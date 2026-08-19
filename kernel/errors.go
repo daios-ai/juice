@@ -150,10 +150,13 @@ func GrantRequiredError(ref string) error {
 	return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
 }
 
-// PeerUnreachableError attributes a never-dispatched remote call to the peer (§13): handle in
-// both the message and Meta["peer"], mirroring GrantRequiredError.
-func PeerUnreachableError(handle string) *KernelError {
-	return ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", handle).WithMeta("peer", handle)
+// PeerUnreachableError attributes an unreachable peer to that peer (§13): the reference in both the
+// message and Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer —
+// call dispatch, resolve, step, settlement — mints it here, so a client never has to infer who was
+// unreachable from what the user typed. The reference is a petname where the caller knows one and
+// the raw key otherwise (both name a kernel, §13); a call adds its refund clause on top.
+func PeerUnreachableError(ref string) *KernelError {
+	return ErrPeerUnreachable.Wrapf("peer %s is unreachable", ref).WithMeta("peer", ref)
 }
 
 // TermsChangedError refuses a run whose quote pin no longer matches (§4 precondition 7), before any

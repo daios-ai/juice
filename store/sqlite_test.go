@@ -196,6 +196,60 @@ func TestValueMigrationRefusesToStrandFunds(t *testing.T) {
 	}
 }
 
+// TestValueLedgerBackfill: deliveries that settled before the journal existed are reconstructed from
+// the receipts that signed them, so an old transfer reads like a new one. A receipt naming a party
+// this kernel never held an account for is skipped rather than aborting the upgrade — the ledger's
+// keys name accounts, and value could once cross a kernel boundary.
+func TestValueLedgerBackfill(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		if _, err := raw.Exec(`INSERT INTO "accounts" (id,handle,available,locked,created_at,updated_at)
+			VALUES ('u2','bob',0,0,?,?)`, now, now); err != nil {
+			t.Fatal(err)
+		}
+		insTx := `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,started_at,ended_at)
+			VALUES (?,'p','t','','u1',?,'sys','a1',?,?,?)`
+		ins := `INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,args_hash,reply_hash,status,gross,net,fee,charge,premium,value,value_to,started_at,created_at,signature)
+			VALUES (?,'u1',?,?,'a1',?,'ah','rh',?,0,0,0,0,0,?,?,?,?,'sig')`
+		for _, r := range []struct {
+			id, txID, caller, status, valueTo string
+			value                             int64
+		}{
+			{"r1", "tx1", "u1", "success", "u2", 300},         // delivered locally: backfilled
+			{"r2", "tx2", "u1", "failure", "u2", 50},          // never delivered
+			{"r3", "tx3", "u1", "success", "u2", 0},           // ordinary call, no value
+			{"r4", "tx4", "u1", "success", "gone-abroad", 70}, // beneficiary was never an account here
+		} {
+			if _, err := raw.Exec(insTx, r.txID, r.caller, r.status, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(ins, r.id, r.txID, r.txID, r.caller, r.status, r.value, r.valueTo, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	db := openAt(t, path)
+	ctx := context.Background()
+
+	entries, err := db.ListLedgerByUser(ctx, "u2", 10, 0)
+	if err != nil {
+		t.Fatalf("ListLedgerByUser: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("backfilled %d entries for the beneficiary, want exactly the delivered one", len(entries))
+	}
+	e := entries[0]
+	if e.FromUserID != "u1" || e.ToUserID != "u2" || e.Amount != 300 || e.Reason != "tx1" {
+		t.Errorf("entry = from %s to %s amount %d reason %q, want u1→u2 300 tx1",
+			e.FromUserID, e.ToUserID, e.Amount, e.Reason)
+	}
+	// Derived from the transaction, exactly as the live write derives it, so re-running the migration
+	// inserts nothing and one delivery can never be journalled twice.
+	if e.ID != "tv_tx1" {
+		t.Errorf("entry id = %q, want tv_tx1", e.ID)
+	}
+}
+
 // rawDB opens a connection that bypasses the migration runner entirely.
 func rawDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
@@ -1173,6 +1227,33 @@ func TestTransferEffectFundsFromCaller(t *testing.T) {
 	if pu, _ := db.ReadUser(ctx, P.ID); pu.Available != 800 || pu.Locked != 200 {
 		t.Errorf("P untouched by value channel: got available=%d locked=%d, want 800/200", pu.Available, pu.Locked)
 	}
+
+	// The delivery is journalled where every balance movement between two users is. Without it the
+	// beneficiary — no party to the transaction (§11) — would see credit arrive with nothing to read.
+	entries, err := db.ListLedgerByUser(ctx, B.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("ListLedgerByUser: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("beneficiary ledger: got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.FromUserID != C.ID || e.ToUserID != B.ID || e.Amount != 100 {
+		t.Errorf("entry = from %s to %s amount %d, want from C to B amount 100", e.FromUserID, e.ToUserID, e.Amount)
+	}
+	if e.OperatorUserID != C.ID {
+		t.Errorf("authorizer = %s, want the immediate caller C (%s)", e.OperatorUserID, C.ID)
+	}
+	if e.Reason != tx.ID {
+		t.Errorf("reason = %q, want the settling transaction id %q", e.Reason, tx.ID)
+	}
+	if !e.CreatedAt.Equal(receipt.CreatedAt) {
+		t.Errorf("created_at = %v, want the receipt's settlement time %v", e.CreatedAt, receipt.CreatedAt)
+	}
+	// The sender sees the same one entry, so both parties can reconstruct the movement.
+	if sent, _ := db.ListLedgerByUser(ctx, C.ID, 10, 0); len(sent) != 1 || sent[0].ID != e.ID {
+		t.Errorf("sender ledger: got %d entries, want the same one", len(sent))
+	}
 }
 
 // TestTransferEffectRefundedOnFailure: a failed composed transfer returns the whole value reserve to
@@ -1220,6 +1301,14 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	}
 	if bu, _ := db.ReadUser(ctx, B.ID); bu.Available != 0 {
 		t.Errorf("failed transfer delivered value: beneficiary got %d, want 0", bu.Available)
+	}
+	// Nothing moved between the two, so the journal records nothing: the ledger holds completed
+	// movements, and the refund returns C's own reserve to C.
+	if entries, _ := db.ListLedgerByUser(ctx, B.ID, 10, 0); len(entries) != 0 {
+		t.Errorf("failed transfer wrote %d ledger entries, want 0", len(entries))
+	}
+	if entries, _ := db.ListLedgerByUser(ctx, C.ID, 10, 0); len(entries) != 0 {
+		t.Errorf("failed transfer wrote %d ledger entries for the sender, want 0", len(entries))
 	}
 }
 
@@ -3506,10 +3595,10 @@ func TestListPurgeablePeers(t *testing.T) {
 	local.CreatedAt = old
 	_ = db.CreateUser(ctx, local)
 
-	// The §13 sync cache must NOT count as activity: a fresh peer_last_seen on the idle peer keeps
+	// The §13 contact cache must NOT count as activity: a fresh last_seen on the idle peer keeps
 	// it purgeable, or answering gossip would immortalize a zombie peer.
-	if err := db.UpdatePeerSync(ctx, idle.KernelPublicKey, now, nil); err != nil {
-		t.Fatalf("UpdatePeerSync: %v", err)
+	if err := db.RecordKernelContact(ctx, idle.KernelPublicKey, true, now, nil); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
 	}
 
 	ids, err := db.ListPurgeablePeers(ctx, cutoff)
@@ -3521,33 +3610,80 @@ func TestListPurgeablePeers(t *testing.T) {
 	}
 }
 
-// TestUpdatePeerSync round-trips the §13 friend-sync cache and checks the COALESCE keep-prior rule.
-func TestUpdatePeerSync(t *testing.T) {
+// TestRecordKernelContact round-trips the §13 contact cache: success and failure land on their own
+// columns, each only moves forward, a nil credit keeps the prior one, and an unknown key writes nothing.
+func TestRecordKernelContact(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
+	key := peer.KernelPublicKey
 
 	credit := int64(900)
-	if err := db.UpdatePeerSync(ctx, peer.KernelPublicKey, now, &credit); err != nil {
-		t.Fatalf("UpdatePeerSync: %v", err)
+	if err := db.RecordKernelContact(ctx, key, true, now, &credit); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
 	}
-	got, _ := db.ReadKernel(ctx, peer.KernelPublicKey)
+	got, _ := db.ReadKernel(ctx, key)
 	if got.LastSeen == nil {
-		t.Error("expected peer_last_seen set")
+		t.Error("expected last_seen set")
+	}
+	if got.LastContactFailedAt != nil {
+		t.Error("a success must not touch last_contact_failed_at")
 	}
 	if got.PeerCredit == nil || *got.PeerCredit != 900 {
 		t.Errorf("peer_credit = %v, want 900", got.PeerCredit)
 	}
 
-	// A nil credit refreshes last_seen but keeps the prior value (COALESCE).
+	// A nil credit advances last_seen but keeps the prior value (COALESCE).
 	later := now.Add(time.Hour)
-	if err := db.UpdatePeerSync(ctx, peer.KernelPublicKey, later, nil); err != nil {
-		t.Fatalf("UpdatePeerSync nil: %v", err)
+	if err := db.RecordKernelContact(ctx, key, true, later, nil); err != nil {
+		t.Fatalf("RecordKernelContact nil credit: %v", err)
 	}
-	got, _ = db.ReadKernel(ctx, peer.KernelPublicKey)
+	got, _ = db.ReadKernel(ctx, key)
 	if got.PeerCredit == nil || *got.PeerCredit != 900 {
 		t.Errorf("nil credit must keep prior 900, got %v", got.PeerCredit)
+	}
+	if !got.LastSeen.Equal(later) {
+		t.Errorf("last_seen = %v, want %v", got.LastSeen, later)
+	}
+
+	// Neither timestamp ever moves backwards, so a slow observation cannot overwrite newer truth.
+	// Sub-second spacing is the case lexical text ordering gets wrong, hence julianday().
+	stale := later.Add(-500 * time.Millisecond)
+	if err := db.RecordKernelContact(ctx, key, true, stale, nil); err != nil {
+		t.Fatalf("stale success: %v", err)
+	}
+	got, _ = db.ReadKernel(ctx, key)
+	if !got.LastSeen.Equal(later) {
+		t.Errorf("stale success moved last_seen to %v, want %v held", got.LastSeen, later)
+	}
+
+	// A failure lands on its own column and leaves the success untouched: a reader compares them.
+	failedAt := later.Add(time.Minute)
+	if err := db.RecordKernelContact(ctx, key, false, failedAt, nil); err != nil {
+		t.Fatalf("failure: %v", err)
+	}
+	got, _ = db.ReadKernel(ctx, key)
+	if got.LastContactFailedAt == nil || !got.LastContactFailedAt.Equal(failedAt) {
+		t.Errorf("last_contact_failed_at = %v, want %v", got.LastContactFailedAt, failedAt)
+	}
+	if !got.LastSeen.Equal(later) {
+		t.Errorf("failure moved last_seen to %v, want %v held", got.LastSeen, later)
+	}
+	if err := db.RecordKernelContact(ctx, key, false, failedAt.Add(-time.Second), nil); err != nil {
+		t.Fatalf("stale failure: %v", err)
+	}
+	got, _ = db.ReadKernel(ctx, key)
+	if !got.LastContactFailedAt.Equal(failedAt) {
+		t.Errorf("stale failure moved last_contact_failed_at to %v", got.LastContactFailedAt)
+	}
+
+	// Observing a kernel this one has never met creates nothing (§13): no row, no error.
+	if err := db.RecordKernelContact(ctx, "k-unknown-kernel", false, now, nil); err != nil {
+		t.Fatalf("unknown key must be a silent no-op: %v", err)
+	}
+	if rk, _ := db.ReadKernel(ctx, "k-unknown-kernel"); rk != nil {
+		t.Error("contact created a kernel row for an unknown key")
 	}
 }
 
@@ -4149,7 +4285,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	credit := int64(42)
-	if err := db.UpdatePeerSync(ctx, key, now, &credit); err != nil {
+	if err := db.RecordKernelContact(ctx, key, true, now, &credit); err != nil {
 		t.Fatal(err)
 	}
 	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)

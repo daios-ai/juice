@@ -2640,9 +2640,12 @@ func containsProcess(t *testing.T, resp *http.Response, id string) bool {
 
 // fakeDiscoverer stands in for *fed.Transport so the discovery pass is exercised without libp2p.
 type fakeDiscoverer struct {
-	bootstrap  []string
-	providers  []string // routing-discovery providers enumerated this pass
-	gossip     map[string]json.RawMessage
+	bootstrap []string
+	providers []string // routing-discovery providers enumerated this pass
+	gossip    map[string]json.RawMessage
+	// broken names peers whose pull fails AFTER dispatch (a dropped stream), the outcome the real
+	// transport leaves untagged because it cannot prove whether the request arrived.
+	broken     map[string]bool
 	gossiped   []string
 	advertised int
 }
@@ -2657,10 +2660,15 @@ func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) {
 func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
 func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
+	if f.broken[key] {
+		return nil, fmt.Errorf("fed: read gossip: stream reset")
+	}
 	if raw, ok := f.gossip[key]; ok {
 		return raw, nil
 	}
-	return nil, fmt.Errorf("offline")
+	// An unreachable peer fails at resolve/connect, which the transport marks as provably never
+	// dispatched (§13) — the distinction the contact cache turns on, so the fake must carry it.
+	return nil, fmt.Errorf("%w: cannot resolve peer", fed.ErrNotDispatched)
 }
 
 // noCursor / discardCursor are the getCursor / setCursor stubs for discoverOnce tests.
@@ -2691,8 +2699,7 @@ func TestDiscoverOnce(t *testing.T) {
 		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
-	noSync := func(context.Context, string, *int64) error { return nil }
-	discoverOnce(context.Background(), f, noFriends, acc, noSync, noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, noFriends, acc, noContact, noCursor, discardCursor, log.Discard())
 
 	sort.Strings(got)
 	if strings.Join(got, ",") != "A,B" {
@@ -2704,23 +2711,123 @@ func TestDiscoverOnce(t *testing.T) {
 }
 
 // discoverOnce runs peer sync with no seeds at all (empty bootstrap_peers and no known kernels, §13):
-// it still pulls gossip from each known peer and records last_seen + the reported counterparty_balance.
+// it still pulls gossip from each known peer and records the contact plus the reported
+// counterparty_balance. A kernel that answered is a contact whether or not it is a counterparty —
+// the balance rides the reply and is nil for a non-counterparty (§13), so no roster check gates it.
 func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	bal := int64(42)
 	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
 	peers := func(context.Context) []string { return []string{"F"} }
-	var syncedKey string
-	var syncedCredit *int64
-	rec := func(_ context.Context, key string, credit *int64) error {
-		syncedKey, syncedCredit = key, credit
-		return nil
+	var contacts []contactCall
+	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
+	discoverOnce(context.Background(), f, peers, acc, recordInto(&contacts), noCursor, discardCursor, log.Discard())
+
+	if len(contacts) != 1 {
+		t.Fatalf("recorded %d contacts, want 1", len(contacts))
+	}
+	c := contacts[0]
+	if c.key != "F" || c.outcome != contactReached || c.credit == nil || *c.credit != 42 {
+		t.Errorf("contact = (%q, outcome=%v, credit=%v), want (F, reached, 42)", c.key, c.outcome, c.credit)
+	}
+}
+
+// contactCall records one contactRecorder invocation for assertions.
+type contactCall struct {
+	key     string
+	outcome contactOutcome
+	credit  *int64
+}
+
+func recordInto(out *[]contactCall) contactRecorder {
+	return func(_ context.Context, key string, outcome contactOutcome, credit *int64) {
+		*out = append(*out, contactCall{key, outcome, credit})
+	}
+}
+
+func noContact(context.Context, string, contactOutcome, *int64) {}
+
+// A dial that never got an answer is the observation that proves a peer unreachable, so the pass
+// records it; every later stage means the peer DID answer and leaves reachability alone (§13).
+func TestDiscoverOnceRecordsContactOutcomes(t *testing.T) {
+	good, _ := json.Marshal(kernel.GossipResponse{PublicKey: "UP", Handle: "UP"})
+	f := &fakeDiscoverer{
+		providers: []string{"UP", "DOWN", "LIAR", "FLAKY"},
+		bootstrap: []string{"UP"},
+		broken:    map[string]bool{"FLAKY": true},
+		gossip: map[string]json.RawMessage{
+			"UP": good,
+			// LIAR answers, but as somebody else: a verification failure, not a reachability one.
+			"LIAR": func() json.RawMessage {
+				b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "OTHER", Handle: "OTHER"})
+				return b
+			}(),
+		},
 	}
 	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
-	discoverOnce(context.Background(), f, peers, acc, rec, noCursor, discardCursor, log.Discard())
+	var contacts []contactCall
+	discoverOnce(context.Background(), f, func(context.Context) []string { return nil },
+		acc, recordInto(&contacts), noCursor, discardCursor, log.Discard())
 
-	if syncedKey != "F" || syncedCredit == nil || *syncedCredit != 42 {
-		t.Errorf("recordSync got (%q,%v), want (F, 42)", syncedKey, syncedCredit)
+	byKey := map[string]contactCall{}
+	for _, c := range contacts {
+		byKey[c.key] = c
+	}
+	if c, seen := byKey["UP"]; !seen || c.outcome != contactReached {
+		t.Errorf("a verified pull must record a successful contact, got %+v (seen=%v)", c, seen)
+	}
+	if c, seen := byKey["DOWN"]; !seen || c.outcome != contactUndispatched {
+		t.Errorf("an undialable peer must record a failed contact, got %+v (seen=%v)", c, seen)
+	}
+	if _, seen := byKey["LIAR"]; seen {
+		t.Error("a peer that answered (even wrongly) must not be recorded as unreachable")
+	}
+	// The pull broke after dispatch, so nobody knows whether it arrived: the pass reports that
+	// honestly and newContactRecorder is what declines to write it (asserted below).
+	if c, seen := byKey["FLAKY"]; !seen || c.outcome != contactUnknown {
+		t.Errorf("a pull that broke after dispatch = %+v (seen=%v), want contactUnknown", c, seen)
+	}
+}
+
+// Only proof reaches the database. The recorder is the single place that decides it, so every
+// observer can report what it saw without knowing which outcomes are worth persisting.
+func TestContactRecorderPersistsOnlyProof(t *testing.T) {
+	type write struct {
+		key string
+		ok  bool
+	}
+	var writes []write
+	rec := newContactRecorder(func(_ context.Context, key string, ok bool, _ *int64) error {
+		writes = append(writes, write{key, ok})
+		return nil
+	})
+	ctx := context.Background()
+	rec(ctx, "A", contactReached, nil)
+	rec(ctx, "B", contactUndispatched, nil)
+	rec(ctx, "C", contactUnknown, nil) // proves nothing
+	rec(ctx, "", contactReached, nil)  // no peer to date
+
+	if len(writes) != 2 {
+		t.Fatalf("wrote %v, want only the two proven outcomes", writes)
+	}
+	if writes[0] != (write{"A", true}) || writes[1] != (write{"B", false}) {
+		t.Errorf("wrote %v, want A=success and B=failure", writes)
+	}
+}
+
+// A cancelled context must not cancel the write recording it: the timeout that proves a peer
+// unreachable arrives with its context already dead.
+func TestContactRecorderSurvivesCancelledContext(t *testing.T) {
+	var got bool
+	rec := newContactRecorder(func(ctx context.Context, _ string, _ bool, _ *int64) error {
+		got = ctx.Err() == nil
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec(ctx, "A", contactUndispatched, nil)
+	if !got {
+		t.Error("the contact write inherited the cancellation that produced it")
 	}
 }
 
@@ -2773,14 +2880,13 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
-	noSync := func(context.Context, string, *int64) error { return nil }
 
 	logPath := filepath.Join(t.TempDir(), "disc.log")
 	logger, err := log.New(log.Config{Level: "debug", FilePath: logPath, Format: "json"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	discoverOnce(context.Background(), f, noFriends, acc, noSync, noCursor, discardCursor, logger)
+	discoverOnce(context.Background(), f, noFriends, acc, noContact, noCursor, discardCursor, logger)
 
 	stageByKey := map[string]string{}
 	for _, e := range readJSONLogEvents(t, logPath, "discovery.pull.failed") {

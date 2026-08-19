@@ -501,6 +501,43 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 			if tc.forbidden != "" && strings.Contains(err.Error(), tc.forbidden) {
 				t.Errorf("a request that may have executed must not claim %q: %v", tc.forbidden, err)
 			}
+			// Either way the error names the peer, so a client never has to infer who failed from
+			// what the user typed (§14).
+			var ke *kernel.KernelError
+			if !errors.As(err, &ke) || ke.Meta["peer"] != key {
+				t.Errorf("Meta[peer] = %q, want the peer key %q", ke.Meta["peer"], key)
+			}
 		})
 	}
+}
+
+// A peer this kernel cannot reach is named by every path that fails to reach it, not just the call
+// path: a cold resolve is where a first call to an offline peer actually fails (§13), and naming it
+// is the difference between "something is offline" and a peer the operator can act on.
+func TestResolveNamesTheUnreachablePeer(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	adapter := newFedAdapter(self, nil)
+	const key = "k-offline-peer"
+
+	// No transport at all, and a transport that cannot reach the peer, are both "unreachable".
+	if _, err := adapter.ResolveRemoteAction(context.Background(), key, "bob", "greet"); !named(err, key) {
+		t.Errorf("resolve with no transport: %v, want ErrPeerUnreachable naming %s", err, key)
+	}
+	adapter.SetTransport(&fakeFed{})
+	if _, err := adapter.ResolveRemoteAction(context.Background(), key, "bob", "greet"); !named(err, key) {
+		t.Errorf("resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
+	}
+	if _, _, err := adapter.ResolveRemoteUser(context.Background(), key, "bob"); !named(err, key) {
+		t.Errorf("user resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
+	}
+	if _, _, err := adapter.Settle(context.Background(), key, "open", "", "", "s1", 0, "", nil); !named(err, key) {
+		t.Errorf("settle with an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
+	}
+}
+
+// named reports whether err is ErrPeerUnreachable carrying peer in its structured meta.
+func named(err error, peer string) bool {
+	var ke *kernel.KernelError
+	return errors.Is(err, kernel.ErrPeerUnreachable) && errors.As(err, &ke) && ke.Meta["peer"] == peer
 }

@@ -105,11 +105,17 @@ func runServer(addr string) error {
 	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
 	fedTransport, ferr := startFedTransport(context.Background(), k, logger)
+	// Every outbound contact records whether the peer answered (§13). Two integration points reach
+	// all of it: the adapter below (calls, resolves, steps, settlement) and the discovery pass
+	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
+	// nothing (§14).
+	recordContact := newContactRecorder(k.RecordKernelContact)
 	if ferr != nil {
 		logger.Error("fed.start_failed", "error", ferr)
 	} else {
 		srv.fed = fedTransport
 		fedAdapter.SetTransport(fedTransport)
+		fedAdapter.SetContactRecorder(recordContact)
 		pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
 		fedAdapter.SetLocalPubKey(pub)
 		defer fedTransport.Close()
@@ -141,7 +147,7 @@ func runServer(addr string) error {
 		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
 			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
 			defer cancel()
-			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, k.RecordPeerSync, k.GossipCursor, k.SetGossipCursor, logger)
+			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
 		})
 	}
 
@@ -254,6 +260,23 @@ const (
 	discoveryPassTimeout      = 30 * time.Second
 )
 
+// contactRecorder journals one outbound contact observation (§13). Synchronous and best-effort: the
+// write is detached from the caller's context, because the very timeout that proves a peer
+// unreachable would otherwise cancel the write recording it, and its error is dropped, because a
+// display-cache write must never change the result of the operation that observed it.
+type contactRecorder func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64)
+
+// newContactRecorder is where an undecided outcome stops: only proof is persisted, so callers report
+// what happened and none of them has to know that "may have arrived" means "write nothing".
+func newContactRecorder(record func(context.Context, string, bool, *int64) error) contactRecorder {
+	return func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64) {
+		if peerKey == "" || outcome == contactUnknown {
+			return
+		}
+		_ = record(context.WithoutCancel(ctx), peerKey, outcome == contactReached, credit)
+	}
+}
+
 // fedDiscoverer is the transport capability the discovery pass needs; *fed.Transport satisfies it,
 // and tests supply a fake so the pass logic is exercised without libp2p.
 type fedDiscoverer interface {
@@ -274,17 +297,15 @@ type fedDiscoverer interface {
 func discoverOnce(ctx context.Context, d fedDiscoverer,
 	peerKeys func(context.Context) []string,
 	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error),
-	recordSync func(context.Context, string, *int64) error,
+	recordContact contactRecorder,
 	getCursor func(context.Context, string) string,
 	setCursor func(context.Context, string, string) error,
 	logger *log.Logger) {
 
 	start := time.Now()
 	keys := map[string]bool{}
-	peers := map[string]bool{}
 	for _, k := range peerKeys(ctx) {
 		keys[k] = true
-		peers[k] = true
 	}
 	// Directory discovery (advertise + enumerate providers) is time-boxed and skipped entirely with no
 	// bootstrap seeds, so a slow or unreachable DHT can never starve counterparty sync — the pull loop
@@ -321,7 +342,10 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		raw, err := d.Gossip(pctx, key, cursor)
 		cancel()
 		if err != nil {
-			fail("transport", err) // peer offline or unreachable; the rotation retries a later pass
+			// The rotation retries a later pass. Only a dial that never connected proves the peer is
+			// unreachable (§13); a stream that broke mid-pull proves nothing and records nothing.
+			recordContact(ctx, key, contactFromErr(err), nil)
+			fail("transport", err)
 			continue
 		}
 		var g kernel.GossipResponse
@@ -343,10 +367,10 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		if next != "" && next != cursor {
 			_ = setCursor(ctx, key, next)
 		}
-		if peers[key] {
-			// A known peer answered: cache last_seen and, when it reported one, our credit there (§13).
-			_ = recordSync(ctx, key, g.CounterpartyBalance)
-		}
+		// Recorded after accumulation, which is what upserts the kernel row: an earlier write would
+		// no-op on a first contact. CounterpartyBalance is set only for a known counterparty (§13),
+		// so passing it through needs no separate roster check.
+		recordContact(ctx, key, contactReached, g.CounterpartyBalance)
 	}
 
 	fields := []any{"candidates", len(keys), "ok", ok, "failed", failed, "duration_ms", time.Since(start).Milliseconds()}

@@ -973,7 +973,7 @@ func (k *Kernel) selfKey(ctx context.Context) string {
 func stepReply(status int, body []byte, notDispatched bool, err error, peerKey string) (map[string]any, error) {
 	if err != nil || notDispatched {
 		if notDispatched {
-			return nil, ErrPeerUnreachable.Wrapf("cannot reach %s (offline?)", peerKey).WithMeta("peer", peerKey)
+			return nil, PeerUnreachableError(peerKey)
 		}
 		return nil, ErrTimeout.Wrapf(
 			"no reply from %s; the request may have executed there — retry to recover its result", peerKey).WithMeta("peer", peerKey)
@@ -1746,14 +1746,13 @@ func (k *Kernel) SetGossipCursor(ctx context.Context, publicKey, cursor string) 
 	return k.store.SetGossipCursor(ctx, publicKey, cursor)
 }
 
-// RecordPeerSync persists a successful peer gossip pull (§13 peer sync) keyed by public key:
-// last_seen=now and, when the peer reported one, our cached credit on it. A no-op for unknown or
-// suspended keys. Display-only cache; never a money path.
-func (k *Kernel) RecordPeerSync(ctx context.Context, publicKey string, credit *int64) error {
-	if u, err := k.store.ReadAccountByKernelKey(ctx, publicKey); err == nil && u != nil && u.SuspendedAt != nil {
-		return nil
-	}
-	return k.store.UpdatePeerSync(ctx, publicKey, time.Now().UTC(), credit)
+// RecordKernelContact persists one contact observation (§13) keyed by public key: a success advances
+// last_seen and, when the peer reported one, our cached credit on it; a failure advances
+// last_contact_failed_at. A no-op for an unknown key. No moderation check: suspension governs whose
+// requests this kernel answers, while reachability is a fact about the network that gates nothing —
+// freezing it would only make the operator's view of a suspended peer wrong. Display-only cache.
+func (k *Kernel) RecordKernelContact(ctx context.Context, publicKey string, ok bool, credit *int64) error {
+	return k.store.RecordKernelContact(ctx, publicKey, ok, time.Now().UTC(), credit)
 }
 
 // CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for an inbound

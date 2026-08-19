@@ -175,6 +175,20 @@ func (k *Kernel) displayOwner(ctx context.Context, ownerID string) string {
 	return k.KernelName(ctx, u.KernelPublicKey)
 }
 
+// ownerKernelKey returns the key of the kernel an action is served from, empty for a local one. Only
+// a proxy has a foreign host, and it names it the way §13 does — through its owner, the peer's
+// billing account — never by storing the peer's location on the row.
+func (k *Kernel) ownerKernelKey(ctx context.Context, a *Action) string {
+	if a == nil || a.Kind != KindRemoteProxy {
+		return ""
+	}
+	u, err := k.store.ReadUser(ctx, a.OwnerUserID)
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.KernelPublicKey
+}
+
 // SetSecretBox installs the credential encryption adapter. Must be called before any
 // CreateAction/UpdateAction calls that include an Auth payload.
 func (k *Kernel) SetSecretBox(box SecretBox) { k.secretBox = box }
@@ -2594,6 +2608,10 @@ type LookupResult struct {
 	// QuoteHash is the §4-precondition-7 pin over the terms actually shown (Price included),
 	// computed here for both kinds of hit so no caller rebuilds the tuple and drifts.
 	QuoteHash string
+	// Host is the kernel serving this action, nil for a local one. The two kinds of remote hit name
+	// their host differently — a doc carries the key, a proxy reaches it through its owner account —
+	// so the hit resolves it here rather than leaving every reader to walk one of those paths.
+	Host *RemoteKernel
 }
 
 // rrfK is the reciprocal-rank-fusion constant (standard default): score = Σ 1/(rrfK + rank).
@@ -2731,6 +2749,19 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	}
 	out := make([]*LookupResult, 0, rr.limit)
 	ownerHandles := map[string]string{}
+	// Hosting kernels, read once per distinct key across the page (hits cluster on few kernels).
+	hosts := map[string]*RemoteKernel{}
+	hostOf := func(publicKey string) *RemoteKernel {
+		if publicKey == "" {
+			return nil
+		}
+		if rk, done := hosts[publicKey]; done {
+			return rk
+		}
+		rk, _ := k.store.ReadKernel(ctx, publicKey)
+		hosts[publicKey] = rk
+		return rk
+	}
 	for _, r := range ranked {
 		if len(out) >= rr.limit {
 			break
@@ -2752,7 +2783,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 				continue
 			}
 			out = append(out, &LookupResult{Discovered: doc, Price: price, Score: float32(r.score),
-				QuoteHash: quoteHashOf(quoteTermsOfDoc(doc, price))})
+				QuoteHash: quoteHashOf(quoteTermsOfDoc(doc, price)), Host: hostOf(doc.KernelPublicKey)})
 			continue
 		}
 		a, err := k.store.ReadAction(ctx, r.id)
@@ -2770,7 +2801,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			a.OwnerHandle = ownerHandles[a.OwnerUserID]
 		}
 		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score),
-			QuoteHash: QuoteHash(a)})
+			QuoteHash: QuoteHash(a), Host: hostOf(k.ownerKernelKey(ctx, a))})
 	}
 	return out, nil
 }

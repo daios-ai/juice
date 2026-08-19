@@ -640,7 +640,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 			// executor-not-configured settlement above (a funded trace must never be stranded).
 			pn := k.KernelName(ctx, target.KernelPublicKey)
 			logger.Warn("remote.unreachable", "action", action.Name, "peer", target.Handle)
-			return fail(ErrPeerUnreachable.Wrapf("peer %s is unreachable; the call was not sent and has been refunded", pn).WithMeta("peer", pn), latency)
+			return fail(PeerUnreachableError(pn).Wrapf(
+				"peer %s is unreachable; the call was not sent and has been refunded", pn), latency)
 		}
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)
 	}

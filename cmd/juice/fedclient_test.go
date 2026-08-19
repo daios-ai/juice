@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/daios-ai/juice/fed"
+	"github.com/daios-ai/juice/kernel"
 )
 
 // fakeFedCaller stands in for the libp2p transport: it returns a canned CallResponse so the
@@ -120,5 +121,36 @@ func TestExecuteFederationNotDispatched(t *testing.T) {
 	}
 	if !fr2.NotDispatched {
 		t.Errorf("nil transport should set NotDispatched, got %+v", fr2)
+	}
+}
+
+// One rule decides reachability everywhere (§13). The bug this pins: an error-returning path and
+// the call path once disagreed about the SAME network event — a stream that broke after dispatch —
+// so a lost connection advanced last_seen on one and last_contact_failed_at on the other. Only a
+// reply proves the peer was reached and only an undispatched request proves it was not; everything
+// between proves nothing, whichever operation produced it.
+func TestContactClassificationAgreesAcrossPaths(t *testing.T) {
+	notDispatched := fmt.Errorf("%w: cannot resolve peer", fed.ErrNotDispatched)
+	midStream := fmt.Errorf("fed: read call: stream reset")
+
+	for _, tc := range []struct {
+		name       string
+		fromErr    error
+		fromResult kernel.FederationResult
+		want       contactOutcome
+	}{
+		{"answered", nil, kernel.FederationResult{HTTPStatus: 200}, contactReached},
+		{"answered with a refusal", nil, kernel.FederationResult{HTTPStatus: 402}, contactReached},
+		{"never dispatched", notDispatched, kernel.FederationResult{NotDispatched: true}, contactUndispatched},
+		{"broke after dispatch", midStream, kernel.FederationResult{}, contactUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := contactFromErr(tc.fromErr); got != tc.want {
+				t.Errorf("contactFromErr = %v, want %v", got, tc.want)
+			}
+			if got := contactFromResult(tc.fromResult); got != tc.want {
+				t.Errorf("contactFromResult = %v, want %v — the two paths must agree", got, tc.want)
+			}
+		})
 	}
 }

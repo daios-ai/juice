@@ -530,19 +530,31 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 	return dbErr(err, "unsuspend user")
 }
 
-// UpdatePeerSync writes the peer-sync display cache (§13), keyed by public key. COALESCE keeps the
-// prior peer_credit when the pull reported none (nil), so a reachable-but-silent peer still
-// refreshes last_seen. updated_at is intentionally untouched: sync is a display cache, not peer
-// activity for retention (§13). It runs only after a successful authenticated sync.
-func (s *DB) UpdatePeerSync(ctx context.Context, publicKey string, lastSeen time.Time, credit *int64) error {
+// RecordKernelContact writes the contact display cache (§13), keyed by public key: one observation,
+// one write. A successful contact advances last_seen and, when the peer reported one, refreshes our
+// cached credit there; a failed one advances last_contact_failed_at. Each timestamp only moves
+// forward and neither is ever cleared, so a slow observation cannot overwrite newer truth — a reader
+// compares the two. Comparison goes through julianday(), since timeLayout is variable-width and
+// misorders lexically near a second boundary (see ListPurgeablePeers). COALESCE keeps the prior
+// credit when none was reported. A plain UPDATE: an unknown key is a no-op, because observing a
+// kernel creates nothing (§13). updated_at is intentionally untouched — contact is a display cache,
+// not peer activity for retention, or a zombie would be immortal.
+func (s *DB) RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time, credit *int64) error {
+	col := "last_contact_failed_at"
+	if ok {
+		col = "last_seen"
+	}
 	var cr any
-	if credit != nil {
+	if ok && credit != nil {
 		cr = *credit
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE kernels SET last_seen=?, peer_credit=COALESCE(?, peer_credit) WHERE public_key=?`,
-		timeToStr(lastSeen), cr, publicKey)
-	return dbErr(err, "update peer sync")
+		`UPDATE kernels
+		    SET `+col+` = CASE WHEN `+col+` IS NULL OR julianday(`+col+`) < julianday(?) THEN ? ELSE `+col+` END,
+		        peer_credit = COALESCE(?, peer_credit)
+		  WHERE public_key = ?`,
+		timeToStr(at), timeToStr(at), cr, publicKey)
+	return dbErr(err, "record kernel contact")
 }
 
 func (s *DB) UpdateUser(ctx context.Context, u *kernel.Account) error {
@@ -1219,13 +1231,28 @@ func transferValueOf(ctx context.Context, tx *sql.Tx, traceID string) (callerC s
 	return callerC, value, to.String, nil
 }
 
-// commitTraceTransferEffect delivers a trace's transfer value to its beneficiary (§13).
-func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error {
+// commitTraceTransferEffect delivers a trace's transfer value to its beneficiary (§13) and journals
+// the movement. The transaction records the execution channel (gross/net/fee); the delivered value is
+// a balance movement between two users, so it is recorded where every such movement is — one ledger
+// entry, written in this same commit, naming C as authorizer and source and carrying the settling
+// transaction's id as its reason. Without it the beneficiary — no party to the transaction — would
+// see credit arrive with no readable record (§3 U5, U15). The id derives from the transaction (like
+// a settlement's), so one delivery can never be journalled twice.
+func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, traceID, txID string, at time.Time) error {
 	callerC, value, valueTo, err := transferValueOf(ctx, tx, traceID)
 	if err != nil {
 		return err
 	}
-	return releaseTransferValue(ctx, tx, callerC, value, valueTo)
+	if err := releaseTransferValue(ctx, tx, callerC, value, valueTo); err != nil {
+		return err
+	}
+	if value == 0 {
+		return nil
+	}
+	return insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
+		ID: "tv_" + txID, OperatorUserID: callerC, FromUserID: callerC, ToUserID: valueTo,
+		Amount: value, Reason: txID, CreatedAt: at,
+	})
 }
 
 // refundTransferEffect returns a trace's transfer value to the caller C — the disposition for a failed
@@ -1297,7 +1324,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 		// Value channel (§13): a local/inbound transfer credits its beneficiary from the caller C's own
 		// reserve, untaxed and on a different wallet than the execution premium above. No-op otherwise.
-		if err := commitTraceTransferEffect(ctx, tx, traceID); err != nil {
+		if err := commitTraceTransferEffect(ctx, tx, traceID, ktx.ID, receipt.CreatedAt); err != nil {
 			return err
 		}
 		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
@@ -2527,14 +2554,22 @@ func (s *DB) CreateLedgerEntry(ctx context.Context, e *kernel.LedgerEntry) error
 				return dbErr(err, "ledger: credit destination")
 			}
 		}
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO ledger (id,operator_user_id,from_user_id,to_user_id,amount,reason,external_key,created_at)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			e.ID, e.OperatorUserID, nullStr(e.FromUserID), nullStr(e.ToUserID), e.Amount, e.Reason,
-			nullStr(e.ExternalKey), timeToStr(e.CreatedAt),
-		)
-		return dbErr(err, "ledger: insert record")
+		return insertLedgerRow(ctx, tx, e)
 	})
+}
+
+// insertLedgerRow writes one ledger record inside an open transaction — the single INSERT behind
+// every entry class (deposit/withdraw/transfer, settlement record, transfer-effect delivery). It
+// inserts what it is given and decides nothing: the nullable columns go through nullStr, so an
+// empty external_key lands as SQL NULL rather than colliding on the unique index.
+func insertLedgerRow(ctx context.Context, tx *sql.Tx, e *kernel.LedgerEntry) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO ledger (id,operator_user_id,from_user_id,to_user_id,amount,reason,external_key,created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		e.ID, e.OperatorUserID, nullStr(e.FromUserID), nullStr(e.ToUserID), e.Amount, e.Reason,
+		nullStr(e.ExternalKey), timeToStr(e.CreatedAt),
+	)
+	return dbErr(err, "ledger: insert record")
 }
 
 // ListLedgerByUser returns ledger entries where userID is the source or destination,
@@ -2611,11 +2646,10 @@ func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sy
 		}
 		// to_user_id names the settled peer/proxy row (non-null from/to CHECK + attribution); the
 		// signed balance change is applied above; reason carries the record JSON.
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO ledger (id,operator_user_id,from_user_id,to_user_id,amount,reason,external_key,created_at)
-			 VALUES (?,?,?,?,?,?,?,?)`,
-			"st_"+externalKey, sysID, nil, rowUserID, ledgerAmt, recordJSON, externalKey, timeToStr(time.Now().UTC()))
-		return dbErr(err, "commit settlement: insert ledger")
+		return insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
+			ID: "st_" + externalKey, OperatorUserID: sysID, ToUserID: rowUserID,
+			Amount: ledgerAmt, Reason: recordJSON, ExternalKey: externalKey, CreatedAt: time.Now().UTC(),
+		})
 	})
 	return stored, err
 }
@@ -2846,7 +2880,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 		`SELECT k.public_key, COALESCE(k.petname,''), k.nickname, k.about,
 		        CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END,
 		        COALESCE(a.available,0), COALESCE(a.locked,0), a.suspended_at,
-		        k.peer_credit, k.last_seen,
+		        k.peer_credit, k.last_seen, k.last_contact_failed_at,
 		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key AND d.kind='action')
 		 FROM kernels k LEFT JOIN accounts a ON a.kernel_public_key = k.public_key
 		 WHERE k.public_key != ? AND (? OR a.suspended_at IS NULL)
@@ -2858,14 +2892,15 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	return queryList(rows, "list kernels", func(scan func(...any) error) (*kernel.RemoteKernelView, error) {
 		var v kernel.RemoteKernelView
 		var hasAccount int
-		var suspendedAt, lastSeen *string
+		var suspendedAt, lastSeen, failedAt *string
 		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &hasAccount,
-			&v.Available, &v.Locked, &suspendedAt, &v.PeerCredit, &lastSeen, &v.Actions); err != nil {
+			&v.Available, &v.Locked, &suspendedAt, &v.PeerCredit, &lastSeen, &failedAt, &v.Actions); err != nil {
 			return nil, err
 		}
 		v.HasAccount = hasAccount == 1
 		v.SuspendedAt = strToNullTime(suspendedAt)
 		v.LastSeen = strToNullTime(lastSeen)
+		v.LastContactFailedAt = strToNullTime(failedAt)
 		return &v, nil
 	})
 }
@@ -2884,12 +2919,12 @@ func (s *DB) ReadKernelByPetname(ctx context.Context, petname string) (*kernel.R
 func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteKernel, error) {
 	var k kernel.RemoteKernel
 	var firstSeen, updatedAt string
-	var lastSeen *string
+	var lastSeen, failedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,gossip_cursor,last_seen,peer_credit,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,gossip_cursor,last_seen,last_contact_failed_at,peer_credit,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
 		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.GossipCursor,
-			&lastSeen, &k.PeerCredit, &firstSeen, &updatedAt)
+			&lastSeen, &failedAt, &k.PeerCredit, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -2897,6 +2932,7 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 		return nil, dbErr(err, "read kernel")
 	}
 	k.LastSeen = strToNullTime(lastSeen)
+	k.LastContactFailedAt = strToNullTime(failedAt)
 	k.FirstSeen = strToTime(firstSeen)
 	k.UpdatedAt = strToTime(updatedAt)
 	return &k, nil

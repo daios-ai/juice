@@ -9,16 +9,16 @@ import (
 // Transfer declares @sys/transfer: a value-bearing native carrying the "transfer" effect (§13). The
 // runtime handler only VALIDATES and acknowledges — it moves no balances. The value channel is a
 // deferred TransferEffect staged at admission (the reserve locked from the immediate caller C) and
-// committed atomically by the kernel at settlement, for local and cross-kernel transfers alike, so no
-// non-atomic ledger write happens in-handler. Value binds the effect id → args extractor without the
-// kernel ever naming the action, keeping the effect encapsulated (natives are never hardwired in).
+// committed atomically by the kernel at settlement, so no non-atomic ledger write happens in-handler.
+// Value binds the effect id → args extractor without the kernel ever naming the action, keeping the
+// effect encapsulated (natives are never hardwired in).
 func Transfer() Spec {
 	return Spec{
 		Name:        "transfer",
 		Effect:      "transfer",
-		Description: "Transfers credits from the caller to another user. The target may be local (a handle) or a remote transfer action (sys@<kernel>/transfer with a local target on that kernel); a cross-kernel transfer settles through the federation receipt/exposure system (§13). The value is funded from the immediate caller's own balance and delivered by a deferred, receipt-backed transfer effect.",
+		Description: "Transfers credits from the caller to another user of this kernel. The value is funded from the immediate caller's own balance and delivered by a deferred, receipt-backed transfer effect. Value never crosses a kernel boundary: the target is always a local recipient.",
 		InputSchema: obj(map[string]any{
-			"target": str("Recipient: a local handle, or (when calling sys@<kernel>/transfer) a bare handle on that kernel"),
+			"target": str("Recipient: a handle or account id on this kernel"),
 			"amount": integer("Amount of credits to transfer (positive integer)"),
 		}, "target", "amount"),
 		OutputSchema: obj(map[string]any{"amount": integer("Amount transferred")}, "amount"),

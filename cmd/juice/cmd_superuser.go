@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// lastSeenStr renders when a peer was last reached by peer sync (§13): "never" when unsynced,
-// else a coarse relative age.
+// lastSeenStr renders one contact timestamp (§13) — last success or last failure: "never" when that
+// contact has not happened yet, else a coarse relative age. Comparing the two is the reader's job.
 func lastSeenStr(t *time.Time) string {
 	if t == nil {
 		return "never"
@@ -442,8 +442,8 @@ func peerListCmd() *cobra.Command {
 			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
 			// calls itself and never resolves (§13). The public key always resolves, so an
 			// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
-			fmt.Printf("%-16s %-16s %8s %8s %10s %10s  %s\n",
-				"PETNAME", "NICKNAME", "ACCOUNT", "BALANCE", "LAST SEEN", "ACTIONS", "PUBLIC KEY")
+			fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10s  %s\n",
+				"PETNAME", "NICKNAME", "ACCOUNT", "BALANCE", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
 			for _, p := range peers {
 				flags := ""
 				if p.SettlementDue {
@@ -460,8 +460,9 @@ func peerListCmd() *cobra.Command {
 					account = "yes"
 					balance = fmt.Sprintf("%d", p.Available)
 				}
-				fmt.Printf("%-16s %-16s %8s %8s %10s %10d  %s%s\n",
-					petname, p.Nickname, account, balance, lastSeenStr(p.LastSeen), p.Actions, p.PublicKey, flags)
+				fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10d  %s%s\n",
+					petname, p.Nickname, account, balance, lastSeenStr(p.LastSeen),
+					lastSeenStr(p.LastContactFailedAt), p.Actions, p.PublicKey, flags)
 			}
 			return nil
 		},

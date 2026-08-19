@@ -252,4 +252,36 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	if _, remote = hits(); remote["action"] != "prov@weatherco/weather" {
 		t.Errorf("a named peer must render by petname: got %v", remote["action"])
 	}
+
+	// Reachability of the hosting kernel rides every remote hit, so a search result can say when the
+	// peer was last reached instead of presenting a dead kernel's actions as if nothing were wrong.
+	// Both are absent until the corresponding contact has happened.
+	local, remote = hits()
+	if _, ok := remote["last_seen"]; ok {
+		t.Error("last_seen present before any contact")
+	}
+	failedAt := time.Now().UTC().Truncate(time.Second)
+	if err := st.RecordKernelContact(ctx, peerKey, false, failedAt, nil); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
+	}
+	if _, remote = hits(); remote["last_contact_failed_at"] != failedAt.Format(time.RFC3339) {
+		t.Errorf("last_contact_failed_at: got %v, want %v", remote["last_contact_failed_at"], failedAt.Format(time.RFC3339))
+	}
+	seenAt := failedAt.Add(time.Minute)
+	if err := st.RecordKernelContact(ctx, peerKey, true, seenAt, nil); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
+	}
+	local, remote = hits()
+	if remote["last_seen"] != seenAt.Format(time.RFC3339) {
+		t.Errorf("last_seen: got %v, want %v", remote["last_seen"], seenAt.Format(time.RFC3339))
+	}
+	// The failure stays: the kernel reports both facts and judges neither — comparing them is the
+	// reader's job (§13).
+	if remote["last_contact_failed_at"] != failedAt.Format(time.RFC3339) {
+		t.Errorf("a success erased the earlier failure: %v", remote["last_contact_failed_at"])
+	}
+	// A local action has no hosting kernel to be out of reach.
+	if _, ok := local["last_seen"]; ok {
+		t.Error("a local action must carry no reachability fields")
+	}
 }

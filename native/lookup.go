@@ -15,15 +15,17 @@ func Lookup() Spec {
 		InputSchema: searchQuerySchema(),
 		OutputSchema: obj(map[string]any{
 			"results": arrayOf(obj(map[string]any{
-				"action_id":     str("Unique action identifier"),
-				"action":        str("Action reference as owner/name"),
-				"description":   str("Human-readable description of the action"),
-				"price":         integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
-				"score":         num("Relevance score between 0 and 1"),
-				"input_schema":  object("JSON Schema for the action's input"),
-				"output_schema": object("JSON Schema for the action's output"),
-				"quote_hash":    str("Fingerprint of the quoted terms; a run carries it back as consent to them"),
-				"observed_at":   str("When this kernel last verified the authority's own description of a remote action (RFC 3339); absent for local actions, which this kernel is itself the authority for"),
+				"action_id":              str("Unique action identifier"),
+				"action":                 str("Action reference as owner/name"),
+				"description":            str("Human-readable description of the action"),
+				"price":                  integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
+				"score":                  num("Relevance score between 0 and 1"),
+				"input_schema":           object("JSON Schema for the action's input"),
+				"output_schema":          object("JSON Schema for the action's output"),
+				"quote_hash":             str("Fingerprint of the quoted terms; a run carries it back as consent to them"),
+				"observed_at":            str("When this kernel last verified the authority's own description of a remote action (RFC 3339); absent for local actions, which this kernel is itself the authority for"),
+				"last_seen":              str("When this kernel last reached the hosting kernel (RFC 3339); absent for local actions and until a first contact"),
+				"last_contact_failed_at": str("When contact with the hosting kernel last failed (RFC 3339); later than last_seen means recent attempts are failing. Absent for local actions and until a first failure"),
 			}), "Ranked list of matching actions"),
 		}),
 		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
@@ -80,6 +82,16 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		}
 		if observedAt != "" {
 			item["observed_at"] = observedAt
+		}
+		// Reachability of the hosting kernel as raw facts, never a verdict: the caller compares them
+		// and decides what counts as stale. Absent until the corresponding contact has happened.
+		if h := r.Host; h != nil {
+			if h.LastSeen != nil {
+				item["last_seen"] = h.LastSeen.UTC().Format(time.RFC3339)
+			}
+			if h.LastContactFailedAt != nil {
+				item["last_contact_failed_at"] = h.LastContactFailedAt.UTC().Format(time.RFC3339)
+			}
 		}
 		items[i] = item
 	}

@@ -478,12 +478,14 @@ type Store interface {
 	// SearchActionsLexical returns up to limit active action IDs matching query, BM25-ranked best-first.
 	SearchActionsLexical(ctx context.Context, query string, limit int) ([]string, error)
 
-	// ---- Peer sync ----
+	// ---- Peer contact ----
 
-	// UpdatePeerSync records a successful, authenticated peer gossip pull (§13 peer sync), keyed by
-	// public key: last_seen=now and, when the peer reported one, peer_credit=credit (nil leaves the
-	// prior value). Display-only cache; never a money path.
-	UpdatePeerSync(ctx context.Context, publicKey string, lastSeen time.Time, credit *int64) error
+	// RecordKernelContact records one contact observation, keyed by public key: a success advances
+	// last_seen and, when the peer reported one, peer_credit (nil leaves the prior value); a failure
+	// advances last_contact_failed_at. Each timestamp only moves forward and neither is cleared, so
+	// a slow observation cannot overwrite newer truth. An unknown key is a no-op — observation binds
+	// nothing (§13). Display-only cache; never a money path, never retention activity.
+	RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time, credit *int64) error
 
 	// CommitSettlement records one finish outcome atomically, keyed idempotently by settlementID (§13,
 	// the external_key read-first short-circuit — anti-grinding). A "clear" outcome passes dClear=±d,

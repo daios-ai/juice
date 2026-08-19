@@ -497,16 +497,21 @@ flow_fed_inspect_read_only() {
     assert_eq "fed_inspect_read_only.baseline_uncached" "" \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
 
+    # The cold resolve above was a real outbound contact, so it dated the peer. Inspect is not:
+    # whatever that left, inspect must leave exactly as it found it.
+    local ps='import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get("petname")=="kernel-r"),{});print(p.get("last_seen") or "")'
+    local seen_before; seen_before=$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+
     # The inspect itself is live: it reaches R and reports what R says right now.
     local doc; doc=$(jj "$dbl" "$hl" admin inspect kernel-r)
     assert_json "fed_inspect_read_only.inspect_live"   "$doc" source live
     assert_json "fed_inspect_read_only.inspect_online" "$doc" online True
 
-    # ...and it left nothing behind: the cache is exactly as uncached as before.
+    # ...and it left nothing behind: the cache is exactly as it was.
     assert_eq "fed_inspect_read_only.credit_still_uncached" "" \
         "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
-    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
-    assert_eq "fed_inspect_read_only.last_seen_still_unset" "" "$seen"
+    assert_eq "fed_inspect_read_only.last_seen_unchanged" "$seen_before" \
+        "$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
 }
 
 # flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):
@@ -541,6 +546,14 @@ flow_fed_offline() {
     # peers and identity are local: succeed with the peer down.
     assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peers    >/dev/null 2>&1; echo $?)"
     assert_eq "fed_offline.identity_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin identity >/dev/null 2>&1; echo $?)"
+
+    # The failed call TAUGHT this kernel something: the peer's row now carries when contact last
+    # failed, so the catalog can say "unreachable since" instead of presenting R's actions as fresh.
+    # Retention (90 idle days) is a different question and is untouched — R stays listed either way.
+    local peer_row; peer_row=$(jj "$FED_DBL" "$FED_HL" admin peers | python3 -c \
+        'import sys,json;print(json.dumps(next((p for p in json.load(sys.stdin) if p.get("petname")=="kernel-r"), {})))')
+    assert_nonempty "fed_offline.peer_still_listed" "$(strfield "$peer_row" public_key)"
+    assert_nonempty "fed_offline.contact_failure_recorded" "$(strfield "$peer_row" last_contact_failed_at)"
 }
 
 # flow_fed_step_complete — the peer-step trap, closed (§10, §13). A step addressed to a peer used to
@@ -698,6 +711,17 @@ flow_transfer() {
     # The beneficiary receives exactly the amount and the sender pays exactly it (price 0, no markup).
     assert_eq "transfer.alice_charged" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
     assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show bob)" available)"
+
+    # Both parties can read the movement. The transaction records the execution (price 0), so without
+    # a ledger entry bob — no party to it — would see 100 credits arrive with nothing to read.
+    local bhome; bhome=$(home "$dir" bob); j "$FED_DBL" "$bhome" auth login bob --password userpass >/dev/null 2>&1
+    assert_contains "transfer.sender_ledger" "bob" "$(jj "$FED_DBL" "$ahome" user ledger)"
+    assert_contains "transfer.recipient_ledger" "alice" "$(jj "$FED_DBL" "$bhome" user ledger)"
+    assert_eq "transfer.ledger_amount" 100 \
+        "$(jj "$FED_DBL" "$bhome" user ledger | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["amount"])')"
+    # The entry points back at the call that delivered it, so the two records join.
+    assert_eq "transfer.ledger_names_tx" "$tx_id" \
+        "$(jj "$FED_DBL" "$bhome" user ledger | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["reason"])')"
 
     # A transfer alice cannot afford is rejected with no balance change.
     j "$FED_DBL" "$ahome" run sys/transfer '{"target":"bob","amount":100000}' >/dev/null 2>&1 || true

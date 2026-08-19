@@ -221,7 +221,18 @@ func actionRef(a *kernel.Action, uc *accountCache) string {
 
 func enrichAction(k *kernel.Kernel, a *kernel.Action, uc *accountCache) actionResp {
 	scheme, requiresGrant := k.ActionAuthInfo(a)
-	return actionResp{Action: a, ActionRef: actionRef(a, uc), HTTP: httpViewOf(a), AuthScheme: scheme, RequiresGrant: requiresGrant, QuoteHash: kernel.QuoteHash(a)}
+	// Respond from a copy: enrichment writes display fields (actionRef backfills owner_handle) and
+	// drops the raw source below, neither of which belongs on the caller's row.
+	cp := *a
+	view := httpViewOf(&cp)
+	// For kind=http the decomposed object IS the read shape; `source` holds the same object as an
+	// encoded string, and serving both would double-encode it (R2). The kind decides that, never
+	// whether the stored source happens to parse — a row too malformed to decompose must not be the
+	// one that leaks the blob. A wasm action keeps its source: authored text, a documented read (§9).
+	if cp.Kind == kernel.KindHTTP {
+		cp.Source = ""
+	}
+	return actionResp{Action: &cp, ActionRef: actionRef(&cp, uc), HTTP: view, AuthScheme: scheme, RequiresGrant: requiresGrant, QuoteHash: kernel.QuoteHash(a)}
 }
 
 // httpViewOf decomposes a kind=http action's stored HTTPSource into a uniform
@@ -665,10 +676,11 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	resps := make([]actionResp, len(actions))
 	uc := newAccountCache(k, ctx) // shared so listing is O(distinct peer owners), not O(rows)
 	for i, a := range actions {
-		cp := *a
-		r := enrichAction(k, &cp, uc) // decompose http view before hiding the raw blob
-		cp.Source = ""
-		cp.ArtifactHash = ""
+		r := enrichAction(k, a, uc)
+		// Lists summarize (§14): no source of any kind and no artifact hash, whatever a detail read
+		// would show. enrichAction responds from its own copy, so this never touches the row.
+		r.Source = ""
+		r.ArtifactHash = ""
 		resps[i] = r
 	}
 	if resps == nil {

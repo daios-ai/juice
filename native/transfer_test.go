@@ -77,8 +77,8 @@ func TestTransferLocal(t *testing.T) {
 		t.Errorf("bob available: got %d, want 100", b.Available)
 	}
 
-	// A kernel-qualified target on the local action is rejected — cross-kernel transfers are addressed
-	// as sys@<kernel>/transfer, not sys/transfer with a remote target.
+	// A kernel-qualified target is rejected: value is local to one kernel, so there is no form of
+	// this call that names a beneficiary elsewhere (§13).
 	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("kernel-qualified target: got %v, want ErrInvalidInput", err)
 	}

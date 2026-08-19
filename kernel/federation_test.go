@@ -2500,45 +2500,72 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 	}
 }
 
-// TestRecordPeerSync: a peer sync persists last_seen and the reported credit; unknown and suspended
-// keys are no-ops (§13 peer sync).
-func TestRecordPeerSync(t *testing.T) {
+// TestRecordKernelContact: a successful contact persists last_seen and the reported credit, a failed
+// one lands on its own column, and unknown or suspended keys are no-ops (§13 contact cache).
+func TestRecordKernelContact(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	k := newTestKernel(st)
-	setupSys(t, k, st)
+	sys := setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	_, err := k.EnsureKernelAccount(ctx, key)
+	acct, err := k.EnsureKernelAccount(ctx, key)
 	if err != nil {
 		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 
 	credit := int64(555)
-	if err := k.RecordPeerSync(ctx, key, &credit); err != nil {
-		t.Fatalf("RecordPeerSync: %v", err)
+	if err := k.RecordKernelContact(ctx, key, true, &credit); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	got, _ := st.ReadKernel(ctx, key)
 	if got.LastSeen == nil {
-		t.Error("expected peer_last_seen set after sync")
+		t.Error("expected last_seen set after a successful contact")
 	}
 	if got.PeerCredit == nil || *got.PeerCredit != 555 {
 		t.Errorf("expected peer_credit 555, got %v", got.PeerCredit)
 	}
 
-	// A nil credit refreshes last_seen but keeps the prior credit (COALESCE).
-	if err := k.RecordPeerSync(ctx, key, nil); err != nil {
-		t.Fatalf("RecordPeerSync nil: %v", err)
+	// A nil credit advances last_seen but keeps the prior credit (COALESCE).
+	if err := k.RecordKernelContact(ctx, key, true, nil); err != nil {
+		t.Fatalf("RecordKernelContact nil: %v", err)
 	}
 	got, _ = st.ReadKernel(ctx, key)
 	if got.PeerCredit == nil || *got.PeerCredit != 555 {
 		t.Errorf("nil credit must keep prior 555, got %v", got.PeerCredit)
 	}
 
+	// A failure records separately, leaving the success in place for a reader to compare against.
+	if err := k.RecordKernelContact(ctx, key, false, nil); err != nil {
+		t.Fatalf("RecordKernelContact failure: %v", err)
+	}
+	got, _ = st.ReadKernel(ctx, key)
+	if got.LastContactFailedAt == nil {
+		t.Error("expected last_contact_failed_at set after a failed contact")
+	}
+	if got.LastSeen == nil {
+		t.Error("a failure must not clear last_seen")
+	}
+
+	// Suspension governs whose requests this kernel answers; reachability is a fact about the network
+	// that gates nothing, so it keeps being recorded — a suspended peer the operator can still see is
+	// reachable is the honest display, and freezing it would only make the roster lie.
+	if err := k.SuspendUser(ctx, sys.ID, acct.ID); err != nil {
+		t.Fatalf("SuspendUser: %v", err)
+	}
+	before, _ := st.ReadKernel(ctx, key)
+	if err := k.RecordKernelContact(ctx, key, true, nil); err != nil {
+		t.Fatalf("suspended contact: %v", err)
+	}
+	after, _ := st.ReadKernel(ctx, key)
+	if !after.LastSeen.After(*before.LastSeen) {
+		t.Errorf("suspended peer's last_seen did not advance: %v → %v", before.LastSeen, after.LastSeen)
+	}
+
 	// Unknown key is a no-op (no error).
 	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if err := k.RecordPeerSync(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), &credit); err != nil {
+	if err := k.RecordKernelContact(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), true, &credit); err != nil {
 		t.Errorf("unknown key should be a no-op, got %v", err)
 	}
 }

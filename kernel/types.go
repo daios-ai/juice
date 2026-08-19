@@ -370,18 +370,19 @@ type SettlementRecord struct {
 // remote asserts about itself (never resolves a reference), and the Petname assigned locally
 // (resolves). GossipCursor is the persisted evidence high-watermark (§13 peer sync), advanced only
 // after a page is verified and committed, so it is never written by ordinary observation.
-// LastSeen and PeerCredit are the peer-sync display cache, written only after a successful
-// authenticated sync.
+// LastSeen, LastContactFailedAt, and PeerCredit are the contact display cache: the latest successful
+// and latest failed contact, each only ever moving forward, plus the credit a peer last reported.
 type RemoteKernel struct {
-	PublicKey    string     `json:"public_key"`
-	Petname      string     `json:"petname,omitempty"`
-	Nickname     string     `json:"nickname,omitempty"`
-	About        string     `json:"about,omitempty"`
-	GossipCursor string     `json:"gossip_cursor,omitempty"`
-	LastSeen     *time.Time `json:"last_seen,omitempty"`
-	PeerCredit   *int64     `json:"peer_credit,omitempty"`
-	FirstSeen    time.Time  `json:"first_seen"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	PublicKey           string     `json:"public_key"`
+	Petname             string     `json:"petname,omitempty"`
+	Nickname            string     `json:"nickname,omitempty"`
+	About               string     `json:"about,omitempty"`
+	GossipCursor        string     `json:"gossip_cursor,omitempty"`
+	LastSeen            *time.Time `json:"last_seen,omitempty"`
+	LastContactFailedAt *time.Time `json:"last_contact_failed_at,omitempty"`
+	PeerCredit          *int64     `json:"peer_credit,omitempty"`
+	FirstSeen           time.Time  `json:"first_seen"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -600,10 +601,12 @@ type RemoteKernelView struct {
 	Available   int64      `json:"available"`
 	Locked      int64      `json:"locked"`
 	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
-	// PeerCredit and LastSeen are the peer-sync cache (§13 peer sync): our credit on the peer
-	// and when we last reached it. Display-only.
-	PeerCredit *int64     `json:"peer_credit,omitempty"`
-	LastSeen   *time.Time `json:"last_seen,omitempty"`
+	// PeerCredit, LastSeen, and LastContactFailedAt are the contact cache (§13): our credit on the
+	// peer, when we last reached it, and when a contact last failed. Display-only — a consumer
+	// compares the two timestamps and applies its own freshness policy; the kernel judges neither.
+	PeerCredit          *int64     `json:"peer_credit,omitempty"`
+	LastSeen            *time.Time `json:"last_seen,omitempty"`
+	LastContactFailedAt *time.Time `json:"last_contact_failed_at,omitempty"`
 	// SettlementDue flags a debtor peer when this kernel's global gross receivables have reached the
 	// settlement trigger Y (§13): information for the operator, never authority — computed live.
 	SettlementDue bool `json:"settlement_due,omitempty"`

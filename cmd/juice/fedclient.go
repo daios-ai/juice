@@ -22,6 +22,7 @@ type fedAdapter struct {
 	transport      federationTransport // libp2p federation carrier; nil off the serving path
 	localPubKey    string              // this kernel's base64url Ed25519 public key
 	signFederation signerFunc          // signs as this kernel; the private key never leaves the kernel
+	recordContact  contactRecorder     // journals whether a peer answered (§13); nil off the serving path
 }
 
 // newFedAdapter builds the adapter around the kernel's own signer. Only the signers it uses are
@@ -37,6 +38,56 @@ func (c *fedAdapter) SetTransport(tr federationTransport) { c.transport = tr }
 // SetLocalPubKey records this kernel's own key, known after bootstrap loads the signing key.
 func (c *fedAdapter) SetLocalPubKey(key string) { c.localPubKey = key }
 
+// SetContactRecorder installs the contact journal (§13). Every outbound leg below reports through
+// `contacted`, so reachability is observed where the transport actually succeeds or fails.
+func (c *fedAdapter) SetContactRecorder(r contactRecorder) { c.recordContact = r }
+
+// contactOutcome is what one attempt PROVED about reaching a peer (§13). Three states, because two
+// would force every caller to guess about the middle one: a request that may or may not have arrived
+// is evidence of nothing, and recording it either way would date a peer wrongly.
+type contactOutcome int
+
+const (
+	contactUnknown      contactOutcome = iota // broke after dispatch, or never answered: proves nothing
+	contactReached                            // the peer answered, whatever the answer said
+	contactUndispatched                       // provably never left this host
+)
+
+// contactFromErr classifies a transport round trip. Only fed.ErrNotDispatched proves non-delivery
+// (§13 never-dispatched); every other error leaves the request's fate open, so it proves nothing.
+func contactFromErr(err error) contactOutcome {
+	switch {
+	case err == nil:
+		return contactReached
+	case errors.Is(err, fed.ErrNotDispatched):
+		return contactUndispatched
+	default:
+		return contactUnknown
+	}
+}
+
+// contactFromResult classifies a federation call, whose transport error is folded into the result:
+// a status means the peer answered, NotDispatched means it never heard us, and a zero result is the
+// parked case that settles only on a later receipt — undecided, exactly like a broken stream.
+func contactFromResult(fr kernel.FederationResult) contactOutcome {
+	switch {
+	case fr.NotDispatched:
+		return contactUndispatched
+	case fr.HTTPStatus != 0:
+		return contactReached
+	default:
+		return contactUnknown
+	}
+}
+
+// contacted journals one attempt. A nil recorder (CLI process, tests) makes it a no-op, so no leg
+// needs to check. A peer that answers with a refusal was still reached.
+func (c *fedAdapter) contacted(ctx context.Context, peerKey string, outcome contactOutcome) {
+	if c.recordContact != nil {
+		c.recordContact(ctx, peerKey, outcome, nil)
+	}
+}
+
 // signerFunc signs a federation request with the platform key, returning (signature, timestamp).
 type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error)
 
@@ -49,8 +100,10 @@ func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actio
 		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
-	return executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
+	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
 		peerPublicKey, actionID, expectedContractHash, idempotencyKey, args)
+	c.contacted(ctx, peerPublicKey, contactFromResult(fr))
+	return fr, err
 }
 
 // federationTransport is the outbound half of the libp2p transport this executor needs; *fed.Transport
@@ -96,6 +149,11 @@ func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Dura
 	octx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	resp, err := c.transport.Step(octx, peerKey, req)
+	// A completion is work and dates the peer; a list is a read, and `admin inspect` is built on one
+	// (§14: inspection writes nothing, so no display state depends on being looked at).
+	if req.Kind != "list" {
+		c.contacted(ctx, peerKey, contactFromErr(err))
+	}
 	if err != nil {
 		return 0, nil, errors.Is(err, fed.ErrNotDispatched), err
 	}
@@ -106,14 +164,15 @@ func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Dura
 // signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
 func (c *fedAdapter) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (int, []byte, error) {
 	if c.transport == nil {
-		return 0, nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+		return 0, nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
 	resp, err := c.transport.Settle(ctx, peerPublicKey, fed.SettleRequest{
 		Kind: kind, Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
 		SettlementID: settlementID, Amount: amount, Nonce: nonce, Record: record,
 	})
+	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return 0, nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+		return 0, nil, kernel.PeerUnreachableError(peerPublicKey)
 	}
 	return resp.Status, resp.Body, nil
 }
@@ -124,11 +183,12 @@ func (c *fedAdapter) Settle(ctx context.Context, peerPublicKey, kind, timestamp,
 // the kernel never treats "no network" as "action absent".
 func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ActionManifest, error) {
 	if c.transport == nil {
-		return nil, kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
 	resp, err := c.transport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
+	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return nil, kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+		return nil, kernel.PeerUnreachableError(peerPublicKey)
 	}
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote action not found")
@@ -142,11 +202,12 @@ func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, own
 
 func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (string, string, error) {
 	if c.transport == nil {
-		return "", "", kernel.ErrPeerUnreachable.Wrap("federation transport not running")
+		return "", "", kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
 	resp, err := c.transport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "user", User: ref})
+	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return "", "", kernel.ErrPeerUnreachable.Wrap("peer unreachable")
+		return "", "", kernel.PeerUnreachableError(peerPublicKey)
 	}
 	if resp.Status != 200 {
 		return "", "", kernel.ErrNotFound.Wrap("remote user not found")

@@ -251,13 +251,50 @@ func TestEnrichAction(t *testing.T) {
 	if r2.ActionRef != "bob@provider/greet" {
 		t.Errorf("proxy ActionRef = %q, want bob@provider/greet", r2.ActionRef)
 	}
-	if proxy.OwnerHandle != "provider" {
-		t.Errorf("proxy owner_handle = %q, want provider (never empty)", proxy.OwnerHandle)
+	if r2.OwnerHandle != "provider" {
+		t.Errorf("proxy owner_handle = %q, want provider (never empty)", r2.OwnerHandle)
+	}
+	// The response is built from a copy, so enrichment never writes display state back onto the row.
+	if proxy.OwnerHandle != "" {
+		t.Errorf("enrichAction mutated the caller's action: owner_handle = %q", proxy.OwnerHandle)
 	}
 
 	// Name-less action still yields no ref.
 	if got := enrichAction(k, &kernel.Action{ID: "a3"}, uc).ActionRef; got != "" {
 		t.Errorf("enrichAction(no name): ActionRef = %q, want empty", got)
+	}
+}
+
+// An http action's request shape is served once, as the decomposed object — never also as the
+// encoded string it is stored in (R2, no double-encoded JSON). A wasm action keeps its source,
+// which is authored text and a documented read path (§9).
+func TestEnrichActionOmitsEncodedHTTPSource(t *testing.T) {
+	k := newTestKernel(t)
+	uc := newAccountCache(k, context.Background())
+
+	src := `{"method":"GET","base_url":"https://api.example.com","path":"/v1/ping"}`
+	httpAction := &kernel.Action{ID: "h1", OwnerHandle: "bob", Name: "ping", Kind: kernel.KindHTTP, Source: src}
+	r := enrichAction(k, httpAction, uc)
+	if r.Source != "" {
+		t.Errorf("http read still carries the encoded source: %q", r.Source)
+	}
+	if r.HTTP == nil || r.HTTP.Method != "GET" || r.HTTP.URL != "https://api.example.com/v1/ping" {
+		t.Errorf("http view = %+v, want the decomposed request shape", r.HTTP)
+	}
+	if httpAction.Source != src {
+		t.Errorf("the caller's row lost its source: %q", httpAction.Source)
+	}
+
+	wasm := &kernel.Action{ID: "w1", OwnerHandle: "bob", Name: "calc", Kind: kernel.KindWasm, Source: "package main"}
+	if got := enrichAction(k, wasm, uc); got.Source != "package main" {
+		t.Errorf("wasm source = %q, want it preserved on a detail read", got.Source)
+	}
+
+	// The kind decides the read shape, not whether the stored source parses: a row too malformed to
+	// decompose is exactly the one that must not fall back to serving the encoded blob.
+	broken := &kernel.Action{ID: "h2", OwnerHandle: "bob", Name: "bad", Kind: kernel.KindHTTP, Source: "not json"}
+	if got := enrichAction(k, broken, uc); got.Source != "" || got.HTTP != nil {
+		t.Errorf("malformed http row: source = %q, http = %+v; want neither served", got.Source, got.HTTP)
 	}
 }
 
