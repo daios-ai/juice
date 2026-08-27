@@ -39,16 +39,15 @@ type NativePriceConfig struct {
 // NativeConfig holds per-action configuration for all native actions (§14 `native.<action>`).
 // Configuration owns prices and their defaults; each native's contract lives with its handler (§9).
 type NativeConfig struct {
-	LLM        NativeLLMConfig    `json:"llm"`
-	Lookup     NativeLookupConfig `json:"lookup"`
-	UserLookup NativePriceConfig  `json:"user-lookup"`
-	Time       NativePriceConfig  `json:"time"`
-	Sink       NativePriceConfig  `json:"sink"`
-	Message    NativePriceConfig  `json:"message"`
-	Random     NativePriceConfig  `json:"random"`
-	Web        NativeWebConfig    `json:"web"`
-	TinyGo     NativePriceConfig  `json:"tinygo"`
-	Transfer   NativePriceConfig  `json:"transfer"`
+	LLM      NativeLLMConfig    `json:"llm"`
+	Lookup   NativeLookupConfig `json:"lookup"`
+	Time     NativePriceConfig  `json:"time"`
+	Sink     NativePriceConfig  `json:"sink"`
+	Message  NativePriceConfig  `json:"message"`
+	Random   NativePriceConfig  `json:"random"`
+	Web      NativeWebConfig    `json:"web"`
+	TinyGo   NativePriceConfig  `json:"tinygo"`
+	Transfer NativePriceConfig  `json:"transfer"`
 }
 
 // PriceOf returns the configured price for a native action name (§9 names, §14 config keys). It is
@@ -57,8 +56,6 @@ func (c NativeConfig) PriceOf(name string) int64 {
 	switch name {
 	case "lookup":
 		return c.Lookup.Price
-	case "user-lookup":
-		return c.UserLookup.Price
 	case "llm/chat", "llm/embed", "llm/json", "llm/decide":
 		return c.LLM.Price
 	case "time":

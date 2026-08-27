@@ -1416,9 +1416,9 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
-// GetGossip returns this kernel's v0.13 gossip payload (§13): first-party identity, users (sys +
-// owners of active public actions), the kernel's own signed action manifests, and one page of
-// evidence bundles ordered by effective time after cursor. When requesterKey names a known,
+// GetGossip returns this kernel's v0.13 gossip payload (§13): first-party identity, the kernel's
+// own signed action manifests, and one page of evidence bundles ordered by effective time after
+// cursor. When requesterKey names a known,
 // non-suspended peer, the response also carries that peer's credit here (CounterpartyBalance, §13
 // peer sync); nil for strangers, suspended keys, and anonymous pulls.
 // reasonRemoteReceiptInvalidPrefix marks a quarantined remote-proxy settlement: a validly-signed
@@ -1442,9 +1442,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		return nil, err
 	}
 	var manifests []*ActionManifest
-	var users []GossipUser
-	ownerSeen := map[string]bool{}
-	owners := map[string]*Account{} // one read per owner, shared by the manifest and the user summary
+	owners := map[string]*Account{} // one read per owner across the manifest loop
 	for _, a := range actions {
 		if k.exportable(a) != nil {
 			continue
@@ -1462,16 +1460,6 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 			continue
 		}
 		manifests = append(manifests, m)
-		if !ownerSeen[ow.ID] {
-			ownerSeen[ow.ID] = true
-			if ow.KernelPublicKey == "" {
-				users = append(users, GossipUser{UserID: ow.ID, Handle: ow.Handle, Description: ow.Description})
-			}
-		}
-	}
-	// Always advertise @sys so a discovering kernel can index the operator identity.
-	if sys != nil && !ownerSeen[sys.ID] {
-		users = append(users, GossipUser{UserID: sys.ID, Handle: sys.Handle, Description: sys.Description})
 	}
 
 	bundles, nextCursor, err := k.gossipEvidencePage(ctx, ourKey, cursor)
@@ -1483,7 +1471,6 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		PublicKey:       ourKey,
 		Handle:          handle,
 		About:           about,
-		Users:           users,
 		ActionManifests: manifests,
 		Evidence:        bundles,
 		NextCursor:      nextCursor,
@@ -1654,7 +1641,7 @@ func (k *Kernel) ReadKernelByPetname(ctx context.Context, petname string) (*Remo
 	return k.store.ReadKernelByPetname(ctx, NormalizeHandle(petname))
 }
 
-// DiscoveryDocsForKernel returns the locally-cached "action" discovery docs for one source kernel
+// DiscoveryDocsForKernel returns the locally-cached discovery docs for one source kernel
 // (§13). Regenerable — empty until the next gossip pull.
 func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) ([]*DiscoveryDoc, error) {
 	all, err := k.store.ListDiscoveryDocs(ctx)
@@ -1663,7 +1650,7 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 	}
 	out := make([]*DiscoveryDoc, 0)
 	for _, d := range all {
-		if d.KernelPublicKey == publicKey && d.Kind == "action" {
+		if d.KernelPublicKey == publicKey {
 			out = append(out, d)
 		}
 	}
@@ -1817,7 +1804,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 
 	// Rebuild discovery docs from the verified catalog snapshot (replace-all per source kernel).
 	const maxGossipElements = 10000
-	docs := make([]*DiscoveryDoc, 0, len(gossip.ActionManifests)+len(gossip.Users))
+	docs := make([]*DiscoveryDoc, 0, len(gossip.ActionManifests))
 	for i, m := range gossip.ActionManifests {
 		if i >= maxGossipElements {
 			break
@@ -1833,8 +1820,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 		d := &DiscoveryDoc{
 			KernelPublicKey: gossip.PublicKey,
-			Kind:            "action",
-			UserID:          m.OwnerID,
 			Handle:          m.OwnerHandle,
 			Description:     m.Description,
 			ActionID:        m.ActionID,
@@ -1846,28 +1831,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 		if k.llm != nil {
 			if vec, eerr := k.llm.Embed(ctx, m.Name+" "+m.Description); eerr == nil {
-				d.Embedding = vec
-			}
-		}
-		docs = append(docs, d)
-	}
-	for i, u := range gossip.Users {
-		if i >= maxGossipElements {
-			break
-		}
-		if u.UserID == "" {
-			continue
-		}
-		d := &DiscoveryDoc{
-			KernelPublicKey: gossip.PublicKey,
-			Kind:            "user",
-			UserID:          u.UserID,
-			Handle:          u.Handle,
-			Description:     u.Description,
-			ObservedAt:      now,
-		}
-		if k.llm != nil {
-			if vec, eerr := k.llm.Embed(ctx, u.Handle+" "+u.Description); eerr == nil {
 				d.Embedding = vec
 			}
 		}

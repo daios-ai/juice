@@ -374,7 +374,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 
 // The platform stdlib is local, so a stock kernel exposes none of it across federation: every native
 // is registered local (§9) and a fresh kernel — which owns nothing but natives — therefore gossips an
-// empty action catalog while still advertising sys as a first-party user (§13).
+// empty action catalog (§13).
 func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
@@ -411,9 +411,6 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	}
 	if len(g.ActionManifests) != 0 {
 		t.Errorf("gossip served %d manifests, want 0 (natives are local)", len(g.ActionManifests))
-	}
-	if len(g.Users) != 1 || g.Users[0].Handle != "sys" {
-		t.Errorf("gossip users = %+v, want sys alone", g.Users)
 	}
 }
 

@@ -41,7 +41,7 @@ func TestAllShipsCompleteContracts(t *testing.T) {
 	}
 	// The stdlib §9 names; a native removed from the platform must also leave this list.
 	for _, want := range []string{
-		"lookup", "user-lookup", "llm/chat", "llm/embed", "llm/json", "llm/decide",
+		"lookup", "llm/chat", "llm/embed", "llm/json", "llm/decide",
 		"time", "sink", "message", "random", "transfer", "web", "tinygo/compile",
 	} {
 		if !seen[want] {

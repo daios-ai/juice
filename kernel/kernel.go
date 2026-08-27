@@ -2617,9 +2617,9 @@ type LookupResult struct {
 const rrfK = 60
 
 // rankDense ranks keyed vectors by cosine against qvec and reports the top `oversample` in
-// descending similarity, calling hit(key, rank). One dense retrieval leg, shared by the action,
-// discovery-action, and discovery-user legs (§9). A vector whose dimension differs from the
-// query's is skipped, so a changed embed model can never panic cosine or score across spaces.
+// descending similarity, calling hit(key, rank). One dense retrieval leg, shared by the action
+// and discovery legs (§9). A vector whose dimension differs from the query's is skipped, so a
+// changed embed model can never panic cosine or score across spaces.
 // docEmbeddings projects discovery docs onto the key→vector map rankDense consumes.
 func docEmbeddings(byKey map[string]*DiscoveryDoc) map[string][]float32 {
 	vecs := make(map[string][]float32, len(byKey))
@@ -2630,9 +2630,9 @@ func docEmbeddings(byKey map[string]*DiscoveryDoc) map[string][]float32 {
 }
 
 // rrfRanker fuses ranking legs by reciprocal-rank fusion: scale-free (no normalization between
-// cosine and BM25) and positive by construction. Both lookup surfaces (§9) accumulate their legs
-// here and read one ordering out, so the fusion formula, its limit ceiling, and the ordering rule
-// have a single owner; only candidate construction and hydration differ between them.
+// cosine and BM25) and positive by construction. Lookup (§9) accumulates its legs here and reads
+// one ordering out, so the fusion formula, its limit ceiling, and the ordering rule have a
+// single owner.
 type rrfRanker struct {
 	limit      int
 	oversample int
@@ -2726,7 +2726,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	discHits := map[string]*DiscoveryDoc{}
 	if req.CallerID != "" {
 		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.KernelPublicKey == "" {
-			k.forEachDiscoveryHit(ctx, "action", req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
+			k.forEachDiscoveryHit(ctx, req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
 				rr.add("disc:"+key, rank)
 				discHits["disc:"+key] = d
 			})
@@ -2805,19 +2805,16 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	return out, nil
 }
 
-// forEachDiscoveryHit runs the two discovery ranking legs for one doc kind (§13) — dense over the
-// stored embeddings, lexical over the FTS mirror — calling add for every hit with its rank. Both
-// lookup surfaces fold discovery in this way; only what they build from a hit differs.
-func (k *Kernel) forEachDiscoveryHit(ctx context.Context, kind, query string, oversample int, add func(key string, d *DiscoveryDoc, rank int)) {
+// forEachDiscoveryHit runs the two discovery ranking legs (§13) — dense over the stored
+// embeddings, lexical over the FTS mirror — calling add for every hit with its rank.
+func (k *Kernel) forEachDiscoveryHit(ctx context.Context, query string, oversample int, add func(key string, d *DiscoveryDoc, rank int)) {
 	docs, err := k.store.ListDiscoveryDocs(ctx)
 	if err != nil {
 		return
 	}
 	byKey := map[string]*DiscoveryDoc{}
 	for _, d := range docs {
-		if d.Kind == kind {
-			byKey[discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID)] = d
-		}
+		byKey[discoveryDocKey(d.KernelPublicKey, d.ActionID)] = d
 	}
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, query); err == nil {
@@ -2838,97 +2835,8 @@ func (k *Kernel) forEachDiscoveryHit(ctx context.Context, kind, query string, ov
 }
 
 // discoveryDocKey mirrors the store's FTS key composition so lookup can map a doc to its synthetic id.
-func discoveryDocKey(kernelKey, kind, userID, actionID string) string {
-	return kernelKey + "/" + kind + "/" + userID + "/" + actionID
-}
-
-// UserLookupResult is a ranked user hit (sys/user-lookup). PrincipalID is the stable identity
-// (kernel key + user id, §13); Reference is the display/use form ("handle@<key>" for a discovered
-// user, a bare handle for a local one). KernelPublicKey is empty for a local user (this kernel).
-type UserLookupResult struct {
-	KernelPublicKey string  `json:"kernel_public_key"`
-	UserID          string  `json:"user_id"`
-	Reference       string  `json:"reference"`
-	Handle          string  `json:"handle"`
-	Description     string  `json:"description"`
-	Score           float32 `json:"score"`
-}
-
-// LookupUsers ranks users — local (sys + owners of active public actions) and discovered (kind=user
-// docs) — by the same lexical+dense RRF as Lookup (§13). It returns the stable PrincipalID plus a
-// display reference. Discovered users are shown only to authenticated local callers.
-func (k *Kernel) LookupUsers(ctx context.Context, req LookupRequest) ([]*UserLookupResult, error) {
-	rr := newRRFRanker(req.Limit)
-	// Candidates keyed by synthetic id → result skeleton.
-	cands := map[string]*UserLookupResult{}
-
-	// Local candidates: sys + owners of active public actions. Small N; score lexically in-memory by
-	// substring, then let RRF ordering fold with discovery. We assign a rank by match position.
-	locals := map[string]*Account{}
-	if sys, _ := k.store.ReadUserByHandle(ctx, "sys"); sys != nil {
-		locals[sys.ID] = sys
-	}
-	if actions, err := k.store.ListVisibleActions(ctx, false, 500, 0); err == nil {
-		for _, a := range actions {
-			if !a.Active || a.Visibility != VisibilityPublic {
-				continue
-			}
-			if _, ok := locals[a.OwnerUserID]; ok {
-				continue
-			}
-			if ow, _ := k.store.ReadUser(ctx, a.OwnerUserID); ow != nil && ow.KernelPublicKey == "" {
-				locals[ow.ID] = ow
-			}
-		}
-	}
-	q := strings.ToLower(req.Query)
-	localRanked := make([]*Account, 0, len(locals))
-	for _, u := range locals {
-		localRanked = append(localRanked, u)
-	}
-	// Rank local users: those whose handle/description contains the query first, stable by handle.
-	sort.Slice(localRanked, func(i, j int) bool {
-		mi := strings.Contains(strings.ToLower(localRanked[i].Handle+" "+localRanked[i].Description), q)
-		mj := strings.Contains(strings.ToLower(localRanked[j].Handle+" "+localRanked[j].Description), q)
-		if mi != mj {
-			return mi
-		}
-		return localRanked[i].Handle < localRanked[j].Handle
-	})
-	for rank, u := range localRanked {
-		id := "local:" + u.ID
-		rr.add(id, rank)
-		cands[id] = &UserLookupResult{UserID: u.ID, Reference: u.Handle, Handle: u.Handle, Description: u.Description}
-	}
-
-	// Discovery candidates, gated to authenticated local callers.
-	if req.CallerID != "" {
-		if cu, _ := k.store.ReadUser(ctx, req.CallerID); cu != nil && cu.KernelPublicKey == "" {
-			k.forEachDiscoveryHit(ctx, "user", req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
-				id := "disc:" + key
-				rr.add(id, rank)
-				cands[id] = &UserLookupResult{
-					KernelPublicKey: d.KernelPublicKey,
-					UserID:          d.UserID,
-					Reference:       d.Handle + "@" + d.KernelPublicKey,
-					Handle:          d.Handle,
-					Description:     d.Description,
-				}
-			})
-		}
-	}
-
-	out := make([]*UserLookupResult, 0, rr.limit)
-	for _, r := range rr.ranked() {
-		if len(out) >= rr.limit {
-			break
-		}
-		if c := cands[r.id]; c != nil {
-			c.Score = float32(r.score)
-			out = append(out, c)
-		}
-	}
-	return out, nil
+func discoveryDocKey(kernelKey, actionID string) string {
+	return kernelKey + "/" + actionID
 }
 
 // indexForLookup keeps an action's lookup entries current: the lexical FTS text (always — it needs

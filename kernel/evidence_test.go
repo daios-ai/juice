@@ -183,7 +183,6 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 
 	g := &kernel.GossipResponse{
 		PublicKey: peerKey, Handle: "peerk",
-		Users:           []kernel.GossipUser{{UserID: "u1", Handle: "prov", Description: "a provider"}},
 		ActionManifests: []*kernel.ActionManifest{good, bad},
 	}
 	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {

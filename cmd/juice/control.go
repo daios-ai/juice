@@ -286,8 +286,8 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 		resp["account"] = map[string]any{"available": pu.Available, "locked": pu.Locked, "suspended": pu.SuspendedAt != nil}
 	}
 
-	// Live view when the peer answers: a fresh gossip pull (identity + first-party users + own
-	// signed manifests). The evidence page is ignored here; the persistent discovery loop ingests it.
+	// Live view when the peer answers: a fresh gossip pull (identity + own signed manifests).
+	// The evidence page is ignored here; the persistent discovery loop ingests it.
 	if gRaw, err := s.fed.Gossip(octx, peerKey, ""); err == nil {
 		var g kernel.GossipResponse
 		if json.Unmarshal(gRaw, &g) == nil {
@@ -296,7 +296,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			if resp["petname"] == g.PublicKey {
 				resp["petname"] = "" // unbound: KernelName falls back to the key
 			}
-			resp["about"], resp["users"] = g.About, g.Users
+			resp["about"] = g.About
 			resp["actions"] = s.kernel.PeerCatalog(g.ActionManifests)
 			resp["source"] = "live"
 			if steps, serr := s.kernel.PeerStepsAwaitingUs(octx, peerKey); serr == nil && steps != nil {

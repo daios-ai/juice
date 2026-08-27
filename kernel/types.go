@@ -646,14 +646,6 @@ type GossipRequest struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-// GossipUser is a first-party user summary in a gossip response: @sys and the owners of active
-// public actions, the searchable identities a peer indexes into its discovery docs (§13).
-type GossipUser struct {
-	UserID      string `json:"user_id"`
-	Handle      string `json:"handle"`
-	Description string `json:"description,omitempty"`
-}
-
 // RatingEvidence is the wire projection of a Rating (§13): the public reputation signal only —
 // value, note, timestamp, and the receipt link — with no rater or transaction identity. The
 // gossiping kernel signs it under sigDomainRating; the full Rating never crosses the wire.
@@ -672,14 +664,13 @@ type EvidenceBundle struct {
 }
 
 // GossipResponse is the v0.13 gossip payload. It carries the full first-party catalog snapshot
-// (identity, users, own signed manifests) on every response, plus one page of evidence bundles
+// (identity, own signed manifests) on every response, plus one page of evidence bundles
 // ordered by effective time (a rating's created_at when rated, else the receipt's) so a late
 // rating re-surfaces its bundle. NextCursor is the exclusive high-watermark to send on the next pull.
 type GossipResponse struct {
 	PublicKey       string            `json:"public_key"`
 	Handle          string            `json:"handle"`
 	About           string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
-	Users           []GossipUser      `json:"users,omitempty"`
 	ActionManifests []*ActionManifest `json:"action_manifests,omitempty"`
 	Evidence        []EvidenceBundle  `json:"evidence,omitempty"`
 	NextCursor      string            `json:"next_cursor,omitempty"`
@@ -724,19 +715,16 @@ type EvidenceRow struct {
 	Equivocated                 bool
 }
 
-// DiscoveryDoc is one regenerable, searchable discovery record (§13): a user or action summary
+// DiscoveryDoc is one regenerable, searchable discovery record (§13): a remote action summary
 // learned first-party from gossip and indexed by the lookup machinery. It carries no execution
 // semantics and is truncatable with zero effect (a lookup selection still resolves and verifies
-// from the home kernel). For Kind=="action", ActionID is the remote action's stable id and the
-// schemas mirror the signed manifest; for Kind=="user", UserID/Handle/Description summarize the
-// remote principal.
+// from the home kernel). ActionID is the remote action's stable id and the schemas mirror the
+// signed manifest; Handle is the owner's, for rendering owner@kernel/name.
 type DiscoveryDoc struct {
 	KernelPublicKey string         `json:"kernel_public_key"`
-	Kind            string         `json:"kind"` // "user" | "action"
-	UserID          string         `json:"user_id,omitempty"`
 	Handle          string         `json:"handle,omitempty"`
 	Description     string         `json:"description,omitempty"`
-	ActionID        string         `json:"action_id,omitempty"` // remote action id (Kind=="action")
+	ActionID        string         `json:"action_id,omitempty"` // remote action id
 	Name            string         `json:"name,omitempty"`
 	InputSchema     map[string]any `json:"input_schema,omitempty"`
 	OutputSchema    map[string]any `json:"output_schema,omitempty"`

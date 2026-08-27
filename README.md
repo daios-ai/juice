@@ -58,7 +58,7 @@ final and atomic with its transaction and receipt.
   non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
   **[docs/oauth.md](docs/oauth.md)**.
 - **Native `sys` actions** (the platform stdlib, all `local` — callable here, never served
-  abroad): `lookup`, `user-lookup`, `llm/chat`, `llm/embed`, `llm/json`, `llm/decide`,
+  abroad): `lookup`, `llm/chat`, `llm/embed`, `llm/json`, `llm/decide`,
   `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`, `transfer`.
 - **Federation** — call peer kernels by public key (actions resolve and cache on first use), proxy users, prepaid credits, signed
   manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
@@ -188,7 +188,7 @@ kernel/      Core types, interfaces, auth, call/settlement semantics, federation
 store/       SQLite implementation of kernel.Store (migrations, WAL)
 script/      WebAssembly execution via wazero
 llm/         Language and embedding adapter (Ollama) for lookup, chat, json, decide
-native/      Native sys action handlers (lookup, user-lookup, llm/*, time, sink, message, random, web, transfer, tinygo)
+native/      Native sys action handlers (lookup, llm/*, time, sink, message, random, web, transfer, tinygo)
 log/         Structured logger (slog + tint, text + JSON)
 ```
 

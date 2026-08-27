@@ -3511,7 +3511,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", Kind: "action", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
+	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpsertEvidence(ctx, &kernel.EvidenceRow{IssuerPublicKey: "staleKey", ReceiptHash: "rh1", SubjectKernelPublicKey: "staleKey", SubjectActionID: "sa1", EvidenceReceiptJSON: "{}", ReceiptCreatedAt: old, EffectiveAt: old, ObservedAt: old}); err != nil {
@@ -4413,8 +4413,8 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 	}
 
 	docs := []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "pk", Kind: "action", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
-		{KernelPublicKey: "pk", Kind: "action", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
+		{KernelPublicKey: "pk", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
+		{KernelPublicKey: "pk", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
 	}
 	if err := db.ReplaceDiscoveryDocs(ctx, "pk", docs); err != nil {
 		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
@@ -4433,10 +4433,130 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 
 	// A negative serving price is rejected by the column CHECK, not silently stored.
 	err = db.ReplaceDiscoveryDocs(ctx, "pk", []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "pk", Kind: "action", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
+		{KernelPublicKey: "pk", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
 	})
 	if err == nil {
 		t.Error("a negative serving_price must be rejected by the CHECK constraint")
+	}
+}
+
+// TestMigration046DropsDiscoveryKind: the discovery cache became action-only, so 046 rebuilds it
+// without the kind discriminator and the user-doc-only user_id column. The cache is regenerable
+// (§13), so the rebuild is a truncation: old rows of both kinds and their FTS mirror go, and the
+// replace/search round-trip works against the new shape.
+func TestMigration046DropsDiscoveryKind(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		for _, ins := range []string{
+			`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,observed_at,serving_price,effect)
+			 VALUES ('pk','user','u1','prov','a provider','','','{}','{}','` + now + `',0,'')`,
+			`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,observed_at,serving_price,effect)
+			 VALUES ('pk','action','u1','prov','forecast','a1','weather','{}','{}','` + now + `',10,'')`,
+			`INSERT INTO discovery_fts (doc_key,text) VALUES ('pk/user/u1/','prov a provider')`,
+			`INSERT INTO discovery_fts (doc_key,text) VALUES ('pk/action/u1/a1','prov weather forecast')`,
+		} {
+			if _, err := raw.Exec(ins); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	var docRows, ftsRows int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM discovery_docs`).Scan(&docRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM discovery_fts`).Scan(&ftsRows); err != nil {
+		t.Fatal(err)
+	}
+	if docRows != 0 || ftsRows != 0 {
+		t.Errorf("046 must truncate the cache: %d docs, %d fts rows", docRows, ftsRows)
+	}
+	cols := map[string]bool{}
+	rows, err := db.db.QueryContext(ctx, `PRAGMA table_info(discovery_docs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = true
+	}
+	for _, gone := range []string{"kind", "user_id", "effect"} {
+		if cols[gone] {
+			t.Errorf("column %q survived the 046 rebuild", gone)
+		}
+	}
+
+	// Repopulation path: a replace and a lexical search work against the new shape.
+	if err := db.ReplaceDiscoveryDocs(ctx, "pk", []*kernel.DiscoveryDoc{
+		{KernelPublicKey: "pk", Handle: "prov", ActionID: "a1", Name: "weather",
+			Description: "forecast", ServingPrice: 10, ObservedAt: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	}
+	keys, err := db.SearchDiscoveryLexical(ctx, "weather", 10)
+	if err != nil {
+		t.Fatalf("SearchDiscoveryLexical: %v", err)
+	}
+	if len(keys) != 1 || keys[0] != "pk/a1" {
+		t.Errorf("post-046 search = %v, want [pk/a1]", keys)
+	}
+}
+
+// TestDiscoveryFTSDeleteIsNotWildcarded: doc keys are prefix-scoped by kernel key, and base64url
+// keys may contain '_' — a LIKE single-char wildcard. The prefix delete must be an exact range, so
+// clearing one kernel can never take an underscore-cousin's rows with it.
+func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	// Under LIKE 'kernel_A/%', '_' would match the 'X' in kernelXA.
+	const k1, k2 = "kernel_A", "kernelXA"
+	seed := func(key, name string) {
+		if err := db.ReplaceDiscoveryDocs(ctx, key, []*kernel.DiscoveryDoc{
+			{KernelPublicKey: key, Handle: "prov", ActionID: "a1", Name: name,
+				Description: name, ServingPrice: 1, ObservedAt: now},
+		}); err != nil {
+			t.Fatalf("ReplaceDiscoveryDocs(%s): %v", key, err)
+		}
+	}
+	seed(k1, "alpha")
+	seed(k2, "beta")
+
+	// Replace-all for k1 must not clear k2's FTS row.
+	seed(k1, "gamma")
+	if keys, err := db.SearchDiscoveryLexical(ctx, "beta", 10); err != nil || len(keys) != 1 || keys[0] != k2+"/a1" {
+		t.Fatalf("k2's fts row lost to k1's replace: keys=%v err=%v", keys, err)
+	}
+
+	// Stale eviction of k1 (never a peer) must not clear k2's rows either.
+	old := now.Add(-100 * 24 * time.Hour)
+	if err := db.UpsertKernel(ctx, k1, "one", "", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertKernel(ctx, k2, "two", "", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("PurgeStaleDiscovery: %v", err)
+	}
+	if keys, err := db.SearchDiscoveryLexical(ctx, "beta", 10); err != nil || len(keys) != 1 || keys[0] != k2+"/a1" {
+		t.Fatalf("k2's fts row lost to k1's purge: keys=%v err=%v", keys, err)
+	}
+	if keys, _ := db.SearchDiscoveryLexical(ctx, "gamma", 10); len(keys) != 0 {
+		t.Fatalf("k1's fts rows survived its purge: %v", keys)
 	}
 }
 

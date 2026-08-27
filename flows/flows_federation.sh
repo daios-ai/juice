@@ -304,11 +304,11 @@ flow_fed_gossip_discovery() {
 
     # Routing discovery (§13): T bootstraps off the seed R alone and never dials L, yet must learn L
     # through the shared routing-discovery namespace (L advertises to R's DHT; T enumerates it), then
-    # pull L directly and index L's sys user. Proves membership comes from the DHT namespace, not a
-    # gossip-carried hint.
+    # pull L's gossip directly — the verified pull is what lands L in T's merged roster. Proves
+    # membership comes from the DHT namespace, not a gossip-carried hint.
     local lfound=no
     for _ in $(seq 1 45); do
-        if jj "$dbt" "$ht" run sys/user-lookup '{"query":"sys"}' | grep -q "$FED_LKEY"; then lfound=yes; break; fi
+        if jj "$dbt" "$ht" admin peers | grep -q "$FED_LKEY"; then lfound=yes; break; fi
         sleep 1
     done
     assert_eq "fed_gossip.l_discovered_via_routing" yes "$lfound"

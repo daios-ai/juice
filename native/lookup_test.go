@@ -205,8 +205,7 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	observed := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
 	doc := &kernel.DiscoveryDoc{
-		KernelPublicKey: peerKey, Kind: "action",
-		UserID: "u-remote", Handle: "prov", ActionID: "act-remote", Name: "weather",
+		KernelPublicKey: peerKey, Handle: "prov", ActionID: "act-remote", Name: "weather",
 		Description: "forecast the weather for a city", ServingPrice: 10, ObservedAt: observed,
 	}
 	if err := st.ReplaceDiscoveryDocs(ctx, peerKey, []*kernel.DiscoveryDoc{doc}); err != nil {

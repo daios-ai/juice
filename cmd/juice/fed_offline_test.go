@@ -206,7 +206,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 		Handle: handle, PublicKey: key, ActionManifests: []*kernel.ActionManifest{&m},
 	})
 	if err := db.ReplaceDiscoveryDocs(ctx, key, []*kernel.DiscoveryDoc{{
-		KernelPublicKey: key, Kind: "action", ActionID: "act-1", Name: "greet",
+		KernelPublicKey: key, ActionID: "act-1", Name: "greet",
 		Description: "greet", ServingPrice: 21, ObservedAt: time.Now().UTC(),
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},

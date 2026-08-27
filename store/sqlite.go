@@ -418,9 +418,11 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 // deleteDiscoveryCache removes one kernel's regenerable discovery cache within tx: its discovery
 // docs and their FTS mirror, its evidence rows (as issuer and as subject), and its kernels
 // row. Shared by peer purge (§13 Retention) and stale non-peer eviction; order is free — no FK links
-// these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key.
+// these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key —
+// by range, not LIKE, since '_' in a base64url key would be a single-char wildcard and could match
+// another kernel's rows ('0' is the ASCII successor of '/').
 func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, pubKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key >= ? || '/' AND doc_key < ? || '0'`, pubKey, pubKey); err != nil {
 		return dbErr(err, "delete discovery_fts")
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, pubKey); err != nil {
@@ -2881,7 +2883,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 		        CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END,
 		        COALESCE(a.available,0), COALESCE(a.locked,0), a.suspended_at,
 		        k.peer_credit, k.last_seen, k.last_contact_failed_at,
-		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key AND d.kind='action')
+		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key)
 		 FROM kernels k LEFT JOIN accounts a ON a.kernel_public_key = k.public_key
 		 WHERE k.public_key != ? AND (? OR a.suspended_at IS NULL)
 		 ORDER BY k.updated_at DESC, k.public_key
@@ -2949,14 +2951,16 @@ func (s *DB) SetGossipCursor(ctx context.Context, publicKey, cursor string) erro
 
 // ---- Discovery docs (regenerable lookup cache) ----
 
-// discoveryDocKey is the FTS/join key for a discovery doc: "<kernel>/<kind>/<user_id>/<action_id>".
-func discoveryDocKey(kernelKey, kind, userID, actionID string) string {
-	return kernelKey + "/" + kind + "/" + userID + "/" + actionID
+// discoveryDocKey is the FTS/join key for a discovery doc: "<kernel>/<action_id>".
+func discoveryDocKey(kernelKey, actionID string) string {
+	return kernelKey + "/" + actionID
 }
 
 func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, docs []*kernel.DiscoveryDoc) error {
 	return s.withTx(ctx, "replace discovery docs", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key LIKE ? || '/%'`, kernelPublicKey); err != nil {
+		// Prefix scope by range, not LIKE: '_' in a base64url key would be a single-char wildcard
+		// and could match another kernel's rows. '0' is the ASCII successor of '/'.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key >= ? || '/' AND doc_key < ? || '0'`, kernelPublicKey, kernelPublicKey); err != nil {
 			return dbErr(err, "clear discovery_fts")
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, kernelPublicKey); err != nil {
@@ -2977,15 +2981,15 @@ func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, d
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at)
-				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-				d.KernelPublicKey, d.Kind, d.UserID, d.Handle, d.Description, d.ActionID, d.Name,
+				`INSERT INTO discovery_docs (kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+				d.KernelPublicKey, d.Handle, d.Description, d.ActionID, d.Name,
 				string(inJSON), string(outJSON), d.ServingPrice, embed, timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
 			}
 			text := d.Handle + " " + d.Name + " " + d.Description
 			if _, err := tx.ExecContext(ctx, `INSERT INTO discovery_fts(doc_key, text) VALUES (?, ?)`,
-				discoveryDocKey(d.KernelPublicKey, d.Kind, d.UserID, d.ActionID), text); err != nil {
+				discoveryDocKey(d.KernelPublicKey, d.ActionID), text); err != nil {
 				return dbErr(err, "insert discovery_fts")
 			}
 		}
@@ -2995,7 +2999,7 @@ func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, d
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kernel_public_key,kind,user_id,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
+		`SELECT kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
 		 FROM discovery_docs`)
 	if err != nil {
 		return nil, dbErr(err, "list discovery docs")
@@ -3004,7 +3008,7 @@ func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, err
 		var d kernel.DiscoveryDoc
 		var inJSON, outJSON, observedAt string
 		var embed sql.NullString
-		if err := scan(&d.KernelPublicKey, &d.Kind, &d.UserID, &d.Handle, &d.Description, &d.ActionID, &d.Name,
+		if err := scan(&d.KernelPublicKey, &d.Handle, &d.Description, &d.ActionID, &d.Name,
 			&inJSON, &outJSON, &d.ServingPrice, &embed, &observedAt); err != nil {
 			return nil, err
 		}

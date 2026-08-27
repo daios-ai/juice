@@ -468,8 +468,7 @@ func TestLookupDiscoveredActionPrice(t *testing.T) {
 	// mp=100 at remote_bps=500 → serving price sr = 100 + ceil(100*500/10000) = 105.
 	const servingPrice = int64(105)
 	doc := &kernel.DiscoveryDoc{
-		KernelPublicKey: "peer-key-1", Kind: "action",
-		UserID: "u-remote", Handle: "prov", ActionID: "act-remote", Name: "translate",
+		KernelPublicKey: "peer-key-1", Handle: "prov", ActionID: "act-remote", Name: "translate",
 		Description:  "translate icelandic contracts",
 		ServingPrice: servingPrice, ObservedAt: time.Now().UTC(),
 	}

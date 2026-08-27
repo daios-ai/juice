@@ -84,7 +84,7 @@ Every command runs by calling the server over HTTP; the base URL is `--server`, 
 |-----------|------|-----|
 | Health check | `GET /health` (open) → `{status, handle, public_key}`; identity banner — see which kernel you're on before login | `juice health` |
 
-Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Kernels discover each other in the background through libp2p routing discovery over a fixed namespace (§13); discovered actions/users surface through `sys/lookup`/`sys/user-lookup`, and every known kernel — counterparties and discovery-only alike — appears in the merged `admin peers` roster and is inspected with `admin inspect <key>`.
+Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (§13), not over this API. Kernels discover each other in the background through libp2p routing discovery over a fixed namespace (§13); discovered actions surface through `sys/lookup`, and every known kernel — counterparties and discovery-only alike — appears in the merged `admin peers` roster and is inspected with `admin inspect <key>`.
 
 ### Authentication
 
@@ -210,7 +210,6 @@ Native actions registered at bootstrap, owned by `sys`, `local` — callable by 
 | Action | Price | Purpose |
 |--------|-------|---------|
 | `sys/lookup` | 0 | Rank active actions by query |
-| `sys/user-lookup` | 0 | Rank principals (users) by query — the user-facing twin of `sys/lookup` |
 | `sys/llm/chat` | 0 | Platform LLM chat |
 | `sys/llm/embed` | 0 | Text embedding vector |
 | `sys/llm/json`  | 0 | Structured JSON output from LLM, locally validated |

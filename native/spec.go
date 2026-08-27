@@ -39,7 +39,7 @@ type Deps struct {
 // All returns every native the platform ships, in registration order.
 func All(d Deps) []Spec {
 	return []Spec{
-		Lookup(), UserLookup(),
+		Lookup(),
 		Chat(d.Chatter), Embed(d.Embedder), JSON(d.JSON), Decide(d.Decide),
 		Time(), Sink(), Message(), Random(), Transfer(),
 		Web(d.Web), TinyGo(d.Compile, d.CompileSDK),
