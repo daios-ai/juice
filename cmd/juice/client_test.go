@@ -283,6 +283,12 @@ func TestActionUpdateSendsArtifact(t *testing.T) {
 	artifactB64 := base64.StdEncoding.EncodeToString([]byte{0x00, 0x61, 0x73, 0x6d})
 	var gotMethod, gotPath, gotArtifact string
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Every action subcommand resolves its reference server-side first (§14), so the listing
+		// endpoint answers that with a one-element list; the update itself is the call under test.
+		if r.URL.Path == "/v1/actions" {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act1", "action": "a/m"}})
+			return
+		}
 		gotMethod, gotPath = r.Method, r.URL.Path
 		var req struct {
 			WasmArtifact string `json:"wasm_artifact"`

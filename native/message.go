@@ -42,7 +42,7 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 		return nil, kernel.ErrInvalidInput.Wrapf("to %q not found", to)
 	}
 
-	sink, err := k.ReadCallableAction(ctx, kernel.SuperuserHandle, "sink", callerID)
+	sink, err := k.ReadCallableAction(ctx, kernel.SuperuserHandle+"/sink", callerID)
 	if err != nil {
 		return nil, kernel.ErrInvalidState.Wrap("sys/sink not available")
 	}

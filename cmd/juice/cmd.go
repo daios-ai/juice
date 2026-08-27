@@ -678,15 +678,20 @@ func actionDeleteCmd() *cobra.Command {
 }
 
 func actionImportCmd() *cobra.Command {
+	var as string
 	cmd := &cobra.Command{
 		Use:   "import <spec-url>",
 		Short: "Import OpenAPI operations",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			specURL := args[0]
+			body := map[string]any{"spec_url": specURL}
+			if as != "" {
+				body["as"] = as
+			}
 			var result kernel.ImportResult
 			if err := apiCall(context.Background(), "POST", "/v1/actions/import",
-				map[string]any{"spec_url": specURL}, &result); err != nil {
+				body, &result); err != nil {
 				return err
 			}
 			if flagJSON {
@@ -701,6 +706,7 @@ func actionImportCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&as, "as", "", "Import the operations under this name prefix (--as mail names them mail/<operation>)")
 	return cmd
 }
 

@@ -112,6 +112,19 @@ func ParseActionRef(ref string) (ActionRef, error) {
 	return ActionRef{Owner: owner, Kernel: kernel, Name: name}, nil
 }
 
+// KernelQualified reports whether a reference names an action on another kernel — the one case
+// whose resolution may reach a peer, which is why callers with a per-candidate error policy (a dead
+// peer must never block selection among live candidates, §13) need to tell it apart. A malformed
+// reference is not kernel-qualified: it is refused by the resolver like any other bad input.
+func KernelQualified(ref string) bool {
+	head := strings.TrimSpace(ref)
+	if i := strings.Index(head, "/"); i >= 0 {
+		head = head[:i]
+	}
+	owner, kernel, hasKernel := strings.Cut(head, "@")
+	return hasKernel && owner != "" && kernel != ""
+}
+
 // FormatActionRef renders an action's canonical user[@kernel]/action reference. For a remote proxy
 // the stored Name is "remoteowner/rest" and OwnerHandle is the local mount alias, so it renders
 // "remoteowner@mount/rest"; a local action renders "ownerHandle/name". Falls back to the bare name
@@ -199,65 +212,102 @@ func looksLikeID(s string) bool {
 	return err == nil
 }
 
-// ResolveAction resolves an action reference to an Action. It accepts "@owner/name"
-// (with or without a leading "@") or a raw action ID, disambiguated by the "/" that a
-// UUID never contains. This is the single action-resolution entry point shared by Call,
-// Run, the WASM host, and the service layer; do not re-inline the lookup elsewhere.
+// indexActionName is the action that represents a group at its root: referring to a path
+// resolves the exact action named, else that path's index child — the web's index-page
+// convention (§13). An index is an ordinary action in every other respect.
+const indexActionName = "index"
+
+// ResolveAction resolves an action reference to an Action: "owner[@kernel]/name", a bare
+// "owner[@kernel]" naming that owner's root, or a raw action id. This is the single
+// action-resolution entry point shared by Call, Run, the WASM host, the service layer, and the
+// inbound resolve handler; do not re-inline the lookup elsewhere, and do not append the index name
+// anywhere else — exact-then-index lives here alone.
 func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error) {
-	if strings.Contains(ref, "/") {
-		r, err := ParseActionRef(ref)
-		if err != nil {
-			return nil, err
-		}
-		if r.Local() {
-			owner, err := k.ResolveUser(ctx, r.Owner)
-			if err != nil || owner == nil {
-				return nil, ErrNotFound.Wrapf("action %s not found", ref)
-			}
-			a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, r.Name)
-			if err != nil || a == nil {
-				return nil, ErrNotFound.Wrapf("action %s not found", ref)
-			}
-			// A proxy is stored under its mount user named "owner/name", so a bare
-			// "mount/owner/name" would otherwise resolve here (the legacy mount form). Proxies are
-			// addressable only kernel-qualified (owner@kernel/name), so reject it (§8, §13 grammar).
-			if a.Kind == KindRemoteProxy {
-				return nil, ErrNotFound.Wrapf("action %s not found", ref)
-			}
-			return a, nil
-		}
-		// Kernel-qualified: the local proxy cache row is owned by the peer's mount user and named
-		// "owner/name" (§8). Resolve the mount by bound alias or raw key; a discovered label never
-		// resolves (§13). A cached row is the fast path; a miss triggers on-demand resolve (§13).
-		peerKey, mount, kerr := k.ResolveKernelKey(ctx, r.Kernel)
-		if kerr != nil {
+	ref = strings.TrimSpace(ref)
+	// An id is an object, not a path (§13's three disjoint productions), so it is never extended
+	// with an index child: an unknown action id cannot resolve to some user's root.
+	if looksLikeID(ref) {
+		a, err := k.store.ReadAction(ctx, ref)
+		if err != nil || a == nil {
 			return nil, ErrNotFound.Wrapf("action %s not found", ref)
 		}
-		if mount != nil {
-			// An active cached proxy is the fast path; an absent OR inactive row is a cache miss that
-			// re-resolves (§8 rule A) — reconcile preserves the id and re-enables, so an inactive proxy
-			// (drift-deactivated by a prior refresh_proxy/quarantine, §13) is never permanently dead.
-			// A row missing its seller price is a cache miss too: its total was frozen at import and
-			// cannot be re-derived, so it re-resolves once to acquire one rather than have it
-			// reverse-calculated from a rounded total (§16). Self-healing and one round-trip only.
-			if a, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+r.Name); aerr == nil && a != nil && a.Active && a.BasePrice != nil {
+		return k.ensureBasePrice(ctx, a)
+	}
+	r, err := parseActionPath(ref)
+	if err != nil {
+		return nil, err
+	}
+	// Exact first, then the index child; a root has only the index, since "bob" is the group and
+	// "bob/index" the action answering at it.
+	names := []string{r.Name, r.Name + "/" + indexActionName}
+	if r.Name == "" {
+		names = []string{indexActionName}
+	}
+
+	if r.Local() {
+		owner, oerr := k.ResolveUser(ctx, r.Owner)
+		if oerr != nil || owner == nil {
+			return nil, ErrNotFound.Wrapf("action %s not found", ref)
+		}
+		for _, name := range names {
+			a, aerr := k.store.ReadActionByOwnerName(ctx, owner.ID, name)
+			// A proxy is stored under its mount user as "owner/name", so an unqualified
+			// "mount/owner/name" would otherwise resolve here; proxies are addressable only
+			// kernel-qualified (§8, §13 grammar).
+			if aerr == nil && a != nil && a.Kind != KindRemoteProxy {
 				return a, nil
 			}
 		}
-		a, lerr := k.lazyResolveRemote(ctx, peerKey, mount, r)
-		if lerr != nil {
-			if errors.Is(lerr, ErrNotFound) {
-				return nil, ErrNotFound.Wrapf("action %s not found", ref)
-			}
-			return nil, lerr
-		}
-		return a, nil
-	}
-	a, err := k.store.ReadAction(ctx, ref)
-	if err != nil || a == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", ref)
 	}
-	return k.ensureBasePrice(ctx, a)
+
+	// Kernel-qualified: a cached proxy answers locally, so a resolved group costs no round trip.
+	// The mount is the peer's local account, resolved by bound petname or raw key (§13).
+	peerKey, mount, kerr := k.ResolveKernelKey(ctx, r.Kernel)
+	if kerr != nil {
+		return nil, ErrNotFound.Wrapf("action %s not found", ref)
+	}
+	// A peer we have never dealt with holds no account, and so nothing cached to consult.
+	for _, name := range names {
+		if mount == nil {
+			break
+		}
+		row, aerr := k.store.ReadActionByOwnerName(ctx, mount.ID, r.Owner+"/"+name)
+		if aerr != nil || row == nil {
+			continue
+		}
+		// A row that exists but cannot be served is a cache miss to re-resolve (§8 rule A), never an
+		// absence to walk past: it says the peer holds this exact action, so answering with an index
+		// cached beneath it would execute something else. A price-less row is stale for its own
+		// reason — the total was frozen at import and cannot be re-derived (§16).
+		if !row.Active || row.BasePrice == nil {
+			break
+		}
+		return row, nil
+	}
+	// One request, carrying the name as written — empty for a root. The serving kernel applies this
+	// same convention, and lazyResolveRemote binds the reply to what was asked.
+	a, lerr := k.lazyResolveRemote(ctx, peerKey, mount, r)
+	if lerr != nil {
+		if errors.Is(lerr, ErrNotFound) {
+			return nil, ErrNotFound.Wrapf("action %s not found", ref)
+		}
+		return nil, lerr
+	}
+	return a, nil
+}
+
+// parseActionPath parses a reference that is not a raw id: ParseActionRef's grammar, widened by the
+// one form it cannot express — a bare "owner[@kernel]" naming a root, whose action name is empty.
+func parseActionPath(ref string) (ActionRef, error) {
+	if strings.Contains(ref, "/") {
+		return ParseActionRef(ref)
+	}
+	owner, kernel, hasKernel := strings.Cut(ref, "@")
+	if owner == "" || (hasKernel && kernel == "") {
+		return ActionRef{}, ErrInvalidInput.Wrap("action ref must be owner[@kernel][/name]")
+	}
+	return ActionRef{Owner: owner, Kernel: kernel}, nil
 }
 
 // ensureBasePrice heals a proxy imported before the seller's price was stored (§16). Such a row's
@@ -286,6 +336,19 @@ func (k *Kernel) ensureBasePrice(ctx context.Context, a *Action) (*Action, error
 	return healed, nil
 }
 
+// manifestAnswers reports whether a resolve reply answers the reference that was requested: same
+// owner, and either the action named or that path's index child — for a root request (empty name),
+// the index itself. The one place the index convention is read on the receiving side of the wire.
+func manifestAnswers(r ActionRef, m *ActionManifest) bool {
+	if NormalizeHandle(m.OwnerHandle) != NormalizeHandle(r.Owner) {
+		return false
+	}
+	if r.Name == "" {
+		return m.Name == indexActionName
+	}
+	return m.Name == r.Name || m.Name == r.Name+"/"+indexActionName
+}
+
 // lazyResolveRemote resolves a single remote action on demand and caches it as a local proxy row
 // (§13 subscription-free calls). It is invoked from ResolveAction's kernel-qualified miss branch, so
 // run, /v1/call, and WASM subcalls all reach unimported remote actions uniformly. Trust derives from
@@ -304,6 +367,15 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	}
 	if err := VerifyManifestSignature(peerKey, m); err != nil {
 		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
+	}
+	// The reply must answer the request, or a peer could serve any signed action of its own and we
+	// would cache and execute it under the reference the caller typed. The name may differ from the
+	// one asked for in exactly one way: the index convention (§13), which the serving kernel applies
+	// — so a request for a group answers with its index, and a root request answers with "index".
+	// Checked before any side effect, so a mismatched reply binds no petname and provisions no
+	// account.
+	if !manifestAnswers(r, m) {
+		return nil, ErrUnauthorized.Wrapf("peer served a manifest for %s/%s, not %s", m.OwnerHandle, m.Name, r.String())
 	}
 	// First meaningful use (§13): our own verified outbound act, so this is where a local petname
 	// is bound — seeded from the kernel's cached nickname when one is known, else mechanically.
@@ -447,8 +519,13 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		}
 	} else {
 		if req.ActionRef != "" {
+			// The resolver's typed errors are the answer — an unreachable peer, a malformed
+			// reference, a substituted manifest — and must not collapse into "not found".
 			action, err = k.ResolveAction(ctx, req.ActionRef)
-			if err != nil || action == nil {
+			if err != nil {
+				return nil, err
+			}
+			if action == nil {
 				return nil, ErrNotFound.Wrapf("action %s not found", req.ActionRef)
 			}
 		} else {

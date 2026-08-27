@@ -3573,3 +3573,184 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 		t.Errorf("quote hash differs between catalog and resolved proxy\n proxy      %s\n discovered %s\nprices: proxy=%d discovered=%d", got, want, proxy.Price, discovered.Price)
 	}
 }
+
+// TestResolveRemoteApplicationRoot: a kernel-qualified application root costs one resolve round
+// trip — the peer applies the index convention and returns the index manifest, cached as
+// owner/name/index — and none thereafter; a root reference is requested with an empty action name.
+func TestResolveRemoteApplicationRoot(t *testing.T) {
+	st := newTestStore(t)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	sign := func(m *kernel.ActionManifest) *kernel.ActionManifest {
+		sig, err := kernel.SignManifest(priv, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+		return m
+	}
+	manifest := func(name string) *kernel.ActionManifest {
+		return sign(&kernel.ActionManifest{
+			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Name: name,
+			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		})
+	}
+
+	// The peer answers a request for the group with the group's index action.
+	fake := &fakeFederationHTTP{resolveManifest: manifest("mail/index")}
+	k := newTestKernelWithHTTP(st, fake)
+	ctx := context.Background()
+
+	a, err := k.ResolveAction(ctx, "bob@"+pubB64+"/mail")
+	if err != nil {
+		t.Fatalf("resolve application root: %v", err)
+	}
+	if a.Name != "bob/mail/index" {
+		t.Errorf("proxy row name: got %q, want bob/mail/index", a.Name)
+	}
+	if len(fake.resolvedRefs) != 1 || fake.resolvedRefs[0] != "bob/mail" {
+		t.Errorf("one request carrying the reference as written: got %v", fake.resolvedRefs)
+	}
+	// The cached row answers the same reference thereafter, with no further request.
+	fake.resolvedRefs = nil
+	a2, err := k.ResolveAction(ctx, "bob@"+pubB64+"/mail")
+	if err != nil || a2.ID != a.ID {
+		t.Fatalf("cache hit: err=%v id=%v want %v", err, a2.ID, a.ID)
+	}
+	if len(fake.resolvedRefs) != 0 {
+		t.Errorf("cached root must not dial: got %v", fake.resolvedRefs)
+	}
+
+	// An owner root (no action name at all) is requested with an empty name; the peer's resolver
+	// answers with that owner's index.
+	st2 := newTestStore(t)
+	fake2 := &fakeFederationHTTP{resolveManifest: manifest("index")}
+	k2 := newTestKernelWithHTTP(st2, fake2)
+	if _, err := k2.ResolveAction(ctx, "bob@"+pubB64); err != nil {
+		t.Fatalf("resolve owner root: %v", err)
+	}
+	if len(fake2.resolvedRefs) != 1 || fake2.resolvedRefs[0] != "bob/" {
+		t.Errorf("root request must carry an empty action name: got %v", fake2.resolvedRefs)
+	}
+
+	// A peer that is unreachable reports exactly that, and never as a miss.
+	st3 := newTestStore(t)
+	fake3 := &fakeFederationHTTP{resolveErr: kernel.ErrPeerUnreachable.Wrap("offline")}
+	k3 := newTestKernelWithHTTP(st3, fake3)
+	if _, err := k3.ResolveAction(ctx, "bob@"+pubB64+"/mail"); !errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Errorf("want ErrPeerUnreachable, got %v", err)
+	}
+}
+
+// TestResolveRemoteManifestBoundToRequest: a resolve answer must answer the reference requested —
+// same owner, and either the action named or its index child — else it is refused before anything
+// is cached, bound, or provisioned. Otherwise a peer could serve any signed action of its own and
+// have it executed under the reference the caller typed.
+func TestResolveRemoteManifestBoundToRequest(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	manifest := func(owner, name string) *kernel.ActionManifest {
+		m := &kernel.ActionManifest{
+			ActionID: "ra-x", OwnerID: "remote-id", OwnerHandle: owner, Name: name,
+			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		}
+		sig, err := kernel.SignManifest(priv, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+		return m
+	}
+
+	for _, tc := range []struct {
+		label string
+		ref   string
+		m     *kernel.ActionManifest
+	}{
+		{"another owner", "bob@" + pubB64 + "/mail", manifest("carol", "mail")},
+		{"another action", "bob@" + pubB64 + "/mail", manifest("bob", "other")},
+		{"another group's index", "bob@" + pubB64 + "/mail", manifest("bob", "other/index")},
+		{"root answered by a named action", "bob@" + pubB64, manifest("bob", "mail")},
+	} {
+		st := newTestStore(t)
+		fake := &fakeFederationHTTP{resolveManifest: tc.m}
+		k := newTestKernelWithHTTP(st, fake)
+		ctx := context.Background()
+
+		if _, err := k.ResolveAction(ctx, tc.ref); !errors.Is(err, kernel.ErrUnauthorized) {
+			t.Errorf("%s: want ErrUnauthorized, got %v", tc.label, err)
+		}
+		// Nothing is kept from a reply that did not answer the request.
+		acts, err := st.ListAllActions(ctx, 100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range acts {
+			if a.Kind == kernel.KindRemoteProxy {
+				t.Errorf("%s: cached a proxy for a mismatched reply", tc.label)
+			}
+		}
+		if acct, _ := st.ReadAccountByKernelKey(ctx, pubB64); acct != nil {
+			t.Errorf("%s: provisioned an account for a mismatched reply", tc.label)
+		}
+	}
+}
+
+// TestStaleExactProxyReResolvesBeforeIndex: a cached proxy that exists but cannot be served is a
+// cache miss to re-resolve, not an absence to walk past — otherwise an inactive exact proxy would
+// silently degrade to a cached index while the exact action is still live on the peer (§13 rule A).
+func TestStaleExactProxyReResolvesBeforeIndex(t *testing.T) {
+	st := newTestStore(t)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	manifest := func(name string) *kernel.ActionManifest {
+		m := &kernel.ActionManifest{
+			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Name: name,
+			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		}
+		sig, err := kernel.SignManifest(priv, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+		return m
+	}
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+	ctx := context.Background()
+
+	// Cache both the exact action and the group's index, each by its own reference.
+	fake.resolveManifest = manifest("mail")
+	exact, err := k.ResolveAction(ctx, "bob@"+pubB64+"/mail")
+	if err != nil {
+		t.Fatalf("resolve exact: %v", err)
+	}
+	fake.resolveManifest = manifest("mail/index")
+	if _, err := k.ResolveAction(ctx, "bob@"+pubB64+"/mail/index"); err != nil {
+		t.Fatalf("resolve index: %v", err)
+	}
+
+	// Deactivate the exact row: the reference must go back to the peer for THAT action, never
+	// answer with the index cached beneath it.
+	if err := st.DeactivateImportedIfHash(ctx, exact.ID, exact.ArtifactHash, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	fake.resolvedRefs = nil
+	fake.resolveManifest = manifest("mail")
+	got, err := k.ResolveAction(ctx, "bob@"+pubB64+"/mail")
+	if err != nil {
+		t.Fatalf("re-resolve: %v", err)
+	}
+	if got.ID != exact.ID {
+		t.Errorf("a stale exact proxy must re-resolve in place: got %s, want %s", got.ID, exact.ID)
+	}
+	if len(fake.resolvedRefs) != 1 || fake.resolvedRefs[0] != "bob/mail" {
+		t.Errorf("must re-resolve the exact reference: got %v", fake.resolvedRefs)
+	}
+}

@@ -2197,6 +2197,9 @@ type fakeFederationHTTP struct {
 	// rejectRefreshProxy makes that rejection the contract-mismatch kind (§8 If-Match): the peer's
 	// terms moved under our cached row, so it tells us to re-resolve rather than refusing outright.
 	rejectRefreshProxy bool
+	// resolvedRefs records every resolve request the kernel actually sent, as "owner/name" — a
+	// root request has an empty name, so it reads as "owner/" (§13).
+	resolvedRefs []string
 	// sentAction / sentIdempotencyKey record what the kernel actually put on the wire (§13: the
 	// peer's stable action id, under the key parked with the dispatch).
 	sentAction         string
@@ -2210,7 +2213,8 @@ type fakeFederationHTTP struct {
 	stepForUserID     string
 }
 
-func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, _, _ string) (*kernel.ActionManifest, error) {
+func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ActionManifest, error) {
+	f.resolvedRefs = append(f.resolvedRefs, owner+"/"+name)
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}
@@ -2398,7 +2402,7 @@ func TestReadCallableAction(t *testing.T) {
 	}
 
 	t.Run("public action visible to any process owner", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "owner", "pub-action", other.ID)
+		a, err := k.ReadCallableAction(ctx, "owner"+"/"+"pub-action", other.ID)
 		if err != nil {
 			t.Fatalf("expected public action to be callable by other: %v", err)
 		}
@@ -2408,7 +2412,7 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action visible only to its owner process", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "owner", "priv-action", owner.ID)
+		a, err := k.ReadCallableAction(ctx, "owner"+"/"+"priv-action", owner.ID)
 		if err != nil {
 			t.Fatalf("expected private action callable by own process: %v", err)
 		}
@@ -2418,14 +2422,14 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action not callable by foreign process", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "owner", "priv-action", other.ID)
+		_, err := k.ReadCallableAction(ctx, "owner"+"/"+"priv-action", other.ID)
 		if err == nil {
 			t.Error("expected error: private action should not be callable by other process")
 		}
 	})
 
 	t.Run("unknown action returns not-found error", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "owner", "no-such-action", owner.ID)
+		_, err := k.ReadCallableAction(ctx, "owner"+"/"+"no-such-action", owner.ID)
 		if err == nil {
 			t.Error("expected error for missing action")
 		}

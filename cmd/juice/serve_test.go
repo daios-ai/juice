@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -3013,5 +3014,122 @@ func TestOnCallRejectsPeerKeyMismatch(t *testing.T) {
 	})
 	if resp.Status != http.StatusUnauthorized {
 		t.Errorf("mismatched peer key: status %d, want 401", resp.Status)
+	}
+}
+
+// TestServeActionsRefMode: the listing endpoint's reference mode resolves one reference through the
+// kernel's resolver — so an application root and a raw id behave here exactly as they do when
+// called — requires authentication because resolving can dial a peer, and never mixes with the
+// flat filters.
+func TestServeActionsRefMode(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	_, tok := makeUser(t, k, "app-owner")
+	ownerHandle := "app-owner"
+	mk := func(name string) string {
+		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+			"name": name, "kind": "http", "price": 0, "source": "http://x.example",
+			"description": "an action", "input_schema": minSchema, "output_schema": minSchema,
+			"visibility": "public",
+		}, tok)
+		var a kernel.Action
+		decodeResponse(t, cr, &a)
+		httpDo(t, srv, "PUT", "/v1/actions/"+a.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
+		httpDo(t, srv, "POST", "/v1/actions/"+a.ID+"/enable", nil, tok).Body.Close()
+		return a.ID
+	}
+	idxID := mk("mail/index")
+	rootID := mk("index")
+
+	get := func(query, token string) (int, []actionResp) {
+		resp := httpDo(t, srv, "GET", "/v1/actions?"+query, nil, token)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return resp.StatusCode, nil
+		}
+		var out []actionResp
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.StatusCode, out
+	}
+
+	// A group and an owner root both resolve to the index answering there.
+	for query, want := range map[string]string{
+		"ref=" + url.QueryEscape(ownerHandle+"/mail"): idxID,
+		"ref=" + url.QueryEscape(ownerHandle):         rootID,
+		"ref=" + idxID:                                idxID,
+	} {
+		code, out := get(query, tok)
+		if code != http.StatusOK || len(out) != 1 || out[0].ID != want {
+			t.Errorf("%s: got code=%d %+v, want the single action %s", query, code, out, want)
+		}
+	}
+
+	// Authentication is required by the dial, not by resolution: a kernel-qualified reference is
+	// refused anonymously, while a local one stays open — that is what keeps a public action's
+	// ratings anonymously readable through the same client-side reference resolution (§11).
+	if code, _ := get("ref="+url.QueryEscape("someone@"+strings.Repeat("A", 43)+"/mail"), ""); code != http.StatusUnauthorized {
+		t.Errorf("anonymous kernel-qualified ref: got %d, want 401", code)
+	}
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/mail"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != idxID {
+		t.Errorf("anonymous local ref on a public action: got code=%d %+v", code, out)
+	}
+	// Action names carry no character restriction, so an @ inside a NAME is still a local
+	// reference: only the head before the first / qualifies a kernel.
+	atID := mk("mail@home")
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/mail@home"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != atID {
+		t.Errorf("anonymous local ref whose name contains @: got code=%d %+v", code, out)
+	}
+	// Reference mode and the flat filters are different questions and never combine.
+	if code, _ := get("ref="+url.QueryEscape(ownerHandle+"/mail")+"&name=mail/index", tok); code != http.StatusUnprocessableEntity {
+		t.Errorf("ref+name: got %d, want 422", code)
+	}
+	// A miss is an empty list, like every other filter on this endpoint.
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/absent"), tok); code != http.StatusOK || len(out) != 0 {
+		t.Errorf("miss: got code=%d %+v, want an empty list", code, out)
+	}
+	// The flat filters stay exact: ?name= names a row, and never resolves a group.
+	if code, out := get("name=mail&owner="+ownerHandle, tok); code != http.StatusOK || len(out) != 0 {
+		t.Errorf("name filter must stay exact: got code=%d %+v", code, out)
+	}
+}
+
+// TestServeImportOpenAPIAs: the import endpoint carries the name prefix that makes one spec one
+// application, and the operation keyed index becomes its root.
+func TestServeImportOpenAPIAs(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	_, tok := makeUser(t, k, "app-import-owner")
+
+	resp := httpDo(t, srv, "POST", "/v1/actions/import",
+		map[string]any{"spec_url": specSrv.URL + "/spec.json", "as": "mail"}, tok)
+	defer resp.Body.Close()
+	var result kernel.ImportResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	names := map[string]bool{}
+	for _, a := range result.Created {
+		names[a.Name] = true
+	}
+	if !names["mail/index"] || !names["mail/greet"] {
+		t.Fatalf("imported under the prefix: got %v", names)
+	}
+
+	// Relocation is refused rather than silently leaving the rows under the old prefix.
+	resp2 := httpDo(t, srv, "POST", "/v1/actions/import",
+		map[string]any{"spec_url": specSrv.URL + "/spec.json", "as": "inbox"}, tok)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("relocation: got %d, want 422", resp2.StatusCode)
 	}
 }

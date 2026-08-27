@@ -154,6 +154,50 @@ flow_openapi_import_execute() {
     assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "alice/$name" '{}')" tx_id)"
 }
 
+flow_openapi_application() {
+    echo "=== FLOW openapi_application ==="
+    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    aport=$(backend_port)
+    python3 - "$aport" "$dir/spec.json" <<'PY'
+import json,sys
+port,f=sys.argv[1],sys.argv[2]
+op=lambda oid,desc:{"post":{"operationId":oid,"description":desc,
+  "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
+  "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"message":{"type":"string","description":"reply"}}}}}}}}}
+json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},"x-juice-owner":"alice",
+  "servers":[{"url":f"http://127.0.0.1:{port}"}],
+  "paths":{"/":op("index","what this application is"),"/greet":op("greet","says hello")}},open(f,"w"))
+PY
+    start_api_server "$aport" "$dir/spec.json"
+    make_admin "$db" "$hs" || { fail "openapi_application.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" bob 50
+
+    # One spec, one application: every operation lands under the prefix, and the operation named
+    # index becomes the group's root.
+    local imp; imp=$(jj "$db" "$ha" action import "http://127.0.0.1:${aport}/" --as mail)
+    assert_eq "openapi_application.created_2" 2 "$(python3 -c "import sys,json;print(len(json.loads(sys.argv[1]).get('Created',[])))" "$imp" 2>/dev/null)"
+    local idx_id greet_id
+    idx_id=$(python3 -c "import sys,json;print(next(a['id'] for a in json.loads(sys.argv[1])['Created'] if a['name']=='mail/index'))" "$imp" 2>/dev/null)
+    greet_id=$(python3 -c "import sys,json;print(next(a['id'] for a in json.loads(sys.argv[1])['Created'] if a['name']=='mail/greet'))" "$imp" 2>/dev/null)
+    assert_nonempty "openapi_application.index_imported" "$idx_id"
+
+    for id in "$idx_id" "$greet_id"; do
+        j "$db" "$ha" action enable "$id" >/dev/null 2>&1
+        j "$db" "$ha" action update "$id" --visibility public >/dev/null 2>&1
+    done
+
+    # The group answers to its own name: reading and running alice/mail both reach the index.
+    assert_json "openapi_application.show_root" "$(jj "$db" "$hb" action show alice/mail)" id "$idx_id"
+    assert_nonempty "openapi_application.run_root" "$(strfield "$(jj "$db" "$hb" run alice/mail '{}')" tx_id)"
+    assert_nonempty "openapi_application.run_member" "$(strfield "$(jj "$db" "$hb" run alice/mail/greet '{}')" tx_id)"
+    # Members keep their own identity; the index does not shadow them.
+    assert_json "openapi_application.member_distinct" "$(jj "$db" "$hb" action show alice/mail/greet)" id "$greet_id"
+    # A second prefix would not move the rows, so it is refused.
+    assert_fails "openapi_application.relocation_refused" "prefix" -- j "$db" "$ha" action import "http://127.0.0.1:${aport}/" --as inbox
+}
+
 flow_openapi_changed_reimport() {
     echo "=== FLOW openapi_changed_reimport ==="
     local dir db hs ha aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)

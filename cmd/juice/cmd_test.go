@@ -1671,4 +1671,76 @@ func TestCLIActionRatings(t *testing.T) {
 	if !strings.Contains(out, "1") || !strings.Contains(out, note) {
 		t.Errorf("action ratings output missing value/note: %q", out)
 	}
+
+	// A public action's ratings are public evidence, readable with no session at all (§11) — the
+	// reference resolution the CLI performs first must not put a login in front of them.
+	if err := saveToken(""); err != nil {
+		t.Fatal(err)
+	}
+	anon := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner/svc")
+		return err
+	})
+	if !strings.Contains(anon, note) {
+		t.Errorf("anonymous action ratings on a public action: %q", anon)
+	}
+}
+
+// TestActionImportAsAndRootReference: `action import --as` lands one spec as one application, and
+// every action subcommand reaches the group by its own name — the reference travels untouched to
+// the server, so the CLI holds no naming rules of its own.
+func TestActionImportAsAndRootReference(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+
+	env := newTestEnv(t)
+	ctx := context.Background()
+	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
+
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "app-cli-owner", Password: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := loginTokenFor(env.k, ctx, "app-cli-owner", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := actionImportCmd()
+	if _, err := execTestCmd(t, cmd, specSrv.URL+"/spec.json", "--as", "mail"); err != nil {
+		t.Fatalf("action import --as: %v", err)
+	}
+	names := map[string]bool{}
+	actions, err := env.k.ListAllActions(ctx, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range actions {
+		names[a.Name] = true
+	}
+	if !names["mail/index"] || !names["mail/greet"] {
+		t.Fatalf("imported under the prefix: got %v", names)
+	}
+
+	// The group answers to its own name, and so does the owner's root once one exists.
+	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner/mail"); err != nil {
+		t.Errorf("action show on the group root: %v", err)
+	}
+	ownerID := actions[0].OwnerUserID
+	if _, err := env.k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+		OwnerUserID: ownerID, Name: "index",
+		Kind: kernel.KindHTTP, Source: "http://example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner"); err != nil {
+		t.Errorf("action show on the owner root: %v", err)
+	}
+	// A prefix that would relocate an imported spec is refused at the CLI too.
+	if _, err := execTestCmd(t, actionImportCmd(), specSrv.URL+"/spec.json", "--as", "inbox"); err == nil {
+		t.Error("relocation must be refused")
+	}
 }

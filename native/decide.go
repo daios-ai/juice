@@ -41,7 +41,7 @@ func executeDecide(
 	ctx context.Context,
 	args map[string]any,
 	chatter kernel.DecideChatter,
-	lookup func(ctx context.Context, ownerHandle, actionName, callerID string) (*kernel.Action, error),
+	lookup func(ctx context.Context, ref, callerID string) (*kernel.Action, error),
 	resolve func(ctx context.Context, ref string) (*kernel.Action, error),
 	callerID string,
 ) (map[string]any, error) {
@@ -94,13 +94,13 @@ func executeDecide(
 		if !ok {
 			return nil, kernel.ErrInvalidInput.Wrap("each action must be a string")
 		}
-		r, err := kernel.ParseActionRef(ref)
-		if err != nil {
-			return nil, kernel.ErrInvalidInput.Wrapf("invalid action reference %q: expected owner/name", ref)
-		}
-
-		var a *kernel.Action
-		if r.Kernel != "" {
+		// Candidates travel whole: a group root ("bob", "bob@kernel") is as valid a reference as
+		// owner/name, and only the resolver decides what a reference means (§13).
+		var (
+			a   *kernel.Action
+			err error
+		)
+		if kernel.KernelQualified(ref) {
 			// A discovered kernel-qualified reference (lookup → decide → run): resolve it through the
 			// same resolve-and-cache path as run. A stale/unresolvable candidate is DISCARDED so one
 			// dead peer never blocks selection among the valid candidates (§13).
@@ -109,8 +109,8 @@ func executeDecide(
 				continue
 			}
 		} else {
-			// A bare local reference keeps strict behavior: an unknown one aborts.
-			a, err = lookup(ctx, r.Owner, r.Name, callerID)
+			// A local reference keeps strict behavior: an unknown one aborts.
+			a, err = lookup(ctx, ref, callerID)
 			if err != nil {
 				return nil, err
 			}

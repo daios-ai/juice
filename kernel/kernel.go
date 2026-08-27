@@ -1813,18 +1813,17 @@ func (k *Kernel) ReadActionByOwnerName(ctx context.Context, ownerID, name string
 	return k.store.ReadActionByOwnerName(ctx, ownerID, name)
 }
 
-// ReadCallableAction resolves an @owner/name reference and returns the action only if
+// ReadCallableAction resolves an action reference and returns the action only if
 // canCall(caller, action) is satisfied. Used by native actions (§9 composition) to discover
 // composable actions without bypassing the kernel's access-control layer; the subject is the
-// immediate caller, matching subcall dispatch (§4).
-func (k *Kernel) ReadCallableAction(ctx context.Context, ownerHandle, actionName, callerID string) (*Action, error) {
-	owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
+// immediate caller, matching subcall dispatch (§4). It takes the reference WHOLE — never an owner
+// and name apart — so a caller holds no grammar of its own and a group root ("bob") reaches its
+// index exactly as dispatch does (§13). The resolver selects the row; canCall judges it, so an
+// uncallable exact action is refused rather than passed over for a sibling.
+func (k *Kernel) ReadCallableAction(ctx context.Context, ref, callerID string) (*Action, error) {
+	a, err := k.ResolveAction(ctx, ref)
 	if err != nil {
-		return nil, ErrNotFound.Wrap("action owner not found")
-	}
-	a, err := k.store.ReadActionByOwnerName(ctx, owner.ID, actionName)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("action not found")
+		return nil, err
 	}
 	caller, _ := k.store.ReadUser(ctx, callerID)
 	if !canCall(caller, a) {

@@ -19,7 +19,7 @@ func (s *stubDecideChatter) ChatDecide(_ context.Context, _ []kernel.DecideMessa
 }
 
 var (
-	lookupOK = func(_ context.Context, _, _ string, _ string) (*kernel.Action, error) {
+	lookupOK = func(_ context.Context, _, _ string) (*kernel.Action, error) {
 		return &kernel.Action{
 			Description: "search actions",
 			InputSchema: map[string]any{
@@ -69,18 +69,24 @@ func TestExecuteDecide_MissingActions(t *testing.T) {
 	}
 }
 
+// TestExecuteDecide_InvalidActionRef: decide holds no reference grammar of its own — a candidate
+// travels whole to the resolver, and whatever the resolver says about a bad one aborts selection.
+// A slashless candidate is no longer malformed: it names an owner's root (§13).
 func TestExecuteDecide_InvalidActionRef(t *testing.T) {
+	lookupBad := func(_ context.Context, _, _ string) (*kernel.Action, error) {
+		return nil, kernel.ErrInvalidInput.Wrap("action ref must be owner[@kernel]/name")
+	}
 	_, err := executeDecide(context.Background(), map[string]any{
 		"messages": validDecideArgs["messages"],
-		"actions":  []any{"noslash"},
-	}, &stubDecideChatter{}, lookupOK, resolveStub, "")
+		"actions":  []any{"@sigil/greet"},
+	}, &stubDecideChatter{}, lookupBad, resolveStub, "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
 }
 
 func TestExecuteDecide_UnknownAction(t *testing.T) {
-	lookupErr := func(_ context.Context, _, _ string, _ string) (*kernel.Action, error) {
+	lookupErr := func(_ context.Context, _, _ string) (*kernel.Action, error) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
 	_, err := executeDecide(context.Background(), validDecideArgs, &stubDecideChatter{}, lookupErr, resolveStub, "")
@@ -176,5 +182,34 @@ func TestExecuteDecide_ToolTurn(t *testing.T) {
 	}
 	if result["action"] != "sys/lookup" {
 		t.Errorf("unexpected action: %v", result["action"])
+	}
+}
+
+// TestExecuteDecide_RootCandidates: a candidate travels whole to the resolver, so an owner root is
+// a valid candidate at both depths — bob locally, bob@kernel remotely — and decide holds no
+// grammar that could reject one before the resolver sees it (§13).
+func TestExecuteDecide_RootCandidates(t *testing.T) {
+	var seenLocal, seenRemote []string
+	lookupRoot := func(_ context.Context, ref, _ string) (*kernel.Action, error) {
+		seenLocal = append(seenLocal, ref)
+		return &kernel.Action{Name: "index", Description: "the group", InputSchema: map[string]any{"type": "object"}}, nil
+	}
+	resolveRoot := func(_ context.Context, ref string) (*kernel.Action, error) {
+		seenRemote = append(seenRemote, ref)
+		return &kernel.Action{Name: "index", Description: "a remote group", InputSchema: map[string]any{"type": "object"}}, nil
+	}
+	chatter := &stubDecideChatter{call: &kernel.ToolCall{Action: "bob", Args: map[string]any{}}}
+
+	if _, err := executeDecide(context.Background(), map[string]any{
+		"messages": validDecideArgs["messages"],
+		"actions":  []any{"bob", "carol@kernelkey/mail"},
+	}, chatter, lookupRoot, resolveRoot, ""); err != nil {
+		t.Fatalf("root candidates: %v", err)
+	}
+	if len(seenLocal) != 1 || seenLocal[0] != "bob" {
+		t.Errorf("local candidate must travel whole: got %v", seenLocal)
+	}
+	if len(seenRemote) != 1 || seenRemote[0] != "carol@kernelkey/mail" {
+		t.Errorf("kernel-qualified candidate must reach the resolver: got %v", seenRemote)
 	}
 }

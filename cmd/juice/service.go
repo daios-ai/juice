@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -574,6 +575,28 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 		return actionResp{}, err
 	}
 	return enrichAction(k, a, newAccountCache(k, ctx)), nil
+}
+
+// resolveActionRef answers the listing endpoint's reference mode: one reference resolved by the
+// kernel's own resolver, so a reference means here exactly what it means when called, then read
+// back through the ordinary per-row gate. A miss is an empty list rather than an error, matching
+// every other filter on this endpoint.
+func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref string) ([]actionResp, error) {
+	a, err := k.ResolveAction(ctx, ref)
+	if err != nil {
+		if errors.Is(err, kernel.ErrNotFound) {
+			return []actionResp{}, nil
+		}
+		return nil, err
+	}
+	a, err = k.ReadActionForSubject(ctx, callerID, a.ID)
+	if err != nil {
+		if errors.Is(err, kernel.ErrNotFound) || errors.Is(err, kernel.ErrUnauthorized) {
+			return []actionResp{}, nil
+		}
+		return nil, err
+	}
+	return []actionResp{enrichAction(k, a, newAccountCache(k, ctx))}, nil
 }
 
 func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateActionRequest) (actionResp, error) {

@@ -472,7 +472,55 @@ func openAPISlug(s string) string {
 
 // ImportOpenAPI parses specBytes (caller-fetched OpenAPI JSON), reconciles operations with
 // existing OpenAPI-imported actions for the owner, and returns the diff. It is idempotent.
-func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL string, specBytes []byte) (*ImportResult, error) {
+// validateImportPrefix checks the name prefix an import lands under: no kernel qualifier, and no
+// empty segment — one rule covering a leading, trailing, or doubled slash. Nothing further, since
+// action names carry no character class of their own and inventing one here would be a second
+// naming authority. An empty prefix is valid.
+func validateImportPrefix(prefix string) (string, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return "", nil
+	}
+	if strings.Contains(prefix, "@") {
+		return "", ErrInvalidInput.Wrap("import prefix must not contain @: it qualifies a kernel")
+	}
+	for _, seg := range strings.Split(prefix, "/") {
+		if seg == "" {
+			return "", ErrInvalidInput.Wrap("import prefix must not have an empty path segment")
+		}
+	}
+	return prefix, nil
+}
+
+// importedPrefix derives the prefix a spec's rows were imported under by taking each row's name
+// apart from its own operation key. Nothing stores it: a stored copy could drift from the names
+// themselves, and creation is the only writer of a name — there is no rename path. Rows that
+// disagree, or a name not ending in its key, report false and are treated as a conflict.
+func importedPrefix(existing []*Action) (string, bool) {
+	found := ""
+	for i, a := range existing {
+		var src HTTPSource
+		if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+			return "", false
+		}
+		var p string
+		switch {
+		case a.Name == src.OperationKey:
+			p = ""
+		case strings.HasSuffix(a.Name, "/"+src.OperationKey):
+			p = strings.TrimSuffix(a.Name, "/"+src.OperationKey)
+		default:
+			return "", false
+		}
+		if i > 0 && p != found {
+			return "", false
+		}
+		found = p
+	}
+	return found, true
+}
+
+func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL string, specBytes []byte, prefix string) (*ImportResult, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
 	logger.Info("openapi.import.start", "spec_url", specURL)
@@ -480,9 +528,13 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		logger.Warn("openapi.import.failed", "spec_url", specURL, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	owner, err := k.store.ReadUser(ctx, ownerID)
+	prefix, err := validateImportPrefix(prefix)
 	if err != nil {
 		return nil, err
+	}
+	owner, rerr := k.store.ReadUser(ctx, ownerID)
+	if rerr != nil {
+		return nil, rerr
 	}
 
 	rawOps, rejected, baseURL, err := parseOpenAPISpec(specBytes, specURL)
@@ -512,6 +564,14 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		return nil, err
 	}
 
+	// Reconcile matches by operation key and never renames, so a second prefix would leave the rows
+	// where they are and silently mean nothing. Refused instead, keeping identity and history.
+	if len(existing) > 0 {
+		if inUse, ok := importedPrefix(existing); !ok || inUse != prefix {
+			return nil, ErrInvalidInput.Wrapf("spec already imported under prefix %q; a different prefix would not move it", inUse)
+		}
+	}
+
 	existingByKey := make(map[string]*Action, len(existing))
 	for _, a := range existing {
 		var src HTTPSource
@@ -531,7 +591,12 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 	var incoming []incomingOp
 	for _, raw := range rawOps {
 		raw := raw
+		// The prefix is what turns a spec into a group, and it is why an operation already mapped to
+		// "index" becomes that group's root without any further rule.
 		name := raw.key
+		if prefix != "" {
+			name = prefix + "/" + raw.key
+		}
 		// Name collision: only check for truly new ops (not already imported).
 		if _, exists := existingByKey[raw.key]; !exists {
 			if _, err := k.store.ReadActionByOwnerName(ctx, ownerID, name); err == nil {

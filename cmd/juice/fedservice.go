@@ -160,7 +160,19 @@ func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.Sett
 func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRequest) fed.ResolveResponse {
 	switch req.Kind {
 	case "action":
-		a, err := h.kernel.ResolveAction(ctx, req.Owner+"/"+req.Name)
+		// The owner must be one of ours: confirming the handle locally is what stops a supplied
+		// "owner@third-kernel" from making us resolve on a third party's behalf (§13).
+		owner, oerr := h.kernel.ReadUserByHandle(ctx, req.Owner)
+		if oerr != nil || owner == nil {
+			return fedError(kernel.ErrNotFound.Wrap("action not found"))
+		}
+		// An empty name is a request for the owner's root, which the resolver answers with that
+		// owner's index action (§13); a named request resolves exactly as a local reference does.
+		ref := req.Owner
+		if req.Name != "" {
+			ref += "/" + req.Name
+		}
+		a, err := h.kernel.ResolveAction(ctx, ref)
 		if err != nil || a == nil {
 			return fedError(kernel.ErrNotFound.Wrap("action not found"))
 		}

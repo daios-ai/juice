@@ -142,25 +142,12 @@ func refreshToken(ctx context.Context) bool {
 	return true
 }
 
-// resolveActionID turns an @owner/name reference into an action id via the public listing
-// endpoint; a raw id (no leading @) is returned unchanged. The stored token is attached by
-// apiCall, so an owner listing their own inactive/private action resolves too (§3).
+// resolveActionID turns an action reference into an action id by asking the server to resolve it.
+// The reference travels untouched — owner/name, a group root, owner@kernel/name, or a raw id — so
+// the naming rules live in the kernel's one resolver and never here (§14). The stored token is
+// attached by apiCall, so an owner resolving their own inactive/private action works too (§3).
 func resolveActionID(ctx context.Context, ref string) (string, error) {
-	// A raw action id has no "/"; anything with "/" is an owner[@kernel]/name reference (§14).
-	if !strings.Contains(ref, "/") {
-		return ref, nil
-	}
-	r, err := kernel.ParseActionRef(ref)
-	if err != nil {
-		return "", err
-	}
-	owner, name := r.Owner, r.Name
-	if !r.Local() {
-		// Kernel-qualified: the local proxy row is owned by the mount (the kernel alias) and named
-		// "owner/name", so query by those.
-		owner, name = r.Kernel, r.Owner+"/"+r.Name
-	}
-	q := url.Values{"owner": {owner}, "name": {name}}
+	q := url.Values{"ref": {ref}}
 	var actions []actionResp
 	if err := apiCall(ctx, "GET", "/v1/actions?"+q.Encode(), nil, &actions); err != nil {
 		return "", err

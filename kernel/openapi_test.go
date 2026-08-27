@@ -20,7 +20,7 @@ func TestImportOpenAPI(t *testing.T) {
 	owner := setupUser(t, st, "oapi-import-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestImportOpenAPI(t *testing.T) {
 	}
 
 	// Re-import with identical spec → Unchanged.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	owner := setupUser(t, st, "oapi-unimport-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestUnimportOpenAPI(t *testing.T) {
 	}
 
 	// UnimportOpenAPI with name filter deactivates only the matching action.
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
 	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "sayHello")
@@ -107,7 +107,7 @@ func TestUnimportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
 		t.Fatalf("CreateAction: %v", err)
 	}
 
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec)); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 	deactivated, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
@@ -138,7 +138,7 @@ func TestOpenAPIActivation(t *testing.T) {
 	owner := setupUser(t, st, "oapi-activate-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
 	specURL := "https://spec.example.com/api.json"
 	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestImportOpenAPISubjectMismatchRejected(t *testing.T) {
 	userA := setupUser(t, st, "user-a-imp", 0)
 	userB := setupUser(t, st, "user-b-imp", 0)
 
-	_, err := k.ImportOpenAPI(ctx, userA.ID, userB.ID, "http://spec.example.com", []byte(minOpenAPISpec))
+	_, err := k.ImportOpenAPI(ctx, userA.ID, userB.ID, "http://spec.example.com", []byte(minOpenAPISpec), "")
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
 	}
@@ -327,7 +327,7 @@ func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
 	specURL := "https://spec.example.com/api.json"
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	specURL := "https://spec.example.com/api.json"
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil || len(result.Created) != 1 {
 		t.Fatalf("first import failed: %v, created=%d", err, len(result.Created))
 	}
@@ -366,7 +366,7 @@ func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
 	fetcher.wellKnown["http://api.example.com/.well-known/juice-owner.txt"] = "other-owner"
 	k2 := newTestKernelWithHTTP(st, fetcher)
 
-	result2, err := k2.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result2, err := k2.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("second import failed: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	specURL := "https://spec.example.com/admin-test.json"
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
 	// Unrelated user should be rejected.
 	other := setupUser(t, st, "openapi-other", 0)
 	// Re-import to have an action to unimport.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestOpenAPIRejectMissingName(t *testing.T) {
 	// Operation has neither operationId nor x-juice-name.
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"description":"says hello","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI returned error: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestOpenAPIRejectMissingInputContract(t *testing.T) {
 	// Operation has operationId and description but no parameters and no requestBody.
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/ping":{"get":{"operationId":"ping","description":"ping the server","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI returned error: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 		}
 	}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec))
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
 	if err != nil {
 		t.Fatalf("ImportOpenAPI error: %v", err)
 	}
@@ -561,5 +561,119 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	}
 	if paramsByName["count"] != "body" {
 		t.Errorf("expected count param in=body, got %q", paramsByName["count"])
+	}
+}
+
+// appOpenAPISpec has two operations, one of them named index, so an import under a prefix produces
+// a group whose root is an ordinary imported action.
+const appOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"what this application is","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+// TestImportOpenAPIPrefix: --as places every imported operation under one name prefix, the
+// operation keyed index becomes the application root, and re-importing one spec_url under a
+// different prefix is refused rather than silently leaving the rows where they are.
+func TestImportOpenAPIPrefix(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+	specURL := "http://api.example.com/openapi.json"
+
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail")
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(result.Created) != 2 {
+		t.Fatalf("created: got %d, want 2", len(result.Created))
+	}
+	names := map[string]bool{}
+	for _, a := range result.Created {
+		names[a.Name] = true
+	}
+	if !names["mail/index"] || !names["mail/greet"] {
+		t.Fatalf("imported names: got %v, want mail/index and mail/greet", names)
+	}
+
+	// The group is now addressable by its own name: the root resolves to the imported index.
+	root, err := k.ResolveAction(ctx, "acme/mail")
+	if err != nil {
+		t.Fatalf("resolve acme/mail: %v", err)
+	}
+	if root.Name != "mail/index" {
+		t.Errorf("acme/mail resolved to %q, want mail/index", root.Name)
+	}
+
+	// Re-import under the same prefix reconciles as usual; identity and stats are untouched.
+	again, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail")
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if len(again.Unchanged) != 2 || len(again.Created) != 0 {
+		t.Errorf("re-import: unchanged=%d created=%d, want 2 and 0", len(again.Unchanged), len(again.Created))
+	}
+
+	// A different prefix would not move the rows, so it is refused, and nothing changes.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "inbox"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("relocation: want ErrInvalidInput, got %v", err)
+	}
+	if a, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/greet"); a == nil {
+		t.Error("a refused relocation must leave the imported rows in place")
+	}
+
+	// An unprefixed spec keeps its plain operation names, and its rows are their own group-free set.
+	plain := setupUser(t, st, "plain", 0)
+	flat, err := k.ImportOpenAPI(ctx, plain.ID, plain.ID, specURL, []byte(minOpenAPISpec), "")
+	if err != nil {
+		t.Fatalf("unprefixed import: %v", err)
+	}
+	if len(flat.Created) != 1 || flat.Created[0].Name != "sayHello" {
+		t.Errorf("unprefixed import must not prefix: got %+v", flat.Created)
+	}
+}
+
+// TestImportOpenAPIPrefixValidation: a prefix must be addressable as part of an action name — no
+// kernel qualifier, no empty path segment — and surrounding whitespace is not part of it.
+func TestImportOpenAPIPrefixValidation(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+
+	for _, bad := range []string{"ma@il", "/mail", "mail/", "mail//x"} {
+		if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "http://api.example.com/s-"+bad, []byte(minOpenAPISpec), bad); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("prefix %q: want ErrInvalidInput, got %v", bad, err)
+		}
+	}
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "http://api.example.com/ok.json", []byte(minOpenAPISpec), "  mail  ")
+	if err != nil {
+		t.Fatalf("padded prefix: %v", err)
+	}
+	if len(result.Created) != 1 || result.Created[0].Name != "mail/sayHello" {
+		t.Errorf("padded prefix must trim: got %+v", result.Created)
+	}
+}
+
+// TestUnimportNameUnderPrefix: unimport stays provenance-scoped under a prefix, and its name filter
+// matches the action name or the operation key, so both forms address one operation.
+func TestUnimportNameUnderPrefix(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+	specURL := "http://api.example.com/openapi.json"
+
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	for _, ref := range []string{"greet", "mail/greet"} {
+		if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail"); err != nil {
+			t.Fatalf("re-import: %v", err)
+		}
+		out, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, ref)
+		if err != nil {
+			t.Fatalf("unimport %q: %v", ref, err)
+		}
+		if len(out) != 1 || out[0].Name != "mail/greet" {
+			t.Errorf("unimport %q: got %+v, want mail/greet alone", ref, out)
+		}
 	}
 }

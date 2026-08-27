@@ -2341,3 +2341,100 @@ func TestQuoteHashFixture(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveActionIndexFallback: a reference resolves the exact action first and its index child
+// second, at every depth (bob → bob/index, acme/mail → acme/mail/index); an exact acme/mail always
+// wins over acme/mail/index, and a raw id is never treated as a path.
+func TestResolveActionIndexFallback(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	bob := setupUser(t, st, "bob", 0)
+	root := setupAction(t, st, bob.ID, "index", 0)
+	mailIndex := setupAction(t, st, bob.ID, "mail/index", 0)
+	deep := setupAction(t, st, bob.ID, "mail/eu/index", 0)
+
+	// Depth zero, one, and two: the group is named, the index answers.
+	for ref, want := range map[string]string{
+		"bob":            root.ID,
+		"bob/index":      root.ID,
+		"bob/mail":       mailIndex.ID,
+		"bob/mail/eu":    deep.ID,
+		"bob/mail/index": mailIndex.ID,
+	} {
+		got, err := k.ResolveAction(ctx, ref)
+		if err != nil {
+			t.Fatalf("ResolveAction(%q): %v", ref, err)
+		}
+		if got.ID != want {
+			t.Errorf("ResolveAction(%q): got %s, want %s", ref, got.ID, want)
+		}
+	}
+
+	// An exact action always wins over the index child of the same path.
+	exact := setupAction(t, st, bob.ID, "mail", 0)
+	got, err := k.ResolveAction(ctx, "bob/mail")
+	if err != nil {
+		t.Fatalf("ResolveAction(bob/mail): %v", err)
+	}
+	if got.ID != exact.ID {
+		t.Errorf("exact action must win: got %s, want %s", got.ID, exact.ID)
+	}
+
+	// A miss names what the caller wrote, never the candidate the resolver tried.
+	_, err = k.ResolveAction(ctx, "bob/absent")
+	if !errors.Is(err, kernel.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if strings.Contains(err.Error(), "index") {
+		t.Errorf("error must name the original reference, got %q", err)
+	}
+
+	// An id is an object, not a path: an unknown one never resolves to a user's root, even when
+	// the id belongs to a user who has one.
+	if _, err := k.ResolveAction(ctx, bob.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("a user id must not resolve to that user's root: got %v", err)
+	}
+
+	// Grammar still governs: a malformed reference is invalid input, not a miss.
+	if _, err := k.ResolveAction(ctx, "@bob/greet"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("sigil-prefixed ref: want ErrInvalidInput, got %v", err)
+	}
+}
+
+// TestReadCallableActionIndexFallback: sys/llm/decide's bare local reference reaches an application
+// root through the same resolver, and an uncallable exact action is refused rather than passed over
+// for its sibling.
+func TestReadCallableActionIndexFallback(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	acme := setupUser(t, st, "acme", 0)
+	caller := setupUser(t, st, "caller", 0)
+	idx := setupAction(t, st, acme.ID, "mail/index", 0)
+	idx.Visibility = kernel.VisibilityPublic
+	if err := st.UpdateAction(ctx, idx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := k.ReadCallableAction(ctx, "acme/mail", caller.ID)
+	if err != nil {
+		t.Fatalf("ReadCallableAction(acme, mail): %v", err)
+	}
+	if got.ID != idx.ID {
+		t.Errorf("got %s, want the index %s", got.ID, idx.ID)
+	}
+
+	// A private exact action is refused on authority; the resolver does not fall through to the
+	// index child, which would answer a different action than the one named.
+	priv := setupAction(t, st, acme.ID, "mail", 0)
+	priv.Visibility = kernel.VisibilityPrivate
+	if err := st.UpdateAction(ctx, priv); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.ReadCallableAction(ctx, "acme/mail", caller.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("want ErrUnauthorized for the exact private action, got %v", err)
+	}
+}

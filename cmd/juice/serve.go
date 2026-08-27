@@ -853,16 +853,38 @@ func (s *server) postRecoverComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
-	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	q := r.URL.Query()
+	// Reference mode resolves one reference through the kernel's resolver instead of filtering the
+	// listing, so a client never has to know the naming rules (§14). It is authenticated because
+	// resolving a kernel-qualified reference can dial a peer, and this route is otherwise open.
+	if ref := q.Get("ref"); ref != "" {
+		if q.Get("owner") != "" || q.Get("name") != "" {
+			writeErr(w, kernel.ErrInvalidInput.Wrap("ref cannot be combined with owner or name"))
+			return
+		}
+		caller := s.optionalAuth(r)
+		// Authentication is required by the dial, not by resolution: a kernel-qualified reference
+		// reaches a peer, so only a local caller may ask for one. A local reference is a store read
+		// and stays open, which is what keeps a public action's ratings anonymously readable (§11).
+		if caller == "" && kernel.KernelQualified(ref) {
+			writeErr(w, kernel.ErrUnauthenticated.Wrap("a kernel-qualified reference requires authentication"))
+			return
+		}
+		resps, err := resolveActionRef(s.kernel, r.Context(), caller, ref)
+		writeOr(w, resps, err)
+		return
+	}
+	all := q.Get("all") == "1" || q.Get("all") == "true"
 	limit, offset := listBounds(r)
 	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
-		r.URL.Query().Get("owner"), r.URL.Query().Get("name"), all, limit, offset)
+		q.Get("owner"), q.Get("name"), all, limit, offset)
 	writeOr(w, resps, err)
 }
 
 func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SpecURL string `json:"spec_url"`
+		Prefix  string `json:"as"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -876,7 +898,7 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	result, err := s.kernel.ImportOpenAPI(r.Context(), callerFrom(r), callerFrom(r), req.SpecURL, specBytes)
+	result, err := s.kernel.ImportOpenAPI(r.Context(), callerFrom(r), callerFrom(r), req.SpecURL, specBytes, req.Prefix)
 	writeOr(w, result, err)
 }
 
