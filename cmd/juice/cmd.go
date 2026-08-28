@@ -257,20 +257,17 @@ func userCreateCmd() *cobra.Command {
 				}
 				password = p
 			}
-			// Enroll a recovery phrase (§12): generate it client-side, send only the public key,
-			// and show the phrase once. It is the sole recovery credential — the server never sees it.
-			mnemonic, recoveryPub, err := generateRecovery()
-			if err != nil {
-				return err
-			}
+			// Enroll a recovery phrase (§12): generated client-side, only the public key is
+			// sent — it is the sole recovery credential, and the server never sees it. The
+			// ceremony shows and acknowledges the phrase before committing.
 			var view json.RawMessage
-			if err := apiCall(context.Background(), "POST", "/v1/users", kernel.CreateUserRequest{
-				Handle: user, Password: password, RecoveryPublicKey: recoveryPub,
-			}, &view); err != nil {
+			if err := enrollRecovery("Recovery phrase", func(recoveryPub string) error {
+				return apiCall(context.Background(), "POST", "/v1/users", kernel.CreateUserRequest{
+					Handle: user, Password: password, RecoveryPublicKey: recoveryPub,
+				}, &view)
+			}); err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "Recovery phrase (write this down; it is shown only once and cannot be recovered):")
-			fmt.Fprintln(os.Stderr, "  "+mnemonic)
 			return emitRaw(view)
 		},
 	}

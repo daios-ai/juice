@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -60,6 +63,90 @@ func TestRecoveryKeyDerivation(t *testing.T) {
 	if _, err := deriveRecoveryKey("not a valid recovery phrase"); err == nil {
 		t.Error("an invalid mnemonic should be rejected")
 	}
+}
+
+// TestRecoveryCeremony pins the enrollment sequence (§12): the phrase is displayed before the
+// commit callback runs, acknowledgment gates the commit when a reader is supplied, headless
+// (nil ack) never pauses or prompts, and a failed commit announces that the phrase is dead.
+func TestRecoveryCeremony(t *testing.T) {
+	t.Run("headless commits without pausing", func(t *testing.T) {
+		var out strings.Builder
+		var committed string
+		if err := runRecoveryCeremony(&out, nil, "Recovery phrase", func(pub string) error {
+			committed = pub
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(committed)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			t.Errorf("commit did not receive a valid recovery public key: %q", committed)
+		}
+		if !strings.Contains(out.String(), "shown only once") {
+			t.Error("notice missing from output")
+		}
+		if strings.Contains(out.String(), "Press Enter") {
+			t.Error("headless ceremony must not prompt for acknowledgment")
+		}
+	})
+
+	t.Run("acknowledgment gates the commit", func(t *testing.T) {
+		r, w := io.Pipe()
+		var out safeBuilder
+		committed := make(chan string, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- runRecoveryCeremony(&out, r, "sys recovery phrase", func(pub string) error {
+				committed <- pub
+				return nil
+			})
+		}()
+		select {
+		case <-committed:
+			t.Fatal("commit ran before acknowledgment")
+		case <-time.After(50 * time.Millisecond):
+		}
+		if !strings.Contains(out.String(), "sys recovery phrase") {
+			t.Error("phrase notice not shown while awaiting acknowledgment")
+		}
+		if _, err := w.Write([]byte("\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		<-committed
+	})
+
+	t.Run("failed commit announces the phrase is dead", func(t *testing.T) {
+		var out strings.Builder
+		wantErr := kernel.ErrInvalidState.Wrap("boom")
+		err := runRecoveryCeremony(&out, nil, "Recovery phrase", func(string) error { return wantErr })
+		if err != wantErr {
+			t.Fatalf("commit error not returned: %v", err)
+		}
+		if !strings.Contains(out.String(), "NOT enrolled") {
+			t.Error("discard warning missing after failed commit")
+		}
+	})
+}
+
+// safeBuilder is a strings.Builder safe for the ceremony goroutine and the asserting test to share.
+type safeBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *safeBuilder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *safeBuilder) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestAuthLoginLogout(t *testing.T) {

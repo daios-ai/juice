@@ -146,19 +146,17 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 		return "", fmt.Errorf("password cannot be empty")
 	}
 
-	// Enroll sys's own recovery phrase (§12): generated here, only the public key is stored, so the
-	// operator can reset the superuser password if it is lost. The phrase is shown once.
-	mnemonic, recoveryPub, err := generateRecovery()
-	if err != nil {
-		return "", fmt.Errorf("generate recovery phrase: %w", err)
-	}
-	if err := k.FirstBoot(ctx, password, recoveryPub); err != nil {
+	// Enroll sys's own recovery phrase (§12): generated client-side, only the public key is
+	// stored, so the operator can reset the superuser password if it is lost. The ceremony shows
+	// and acknowledges the phrase before committing, so no logging follows until the operator
+	// has it (interactive), and a boot that fails after display announces the phrase is dead.
+	if err := enrollRecovery("sys recovery phrase", func(recoveryPub string) error {
+		return k.FirstBoot(ctx, password, recoveryPub)
+	}); err != nil {
 		return "", fmt.Errorf("first boot: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
-	fmt.Fprintln(os.Stderr, "sys recovery phrase (write this down; it is shown only once and cannot be recovered):")
-	fmt.Fprintf(os.Stderr, "  %s\n", mnemonic)
 	return superuserHandle, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
 	bip39 "github.com/tyler-smith/go-bip39"
+	"golang.org/x/term"
 )
 
 func init() {
@@ -175,7 +177,7 @@ func deriveRecoveryKey(mnemonic string) (ed25519.PrivateKey, error) {
 }
 
 // generateRecovery creates a fresh 12-word mnemonic and returns it with the base64url public key to
-// enroll. The mnemonic is the master secret; it never leaves the client (§12).
+// enroll. The mnemonic is the recovery credential; it never leaves the client (§12).
 func generateRecovery() (mnemonic, recoveryPublicKey string, err error) {
 	entropy, err := bip39.NewEntropy(128) // 128 bits of entropy => 12 words
 	if err != nil {
@@ -191,6 +193,46 @@ func generateRecovery() (mnemonic, recoveryPublicKey string, err error) {
 	}
 	pub := priv.Public().(ed25519.PublicKey)
 	return mnemonic, base64.RawURLEncoding.EncodeToString(pub), nil
+}
+
+// runRecoveryCeremony is the whole enrollment sequence: generate the phrase, show it on out,
+// wait for acknowledgment when ack is non-nil, then commit the public key. The phrase is shown
+// BEFORE commit, so a crash between the two leaves an account without a recovery key — recoverable
+// by password — rather than an enrolled key whose phrase nobody received; a failed commit is
+// announced so the operator discards the phrase.
+func runRecoveryCeremony(out io.Writer, ack io.Reader, label string, commit func(recoveryPublicKey string) error) error {
+	mnemonic, recoveryPub, err := generateRecovery()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%s (write this down; it is shown only once and cannot be recovered):\n", label)
+	fmt.Fprintf(out, "  %s\n", mnemonic)
+	if ack != nil {
+		fmt.Fprint(out, "Press Enter once you have written it down: ")
+		if _, err := bufio.NewReader(ack).ReadString('\n'); err != nil && err != io.EOF {
+			return err
+		}
+	}
+	if err := commit(recoveryPub); err != nil {
+		fmt.Fprintln(out, "the recovery phrase shown above was NOT enrolled; discard it")
+		return err
+	}
+	return nil
+}
+
+// enrollRecovery runs the ceremony on the controlling terminal when there is one, so the phrase
+// is acknowledged before any further output and never enters a redirected stderr (log files).
+// Headless (no terminal), the phrase goes to stderr without a pause: stdio is the only delivery
+// channel a headless boot has, and the operator capturing it is receiving the phrase, not
+// leaking it — a deliberate choice, not an oversight.
+func enrollRecovery(label string, commit func(recoveryPublicKey string) error) error {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+			defer tty.Close()
+			return runRecoveryCeremony(tty, tty, label, commit)
+		}
+	}
+	return runRecoveryCeremony(os.Stderr, nil, label, commit)
 }
 
 // signRecoveryChallenge signs the recovery nonce with the phrase-derived key, matching the kernel's
