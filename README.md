@@ -4,201 +4,258 @@
 
 # Juice
 
-Juice is a Go kernel and research platform for **callable actions**. An action is a named,
-priced, owned unit of computation — an HTTP endpoint, a WebAssembly module, a native handler, or
-a proxy to another kernel's action. Every call runs inside a funded process, is fully traced,
-settles atomically, and produces a signed receipt.
+Juice is a kernel for **callable actions**: named, priced, owned units of service. An
+action can be an HTTP endpoint, a WebAssembly module, a built-in, or another kernel's
+action reached over federation. Anyone can publish one, set a price, and get paid per
+use; anyone can find one, run it, and rate the result. Every call settles atomically
+and leaves a signed receipt, so both sides can always prove what happened and what it
+cost.
 
-Juice aims to be a kernel in the OS sense: a small set of general, robust primitives
-(execution, accounting, tracing, settlement, federation), with everything else — including the
-standard library of `sys` actions — living in the application layer on top of those primitives.
+One number to keep in mind: an action's **price is the whole cost**. Whatever the
+action does internally — call other paid actions, wait for a human, reach across the
+network — you are never charged more than the price you saw.
 
-## Core model
-
-Execution starts with a single primitive:
-
-```text
-run(action, args)        // action is owner/name
-```
-
-`run` atomically creates a process funded with exactly `action.price`, locked from the caller's
-balance, creates a root trace from that process, and issues the root call. Every call — root
-calls, WASM subcalls, step completions, OpenAPI HTTP actions, remote proxies — flows through one
-dispatch primitive:
-
-```text
-Call(caller, trace, action, args)
-```
-
-The process closes automatically once the root call returns and no steps remain outstanding; you
-never start or fund a process by hand.
-
-**Money.** Every wallet — user, process, trace — has `available` and `locked`. `action.price` is
-a *subtree bound*: the most the whole call tree can cost. A call's unspent allocation is its value
-added and is paid to the action owner at settlement; the platform (`sys`) takes `fee_bps`
-(default `2000` = 20%). Failures refund the remaining allocation up the chain. Settlement is
-final and atomic with its transaction and receipt.
-
-## Features
-
-- **Actions** — `http`, `wasm`, `native`, and `remote_proxy` kinds, with JSON Schema validation on
-  inputs and outputs. Each action is `active` or not and has a visibility of `private` (owner only),
-  `local` (any user on this kernel), or `public` (also callable by federated peers). (No per-user ACLs.)
-- **Funded processes & traces** — budgeted execution contexts; funds locked per call, settled on
-  success, refunded on failure; a full trace tree per process.
-- **Immutable transactions** with signed **Ed25519 receipts** and signed **ratings** (`0`/`1`).
-- **Steps** — partially-applied future calls (`waiting → running → done | cancelled`) for
-  human-in-the-loop and webhook completion.
-- **Upstream auth** — per-action, sealed at rest and never returned: static (`header`, `query`,
-  `bearer`, `basic`), owner-held OAuth (`oauth_client_credentials`, `oauth_jwt_bearer`), and two
-  per-caller **delegated** schemes for wrapping multi-user APIs, where each caller connects their
-  own account once and the action then calls the upstream as them — `oauth_delegated` (browser
-  consent, `juice user connect`) and `delegated_bearer` (a pasted API key / personal access token,
-  `juice user connect --token`, applied into a configurable header). Reads expose only the
-  non-secret `auth_scheme` name and a `requires_grant` flag, never config or secrets. See
-  **[docs/oauth.md](docs/oauth.md)**.
-- **Native `sys` actions** (the platform stdlib, all `local` — callable here, never served
-  abroad): `lookup`, `llm/chat`, `llm/embed`, `llm/json`, `llm/decide`,
-  `tinygo/compile`, `time`, `sink`, `message`, `random`, `web`, `transfer`.
-- **Federation** — call peer kernels by public key (actions resolve and cache on first use), proxy users, prepaid credits, signed
-  manifests, and gossip-based discovery; `juice tx verify` checks a remote receipt locally.
-- **OpenAPI import** — register representable HTTP operations as actions.
-- **WASM via wazero** — sandboxed scripts with host functions `juice.call`, `juice.step_create`,
-  `juice.step_complete`, and `juice.log`; no ambient filesystem, network, or token access.
-- **Hybrid lookup** — lexical (BM25) and semantic (cosine) search over actions, fused by reciprocal-rank fusion.
-- **SQLite** — single file, WAL mode, pure Go (no CGO); structured logging.
-
-## Installation
+## Install and boot
 
 ```bash
 git clone https://github.com/daios-ai/juice.git
 cd juice
-make build        # or: go build -o juice ./cmd/juice/
+make build          # or: go build -o juice ./cmd/juice/
+./juice serve --addr :4040
 ```
 
-Requires Go 1.25+. Module path is `github.com/daios-ai/juice`.
+Requires Go 1.25+. The first boot prompts for a kernel name and a superuser password,
+then creates the `sys` account, its signing keypair, and a JWT secret. It also prints a
+one-time 12-word recovery phrase for `sys` — **write it down**; it is the only way to
+reset the superuser password (`juice auth recover sys`). Subsequent boots are
+idempotent.
 
-On first boot the kernel prompts for a superuser password and atomically creates the `sys` user,
-its signing keypair, and a JWT secret, then registers the native `sys` actions. It also prints a
-one-time 12-word recovery phrase for `sys` — write it down; it is the only way to reset the
-superuser password (`juice auth recover sys`) and cannot be recovered if lost. Subsequent boots
-are idempotent.
+All state lives under `$JUICE_HOME/kernel/` (default `~/.juice/kernel/`): the database
+(which holds the signing key), `config.json`, and auth tokens. Set `JUICE_HOME` to
+relocate everything, or `--db ./juice.db` for a per-folder kernel. The `kernel/cache/`
+subdirectory is regenerable and safe to delete.
 
-State — the database (which holds the signing key), config, and auth tokens — lives under
-`$JUICE_HOME/kernel/` (default `~/.juice/kernel/`); the binary is separate, on your `PATH`.
-Set `JUICE_HOME` to relocate the whole juice suite, or point `--db` elsewhere to run several
-kernels, or use `--db ./juice.db` for a portable per-folder kernel. The `kernel/cache/`
-subdirectory holds regenerable data and is safe to delete.
+The CLI is a pure client of the server (`--server`, default `http://localhost:4040`),
+so the commands below work against any kernel you can reach and log in to.
 
-## Quick start
+## Accounts and credits
 
 ```bash
-# Start the server (first run prompts for the sys password)
-./juice serve --addr :4040
-
-# Create a user and log in (token stored under $JUICE_HOME/kernel/)
-# `user create` prints a one-time recovery phrase — write it down.
-./juice user create alice
+./juice user create alice        # prints alice's one-time recovery phrase
 ./juice auth login alice
-
-# Register an action and activate it
-./juice action create echo --kind http --source https://httpbin.org/post --price 0
-./juice action enable alice/echo
-
-# Run it — creates a funded process, calls the action, closes the process
-./juice run alice/echo '{"msg":"hello"}'
-
-# Inspect and rate the resulting transaction
-./juice tx show <tx-id>
-./juice tx rate <tx-id> 1
-
-# Native actions work the same way
-./juice run sys/time
+./juice user me                  # handle, balance, locked funds
 ```
 
-JSON arguments accept the `@file.json` convention (a leading `@` reads the value from a file), and
-omitted args default to `{}`. Add `--json` for canonical machine-readable output (the HTTP shape)
-or `--quiet` to print only a created resource's id.
-
-## CLI
-
-Every HTTP endpoint has a CLI command. Primary identifiers are positional natural keys — a user is
-`handle`, an action is `owner/name` (an id is also accepted), and processes, steps, and
-transactions are ids.
-
-```text
-juice serve | health
-juice user create <user> | me | update | connect <action> | disconnect <action>
-juice auth login <user> | logout | recover <user>
-juice action create <name> | update <action> | enable/disable <action> | list | show <action>
-juice action delete <action> | import <name> [<spec-url>] | stats <action>
-juice run <action> [json]
-juice process list | show <id> | end <id>
-juice step create <action> | list | show <id> | complete <id> [json]
-juice tx list | show <id> | rate <id> <0|1> | verify <id>
-juice admin users | show | suspend | unsuspend | rename | deposit | withdraw
-juice admin suspend <user> | unsuspend <user> | peers | inspect <key|handle> | settle <user> | identity
-```
-
-Global flags: `--db <path>`, `--config <path>`, `--json`, `--quiet`. `admin` commands (including
-federation trust) are superuser-only. See **[API.md](API.md)** for the full command/flag and HTTP
-route reference.
-
-## HTTP API
+Credits enter by operator deposit (reflecting a payment made outside the system) and
+move freely between local users:
 
 ```bash
-./juice serve --addr :4040
+./juice admin deposit alice 1000   # operator only
+./juice user transfer bob 250      # alice pays bob directly, no fee
+./juice user ledger                # every deposit, withdrawal, and transfer
 ```
 
-Most routes require `Authorization: Bearer <token>`. Public routes are `GET /health` (also an
-identity banner: handle + public key) and `GET /v1/actions`. The execution entry point is
-`POST /v1/run`. Federation has **no HTTP surface** — peers, manifests, gossip,
-and inbound calls travel over the libp2p transport (§13), not this API. The complete
-route table — with request/response shapes and the R1–R9 / C1–C12 design rules — lives in
-**[API.md](API.md)**.
+If you lose your password, `juice auth recover <user>` restores the account from the
+recovery phrase. There is no email anywhere in the system.
+
+## Publish and run an action
+
+An action needs a name, a description, input/output schemas, and a price. It starts
+disabled and private, so nothing is callable by accident:
+
+```bash
+./juice action create echo --kind http --source https://httpbin.org/post --price 5
+./juice action enable alice/echo
+./juice run alice/echo '{"msg":"hello"}'
+```
+
+`run` debits exactly the price, executes, and settles. Invalid input is rejected
+before you are charged; a failed call refunds what was not consumed. Inspect and rate
+the result:
+
+```bash
+./juice tx show <tx-id>
+./juice tx rate <tx-id> 1 --note "did what it said"
+./juice action ratings alice/echo    # public track record: value, note, date
+./juice action stats alice/echo      # uses, successes, latency
+```
+
+Only the payer can rate, once, and ratings are immutable — they are the market's
+public evidence about the action.
+
+Three visibility levels control the audience, each widened deliberately by the owner:
+`private` (owner only), `local` (users of this kernel), `public` (everyone, including
+other kernels). Changing an action's terms never surprises a buyer: a call pinned to
+terms that changed is refused and re-quoted, never silently repriced.
+
+As a provider, the price is your bound and your margin: sub-actions you call are paid
+from your budget, and what you don't spend is yours at settlement, minus the kernel's
+fee on that margin. JSON arguments accept `@file.json`; `--json` gives machine-readable
+output; `--quiet` prints only ids.
+
+## Compose actions
+
+A WASM action can call other actions within its own advertised price, using the host
+functions `juice.call`, `juice.step_create`, `juice.step_complete`, and `juice.log` —
+no filesystem, network, or token access. Write the handler in Go and compile it on the
+kernel:
+
+```bash
+./juice run sys/tinygo/compile '{"source": "@handler.go"}'
+./juice action create pipeline --kind wasm --artifact @artifact.b64 --price 100
+```
+
+An HTTP-backed action can compose too: each dispatch carries a capability header the
+endpoint presents back to `POST /v1/call` to make sub-calls under the same budget. The
+caller still sees one price, one result, one party to rate.
+
+## Wrap an existing web API
+
+Install a whole OpenAPI document as one application — one action per operation, rooted
+at `<name>/index`:
+
+```bash
+./juice action import weather https://api.example.com/openapi.json
+./juice action enable alice/weather      # enables the whole subtree
+./juice run alice/weather/forecast '{"city":"Lisbon"}'
+```
+
+Re-running the import reconciles a changed document without losing history or the
+terms you set; `action disable alice/weather` and `action delete alice/weather`
+switch off or remove the application with the ordinary verbs.
+
+Upstream credentials attach per action and never surface anywhere — not in inputs,
+outputs, logs, or receipts. Owner-held schemes (`header`, `query`, `bearer`, `basic`,
+OAuth client-credentials, JWT-bearer) serve APIs where the owner holds one key. For
+multi-user APIs, each caller connects their **own** upstream account once:
+
+```bash
+./juice user connect alice/mail            # browser consent (OAuth), or:
+./juice user connect alice/mail --token    # paste a personal API key
+./juice user me                            # lists connections, never tokens
+./juice user disconnect alice/mail
+```
+
+One consent covers the whole directory of actions it names. A call that needs a
+missing consent is refused before any money moves, telling the client exactly which
+consent to request. See [docs/oauth.md](docs/oauth.md).
+
+## Wait for a human or a webhook
+
+An action can park a **step**: a prepaid continuation addressed to one named party.
+The money is already reserved, so completing it needs no further funds:
+
+```bash
+./juice run sys/message '{"to":"bob","message":"approve the order?"}'
+./juice step list                    # bob sees work addressed to him
+./juice step complete <step-id> '{}'
+./juice process list                 # a parked step keeps its process open
+./juice process end <process-id>     # owner force-closes; parked funds return
+```
+
+External systems integrate the same way — they register as ordinary users and either
+call `run` or complete a step pre-created for them. There is no separate webhook
+machinery. Suspended work survives restarts.
+
+## Search, and letting agents choose
+
+```bash
+./juice run sys/lookup '{"query":"translate text to german"}'
+```
+
+Lookup searches descriptions lexically and semantically and returns ranked candidates
+with schemas and all-in prices — including actions discovered on other kernels. With a
+local LLM configured (Ollama; `native.llm` in config), `sys/llm/decide` picks one
+action from typed candidates and proposes valid arguments **without executing
+anything**, so planning and spending stay separate decisions. The rest of the stdlib
+(`sys/time`, `sys/random`, `sys/web`, `sys/llm/chat`, `sys/llm/embed`,
+`sys/llm/json`, `sys/transfer`, `sys/sink`) works like any other action: `juice run
+sys/time`.
+
+## Federation
+
+Kernels reach each other by public key over libp2p — no URLs, no port forwarding; a
+kernel behind home NAT federates like any other. Joining is just booting with the
+default `bootstrap_peers`. Serving is just marking an action `public`. Calling is just
+naming it:
+
+```bash
+./juice run 'bob@<kernel-key-or-petname>/summarize' '{"text":"..."}'
+./juice tx verify <tx-id>     # check the peer's signed receipt, offline
+```
+
+You pay from your **local** balance at the advertised all-in price — no remote
+account, no prefunding. The first call resolves and caches the action; a changed
+remote contract is refused and re-resolved, never silently repaid. If the peer is
+unreachable the call either fails fast with a full refund or stays visibly parked
+until its signed receipt arrives — never double-charged, never silently dropped.
+
+## Operating a kernel
+
+The operator (`sys`) uses the same commands as users, widened in scope, plus the money
+and trust verbs:
+
+```bash
+./juice admin users                    # all local accounts
+./juice admin deposit carol 500        # credit/debit against outside payments
+./juice admin withdraw carol 200
+./juice admin suspend carol            # one reversible lever, humans and kernels alike
+./juice admin rename k-3f8a2c weather-farm   # give a peer a memorable local name
+./juice admin peers                    # counterparties and discovered kernels, balances, last seen
+./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
+./juice admin identity                 # own key, addresses, exposure position
+./juice admin settle <peer>            # settle the bilateral balance over your chosen rail
+./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
+```
+
+Serving strangers is bounded-risk by construction: a global exposure cap limits total
+unsecured credit across all peers at once, so minting identities buys an attacker
+nothing. `admin identity` shows the position; `admin settle` clears debts — including,
+below the configured quantum, by a provably fair coin flip that makes tiny debts
+economical to settle.
 
 ## Configuration
 
-Configuration is a `config.json` file, auto-created next to the database (override with `--config`).
-Key groups:
+`config.json` sits next to the database; safe defaults apply when a key is absent.
+The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
-| `native.*` | Per-action prices plus LLM URL/models (`native.llm`) |
-| `fee_bps` | Platform fee in basis points (default `2000` = 20%; recipient is fixed to `sys`) |
-| `import_bps` | Federation import duty in basis points (default `500`) |
-| `token_ttl` | Access-token lifetime (e.g. `15m`) |
+| `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
+| `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
+| `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
+| `exposure_max` / `settlement_trigger` | Unsecured-credit cap across all peers, and the "please settle" threshold |
+| `native.*` | Stdlib prices and LLM URL/models (`native.llm`) |
+| `allow_local_sources` | Permit private-network URLs for action sources (off by default; loopback always allowed) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
-| `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the discovery network |
-| `allow_local_sources` | Permit private, link-local, and CGNAT URLs for action sources and OAuth endpoints (off by default). Loopback is always permitted: a co-located service shares the kernel's trust domain, which is a deployment assumption to make deliberately on a shared host |
-| `credentials_key` | Auto-generated AES-256 key sealing action upstream credentials and delegated-OAuth grant refresh tokens |
 
-Environment variables are bootstrap and overrides only (everything else is configured
-through `config.json`): `JUICE_HOME` (root for all juice state, default `~/.juice`; the kernel
-uses `$JUICE_HOME/kernel/`), `JUICE_SECRET_KEY`, `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`,
-`JUICE_BOOTSTRAP_PASSWORD`, `JUICE_BOOTSTRAP_KERNEL_HANDLE`, and `JUICE_ALLOW_LOCAL_SOURCES`.
-The database and config paths are the `--db` / `--config` flags; the HTTP listen address is
-the `--addr` flag.
+Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
+`JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
+`JUICE_BOOTSTRAP_KERNEL_HANDLE`, `JUICE_ALLOW_LOCAL_SOURCES`.
 
-## Architecture
+## HTTP API
+
+Every command above is a thin client of the HTTP API: most routes take
+`Authorization: Bearer <token>`; `GET /health` and `GET /v1/actions` are public;
+`POST /v1/run` is the execution entry point. Federation has no HTTP surface — peer
+traffic travels over libp2p only. The full route table lives in [API.md](API.md).
+
+## Repository layout
 
 ```text
-cmd/juice/   CLI + HTTP server, config, bootstrap (wires everything together)
-kernel/      Core types, interfaces, auth, call/settlement semantics, federation, OpenAPI import
-store/       SQLite implementation of kernel.Store (migrations, WAL)
-script/      WebAssembly execution via wazero
-llm/         Language and embedding adapter (Ollama) for lookup, chat, json, decide
-native/      Native sys action handlers (lookup, llm/*, time, sink, message, random, web, transfer, tinygo)
-log/         Structured logger (slog + tint, text + JSON)
+cmd/juice/   CLI + HTTP server, config, bootstrap
+kernel/      Core objects and operational semantics
+store/       SQLite persistence (migrations, WAL)
+fed/         Federation transport (libp2p)
+script/      WebAssembly execution (wazero)
+llm/         Language/embedding adapter (Ollama)
+native/      The sys stdlib actions
+log/         Structured logging
 ```
-
-`kernel/` imports no SQLite, wazero, Ollama, CLI, or HTTP code — those adapters are injected at
-startup behind ordinary Go interfaces. Every source file has a corresponding `_test.go`, and
-`go test ./...` requires no network access.
 
 ## Further reading
 
-- **[API.md](API.md)** — authoritative HTTP/CLI contract and design rules.
-- **[requirements.md](requirements.md)** — the kernel specification.
-- **[docs/oauth.md](docs/oauth.md)** — building actions that call APIs as the caller (delegated OAuth or a per-user API key).
-- **[flows/](flows/)** — runnable end-to-end shell flows (`flows_test.sh` drives the rest).
+- [requirements.md](requirements.md) — the kernel specification (authoritative).
+- [API.md](API.md) — the full HTTP/CLI reference.
+- [docs/oauth.md](docs/oauth.md) — wrapping APIs that need per-user consent.
+- [flows/](flows/) — runnable end-to-end shell flows (`flows_test.sh` drives them).
