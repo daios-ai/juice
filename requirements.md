@@ -1,6 +1,6 @@
 # Juice: user stories, product constraints, and design decisions
 
-Version: 0.12
+Version: 0.13
 Codename: `juice`
 
 INSTRUCTIONS FOR EDITING THIS FILE:
