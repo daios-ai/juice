@@ -35,7 +35,7 @@ func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)

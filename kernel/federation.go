@@ -241,10 +241,6 @@ func (s *pricedStore) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, re
 	return s.priceOne(s.Store.ReadActionByOwnerRemoteID(ctx, ownerID, remoteActionID))
 }
 
-func (s *pricedStore) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error) {
-	return s.priceMany(s.Store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL))
-}
-
 func (s *pricedStore) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error) {
 	return s.priceMany(s.Store.ListVisibleActions(ctx, includeLocal, limit, offset))
 }
@@ -2056,7 +2052,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	}
 	incoming := []incomingOp{{
 		key:  m.ActionID,
-		hash: contentHash,
+		name: name,
 		apply: func(a *Action) {
 			a.Name = name
 			a.Source = source
@@ -2069,7 +2065,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.RemoteBPS = &rbps
 			a.BasePrice = &basePrice
 		},
-		// Identity and lifecycle only; reconcileImport calls apply for the contract fields.
+		// Identity and lifecycle only; apply writes the contract fields.
 		new: func() *Action {
 			now := time.Now().UTC()
 			return &Action{
@@ -2085,7 +2081,12 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		},
 	}}
 
-	result, err := k.reconcileImport(ctx, existingByKey, func(a *Action) string { return a.ArtifactHash }, incoming, false)
+	// A manifest is signed as a whole, so its own content hash decides whether the served contract
+	// moved — no field-by-field projection is needed on this side.
+	plan := classifyImport(existingByKey, incoming, func(ex *Action, _ incomingOp) bool {
+		return ex.ArtifactHash != contentHash
+	})
+	result, err := k.commitProxyImport(ctx, plan)
 	if err != nil {
 		return nil, err
 	}

@@ -599,12 +599,38 @@ func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref strin
 	return []actionResp{enrichAction(k, a, newAccountCache(k, ctx))}, nil
 }
 
-func updateAction(k *kernel.Kernel, ctx context.Context, callerID string, req kernel.UpdateActionRequest) (actionResp, error) {
-	a, err := k.UpdateAction(ctx, callerID, req)
-	if err != nil {
-		return actionResp{}, err
+// enrichActions projects the rows one mutation touched, in the order they were written.
+func enrichActions(k *kernel.Kernel, ctx context.Context, as []*kernel.Action) []actionResp {
+	cache := newAccountCache(k, ctx)
+	out := make([]actionResp, 0, len(as))
+	for _, a := range as {
+		out = append(out, enrichAction(k, a, cache))
 	}
-	return enrichAction(k, a, newAccountCache(k, ctx)), nil
+	return out
+}
+
+func updateActions(k *kernel.Kernel, ctx context.Context, callerID, target string, req kernel.UpdateActionRequest) ([]actionResp, error) {
+	as, err := k.UpdateActionMany(ctx, callerID, target, req)
+	if err != nil {
+		return nil, err
+	}
+	return enrichActions(k, ctx, as), nil
+}
+
+func setActionsActive(k *kernel.Kernel, ctx context.Context, callerID, target string, active bool) ([]actionResp, error) {
+	as, err := k.SetActiveMany(ctx, callerID, target, active)
+	if err != nil {
+		return nil, err
+	}
+	return enrichActions(k, ctx, as), nil
+}
+
+func deleteActions(k *kernel.Kernel, ctx context.Context, callerID, target string) ([]actionResp, error) {
+	as, err := k.DeleteActionMany(ctx, callerID, target)
+	if err != nil {
+		return nil, err
+	}
+	return enrichActions(k, ctx, as), nil
 }
 
 // listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.

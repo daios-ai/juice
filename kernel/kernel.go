@@ -86,7 +86,6 @@ type Kernel struct {
 	scripts        ScriptExecutor
 	http           HTTPExecutor
 	fedClient      FederationClient
-	fetcher        URLFetcher
 	llm            Embedder
 	cfg            Config
 	log            *log.Logger
@@ -200,7 +199,6 @@ type Dependencies struct {
 	Store      Store
 	Scripts    ScriptExecutor   // WASM execution
 	HTTP       HTTPExecutor     // kind=http action dispatch
-	Fetcher    URLFetcher       // OpenAPI well-known ownership proof (§8)
 	Federation FederationClient // outbound federation: call, settle, resolve (§13)
 	Embedder   Embedder         // semantic leg of lookup (§9)
 	Config     Config
@@ -221,7 +219,6 @@ func New(deps Dependencies) *Kernel {
 		scripts:        deps.Scripts,
 		http:           deps.HTTP,
 		fedClient:      deps.Federation,
-		fetcher:        deps.Fetcher,
 		llm:            deps.Embedder,
 		cfg:            cfg,
 		log:            logger,
@@ -1394,6 +1391,10 @@ type CreateActionRequest struct {
 	Params       []HTTPParam    `json:"params"`        // http only: explicit field bindings; empty = implicit routing
 	WasmArtifact string         `json:"wasm_artifact"` // base64-encoded pre-compiled WASM; if set, stored as-is and used for the hash
 	Auth         *AuthInput     `json:"auth"`          // upstream credentials; sealed into auth_json at rest; write-only
+	// HTTP carries an already-structured source for an in-process caller that holds one (OpenAPI
+	// import), in place of Source/Method/Params. Never wire-settable: the HTTP surface describes an
+	// upstream by URL, and a client that could post provenance could forge it.
+	HTTP *HTTPSource `json:"-"`
 }
 
 // cgnatRange is RFC 6598 shared address space (100.64.0.0/10) — routable-looking but not covered by
@@ -1512,33 +1513,42 @@ func validateHTTPParams(params []HTTPParam) error {
 	return nil
 }
 
+// encodeHTTPSource validates a structured HTTP source and serialises it. It is the single writer of
+// Action.Source for every kind=http row, whether the caller assembled that source from a URL
+// (manual create), merged it into a stored one (manual update), or built it from one OpenAPI
+// operation (import) — so no path can store a source another path would have refused (§7).
+func (k *Kernel) encodeHTTPSource(ctx context.Context, s HTTPSource) (string, error) {
+	if s.Type == "" {
+		s.Type = "http"
+	}
+	if s.Method == "" {
+		s.Method = "POST"
+	}
+	s.Method = strings.ToUpper(s.Method)
+	if !httpMethods[s.Method] {
+		return "", ErrInvalidInput.Wrapf("unsupported HTTP method %q", s.Method)
+	}
+	if err := validateHTTPParams(s.Params); err != nil {
+		return "", err
+	}
+	if err := k.validateHTTPSource(ctx, s.BaseURL, k.cfg.AllowLocalSources); err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return "", ErrInternal.Wrapf("marshal http source: %v", err)
+	}
+	return string(b), nil
+}
+
 // httpSourceFromURL builds the canonical HTTPSource JSON for a manual kind=http
-// action from a raw upstream URL plus optional method/params, validating the URL
-// against SSRF rules and the verb against the allowed set.
+// action from a raw upstream URL plus optional method/params.
 func (k *Kernel) httpSourceFromURL(ctx context.Context, rawURL, method string, params []HTTPParam) (string, error) {
 	base, path, err := splitHTTPURL(rawURL)
 	if err != nil {
 		return "", err
 	}
-	if err := k.validateHTTPSource(ctx, base, k.cfg.AllowLocalSources); err != nil {
-		return "", err
-	}
-	if method == "" {
-		method = "POST"
-	}
-	method = strings.ToUpper(method)
-	if !httpMethods[method] {
-		return "", ErrInvalidInput.Wrapf("unsupported HTTP method %q", method)
-	}
-	if err := validateHTTPParams(params); err != nil {
-		return "", err
-	}
-	src := HTTPSource{Type: "http", BaseURL: base, Path: path, Method: method, Params: params}
-	b, err := json.Marshal(src)
-	if err != nil {
-		return "", ErrInternal.Wrapf("marshal http source: %v", err)
-	}
-	return string(b), nil
+	return k.encodeHTTPSource(ctx, HTTPSource{Type: "http", BaseURL: base, Path: path, Method: method, Params: params})
 }
 
 // mergeHTTPSource applies a partial update (any of url/method/params) onto an
@@ -1559,29 +1569,12 @@ func (k *Kernel) mergeHTTPSource(ctx context.Context, existing string, rawURL, m
 		s.BaseURL, s.Path = base, path
 	}
 	if method != nil {
-		m := strings.ToUpper(*method)
-		if !httpMethods[m] {
-			return "", ErrInvalidInput.Wrapf("unsupported HTTP method %q", m)
-		}
-		s.Method = m
+		s.Method = *method
 	}
 	if params != nil {
-		if err := validateHTTPParams(*params); err != nil {
-			return "", err
-		}
 		s.Params = *params
 	}
-	if s.Method == "" {
-		s.Method = "POST"
-	}
-	if err := k.validateHTTPSource(ctx, s.BaseURL, k.cfg.AllowLocalSources); err != nil {
-		return "", err
-	}
-	b, err := json.Marshal(s)
-	if err != nil {
-		return "", ErrInternal.Wrapf("marshal http source: %v", err)
-	}
-	return string(b), nil
+	return k.encodeHTTPSource(ctx, s)
 }
 
 // httpSourceBaseURL extracts the base URL from a stored kind=http source for
@@ -1627,6 +1620,22 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	if err := k.requireSelf(ctx, callerID, req.OwnerUserID); err != nil {
 		return nil, err
 	}
+	a, err := k.prepareCreateAction(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := k.store.CreateAction(ctx, a); err != nil {
+		return nil, err
+	}
+	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name, "status", "success")
+	return a, nil
+}
+
+// prepareCreateAction validates a create request and builds the action it describes — structured
+// source, compiled artifact, sealed credentials and all — without writing anything. Manual creation
+// and OpenAPI import both run through it, so an imported action is an ordinary action held to
+// exactly the same rules, and a whole import can be validated before its first row is written (§7).
+func (k *Kernel) prepareCreateAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
 	if req.Name == "" {
 		return nil, ErrInvalidInput.Wrap("name is required")
 	}
@@ -1639,12 +1648,21 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 	if req.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
-	if req.Kind == KindHTTP && req.Source != "" {
-		srcJSON, err := k.httpSourceFromURL(ctx, req.Source, req.Method, req.Params)
-		if err != nil {
-			return nil, err
+	if req.Kind == KindHTTP {
+		switch {
+		case req.HTTP != nil:
+			srcJSON, err := k.encodeHTTPSource(ctx, *req.HTTP)
+			if err != nil {
+				return nil, err
+			}
+			req.Source = srcJSON
+		case req.Source != "":
+			srcJSON, err := k.httpSourceFromURL(ctx, req.Source, req.Method, req.Params)
+			if err != nil {
+				return nil, err
+			}
+			req.Source = srcJSON
 		}
-		req.Source = srcJSON
 	}
 	if req.InputSchema != nil {
 		if err := ValidateSchema(req.InputSchema); err != nil {
@@ -1688,10 +1706,6 @@ func (k *Kernel) CreateAction(ctx context.Context, callerID string, req CreateAc
 			return nil, err
 		}
 	}
-	if err := k.store.CreateAction(ctx, a); err != nil {
-		return nil, err
-	}
-	k.log.With(ctx).Info("action.created", "action_id", a.ID, "name", a.Name, "status", "success")
 	return a, nil
 }
 
@@ -1723,7 +1737,8 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 }
 
 // validateAndInitActivation validates schema descriptions and ensures a stats row exists.
-// Called by both SetActive and ActivateNativeAction to eliminate duplicated checks.
+// Used by the native bootstrap path; ordinary activation splits the two halves so a whole
+// application can be validated before anything is written (validateActivation).
 // Errors from validateSchemaDescriptions are returned as-is (ErrSchemaViolation).
 func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error {
 	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
@@ -1732,6 +1747,11 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 	if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
 		return err
 	}
+	return k.initStats(ctx, a)
+}
+
+// initStats creates the action's stats row when it has none.
+func (k *Kernel) initStats(ctx context.Context, a *Action) error {
 	stats, _ := k.store.ReadStats(ctx, a.ID)
 	if stats == nil {
 		if err := k.store.UpsertStats(ctx, DefaultStats(a.ID)); err != nil {
@@ -1962,6 +1982,17 @@ type UpdateActionRequest struct {
 	Params       *[]HTTPParam      `json:"params"`        // http: new explicit bindings (merged into existing HTTPSource)
 	Visibility   *ActionVisibility `json:"visibility"`    // private | local | public (§4)
 	Auth         *AuthInput        `json:"auth"`          // upstream credentials; sealed into auth_json at rest; write-only
+	// HTTP replaces the whole structured source at once, for an in-process caller that holds one
+	// (OpenAPI re-import). Never wire-settable, as on CreateActionRequest.
+	HTTP *HTTPSource `json:"-"`
+}
+
+// rowSpecific reports whether the request carries a field whose value belongs to one action rather
+// than uniformly to every action beneath a path: a description, a schema, or an execution source
+// (§14). Visibility, price, and auth are uniform and apply to a whole subtree.
+func (r UpdateActionRequest) rowSpecific() bool {
+	return r.Description != nil || r.InputSchema != nil || r.OutputSchema != nil ||
+		r.Source != nil || r.Method != nil || r.Params != nil || r.WasmArtifact != "" || r.HTTP != nil
 }
 
 // errProxyKernelManaged rejects any manual mutation of a remote_proxy: its active bit and
@@ -1971,212 +2002,365 @@ type UpdateActionRequest struct {
 // minted by hand; the durable peer lever is suspend (§13).
 var errProxyKernelManaged = ErrInvalidState.Wrap("remote proxy is kernel-managed; use admin suspend to block a peer")
 
-// UpdateAction modifies an action and deactivates it (schema/source changes require re-activation).
-func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateActionRequest) (*Action, error) {
-	a, err := k.store.ReadAction(ctx, req.ID)
-	if err != nil {
-		return nil, err
-	}
-	if a == nil {
-		return nil, ErrNotFound.Wrap("action not found")
-	}
-	if a.Kind == KindNative {
-		return nil, ErrUnauthorized.Wrap("native actions are managed by bootstrap")
-	}
-	if a.Kind == KindRemoteProxy {
-		return nil, errProxyKernelManaged
-	}
-	if err := k.requireAdmin(ctx, callerID, a); err != nil {
-		return nil, err
-	}
-	wasActive := a.Active
-
+// prepareUpdateAction applies an update request to a in memory, validating every field and
+// building any new structured source, but writing nothing. It answers the two questions the commit
+// asks, and is the only place either is decided (§7). resetStats: the quoted terms moved, so the
+// accumulated stats describe an action that no longer exists — a description counts, since it is
+// quoted. revokeGrants: the executed thing moved (source, schema, price) or its credentials were
+// replaced, so no standing consent may survive; this never consults the action's active state,
+// because a grant outlives a disable and would otherwise come back attached to a contract nobody
+// consented to. A description is quoted but not executed, so it resets stats without deactivating
+// or revoking — the pin already refuses a call under terms the caller did not see (§4).
+func (k *Kernel) prepareUpdateAction(ctx context.Context, a *Action, req UpdateActionRequest) (resetStats, revokeGrants bool, err error) {
+	// executionMoved: the dispatched thing itself changed, as opposed to the words describing it.
+	var executionMoved bool
 	if req.Price != nil {
 		if *req.Price < 0 {
-			return nil, ErrInvalidInput.Wrap("price must be non-negative")
+			return false, false, ErrInvalidInput.Wrap("price must be non-negative")
 		}
-		a.Price = *req.Price
-		a.Active = false
+		if *req.Price != a.Price {
+			a.Price = *req.Price
+			resetStats, executionMoved = true, true
+		}
 	}
 	if req.Description != nil {
-		a.Description = *req.Description
+		// An active action must carry a description (it is the quoted terms and the lookup text), so
+		// emptying one is refused rather than silently deactivating it.
+		if strings.TrimSpace(*req.Description) == "" && a.Active {
+			return false, false, ErrInvalidInput.Wrap("description is required while an action is active")
+		}
+		if *req.Description != a.Description {
+			a.Description = *req.Description
+			resetStats = true
+		}
 	}
 	if req.InputSchema != nil {
 		if err := ValidateSchema(req.InputSchema); err != nil {
-			return nil, err
+			return false, false, err
 		}
 		a.InputSchema = req.InputSchema
-		a.Active = false
+		resetStats, executionMoved = true, true
 	}
 	if req.OutputSchema != nil {
 		if err := ValidateSchema(req.OutputSchema); err != nil {
-			return nil, err
+			return false, false, err
 		}
 		a.OutputSchema = req.OutputSchema
-		a.Active = false
+		resetStats, executionMoved = true, true
 	}
-	if a.Kind == KindHTTP && (req.Source != nil || req.Method != nil || req.Params != nil) {
-		srcJSON, err := k.mergeHTTPSource(ctx, a.Source, req.Source, req.Method, req.Params)
-		if err != nil {
-			return nil, err
+	if a.Kind == KindHTTP && (req.HTTP != nil || req.Source != nil || req.Method != nil || req.Params != nil) {
+		var srcJSON string
+		var serr error
+		if req.HTTP != nil {
+			srcJSON, serr = k.encodeHTTPSource(ctx, *req.HTTP)
+		} else {
+			srcJSON, serr = k.mergeHTTPSource(ctx, a.Source, req.Source, req.Method, req.Params)
 		}
-		a.Source = srcJSON
-		a.Active = false
+		if serr != nil {
+			return false, false, serr
+		}
+		if srcJSON != a.Source {
+			a.Source = srcJSON
+			resetStats, executionMoved = true, true
+		}
 	}
 	if (req.Source != nil || req.WasmArtifact != "") && a.Kind != KindHTTP {
 		if req.Source != nil {
 			a.Source = *req.Source
 		}
-		a.Active = false
+		resetStats, executionMoved = true, true
 		if a.Kind == KindWasm {
 			if err := k.deriveWasmArtifact(ctx, a, a.Source, req.WasmArtifact); err != nil {
-				return nil, err
+				return false, false, err
 			}
 		}
 	}
 	if req.Visibility != nil {
 		if !ValidActionVisibility(*req.Visibility) {
-			return nil, ErrInvalidInput.Wrap("visibility must be private, local, or public")
+			return false, false, ErrInvalidInput.Wrap("visibility must be private, local, or public")
 		}
 		a.Visibility = *req.Visibility
-		if err := requireOpenAPIOwnershipIfVisible(a); err != nil {
-			return nil, err
-		}
 	}
 	if req.Auth != nil {
 		if err := k.validateAuthInput(ctx, req.Auth); err != nil {
-			return nil, err
+			return false, false, err
 		}
 		if err := k.sealAuthJSON(a, req.Auth); err != nil {
+			return false, false, err
+		}
+	}
+	// What re-activation re-checks is exactly what invalidates consent, so one condition both
+	// deactivates and revokes. Replacing the credentials revokes as well but does not deactivate:
+	// the contract still stands, only the key behind it changed.
+	if executionMoved {
+		a.Active = false
+	}
+	return resetStats, executionMoved || req.Auth != nil, nil
+}
+
+// commitUpdateAction writes one prepared action. Stats reset and grant revocation ride the same
+// commit as the row itself: an update can need both at once, and consent must never survive the
+// change that invalidated it, not even for the width of a second statement (§5).
+func (k *Kernel) commitUpdateAction(ctx context.Context, a *Action, resetStats, revokeGrants bool) error {
+	a.UpdatedAt = time.Now().UTC()
+	return k.store.UpdateActionLifecycle(ctx, a, resetStats, revokeGrants)
+}
+
+// checkMutable is the authority gate every owner-facing mutation shares: bootstrap owns natives,
+// the kernel owns proxy cache rows, and everything else answers to its owner or the superuser.
+func (k *Kernel) checkMutable(ctx context.Context, callerID string, a *Action) error {
+	if a.Kind == KindNative {
+		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
+	}
+	if a.Kind == KindRemoteProxy {
+		return errProxyKernelManaged
+	}
+	return k.requireAdmin(ctx, callerID, a)
+}
+
+// splitOwnerPath splits a mutation target into bare owner handle and path. It is the consent
+// selector's split without the trailing-"/*" alias, which belongs to grants alone (§8).
+func splitOwnerPath(target string) (ownerHandle, path string, err error) {
+	owner, path, _ := strings.Cut(strings.TrimSpace(target), "/")
+	if owner == "" || strings.Contains(owner, "@") {
+		return "", "", ErrInvalidInput.Wrap("target must be an action id or owner/path (bare handle, no @)")
+	}
+	return owner, path, nil
+}
+
+// resolveTarget resolves a mutation target to the actions it names (§14). The two shapes are
+// disjoint, so the target says which it is without a flag: a raw id names exactly that row, and
+// owner/path names the action at that path together with every action beneath it, by the same
+// segment boundary consent selectors use — "bob/mail" reaches "bob/mail/send" and never
+// "bob/mailer". One command therefore addresses one action or a whole application. The result is
+// ordered by name so a partial failure stops at a predictable place.
+func (k *Kernel) resolveTarget(ctx context.Context, callerID, target string) ([]*Action, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, ErrInvalidInput.Wrap("target is required")
+	}
+	if looksLikeID(target) {
+		a, err := k.store.ReadAction(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		if a == nil {
+			return nil, ErrNotFound.Wrap("action not found")
+		}
+		return []*Action{a}, nil
+	}
+	ownerHandle, path, err := splitOwnerPath(target)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
+	if err != nil || owner == nil {
+		return nil, ErrNotFound.Wrap("action not found")
+	}
+	// Enumerating another owner's rows is refused before the listing, so a subtree target can never
+	// report what a stranger owns; the per-row gate then re-checks each row it touches.
+	if callerID != owner.ID {
+		if err := k.requireSuperuser(ctx, callerID); err != nil {
+			return nil, ErrUnauthorized.Wrap("not authorized to modify this owner's actions")
+		}
+	}
+	all, err := k.store.ListActionsByOwner(ctx, owner.ID, maxOwnerActions, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []*Action
+	for _, a := range all {
+		if selectorPathMatches(path, a.Name) {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound.Wrap("no action matches " + target)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// SetActiveMany enables or disables every action a target names. Every row is checked before any
+// row is written, so an application either goes live as a whole or not at all (§7); the returned
+// slice reports what was written when a commit fails partway.
+func (k *Kernel) SetActiveMany(ctx context.Context, callerID, target string, active bool) ([]*Action, error) {
+	rows, err := k.resolveTarget(ctx, callerID, target)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range rows {
+		if err := k.checkMutable(ctx, callerID, a); err != nil {
+			return nil, err
+		}
+		if active {
+			if err := k.validateActivation(ctx, a); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var done []*Action
+	for _, a := range rows {
+		if active {
+			if err := k.initStats(ctx, a); err != nil {
+				return done, err
+			}
+		}
+		a.Active = active
+		a.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, a); err != nil {
+			return done, err
+		}
+		if active {
+			k.indexForLookup(ctx, a)
+		}
+		event := "action.disabled"
+		if active {
+			event = "action.enabled"
+		}
+		k.log.With(ctx).Info(event, "action_id", a.ID, "status", "success")
+		done = append(done, a)
+	}
+	return done, nil
+}
+
+// UpdateActionMany applies one update to every action a target names. Uniform fields — visibility,
+// price, credentials — describe a whole application; a description, schema, or execution source
+// describes one action, so those are accepted only when the target resolves to a single row (§14).
+func (k *Kernel) UpdateActionMany(ctx context.Context, callerID, target string, req UpdateActionRequest) ([]*Action, error) {
+	rows, err := k.resolveTarget(ctx, callerID, target)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) > 1 && req.rowSpecific() {
+		return nil, ErrInvalidInput.Wrap("description, schema, and source belong to one action: name it by id or by its exact path")
+	}
+	type prepared struct {
+		a                        *Action
+		resetStats, revokeGrants bool
+	}
+	plan := make([]prepared, 0, len(rows))
+	for _, a := range rows {
+		if err := k.checkMutable(ctx, callerID, a); err != nil {
+			return nil, err
+		}
+		resetStats, revokeGrants, err := k.prepareUpdateAction(ctx, a, req)
+		if err != nil {
+			return nil, err
+		}
+		plan = append(plan, prepared{a: a, resetStats: resetStats, revokeGrants: revokeGrants})
+	}
+	var done []*Action
+	for _, p := range plan {
+		if err := k.commitUpdateAction(ctx, p.a, p.resetStats, p.revokeGrants); err != nil {
+			return done, err
+		}
+		if req.Description != nil {
+			k.indexForLookup(ctx, p.a)
+		}
+		k.log.With(ctx).Info("action.updated", "action_id", p.a.ID, "status", "success")
+		done = append(done, p.a)
+	}
+	return done, nil
+}
+
+// DeleteActionMany soft-deletes every action a target names, keeping all history (§7).
+func (k *Kernel) DeleteActionMany(ctx context.Context, callerID, target string) ([]*Action, error) {
+	rows, err := k.resolveTarget(ctx, callerID, target)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range rows {
+		if err := k.checkMutable(ctx, callerID, a); err != nil {
 			return nil, err
 		}
 	}
-	a.UpdatedAt = time.Now().UTC()
+	var done []*Action
+	for _, a := range rows {
+		if err := k.store.DeleteActionAndGrants(ctx, a.ID); err != nil {
+			return done, err
+		}
+		k.log.With(ctx).Info("action.deleted", "action_id", a.ID, "status", "success")
+		done = append(done, a)
+	}
+	return done, nil
+}
 
-	if err := k.store.UpdateAction(ctx, a); err != nil {
+// UpdateAction modifies one action, named by req.ID.
+func (k *Kernel) UpdateAction(ctx context.Context, callerID string, req UpdateActionRequest) (*Action, error) {
+	done, err := k.UpdateActionMany(ctx, callerID, req.ID, req)
+	if err != nil {
 		return nil, err
 	}
-	// Revoke standing delegated grants when the update deactivates the action (a contract change,
-	// §7) or replaces its auth: consent must not silently carry over to changed code or credentials
-	// (§8). A plain enable/disable via SetActive leaves the contract intact and keeps grants.
-	if (wasActive && !a.Active) || req.Auth != nil {
-		if err := k.store.DeleteGrantsForAction(ctx, a.ID); err != nil {
-			k.log.With(ctx).Warn("action.grant_revoke_failed", "action_id", a.ID, "error", err)
-		}
-	}
-	if req.Description != nil {
-		k.indexForLookup(ctx, a)
-	}
-	k.log.With(ctx).Info("action.updated", "action_id", a.ID, "status", "success")
-	return a, nil
+	return done[0], nil
 }
 
-// SetActive activates or deactivates an action.
+// SetActive activates or deactivates one action.
 func (k *Kernel) SetActive(ctx context.Context, callerID, actionID string, active bool) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
-		return err
-	}
-	if a.Kind == KindNative {
-		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
-	}
-	if a.Kind == KindRemoteProxy {
-		return errProxyKernelManaged
-	}
-	if err := k.requireAdmin(ctx, callerID, a); err != nil {
-		return err
-	}
-	if active {
-		if strings.TrimSpace(a.Description) == "" {
-			return ErrInvalidState.Wrap("description is required before activation")
-		}
-		// A pre-compiled wasm artifact (e.g. from @sys/tinygo/compile registered via
-		// `action create --artifact`) is itself the executable, so it satisfies the
-		// source requirement even when the TinyGo source is not stored.
-		if a.Source == "" && a.Kind != KindNative && !(a.Kind == KindWasm && a.WasmArtifact != "") {
-			return ErrInvalidState.Wrap("cannot activate action with no source")
-		}
-		if err := ValidateSchema(a.InputSchema); err != nil {
-			return ErrInvalidState.Wrapf("invalid input schema: %v", err)
-		}
-		if err := ValidateSchema(a.OutputSchema); err != nil {
-			return ErrInvalidState.Wrapf("invalid output schema: %v", err)
-		}
-		if err := k.validateAndInitActivation(ctx, a); err != nil {
-			return err
-		}
-		if a.Kind == KindHTTP {
-			if err := k.validateHTTPSource(ctx, httpSourceBaseURL(a.Source), k.cfg.AllowLocalSources); err != nil {
-				return err
-			}
-			// Fail closed: don't activate an action with stored credentials when no box is
-			// configured — they'd be unreadable (or legacy plaintext) at dispatch (§8).
-			if a.AuthJSON != "" && k.secretBox == nil {
-				return ErrInvalidState.Wrap("cannot activate action with upstream auth: credential encryption is not configured")
-			}
-		}
-		if a.Kind == KindWasm {
-			if k.scripts == nil {
-				return ErrInvalidState.Wrap("cannot activate wasm action: script executor not configured")
-			}
-			wasmBytes := []byte(a.Source)
-			if a.WasmArtifact != "" {
-				// Artifact pre-stored (e.g. via action create --artifact); compile it for the hash, not the TinyGo source.
-				decoded, decErr := base64.StdEncoding.DecodeString(a.WasmArtifact)
-				if decErr != nil {
-					return ErrInvalidState.Wrapf("wasm artifact decode failed: %v", decErr)
-				}
-				wasmBytes = decoded
-			}
-			_, hash, err := k.scripts.Compile(ctx, wasmBytes)
-			if err != nil {
-				return ErrInvalidState.Wrapf("wasm compile failed: %v", err)
-			}
-			a.ArtifactHash = hash
-		}
-		if err := requireOpenAPIOwnershipIfVisible(a); err != nil {
-			return err
-		}
-	}
-	a.Active = active
-	a.UpdatedAt = time.Now().UTC()
-	if err := k.store.UpdateAction(ctx, a); err != nil {
-		return err
-	}
-	if active {
-		k.indexForLookup(ctx, a)
-	}
-	event := "action.disabled"
-	if active {
-		event = "action.enabled"
-	}
-	k.log.With(ctx).Info(event, "action_id", actionID, "status", "success")
-	return nil
+	_, err := k.SetActiveMany(ctx, callerID, actionID, active)
+	return err
 }
 
-// DeleteAction removes an action (marks deleted; keeps transaction history).
+// DeleteAction removes one action (marks deleted; keeps transaction history).
 func (k *Kernel) DeleteAction(ctx context.Context, callerID, actionID string) error {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil {
+	_, err := k.DeleteActionMany(ctx, callerID, actionID)
+	return err
+}
+
+// validateActivation runs every precondition for making an action callable, writing nothing, so a
+// whole application can be checked before the first row goes live (§7). It may fill in derived
+// in-memory state (the compiled artifact hash), which the caller then commits.
+func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
+	if strings.TrimSpace(a.Description) == "" {
+		return ErrInvalidState.Wrap("description is required before activation")
+	}
+	// A pre-compiled wasm artifact (e.g. from @sys/tinygo/compile registered via
+	// `action create --artifact`) is itself the executable, so it satisfies the
+	// source requirement even when the TinyGo source is not stored.
+	if a.Source == "" && a.Kind != KindNative && !(a.Kind == KindWasm && a.WasmArtifact != "") {
+		return ErrInvalidState.Wrap("cannot activate action with no source")
+	}
+	if err := ValidateSchema(a.InputSchema); err != nil {
+		return ErrInvalidState.Wrapf("invalid input schema: %v", err)
+	}
+	if err := ValidateSchema(a.OutputSchema); err != nil {
+		return ErrInvalidState.Wrapf("invalid output schema: %v", err)
+	}
+	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
 		return err
 	}
-	if a.Kind == KindNative {
-		return ErrUnauthorized.Wrap("native actions are managed by bootstrap")
-	}
-	if a.Kind == KindRemoteProxy {
-		return errProxyKernelManaged
-	}
-	if err := k.requireAdmin(ctx, callerID, a); err != nil {
+	if err := validateSchemaDescriptions(a.OutputSchema, "output"); err != nil {
 		return err
 	}
-	if err := k.store.DeleteAction(ctx, actionID); err != nil {
-		return err
+	if a.Kind == KindHTTP {
+		if err := k.validateHTTPSource(ctx, httpSourceBaseURL(a.Source), k.cfg.AllowLocalSources); err != nil {
+			return err
+		}
+		// Fail closed: don't activate an action with stored credentials when no box is
+		// configured — they'd be unreadable (or legacy plaintext) at dispatch (§8).
+		if a.AuthJSON != "" && k.secretBox == nil {
+			return ErrInvalidState.Wrap("cannot activate action with upstream auth: credential encryption is not configured")
+		}
 	}
-	// A deleted action can never be called again; drop any delegated grants pointing at it (§8).
-	if err := k.store.DeleteGrantsForAction(ctx, actionID); err != nil {
-		k.log.With(ctx).Warn("action.grant_revoke_failed", "action_id", actionID, "error", err)
+	if a.Kind == KindWasm {
+		if k.scripts == nil {
+			return ErrInvalidState.Wrap("cannot activate wasm action: script executor not configured")
+		}
+		wasmBytes := []byte(a.Source)
+		if a.WasmArtifact != "" {
+			// Artifact pre-stored (e.g. via action create --artifact); compile it for the hash, not the TinyGo source.
+			decoded, decErr := base64.StdEncoding.DecodeString(a.WasmArtifact)
+			if decErr != nil {
+				return ErrInvalidState.Wrapf("wasm artifact decode failed: %v", decErr)
+			}
+			wasmBytes = decoded
+		}
+		_, hash, err := k.scripts.Compile(ctx, wasmBytes)
+		if err != nil {
+			return ErrInvalidState.Wrapf("wasm compile failed: %v", err)
+		}
+		a.ArtifactHash = hash
 	}
-	k.log.With(ctx).Info("action.deleted", "action_id", actionID, "status", "success")
 	return nil
 }
 
@@ -2988,26 +3172,6 @@ func (k *Kernel) requireSelf(ctx context.Context, callerID, ownerID string) erro
 	return ErrUnauthorized.Wrap("cannot act on behalf of another user")
 }
 
-// requireOpenAPIOwnershipIfVisible returns ErrUnauthorized if a is an OpenAPI action exposed beyond
-// its owner (local or public) whose ownership has not been verified. This prevents exposing an
-// unverified API import to any other caller.
-func requireOpenAPIOwnershipIfVisible(a *Action) error {
-	if a.Visibility == VisibilityPrivate {
-		return nil
-	}
-	if !strings.HasPrefix(strings.TrimSpace(a.Source), "{") {
-		return nil
-	}
-	var osrc HTTPSource
-	if jsonErr := json.Unmarshal([]byte(a.Source), &osrc); jsonErr != nil || osrc.Type != "openapi" {
-		return nil
-	}
-	if !osrc.OwnershipVerified {
-		return ErrUnauthorized.Wrap("ownership not verified: add x-juice-owner to spec")
-	}
-	return nil
-}
-
 // ---- Stats helpers ----
 
 // IncrementalMean updates a running mean with a new observation.
@@ -3134,84 +3298,105 @@ func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
 
 // ---- Import shared logic ----
 
-// incomingOp describes one operation from an external source (OpenAPI or federation manifest).
+// incomingOp describes one operation offered by an external source (an OpenAPI document or a
+// federation manifest), named by the key that identifies it across imports.
 type incomingOp struct {
 	key   string        // unique identifier: operation_key (OpenAPI) or remote_action_id (federation)
-	hash  string        // content hash for change detection
-	apply func(*Action) // update mutable fields on an existing action
+	name  string        // the action name this operation lands on, used for deterministic ordering
+	apply func(*Action) // write the source-owned fields onto an action
 	new   func() *Action
 }
 
-// reconcileImport applies create/update/deactivate logic given existing actions (keyed by op key)
-// and incoming operations. hashOf extracts the stored content hash from an existing action.
-// resetStats controls whether changed or stale actions have their stats row zeroed:
-// true for OpenAPI (contract change invalidates prior stats), false for remote (local usage stats are preserved).
-// Used by both ImportOpenAPI and ImportPeerAction.
-func (k *Kernel) reconcileImport(ctx context.Context, existingByKey map[string]*Action, hashOf func(*Action) string, incoming []incomingOp, resetStats bool) (*ImportResult, error) {
+// importChange pairs an incoming operation with the stored row it updates.
+type importChange struct {
+	existing *Action
+	op       incomingOp
+}
+
+// importPlan is one import pass classified and nothing more. It writes nothing, so the caller can
+// prepare and validate every create, update, and deactivation before the first row is committed,
+// and each caller commits through its own lifecycle — the ordinary action lifecycle for an OpenAPI
+// import, the proxy cache lifecycle for a federation manifest (§7, §8). Ordering is by action name
+// throughout, so a pass that fails partway always stops at the same place.
+type importPlan struct {
+	New       []incomingOp
+	Changed   []importChange
+	Unchanged []importChange
+	Stale     []*Action
+}
+
+// classifyImport sorts incoming operations against the rows already stored for the same source.
+// changed decides whether a stored row still matches what the source now offers.
+func classifyImport(existingByKey map[string]*Action, incoming []incomingOp, changed func(*Action, incomingOp) bool) importPlan {
+	var plan importPlan
 	incomingKeys := make(map[string]struct{}, len(incoming))
 	for _, op := range incoming {
 		incomingKeys[op.key] = struct{}{}
 	}
-
-	var result ImportResult
-
-	// Deactivate existing actions whose ops were removed from the spec.
-	var stale []*Action
 	for key, a := range existingByKey {
-		if _, ok := incomingKeys[key]; ok {
-			continue
+		if _, ok := incomingKeys[key]; !ok {
+			plan.Stale = append(plan.Stale, a)
 		}
-		stale = append(stale, a)
 	}
-	if err := k.deactivateImported(ctx, stale, resetStats); err != nil {
+	for _, op := range incoming {
+		ex, ok := existingByKey[op.key]
+		switch {
+		case !ok:
+			plan.New = append(plan.New, op)
+		case changed(ex, op):
+			plan.Changed = append(plan.Changed, importChange{existing: ex, op: op})
+		default:
+			plan.Unchanged = append(plan.Unchanged, importChange{existing: ex, op: op})
+		}
+	}
+	sort.Slice(plan.New, func(i, j int) bool { return plan.New[i].name < plan.New[j].name })
+	sort.Slice(plan.Changed, func(i, j int) bool { return plan.Changed[i].op.name < plan.Changed[j].op.name })
+	sort.Slice(plan.Unchanged, func(i, j int) bool { return plan.Unchanged[i].op.name < plan.Unchanged[j].op.name })
+	sort.Slice(plan.Stale, func(i, j int) bool { return plan.Stale[i].Name < plan.Stale[j].Name })
+	return plan
+}
+
+// commitProxyImport applies a classified federation import through the proxy cache lifecycle: a
+// proxy row is kernel-managed cache state, so local usage stats survive a contract change and no
+// consent can be attached to revoke (§8).
+func (k *Kernel) commitProxyImport(ctx context.Context, plan importPlan) (*ImportResult, error) {
+	var result ImportResult
+	if err := k.deactivateImported(ctx, plan.Stale, false); err != nil {
 		return nil, err
 	}
-	result.Deactivated = append(result.Deactivated, stale...)
-
-	// Process each incoming op.
-	for _, op := range incoming {
-		if ex, ok := existingByKey[op.key]; ok {
-			if hashOf(ex) == op.hash {
-				// An unchanged contract normally writes nothing. A proxy still missing its seller
-				// price is the exception: that field is local bookkeeping, absent from the contract
-				// hash, so without this a legacy row would re-resolve forever and never acquire it
-				// (§16). Apply in place, preserving active state and stats — the contract really is
-				// unchanged; only our own snapshot was missing.
-				if ex.Kind == KindRemoteProxy && ex.BasePrice == nil {
-					op.apply(ex)
-					ex.UpdatedAt = time.Now().UTC()
-					if err := k.store.UpdateAction(ctx, ex); err != nil {
-						return nil, err
-					}
-				}
-				result.Unchanged = append(result.Unchanged, ex)
-			} else {
-				ex.Active = false
-				ex.UpdatedAt = time.Now().UTC()
-				op.apply(ex)
-				if resetStats {
-					if err := k.store.UpdateActionAndResetStats(ctx, ex); err != nil {
-						return nil, err
-					}
-				} else {
-					if err := k.store.UpdateAction(ctx, ex); err != nil {
-						return nil, err
-					}
-				}
-				result.Updated = append(result.Updated, ex)
-			}
-		} else {
-			// new() supplies identity and lifecycle; apply() is the single writer of every contract
-			// field, on create exactly as on update, so the two paths cannot diverge.
-			a := op.new()
-			op.apply(a)
-			if err := k.store.CreateAction(ctx, a); err != nil {
+	result.Deactivated = append(result.Deactivated, plan.Stale...)
+	for _, ch := range plan.Changed {
+		ch.existing.Active = false
+		ch.op.apply(ch.existing)
+		ch.existing.UpdatedAt = time.Now().UTC()
+		if err := k.store.UpdateAction(ctx, ch.existing); err != nil {
+			return nil, err
+		}
+		result.Updated = append(result.Updated, ch.existing)
+	}
+	for _, op := range plan.New {
+		a := op.new()
+		op.apply(a)
+		if err := k.store.CreateAction(ctx, a); err != nil {
+			return nil, err
+		}
+		result.Created = append(result.Created, a)
+	}
+	for _, ch := range plan.Unchanged {
+		// An unchanged contract normally writes nothing. A proxy still missing its seller price is
+		// the exception: that field is local bookkeeping, absent from the contract hash, so without
+		// this a legacy row would re-resolve forever and never acquire it (§16). Apply in place,
+		// preserving active state and stats — the contract really is unchanged; only our own
+		// snapshot was missing.
+		if ch.existing.Kind == KindRemoteProxy && ch.existing.BasePrice == nil {
+			ch.op.apply(ch.existing)
+			ch.existing.UpdatedAt = time.Now().UTC()
+			if err := k.store.UpdateAction(ctx, ch.existing); err != nil {
 				return nil, err
 			}
-			result.Created = append(result.Created, a)
 		}
+		result.Unchanged = append(result.Unchanged, ch.existing)
 	}
-
 	return &result, nil
 }
 
@@ -3221,14 +3406,8 @@ func (k *Kernel) deactivateImported(ctx context.Context, actions []*Action, rese
 	for _, a := range actions {
 		a.Active = false
 		a.UpdatedAt = time.Now().UTC()
-		if resetStats {
-			if err := k.store.UpdateActionAndResetStats(ctx, a); err != nil {
-				return err
-			}
-		} else {
-			if err := k.store.UpdateAction(ctx, a); err != nil {
-				return err
-			}
+		if err := k.store.UpdateActionLifecycle(ctx, a, resetStats, false); err != nil {
+			return err
 		}
 	}
 	return nil

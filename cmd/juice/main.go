@@ -274,8 +274,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	k := kernel.New(kernel.Dependencies{
 		Store:    db,
 		Scripts:  exec,
-		HTTP:     httpExec,
-		Fetcher:  httpExec, // one cohesive HTTP concern: dispatch + ordinary fetching
+		HTTP:     httpExec, // one cohesive HTTP concern: dispatch + ordinary fetching
 		Embedder: embedder,
 		Config:   cfg,
 		Logger:   logger,

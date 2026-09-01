@@ -399,7 +399,6 @@ func init() {
 		actionShowCmd(),
 		actionDeleteCmd(),
 		actionImportCmd(),
-		actionUnimportCmd(),
 		actionStatsCmd(),
 		actionRatingsCmd(),
 	)
@@ -472,15 +471,10 @@ func actionUpdateCmd() *cobra.Command {
 	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
-		Use:   "update <action>",
-		Short: "Update an action",
+		Use:   "update <action|path>",
+		Short: "Update an action or a path",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			ctx := context.Background()
-			id, err := resolveActionID(ctx, args[0])
-			if err != nil {
-				return err
-			}
 			// Pointer fields carry the absent/set distinction the contract defines (§14): a flag the
 			// user did not pass stays nil, so the server leaves that term alone.
 			var req kernel.UpdateActionRequest
@@ -530,7 +524,7 @@ func actionUpdateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
 			}
-			return apiEmit("PUT", "/v1/actions/"+id, req)
+			return apiEmit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req})
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
@@ -547,11 +541,30 @@ func actionUpdateCmd() *cobra.Command {
 }
 
 func actionEnableCmd() *cobra.Command {
-	return actionActiveCmd("enable <action>", "Enable an action", "enable", "enabled", true)
+	return actionActiveCmd("enable <action|path>", "Enable an action or a path", "enable", "enabled", true)
 }
 
 func actionDisableCmd() *cobra.Command {
-	return actionActiveCmd("disable <action>", "Disable an action", "disable", "disabled", false)
+	return actionActiveCmd("disable <action|path>", "Disable an action or a path", "disable", "disabled", false)
+}
+
+// targetRequest addresses a mutation: an action id names exactly one row, an owner/path names the
+// action at that path and everything beneath it. The CLI passes what the user typed, unexamined —
+// the two shapes are disjoint, and the server owns the resolution (§14).
+type targetRequest struct {
+	Target string `json:"target"`
+	kernel.UpdateActionRequest
+}
+
+// reportActions prints the rows a mutation touched, named rather than counted.
+func reportActions(as []actionResp, verb string) error {
+	if flagJSON {
+		return printJSON(as)
+	}
+	for _, a := range as {
+		fmt.Printf("%s %s\n", verb, a.ActionRef)
+	}
+	return nil
 }
 
 // actionRunE adapts a command body that needs the resolved action id: every action subcommand
@@ -574,16 +587,14 @@ func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.C
 		Use:   use,
 		Short: short,
 		Args:  cobra.ExactArgs(1),
-		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			if err := apiCall(ctx, "POST", "/v1/actions/"+id+"/"+suffix, nil, nil); err != nil {
+		RunE: func(_ *cobra.Command, args []string) error {
+			var as []actionResp
+			if err := apiCall(context.Background(), "POST", "/v1/actions/"+suffix,
+				map[string]string{"target": args[0]}, &as); err != nil {
 				return err
 			}
-			if flagJSON {
-				return printJSON(map[string]bool{"active": active})
-			}
-			fmt.Printf("Action %s %s.\n", ref, pastTense)
-			return nil
-		}),
+			return reportActions(as, pastTense)
+		},
 	}
 }
 
@@ -661,76 +672,80 @@ func actionShowCmd() *cobra.Command {
 
 func actionDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <action>",
-		Short: "Delete an action, preserving history",
+		Use:   "delete <action|path>",
+		Short: "Delete an action or a path, keeping history",
 		Args:  cobra.ExactArgs(1),
-		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			if err := apiCall(ctx, "DELETE", "/v1/actions/"+id, nil, nil); err != nil {
+		RunE: func(_ *cobra.Command, args []string) error {
+			q := url.Values{"target": {args[0]}}
+			var as []actionResp
+			if err := apiCall(context.Background(), "DELETE", "/v1/actions?"+q.Encode(), nil, &as); err != nil {
 				return err
 			}
-			fmt.Printf("Action %s deleted.\n", ref)
-			return nil
-		}),
+			return reportActions(as, "deleted")
+		},
 	}
 }
 
 func actionImportCmd() *cobra.Command {
-	var as string
+	var authStr string
 	cmd := &cobra.Command{
-		Use:   "import <spec-url>",
-		Short: "Import OpenAPI operations",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			specURL := args[0]
-			body := map[string]any{"spec_url": specURL}
-			if as != "" {
-				body["as"] = as
+		Use:   "import <name> [<spec-url>]",
+		Short: "Import an OpenAPI document as one application",
+		Long: "Import one OpenAPI document as the application at <name>, one action per operation.\n" +
+			"The URL is given once; `juice action import <name>` then re-reads it, keeping each\n" +
+			"action's id, history, credentials, and any price you set yourself.",
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(c *cobra.Command, args []string) error {
+			body := map[string]any{"name": args[0]}
+			if len(args) == 2 {
+				body["spec_url"] = args[1]
+			}
+			if c.Flags().Changed("auth") {
+				auth := &kernel.AuthInput{}
+				if err := unmarshalJSONArg(authStr, auth); err != nil {
+					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
+				}
+				body["auth"] = auth
 			}
 			var result kernel.ImportResult
-			if err := apiCall(context.Background(), "POST", "/v1/actions/import",
-				body, &result); err != nil {
+			if err := apiCall(context.Background(), "POST", "/v1/actions/import", body, &result); err != nil {
 				return err
 			}
 			if flagJSON {
 				return printJSON(result)
 			}
-			fmt.Printf("created=%d unchanged=%d updated=%d deactivated=%d rejected=%d\n",
-				len(result.Created), len(result.Unchanged), len(result.Updated),
-				len(result.Deactivated), len(result.Rejected))
+			var counts []string
+			for _, group := range []struct {
+				verb string
+				rows []*kernel.Action
+			}{
+				{"imported", result.Created},
+				{"updated", result.Updated},
+				{"unchanged", result.Unchanged},
+				{"withdrawn", result.Deactivated},
+			} {
+				for _, a := range group.rows {
+					fmt.Printf("%s %s\n", group.verb, a.Name)
+				}
+				if len(group.rows) > 0 {
+					counts = append(counts, fmt.Sprintf("%d %s", len(group.rows), group.verb))
+				}
+			}
 			for _, r := range result.Rejected {
-				fmt.Printf("  rejected %s: %s\n", r.Key, r.Reason)
+				fmt.Printf("skipped %s: %s\n", r.Key, r.Reason)
 			}
+			if len(result.Rejected) > 0 {
+				counts = append(counts, fmt.Sprintf("%d skipped", len(result.Rejected)))
+			}
+			if len(counts) == 0 {
+				fmt.Printf("%s: nothing to do.\n", args[0])
+				return nil
+			}
+			fmt.Printf("%s: %s.\n", args[0], strings.Join(counts, ", "))
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&as, "as", "", "Import the operations under this name prefix (--as mail names them mail/<operation>)")
-	return cmd
-}
-
-func actionUnimportCmd() *cobra.Command {
-	var name string
-	cmd := &cobra.Command{
-		Use:   "unimport <spec-url>",
-		Short: "Deactivate OpenAPI-imported actions",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			specURL := args[0]
-			body := map[string]any{"spec_url": specURL}
-			if name != "" {
-				body["name"] = name
-			}
-			var actions []actionResp
-			if err := apiCall(context.Background(), "POST", "/v1/actions/unimport", body, &actions); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(actions)
-			}
-			fmt.Printf("deactivated %d action(s)\n", len(actions))
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&name, "name", "", "Deactivate only this name or operation_key")
+	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json), applied to every operation")
 	return cmd
 }
 

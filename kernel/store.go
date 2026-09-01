@@ -53,12 +53,6 @@ type GrantStore interface {
 	DeleteConnectionCascade(ctx context.Context, id string) error
 }
 
-// URLFetcher retrieves the body of a URL. Used for OpenAPI ownership proof (well-known challenge).
-// Injected explicitly (Dependencies.Fetcher); a nil fetcher disables well-known proof.
-type URLFetcher interface {
-	FetchURL(ctx context.Context, rawURL string) ([]byte, error)
-}
-
 // FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
 // transport (§13), addressing the peer by its Ed25519 public key. actionID is the action's stable
 // id on that peer; expectedContractHash is the cached contract hash the call
@@ -222,13 +216,16 @@ type Store interface {
 	ReadAction(ctx context.Context, id string) (*Action, error)
 	ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*Action, error)
 	ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*Action, error)
-	// ListActionsByOwnerOpenAPISpec returns all non-deleted actions with matching owner + OpenAPI spec_url.
-	ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*Action, error)
 	UpdateAction(ctx context.Context, a *Action) error
-	// UpdateActionAndResetStats atomically updates the action record and zeros its stats row.
-	// Used during import reconciliation to ensure contract changes and stat resets are coherent.
-	UpdateActionAndResetStats(ctx context.Context, a *Action) error
+	// UpdateActionLifecycle atomically updates the action record and, as flagged, zeros its stats
+	// row and deletes its delegated grants. One update can need both effects at once — an active
+	// source change on a delegated action changes the contract and invalidates standing consent —
+	// so the two are flags on one commit rather than separate operations (§5).
+	UpdateActionLifecycle(ctx context.Context, a *Action, resetStats, revokeGrants bool) error
 	DeleteAction(ctx context.Context, id string) error
+	// DeleteActionAndGrants atomically soft-deletes the action and deletes its delegated grants:
+	// a deleted action can never be called again, so no consent may outlive it (§5, §8).
+	DeleteActionAndGrants(ctx context.Context, id string) error
 	// ListVisibleActions returns active non-deleted actions with a non-suspended owner, network-wide
 	// (visibility=public) and, when includeLocal is set, also kernel-local ones (§4/§14).
 	ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error)

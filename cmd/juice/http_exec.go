@@ -218,25 +218,13 @@ const (
 	callbackHeader   = "X-Juice-Callback"
 )
 
-// httpActionExecutor dispatches kind=http actions and fetches URLs — one cohesive HTTP concern
-// (kernel.HTTPExecutor + kernel.URLFetcher). Federation lives in fedClient, not here.
+// httpActionExecutor dispatches kind=http actions — one cohesive HTTP concern
+// (kernel.HTTPExecutor). Federation lives in fedClient, not here.
 type httpActionExecutor struct {
 	timeout     time.Duration
 	allowLocal  bool
 	callbackURL string         // §9 base URL advertised to dispatched endpoints for callbacks; "" disables composition
 	auth        *authenticator // §9 upstream-auth adapter; nil when no credentials box
-}
-
-// FetchURL retrieves the body of a URL. Implements kernel.URLFetcher for ownership proof checks.
-func (e *httpActionExecutor) FetchURL(ctx context.Context, rawURL string) ([]byte, error) {
-	body, status, err := doHTTP(ctx, http.MethodGet, rawURL, nil, nil, 0, e.allowLocal)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("HTTP %d from %s", status, rawURL)
-	}
-	return body, nil
 }
 
 // fetchWeb performs a read-only GET for the @sys/web native action, returning the

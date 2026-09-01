@@ -2644,59 +2644,93 @@ func TestIdempotencyStateMachine(t *testing.T) {
 	}
 }
 
-func TestListActionsByOwnerOpenAPISpec(t *testing.T) {
+// TestUpdateActionLifecycle: one commit carries the row, the stats reset, and the grant
+// revocation, in every combination — an update can need both effects at once (§5).
+func TestUpdateActionLifecycle(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("oapi-owner", 0)
-	other := newUser("oapi-other", 0)
-	_ = db.CreateUser(ctx, owner)
-	_ = db.CreateUser(ctx, other)
+	user := newUser("lifecycle-owner", 0)
+	_ = db.CreateUser(ctx, user)
 
-	specURL := "https://spec.example.com/api.json"
-	specURL2 := "https://spec.example.com/api2.json"
-
-	makeSrc := func(su, key string) string {
-		src := kernel.HTTPSource{
-			Type: "openapi", SpecURL: su, OperationKey: key,
-			BaseURL: "https://api.example.com", Method: "GET", Path: "/" + key,
+	setup := func(name string) *kernel.Action {
+		a := newAction(user.ID, name, 5, true)
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
 		}
-		b, _ := json.Marshal(src)
-		return string(b)
+		st := kernel.DefaultStats(a.ID)
+		st.Uses, st.Successes = 3, 3
+		if err := db.UpsertStats(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
+		if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+		return a
 	}
 
-	// Action matching owner + specURL.
-	a1 := newAction(owner.ID, "oapi-owner/op1", 0, false)
-	a1.Source = makeSrc(specURL, "op1")
-	_ = db.CreateAction(ctx, a1)
-
-	// Action matching owner + specURL2 (different spec; must not appear).
-	a2 := newAction(owner.ID, "oapi-owner/op2", 0, false)
-	a2.Source = makeSrc(specURL2, "op2")
-	_ = db.CreateAction(ctx, a2)
-
-	// Action owned by other user for specURL (must not appear).
-	a3 := newAction(other.ID, "oapi-other/op1", 0, false)
-	a3.Source = makeSrc(specURL, "op1")
-	_ = db.CreateAction(ctx, a3)
-
-	// Plain HTTP action with no OpenAPI source (must not appear).
-	a4 := newAction(owner.ID, "oapi-owner/plain", 0, false)
-	_ = db.CreateAction(ctx, a4)
-
-	got, err := db.ListActionsByOwnerOpenAPISpec(ctx, owner.ID, specURL)
-	if err != nil {
-		t.Fatalf("ListActionsByOwnerOpenAPISpec: %v", err)
+	for _, tc := range []struct {
+		name                     string
+		resetStats, revokeGrants bool
+	}{
+		{"neither", false, false},
+		{"stats only", true, false},
+		{"grants only", false, true},
+		{"both", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := setup("svc-" + strings.ReplaceAll(tc.name, " ", "-"))
+			a.Description = "moved"
+			if err := db.UpdateActionLifecycle(ctx, a, tc.resetStats, tc.revokeGrants); err != nil {
+				t.Fatalf("UpdateActionLifecycle: %v", err)
+			}
+			got, _ := db.ReadAction(ctx, a.ID)
+			if got.Description != "moved" {
+				t.Errorf("row not written: description = %q", got.Description)
+			}
+			st, _ := db.ReadStats(ctx, a.ID)
+			if tc.resetStats && st.Uses != 0 {
+				t.Errorf("stats not reset: uses = %d", st.Uses)
+			}
+			if !tc.resetStats && st.Uses != 3 {
+				t.Errorf("stats reset when they should stand: uses = %d", st.Uses)
+			}
+			_, err := db.ReadGrant(ctx, user.ID, a.ID)
+			if tc.revokeGrants && !errors.Is(err, kernel.ErrNotFound) {
+				t.Errorf("grant survived revocation: %v", err)
+			}
+			if !tc.revokeGrants && err != nil {
+				t.Errorf("grant revoked when it should stand: %v", err)
+			}
+		})
 	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 action, got %d", len(got))
+}
+
+// TestDeleteActionAndGrants: a deleted action can never be called again, so no consent outlives it,
+// and both go in one commit.
+func TestDeleteActionAndGrants(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	user := newUser("delete-owner", 0)
+	_ = db.CreateUser(ctx, user)
+	a := newAction(user.ID, "doomed", 0, true)
+	_ = db.CreateAction(ctx, a)
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
+	if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+		t.Fatal(err)
 	}
-	if got[0].ID != a1.ID {
-		t.Errorf("id: got %q, want %q", got[0].ID, a1.ID)
+
+	if err := db.DeleteActionAndGrants(ctx, a.ID); err != nil {
+		t.Fatalf("DeleteActionAndGrants: %v", err)
 	}
-	_ = a2
-	_ = a3
-	_ = a4
+	if got, _ := db.ReadAction(ctx, a.ID); got != nil {
+		t.Error("action still readable after delete")
+	}
+	if _, err := db.ReadGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("grant survived the action it consented to: %v", err)
+	}
 }
 
 func TestInitFirstBootConfigPreservesExisting(t *testing.T) {
@@ -2988,8 +3022,8 @@ func TestUpdateActionAndResetStats(t *testing.T) {
 	a.Active = false
 	a.Description = "updated description"
 	a.UpdatedAt = a.UpdatedAt.Add(1)
-	if err := db.UpdateActionAndResetStats(ctx, a); err != nil {
-		t.Fatalf("UpdateActionAndResetStats: %v", err)
+	if err := db.UpdateActionLifecycle(ctx, a, true, false); err != nil {
+		t.Fatalf("UpdateActionLifecycle: %v", err)
 	}
 
 	// Action must reflect the update.

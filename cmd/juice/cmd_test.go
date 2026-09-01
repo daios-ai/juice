@@ -67,7 +67,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	box, _ := newAESGCMBox(make([]byte, 32))
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), allowLocal: true}
 	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: log.Discard()})
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Config: cfg, Logger: log.Discard()})
 	k.SetSecretBox(box)
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
@@ -620,7 +620,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, actionImportCmd(), specSrv.URL+"/spec.json"); err != nil {
+	if _, err := execTestCmd(t, actionImportCmd(), "mail", specSrv.URL+"/spec.json"); err != nil {
 		t.Fatalf("action import: %v", err)
 	}
 
@@ -630,43 +630,85 @@ func TestActionImportOpenAPI(t *testing.T) {
 	}
 	found := false
 	for _, a := range actions {
-		if a.Name == "sayHello" {
+		if a.Name == "mail/sayHello" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected sayHello in actions after import")
+		t.Error("expected mail/sayHello in actions after import")
+	}
+
+	// The document was named once: a re-import needs only the application's own name.
+	if _, err := execTestCmd(t, actionImportCmd(), "mail"); err != nil {
+		t.Fatalf("re-import by name: %v", err)
 	}
 }
 
-func TestActionUnimportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(spec))
-	}))
-	defer specSrv.Close()
-
+// TestActionTreeVerbsCLI: the CLI hands the target over as typed, so one command reaches a whole
+// application and an id still reaches exactly one row.
+func TestActionTreeVerbsCLI(t *testing.T) {
 	env := newTestEnv(t)
-	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
+	ctx := context.Background()
 
-	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "cli-unimport-owner", Password: "pass",
-	})
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "treeowner", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := loginTokenFor(env.k, context.Background(), "cli-unimport-owner", "pass")
+	tok, _ := loginTokenFor(env.k, ctx, "treeowner", "pass")
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
-
-	specURL := specSrv.URL + "/spec.json"
-	if _, err := execTestCmd(t, actionImportCmd(), specURL); err != nil {
-		t.Fatalf("import: %v", err)
+	mk := func(name string) *kernel.Action {
+		a, cerr := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			Source: "http://example.com", Description: "an action",
+			InputSchema: minSchema, OutputSchema: minSchema,
+		})
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
+		return a
 	}
-	if _, err := execTestCmd(t, actionUnimportCmd(), specURL); err != nil {
-		t.Fatalf("unimport: %v", err)
+	root, member, sibling := mk("mail"), mk("mail/send"), mk("mailer")
+
+	out := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionEnableCmd(), "treeowner/mail")
+		return err
+	})
+	if !strings.Contains(out, "treeowner/mail/send") || strings.Contains(out, "treeowner/mailer") {
+		t.Errorf("enable must name the rows it touched and no others: %q", out)
+	}
+	for _, a := range []*kernel.Action{root, member} {
+		got, _ := env.k.ReadAction(ctx, a.ID)
+		if !got.Active {
+			t.Errorf("%s should be enabled by the tree command", got.Name)
+		}
+	}
+	if got, _ := env.k.ReadAction(ctx, sibling.ID); got.Active {
+		t.Error("mailer is outside the mail tree and must be untouched")
+	}
+
+	// An id still names exactly one row.
+	if _, err := execTestCmd(t, actionDisableCmd(), member.ID); err != nil {
+		t.Fatalf("disable by id: %v", err)
+	}
+	if got, _ := env.k.ReadAction(ctx, member.ID); got.Active {
+		t.Error("disable by id did not take effect")
+	}
+	if got, _ := env.k.ReadAction(ctx, root.ID); !got.Active {
+		t.Error("disable by id must not reach the rest of the tree")
+	}
+
+	if _, err := execTestCmd(t, actionDeleteCmd(), "treeowner/mail"); err != nil {
+		t.Fatalf("delete tree: %v", err)
+	}
+	for _, a := range []*kernel.Action{root, member} {
+		if got, _ := env.k.ReadAction(ctx, a.ID); got != nil {
+			t.Errorf("%s should be deleted", a.Name)
+		}
+	}
+	if got, _ := env.k.ReadAction(ctx, sibling.ID); got == nil {
+		t.Error("mailer must survive deletion of the mail tree")
 	}
 }
 
@@ -931,12 +973,12 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 		t.Fatalf("create action %s: expected 201, got %d", name, cr.StatusCode)
 	}
 	id := act["id"].(string)
-	er := httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok)
+	er := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": id}, ownerTok)
 	er.Body.Close()
 	if er.StatusCode != http.StatusOK {
 		t.Fatalf("enable action %s: expected 200, got %d", name, er.StatusCode)
 	}
-	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": id, "visibility": "public"}, ownerTok).Body.Close()
 	return id, handle + "/" + name
 }
 
@@ -1686,10 +1728,10 @@ func TestCLIActionRatings(t *testing.T) {
 	}
 }
 
-// TestActionImportAsAndRootReference: `action import --as` lands one spec as one application, and
-// every action subcommand reaches the group by its own name — the reference travels untouched to
-// the server, so the CLI holds no naming rules of its own.
-func TestActionImportAsAndRootReference(t *testing.T) {
+// TestActionImportNameAndRootReference: `action import <name>` lands one document as one
+// application, and every action subcommand reaches it by its own name — the reference travels
+// untouched to the server, so the CLI holds no naming rules of its own.
+func TestActionImportNameAndRootReference(t *testing.T) {
 	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1709,9 +1751,8 @@ func TestActionImportAsAndRootReference(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := actionImportCmd()
-	if _, err := execTestCmd(t, cmd, specSrv.URL+"/spec.json", "--as", "mail"); err != nil {
-		t.Fatalf("action import --as: %v", err)
+	if _, err := execTestCmd(t, actionImportCmd(), "mail", specSrv.URL+"/spec.json"); err != nil {
+		t.Fatalf("action import: %v", err)
 	}
 	names := map[string]bool{}
 	actions, err := env.k.ListAllActions(ctx, 100, 0)
@@ -1722,7 +1763,7 @@ func TestActionImportAsAndRootReference(t *testing.T) {
 		names[a.Name] = true
 	}
 	if !names["mail/index"] || !names["mail/greet"] {
-		t.Fatalf("imported under the prefix: got %v", names)
+		t.Fatalf("imported under the application name: got %v", names)
 	}
 
 	// The group answers to its own name, and so does the owner's root once one exists.
@@ -1739,8 +1780,12 @@ func TestActionImportAsAndRootReference(t *testing.T) {
 	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner"); err != nil {
 		t.Errorf("action show on the owner root: %v", err)
 	}
-	// A prefix that would relocate an imported spec is refused at the CLI too.
-	if _, err := execTestCmd(t, actionImportCmd(), specSrv.URL+"/spec.json", "--as", "inbox"); err == nil {
-		t.Error("relocation must be refused")
+	// The same document under a second name is an independent application, and a second document
+	// under an occupied name is refused — both decided by the server, not the CLI.
+	if _, err := execTestCmd(t, actionImportCmd(), "inbox", specSrv.URL+"/spec.json"); err != nil {
+		t.Errorf("a second installation of one document: %v", err)
+	}
+	if _, err := execTestCmd(t, actionImportCmd(), "mail", specSrv.URL+"/other.json"); err == nil {
+		t.Error("re-binding a name to another document must be refused")
 	}
 }

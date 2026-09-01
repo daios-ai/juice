@@ -629,28 +629,64 @@ func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
 	})
 }
 
-func (s *DB) UpdateActionAndResetStats(ctx context.Context, a *kernel.Action) error {
-	return s.withTx(ctx, "update action and reset stats", func(tx *sql.Tx) error {
+// resetStatsTx zeros an action's stats row inside tx, creating it when absent.
+func resetStatsTx(ctx context.Context, tx *sql.Tx, actionID string) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
+		 VALUES (?,0,0,0,0,0,0,?)
+		 ON CONFLICT(action_id) DO UPDATE SET
+		   uses=0,successes=0,failures=0,rating_count=0,
+		   latency_estimate=0,rating_estimate=0,last_used_at=excluded.last_used_at`,
+		actionID, timeToStr(time.Time{}),
+	)
+	return dbErr(err, "reset stats")
+}
+
+// deleteGrantsForActionTx is the transaction-local form of DeleteGrantsForAction, so a lifecycle
+// commit revokes consent in the same transaction that changes the action (§5).
+func deleteGrantsForActionTx(ctx context.Context, tx *sql.Tx, actionID string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM grants WHERE action_id=?`, actionID)
+	return dbErr(err, "delete grants for action")
+}
+
+func (s *DB) UpdateActionLifecycle(ctx context.Context, a *kernel.Action, resetStats, revokeGrants bool) error {
+	return s.withTx(ctx, "update action lifecycle", func(tx *sql.Tx) error {
 		if err := s.updateActionTx(ctx, tx, a); err != nil {
 			return err
 		}
-		zeroTime := timeToStr(time.Time{})
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO action_stats (action_id,uses,successes,failures,rating_count,latency_estimate,rating_estimate,last_used_at)
-			 VALUES (?,0,0,0,0,0,0,?)
-			 ON CONFLICT(action_id) DO UPDATE SET
-			   uses=0,successes=0,failures=0,rating_count=0,
-			   latency_estimate=0,rating_estimate=0,last_used_at=excluded.last_used_at`,
-			a.ID, zeroTime,
-		)
-		return dbErr(err, "update action and reset stats: reset stats")
+		if resetStats {
+			if err := resetStatsTx(ctx, tx, a.ID); err != nil {
+				return err
+			}
+		}
+		if revokeGrants {
+			if err := deleteGrantsForActionTx(ctx, tx, a.ID); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-func (s *DB) DeleteAction(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE actions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,
+func (s *DB) deleteActionTx(ctx context.Context, tx *sql.Tx, id string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE actions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,
 		timeToStr(time.Now().UTC()), id)
 	return dbErr(err, "delete action")
+}
+
+func (s *DB) DeleteAction(ctx context.Context, id string) error {
+	return s.withTx(ctx, "delete action", func(tx *sql.Tx) error {
+		return s.deleteActionTx(ctx, tx, id)
+	})
+}
+
+func (s *DB) DeleteActionAndGrants(ctx context.Context, id string) error {
+	return s.withTx(ctx, "delete action and grants", func(tx *sql.Tx) error {
+		if err := s.deleteActionTx(ctx, tx, id); err != nil {
+			return err
+		}
+		return deleteGrantsForActionTx(ctx, tx, id)
+	})
 }
 
 func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*kernel.Action, error) {
@@ -701,21 +737,6 @@ func (s *DB) ListNativeActions(ctx context.Context) ([]*kernel.Action, error) {
 		return nil, dbErr(err, "list native actions")
 	}
 	return queryList(rows, "list native actions", scanActionFn)
-}
-
-func (s *DB) ListActionsByOwnerOpenAPISpec(ctx context.Context, ownerID, specURL string) ([]*kernel.Action, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
-		 WHERE a.owner_user_id=?
-		   AND a.deleted_at IS NULL
-		   AND json_valid(a.source)=1
-		   AND json_extract(a.source,'$.type')='openapi'
-		   AND json_extract(a.source,'$.spec_url')=?`,
-		ownerID, specURL)
-	if err != nil {
-		return nil, dbErr(err, "list actions by openapi spec")
-	}
-	return queryList(rows, "list actions by openapi spec", scanActionFn)
 }
 
 func scanActionFn(scan func(...any) error) (*kernel.Action, error) {

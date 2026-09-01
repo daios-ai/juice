@@ -2,7 +2,7 @@ package kernel
 
 // This file contains tests that must remain in package kernel because they
 // exercise unexported functions (validateHTTPSource, signRating,
-// remoteManifestHash, openAPIOperationHash, parseOpenAPISpec, buildReceipt).
+// remoteManifestHash, documentMoved, parseOpenAPISpec, buildReceipt).
 
 import (
 	"context"
@@ -288,29 +288,59 @@ func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	}
 }
 
-func TestOpenAPIOperationHashIncludesParams(t *testing.T) {
+func TestDocumentMovedDetectsBindingChange(t *testing.T) {
 	schema := map[string]any{"type": "object"}
-	paramsBody := []HTTPParam{{Name: "data", In: "body"}}
-	paramsQuery := []HTTPParam{{Name: "data", In: "query"}}
+	src := HTTPSource{Type: "openapi", SpecURL: "http://s/spec.json", BaseURL: "http://api.example.com",
+		Method: "POST", Path: "/do", OperationKey: "do", Params: []HTTPParam{{Name: "data", In: "body"}}}
+	srcJSON, _ := json.Marshal(src)
+	existing := &Action{Name: "app/do", Description: "do thing", Price: 0,
+		InputSchema: schema, OutputSchema: schema, Source: string(srcJSON)}
 
-	hashBody := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
-		schema, schema, 0, paramsBody)
-	hashQuery := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
-		schema, schema, 0, paramsQuery)
-
-	if hashBody == hashQuery {
-		t.Error("params with different 'in' values should produce different hashes")
+	same := rawOp{key: "do", description: "do thing", inputSchema: schema, outputSchema: schema, source: src}
+	if documentMoved(existing, same) {
+		t.Error("identical document must compare equal")
 	}
 
-	// Order of params must not affect the hash.
-	p1 := []HTTPParam{{Name: "a", In: "query"}, {Name: "b", In: "body"}}
-	p2 := []HTTPParam{{Name: "b", In: "body"}, {Name: "a", In: "query"}}
-	h1 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
-		schema, schema, 0, p1)
-	h2 := openAPIOperationHash("http://api.example.com", "do thing", "POST", "/do",
-		schema, schema, 0, p2)
-	if h1 != h2 {
-		t.Error("param order should not affect hash")
+	// The same field bound to the query instead of the body is a different upstream request.
+	moved := same
+	moved.source.Params = []HTTPParam{{Name: "data", In: "query"}}
+	if !documentMoved(existing, moved) {
+		t.Error("a changed binding must be detected")
+	}
+
+	// A different upstream host is a different action, even at the same path.
+	rehosted := same
+	rehosted.source.BaseURL = "http://other.example.com"
+	if !documentMoved(existing, rehosted) {
+		t.Error("a changed base URL must be detected")
+	}
+
+	// Params are stored in name order, so a re-parse of one document compares equal to itself.
+	reordered := same
+	reordered.source.Params = []HTTPParam{{Name: "data", In: "body"}}
+	if documentMoved(existing, reordered) {
+		t.Error("an identical binding list must compare equal")
+	}
+}
+
+func TestOpenAPIParamsAreNameOrdered(t *testing.T) {
+	spec := []byte(`{"openapi":"3.0.0","servers":[{"url":"http://api.example.com"}],"paths":{"/do":{"post":{
+		"operationId":"do","description":"do thing",
+		"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{
+			"zulu":{"type":"string"},"alpha":{"type":"string"},"mike":{"type":"string"}}}}}},
+		"responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`)
+	for i := 0; i < 8; i++ {
+		ops, _, _, err := parseOpenAPISpec(spec, "http://s/spec.json")
+		if err != nil || len(ops) != 1 {
+			t.Fatalf("parse: %v (%d ops)", err, len(ops))
+		}
+		var got []string
+		for _, p := range ops[0].source.Params {
+			got = append(got, p.Name)
+		}
+		if len(got) != 3 || got[0] != "alpha" || got[1] != "mike" || got[2] != "zulu" {
+			t.Fatalf("params not name-ordered: %v", got)
+		}
 	}
 }
 

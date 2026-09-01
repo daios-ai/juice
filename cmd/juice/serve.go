@@ -492,13 +492,14 @@ func registerRoutes(r chi.Router, srv *server) {
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware)
 		r.Post("/v1/actions/import", srv.importOpenAPI)
-		r.Post("/v1/actions/unimport", srv.unimportOpenAPI)
 		r.Post("/v1/actions", srv.postAction)
 		r.Get("/v1/actions/{id}", srv.getAction)
-		r.Put("/v1/actions/{id}", srv.updateAction)
-		r.Post("/v1/actions/{id}/enable", srv.setActionActive(true))
-		r.Post("/v1/actions/{id}/disable", srv.setActionActive(false))
-		r.Delete("/v1/actions/{id}", srv.deleteAction)
+		// Mutation is addressed by target, not by path id: one endpoint per verb, whose target is an
+		// action id (exactly that row) or owner/path (that action and everything beneath it, §14).
+		r.Put("/v1/actions", srv.updateActionTarget)
+		r.Post("/v1/actions/enable", srv.setActionActiveTarget(true))
+		r.Post("/v1/actions/disable", srv.setActionActiveTarget(false))
+		r.Delete("/v1/actions", srv.deleteActionTarget)
 
 		// Processes.
 		r.Get("/v1/processes", srv.listProcesses)
@@ -673,7 +674,7 @@ func isActionWriteRoute(r *http.Request) bool {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/actions":
 		return true
-	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
+	case r.Method == http.MethodPut && r.URL.Path == "/v1/actions":
 		return true
 	default:
 		return false
@@ -883,50 +884,36 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SpecURL string `json:"spec_url"`
-		Prefix  string `json:"as"`
+		Name    string            `json:"name"`
+		SpecURL string            `json:"spec_url"`
+		Auth    *kernel.AuthInput `json:"auth"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.SpecURL == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
+	if req.Name == "" {
+		writeErr(w, kernel.ErrInvalidInput.Wrap("name is required"))
 		return
 	}
-	specBytes, err := fetchOpenAPISpec(r.Context(), req.SpecURL, s.kernel.AllowsLocalSources())
+	caller := callerFrom(r)
+	specURL := req.SpecURL
+	// The document is named once, at installation; afterwards the application's own path is enough
+	// and the kernel supplies the URL it recorded (§8).
+	if specURL == "" {
+		stored, err := s.kernel.StoredOpenAPISpecURL(r.Context(), caller, caller, req.Name)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		specURL = stored
+	}
+	specBytes, err := fetchOpenAPISpec(r.Context(), specURL, s.kernel.AllowsLocalSources())
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	result, err := s.kernel.ImportOpenAPI(r.Context(), callerFrom(r), callerFrom(r), req.SpecURL, specBytes, req.Prefix)
+	result, err := s.kernel.ImportOpenAPI(r.Context(), caller, caller, req.Name, specURL, specBytes, req.Auth)
 	writeOr(w, result, err)
-}
-
-func (s *server) unimportOpenAPI(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		SpecURL     string `json:"spec_url"`
-		Name        string `json:"name"`
-		OwnerHandle string `json:"owner_handle"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if req.SpecURL == "" {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("spec_url is required"))
-		return
-	}
-	sub := callerFrom(r)
-	ownerID := sub
-	if req.OwnerHandle != "" {
-		owner, err := s.kernel.ReadUserByHandle(r.Context(), req.OwnerHandle)
-		if err != nil {
-			writeErr(w, kernel.ErrNotFound.Wrap("owner not found"))
-			return
-		}
-		ownerID = owner.ID
-	}
-	actions, err := s.kernel.UnimportOpenAPI(r.Context(), sub, ownerID, req.SpecURL, req.Name)
-	writeOr(w, actions, err)
 }
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
@@ -970,36 +957,32 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, views)
 }
 
-func (s *server) updateAction(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req kernel.UpdateActionRequest) (any, int, error) {
-		req.ID = pathID(r) // path-derived, never the wire
-		a, err := updateAction(s.kernel, r.Context(), callerFrom(r), req)
-		return a, http.StatusOK, err
+func (s *server) updateActionTarget(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, req struct {
+		Target string `json:"target"`
+		kernel.UpdateActionRequest
+	}) (any, int, error) {
+		as, err := updateActions(s.kernel, r.Context(), callerFrom(r), req.Target, req.UpdateActionRequest)
+		return as, http.StatusOK, err
 	})(w, r)
 }
 
-func (s *server) setActionActive(active bool) http.HandlerFunc {
+func (s *server) setActionActiveTarget(active bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		if active {
-			err = s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), true)
-		} else {
-			err = s.kernel.SetActive(r.Context(), callerFrom(r), pathID(r), false)
+		var req struct {
+			Target string `json:"target"`
 		}
-		if err != nil {
-			writeErr(w, err)
+		if !decodeBody(w, r, &req) {
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]bool{"active": active})
+		as, err := setActionsActive(s.kernel, r.Context(), callerFrom(r), req.Target, active)
+		writeOr(w, as, err)
 	}
 }
 
-func (s *server) deleteAction(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.DeleteAction(r.Context(), callerFrom(r), pathID(r)); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+func (s *server) deleteActionTarget(w http.ResponseWriter, r *http.Request) {
+	as, err := deleteActions(s.kernel, r.Context(), callerFrom(r), r.URL.Query().Get("target"))
+	writeOr(w, as, err)
 }
 
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {

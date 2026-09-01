@@ -12,6 +12,30 @@ import (
 	"github.com/google/uuid"
 )
 
+// appOpenAPISpec has two operations, one of them named index, so an installed application has a
+// root that is an ordinary imported action.
+const appOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"what this application is","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+// pricedSpec renders the one-operation spec with an x-juice-price extension, or without one when
+// price is empty, so a test can say whether the document declares a price at all.
+func pricedSpec(price string) string {
+	ext := ""
+	if price != "" {
+		ext = `"x-juice-price":` + price + `,`
+	}
+	return `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello",` + ext +
+		`"description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+}
+
+func sourceOf(t *testing.T, a *kernel.Action) kernel.HTTPSource {
+	t.Helper()
+	var src kernel.HTTPSource
+	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
+		t.Fatalf("action source is not valid HTTPSource JSON: %v", err)
+	}
+	return src
+}
+
 func TestImportOpenAPI(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -20,31 +44,37 @@ func TestImportOpenAPI(t *testing.T) {
 	owner := setupUser(t, st, "oapi-import-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(minOpenAPISpec), nil)
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
 	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d (updated=%d unchanged=%d rejected=%d)",
-			len(result.Created), len(result.Updated), len(result.Unchanged), len(result.Rejected))
+		t.Fatalf("expected 1 created action, got %d (updated=%d unchanged=%d rejected=%+v)",
+			len(result.Created), len(result.Updated), len(result.Unchanged), result.Rejected)
 	}
 	a := result.Created[0]
-	if a.Name != "sayHello" {
-		t.Errorf("name: got %q, want %q", a.Name, "sayHello")
+	if a.Name != "mail/sayHello" {
+		t.Errorf("name: got %q, want %q", a.Name, "mail/sayHello")
 	}
 	if a.Active {
 		t.Error("imported action must be inactive")
 	}
-	var src kernel.HTTPSource
-	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
-		t.Fatalf("action source is not valid HTTPSource JSON: %v", err)
+	if a.Visibility != kernel.VisibilityPrivate {
+		t.Errorf("imported action must start private, got %q", a.Visibility)
 	}
-	if src.OperationKey != "sayHello" {
-		t.Errorf("operation_key: got %q, want %q", src.OperationKey, "sayHello")
+	if src := sourceOf(t, a); src.OperationKey != "sayHello" || src.SpecURL != specURL {
+		t.Errorf("provenance: got key=%q spec=%q", src.OperationKey, src.SpecURL)
 	}
 
-	// Re-import with identical spec → Unchanged.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
+	// Re-import needs the name alone: the document URL was recorded at installation.
+	stored, err := k.StoredOpenAPISpecURL(ctx, owner.ID, owner.ID, "mail")
+	if err != nil {
+		t.Fatalf("StoredOpenAPISpecURL: %v", err)
+	}
+	if stored != specURL {
+		t.Errorf("stored spec url: got %q, want %q", stored, specURL)
+	}
+	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", stored, []byte(minOpenAPISpec), nil)
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
@@ -54,43 +84,311 @@ func TestImportOpenAPI(t *testing.T) {
 	}
 }
 
-func TestUnimportOpenAPI(t *testing.T) {
+// TestImportOpenAPINameIsIdentity: the application's path identifies it. One name holds one
+// document, the same document may be installed under several names, and an application installed
+// beneath another keeps its own rows.
+func TestImportOpenAPINameIsIdentity(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+	specURL := "http://api.example.com/openapi.json"
 
-	owner := setupUser(t, st, "oapi-unimport-owner", 0)
-	specURL := "https://spec.example.com/api.json"
-
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
-		t.Fatalf("ImportOpenAPI: %v", err)
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(appOpenAPISpec), nil); err != nil {
+		t.Fatalf("import: %v", err)
 	}
 
-	actions, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
+	// The same document under a second name is an independent application.
+	second, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "inbox", specURL, []byte(appOpenAPISpec), nil)
 	if err != nil {
-		t.Fatalf("UnimportOpenAPI: %v", err)
+		t.Fatalf("second install: %v", err)
 	}
-	if len(actions) != 1 {
-		t.Fatalf("expected 1 deactivated action, got %d", len(actions))
+	if len(second.Created) != 2 {
+		t.Fatalf("second install: created=%d, want 2", len(second.Created))
+	}
+	for _, a := range second.Created {
+		if !strings.HasPrefix(a.Name, "inbox/") {
+			t.Errorf("second install put %q outside its own name", a.Name)
+		}
 	}
 
-	// UnimportOpenAPI with name filter deactivates only the matching action.
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
-		t.Fatalf("reimport: %v", err)
+	// An application installed beneath another is not absorbed by the parent's re-import.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail/calendar", "http://api.example.com/cal.json", []byte(minOpenAPISpec), nil); err != nil {
+		t.Fatalf("nested install: %v", err)
 	}
-	actions2, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "sayHello")
+	again, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(appOpenAPISpec), nil)
 	if err != nil {
-		t.Fatalf("UnimportOpenAPI by name: %v", err)
+		t.Fatalf("parent re-import: %v", err)
 	}
-	if len(actions2) != 1 {
-		t.Fatalf("expected 1 action for name filter, got %d", len(actions2))
+	if len(again.Deactivated) != 0 {
+		t.Errorf("parent re-import withdrew %d nested row(s); it must see only its own", len(again.Deactivated))
+	}
+	if nested, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/calendar/sayHello"); nested == nil {
+		t.Error("nested application row must survive the parent's re-import")
+	}
+
+	// A different document under an occupied name is refused, and the rows stay put.
+	err = errOf(k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "http://api.example.com/other.json", []byte(minOpenAPISpec), nil))
+	if !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("rebinding a name to another document: want ErrInvalidInput, got %v", err)
+	}
+	if a, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/greet"); a == nil {
+		t.Error("a refused re-binding must leave the installed rows in place")
 	}
 }
 
-// TestUnimportOpenAPILeavesManualHTTPUntouched verifies a manually-created
-// kind=http action (type:"http") owned by the same user is invisible to OpenAPI
-// reconciliation: reimport does not see it and unimport does not deactivate it.
-func TestUnimportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
+// errOf drops an import result and keeps its error, for the refusal cases.
+func errOf(_ *kernel.ImportResult, err error) error { return err }
+
+// TestImportOpenAPIGroupRoot: the operation keyed index is the application's root, so the
+// application answers to its own name.
+func TestImportOpenAPIGroupRoot(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "http://api.example.com/openapi.json", []byte(appOpenAPISpec), nil); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	root, err := k.ResolveAction(ctx, "acme/mail")
+	if err != nil {
+		t.Fatalf("resolve acme/mail: %v", err)
+	}
+	if root.Name != "mail/index" {
+		t.Errorf("acme/mail resolved to %q, want mail/index", root.Name)
+	}
+}
+
+// TestImportOpenAPINameValidation: the name is part of every action name it creates, so it must be
+// addressable — no kernel qualifier, no empty segment, not id-shaped, and never absent.
+func TestImportOpenAPINameValidation(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+
+	for _, bad := range []string{"", "ma@il", "/mail", "mail/", "mail//x", uuid.New().String()} {
+		err := errOf(k.ImportOpenAPI(ctx, owner.ID, owner.ID, bad, "http://api.example.com/s.json", []byte(minOpenAPISpec), nil))
+		if !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("name %q: want ErrInvalidInput, got %v", bad, err)
+		}
+	}
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "  mail  ", "http://api.example.com/ok.json", []byte(minOpenAPISpec), nil)
+	if err != nil {
+		t.Fatalf("padded name: %v", err)
+	}
+	if len(result.Created) != 1 || result.Created[0].Name != "mail/sayHello" {
+		t.Errorf("padded name must trim: got %+v", result.Created)
+	}
+}
+
+// TestImportOpenAPIPriceOwnership: the document owns the price only where it declares one.
+func TestImportOpenAPIPriceOwnership(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+	specURL := "http://api.example.com/openapi.json"
+
+	// No x-juice-price: the owner's price survives a re-import that changes the document.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(pricedSpec("")), nil); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	a, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/sayHello")
+	price := int64(7)
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Price: &price}); err != nil {
+		t.Fatalf("set price: %v", err)
+	}
+	changed := strings.Replace(pricedSpec(""), "says hello", "greets you", 1)
+	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(changed), nil)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if len(res.Updated) != 1 {
+		t.Fatalf("changed description must update the row: %+v", res)
+	}
+	after, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/sayHello")
+	if after.Price != 7 {
+		t.Errorf("an undeclared price belongs to the owner: got %d, want 7", after.Price)
+	}
+
+	// A declared price is the document's, including an explicit zero, which must be distinguishable
+	// from no declaration at all.
+	declared, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(pricedSpec("0")), nil)
+	if err != nil {
+		t.Fatalf("declared-zero import: %v", err)
+	}
+	if len(declared.Updated) != 1 {
+		t.Fatalf("declaring a price is a change: %+v", declared)
+	}
+	afterZero, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/sayHello")
+	if afterZero.Price != 0 {
+		t.Errorf("declared price 0 must apply: got %d", afterZero.Price)
+	}
+	if !sourceOf(t, afterZero).PriceDeclared {
+		t.Error("provenance must record that the document declared a price")
+	}
+
+	// A declared price that is not a non-negative integer is refused, not silently zeroed.
+	for _, bad := range []string{`"5"`, `-1`, `1.5`} {
+		out, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "bad"+strings.Trim(bad, `"-.`), "http://api.example.com/"+strings.Trim(bad, `"-.`)+".json", []byte(pricedSpec(bad)), nil)
+		if err != nil {
+			t.Fatalf("bad price %s: %v", bad, err)
+		}
+		if len(out.Created) != 0 || len(out.Rejected) != 1 || !strings.Contains(out.Rejected[0].Reason, "price") {
+			t.Errorf("bad price %s: want one price rejection, got %+v", bad, out)
+		}
+	}
+}
+
+// TestImportOpenAPIRestoresDocumentFields: the document owns its fields, so a hand edit to one of
+// them is put back on the next import — the comparison is against the row, not a recorded hash.
+func TestImportOpenAPIRestoresDocumentFields(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+	specURL := "http://api.example.com/openapi.json"
+
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(minOpenAPISpec), nil); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	a, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/sayHello")
+	edited := "hand-written description"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Description: &edited}); err != nil {
+		t.Fatalf("hand edit: %v", err)
+	}
+	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(minOpenAPISpec), nil)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if len(res.Updated) != 1 {
+		t.Fatalf("an edited document field must re-import as changed: %+v", res)
+	}
+	back, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/sayHello")
+	if back.Description != "says hello" {
+		t.Errorf("document field not restored: got %q", back.Description)
+	}
+}
+
+// TestImportOpenAPIRejectsDuplicateKeys: two operations claiming one name are caught in the
+// preflight, so the second cannot fail after the first has been written.
+func TestImportOpenAPIRejectsDuplicateKeys(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+
+	dup := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{
+		"/a":{"get":{"operationId":"same","description":"first","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},
+		"/b":{"get":{"operationId":"same","description":"second","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+
+	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "dup", "http://api.example.com/dup.json", []byte(dup), nil)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(res.Created) != 1 {
+		t.Errorf("one of the two duplicates must be installed, got %d", len(res.Created))
+	}
+	if len(res.Rejected) != 1 || !strings.Contains(res.Rejected[0].Reason, "duplicate") {
+		t.Errorf("want one duplicate rejection, got %+v", res.Rejected)
+	}
+}
+
+// TestImportOpenAPIAuthParity: credentials attached at import are validated, sealed, and hidden
+// exactly as `action create` does it — an imported action is an ordinary action.
+func TestImportOpenAPIAuthParity(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	ctx := context.Background()
+	owner := setupUser(t, st, "acme", 0)
+
+	good := []*kernel.AuthInput{
+		{Scheme: "header", Config: map[string]any{"name": "X-Api-Key"}, Secrets: map[string]any{"value": "s3cret"}},
+		{Scheme: "delegated_bearer"},
+	}
+	bad := []*kernel.AuthInput{
+		{Scheme: "no-such-scheme"},
+		{Scheme: "delegated_bearer", Secrets: map[string]any{"token": "owner-side"}},
+	}
+
+	for i, auth := range good {
+		name := "ok" + string(rune('a'+i))
+		res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, name, "http://api.example.com/"+name+".json", []byte(minOpenAPISpec), auth)
+		if err != nil {
+			t.Fatalf("import with %s: %v", auth.Scheme, err)
+		}
+		if len(res.Created) != 1 {
+			t.Fatalf("import with %s: %+v", auth.Scheme, res)
+		}
+		got, _ := k.ReadAction(ctx, res.Created[0].ID)
+		if got.AuthJSON == "" {
+			t.Errorf("%s: credentials were not stored", auth.Scheme)
+		}
+		if strings.Contains(got.AuthJSON, "s3cret") {
+			t.Errorf("%s: secret stored in the clear", auth.Scheme)
+		}
+		// A manual create must accept the same configuration.
+		if _, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: "manual-" + name, Kind: kernel.KindHTTP,
+			Source: "https://api.example.com/x", Method: "POST", Auth: auth,
+		}); err != nil {
+			t.Errorf("create rejects what import accepted (%s): %v", auth.Scheme, err)
+		}
+	}
+
+	for i, auth := range bad {
+		name := "bad" + string(rune('a'+i))
+		err := errOf(k.ImportOpenAPI(ctx, owner.ID, owner.ID, name, "http://api.example.com/"+name+".json", []byte(minOpenAPISpec), auth))
+		if err == nil {
+			t.Errorf("import accepted an invalid auth config (%s)", auth.Scheme)
+		}
+		_, cerr := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: "manual-" + name, Kind: kernel.KindHTTP,
+			Source: "https://api.example.com/x", Method: "POST", Auth: auth,
+		})
+		if cerr == nil {
+			t.Errorf("create accepted what import refused (%s)", auth.Scheme)
+		}
+	}
+
+	// A document that moves revokes the application's standing consent, whether or not its rows
+	// were live: a grant survives a disable, so it must not survive the contract moving under it.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "moving", "http://api.example.com/moving.json", []byte(minOpenAPISpec), good[1]); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	row, _ := k.ReadActionByOwnerName(ctx, owner.ID, "moving/sayHello")
+	grantor := setupUser(t, st, "acme-caller", 0)
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: grantor.ID, ActionID: row.ID, CreatedAt: time.Now().UTC()}
+	if err := st.CreateOrReplaceGrant(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(minOpenAPISpec, "says hello", "greets you", 1)
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "moving", "http://api.example.com/moving.json", []byte(changed), nil); err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if _, gerr := st.ReadGrant(ctx, grantor.ID, row.ID); gerr == nil {
+		t.Error("consent survived a re-import that moved the document")
+	}
+
+	// Attaching credentials to an installed application is a write, reported as such.
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "later", "http://api.example.com/later.json", []byte(minOpenAPISpec), nil); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "later", "http://api.example.com/later.json", []byte(minOpenAPISpec), good[0])
+	if err != nil {
+		t.Fatalf("attach credentials: %v", err)
+	}
+	if len(res.Updated) != 1 || len(res.Unchanged) != 0 {
+		t.Errorf("an auth-only change is a write: updated=%d unchanged=%d", len(res.Updated), len(res.Unchanged))
+	}
+}
+
+// TestImportOpenAPILeavesManualHTTPUntouched: a hand-written kind=http action is invisible to
+// import reconciliation — it belongs to no application.
+func TestImportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -98,35 +396,33 @@ func TestUnimportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
 	owner := setupUser(t, st, "oapi-isolation-owner", 0)
 	specURL := "https://spec.example.com/api.json"
 
-	// A manual http action with the same owner.
 	manual, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "manual-svc", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Name: "mail/manual-svc", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com/manual", Method: "POST",
 	})
 	if err != nil {
 		t.Fatalf("CreateAction: %v", err)
 	}
 
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), ""); err != nil {
+	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(minOpenAPISpec), nil); err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
-	deactivated, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
+	// Even inside the application's path, a hand-written row is not the document's to withdraw.
+	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", specURL, []byte(appOpenAPISpec), nil)
 	if err != nil {
-		t.Fatalf("UnimportOpenAPI: %v", err)
+		t.Fatalf("re-import: %v", err)
 	}
-	for _, a := range deactivated {
+	for _, a := range res.Deactivated {
 		if a.ID == manual.ID {
-			t.Fatal("unimport must not touch the manual http action")
+			t.Fatal("re-import must not withdraw a hand-written action")
 		}
 	}
-	// The manual action's source must still be its structured http form.
 	got, err := k.ReadAction(ctx, manual.ID)
 	if err != nil {
 		t.Fatalf("ReadAction: %v", err)
 	}
-	var s kernel.HTTPSource
-	if err := json.Unmarshal([]byte(got.Source), &s); err != nil || s.Type != "http" {
-		t.Errorf("manual source changed: type=%q err=%v", s.Type, err)
+	if s := sourceOf(t, got); s.Type != "http" {
+		t.Errorf("manual source changed: type=%q", s.Type)
 	}
 }
 
@@ -136,9 +432,8 @@ func TestOpenAPIActivation(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "oapi-activate-owner", 0)
-	specURL := "https://spec.example.com/api.json"
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(minOpenAPISpec), "")
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "https://spec.example.com/api.json", []byte(minOpenAPISpec), nil)
 	if err != nil {
 		t.Fatalf("ImportOpenAPI: %v", err)
 	}
@@ -166,13 +461,12 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 
 	// Craft an HTTPSource with a private execution base URL.
 	src := kernel.HTTPSource{
-		Type:          "openapi",
-		SpecURL:       "https://spec.example.com/api.json",
-		BaseURL:       "http://10.0.0.1",
-		Method:        "GET",
-		Path:          "/secret",
-		OperationKey:  "getSecret",
-		OperationHash: "hash",
+		Type:         "openapi",
+		SpecURL:      "https://spec.example.com/api.json",
+		BaseURL:      "http://10.0.0.1",
+		Method:       "GET",
+		Path:         "/secret",
+		OperationKey: "getSecret",
 	}
 	srcBytes, _ := json.Marshal(src)
 	a := &kernel.Action{
@@ -195,109 +489,6 @@ func TestOpenAPIActivationRejectsPrivateBaseURL(t *testing.T) {
 	}
 }
 
-func TestImportOpenAPISetsOwnershipVerified(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "oapi-owner-verified", 0)
-	specURL := "https://spec.example.com/api.json"
-	specWithOwner := `{"openapi":"3.0.0","x-juice-owner":"oapi-owner-verified","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(specWithOwner), "")
-	if err != nil {
-		t.Fatalf("ImportOpenAPI: %v", err)
-	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
-	}
-	var src kernel.HTTPSource
-	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
-		t.Fatalf("source JSON invalid: %v", err)
-	}
-	if !src.OwnershipVerified {
-		t.Error("expected OwnershipVerified=true when x-juice-owner matches handle")
-	}
-}
-
-func TestMakePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "oapi-grant-owner", 0)
-	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
-	srcBytes, _ := json.Marshal(src)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-grant-owner/sayHello",
-		Kind: kernel.KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-
-	pub := kernel.VisibilityPublic
-	_, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub})
-	if err == nil {
-		t.Fatal("expected error making OpenAPI action public without ownership verification, got nil")
-	}
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized, got %v", err)
-	}
-}
-
-func TestMakePublicOpenAPIWithOwnershipVerified(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "oapi-grant-verified", 0)
-	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: true}
-	srcBytes, _ := json.Marshal(src)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-grant-verified/sayHello",
-		Kind: kernel.KindHTTP, Active: false, Description: "test", Source: string(srcBytes),
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-
-	pub := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
-		t.Errorf("UpdateAction with OwnershipVerified=true: unexpected error: %v", err)
-	}
-}
-
-func TestSetActivePublicOpenAPIRequiresOwnershipVerified(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "oapi-setactive-owner", 0)
-	src := kernel.HTTPSource{Type: "openapi", SpecURL: "https://spec.example.com/api.json", BaseURL: "http://api.example.com", Method: "GET", Path: "/hello", OperationKey: "sayHello", OwnershipVerified: false}
-	srcBytes, _ := json.Marshal(src)
-	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "oapi-setactive-owner/sayHello",
-		Kind: kernel.KindHTTP, Active: false, Visibility: kernel.VisibilityPublic, Description: "test", Source: string(srcBytes),
-		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{}},
-		OutputSchema: map[string]any{"type": "object"},
-		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateAction(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-
-	err := k.SetActive(ctx, owner.ID, a.ID, true)
-	if err == nil {
-		t.Fatal("expected error from SetActive on public unverified OpenAPI action, got nil")
-	}
-	if !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized, got %v", err)
-	}
-}
-
 func TestImportOpenAPISubjectMismatchRejected(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -306,126 +497,9 @@ func TestImportOpenAPISubjectMismatchRejected(t *testing.T) {
 	userA := setupUser(t, st, "user-a-imp", 0)
 	userB := setupUser(t, st, "user-b-imp", 0)
 
-	_, err := k.ImportOpenAPI(ctx, userA.ID, userB.ID, "http://spec.example.com", []byte(minOpenAPISpec), "")
+	err := errOf(k.ImportOpenAPI(ctx, userA.ID, userB.ID, "mail", "http://spec.example.com", []byte(minOpenAPISpec), nil))
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when subject != owner, got %v", err)
-	}
-}
-
-// ---- OpenAPI well-known ownership proof tests ----
-
-func TestImportOpenAPIWellKnownSetsOwnershipVerified(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "wk-owner", 0)
-	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
-		"http://api.example.com/.well-known/juice-owner.txt": "wk-owner",
-	}}
-	k := newTestKernelWithHTTP(st, fetcher)
-
-	specURL := "https://spec.example.com/api.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
-
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
-	if err != nil {
-		t.Fatalf("ImportOpenAPI: %v", err)
-	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
-	}
-	var src kernel.HTTPSource
-	if err := json.Unmarshal([]byte(result.Created[0].Source), &src); err != nil {
-		t.Fatalf("source JSON invalid: %v", err)
-	}
-	if !src.OwnershipVerified {
-		t.Error("expected OwnershipVerified=true from well-known challenge")
-	}
-}
-
-func TestImportOpenAPIOwnershipStalenessFixed(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "stale-owner", 0)
-	// First import: well-known returns owner handle → OwnershipVerified=true.
-	fetcher := &fakeURLFetcher{wellKnown: map[string]string{
-		"http://api.example.com/.well-known/juice-owner.txt": "stale-owner",
-	}}
-	k := newTestKernelWithHTTP(st, fetcher)
-
-	specURL := "https://spec.example.com/api.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
-
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
-	if err != nil || len(result.Created) != 1 {
-		t.Fatalf("first import failed: %v, created=%d", err, len(result.Created))
-	}
-
-	// Second import: well-known now returns wrong handle → proof revoked.
-	fetcher.wellKnown["http://api.example.com/.well-known/juice-owner.txt"] = "other-owner"
-	k2 := newTestKernelWithHTTP(st, fetcher)
-
-	result2, err := k2.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
-	if err != nil {
-		t.Fatalf("second import failed: %v", err)
-	}
-	// Action is Unchanged (hash same) but OwnershipVerified must be updated to false.
-	if len(result2.Unchanged) != 1 {
-		t.Fatalf("expected 1 unchanged action, got %d", len(result2.Unchanged))
-	}
-	a, err := st.ReadAction(ctx, result2.Unchanged[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var src kernel.HTTPSource
-	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
-		t.Fatalf("source JSON: %v", err)
-	}
-	if src.OwnershipVerified {
-		t.Error("expected OwnershipVerified=false after proof was revoked")
-	}
-}
-
-// ---- UnimportOpenAPI owner-only test ----
-
-func TestUnimportOpenAPIOwnerOnly(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "openapi-owner", 0)
-
-	specURL := "https://spec.example.com/admin-test.json"
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"adminHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{"msg":{"type":"string","description":"the message"}}}}}}}}}}}`
-
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
-	if err != nil {
-		t.Fatalf("ImportOpenAPI: %v", err)
-	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
-	}
-
-	// Owner can unimport their own actions.
-	deactivated, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, "")
-	if err != nil {
-		t.Fatalf("UnimportOpenAPI as owner: %v", err)
-	}
-	if len(deactivated) != 1 {
-		t.Errorf("expected 1 deactivated action, got %d", len(deactivated))
-	}
-
-	// Unrelated user should be rejected.
-	other := setupUser(t, st, "openapi-other", 0)
-	// Re-import to have an action to unimport.
-	result2, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
-	if err != nil {
-		t.Fatalf("re-import: %v", err)
-	}
-	_ = result2
-	if _, err := k.UnimportOpenAPI(ctx, other.ID, owner.ID, specURL, ""); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("expected ErrUnauthorized for non-owner, got %v", err)
 	}
 }
 
@@ -435,20 +509,16 @@ func TestOpenAPIRejectMissingName(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "oapi-no-name", 0)
-	specURL := "https://spec.example.com/api.json"
 
 	// Operation has neither operationId nor x-juice-name.
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"description":"says hello","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "https://spec.example.com/api.json", []byte(spec), nil)
 	if err != nil {
 		t.Fatalf("ImportOpenAPI returned error: %v", err)
 	}
 	if len(result.Created) != 0 {
 		t.Errorf("expected 0 created, got %d", len(result.Created))
-	}
-	if len(result.Rejected) == 0 {
-		t.Error("expected at least 1 rejection for missing operationId/x-juice-name")
 	}
 	found := false
 	for _, r := range result.Rejected {
@@ -467,20 +537,16 @@ func TestOpenAPIRejectMissingInputContract(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "oapi-no-input", 0)
-	specURL := "https://spec.example.com/api.json"
 
 	// Operation has operationId and description but no parameters and no requestBody.
 	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/ping":{"get":{"operationId":"ping","description":"ping the server","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "https://spec.example.com/api.json", []byte(spec), nil)
 	if err != nil {
 		t.Fatalf("ImportOpenAPI returned error: %v", err)
 	}
 	if len(result.Created) != 0 {
 		t.Errorf("expected 0 created, got %d", len(result.Created))
-	}
-	if len(result.Rejected) == 0 {
-		t.Error("expected at least 1 rejection for missing input contract")
 	}
 	found := false
 	for _, r := range result.Rejected {
@@ -501,7 +567,6 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "oapi-ref-body", 0)
-	specURL := "https://spec.example.com/api.json"
 
 	spec := `{
 		"openapi": "3.0.0",
@@ -535,7 +600,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 		}
 	}`
 
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(spec), "")
+	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "items", "https://spec.example.com/api.json", []byte(spec), nil)
 	if err != nil {
 		t.Fatalf("ImportOpenAPI error: %v", err)
 	}
@@ -543,12 +608,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 		t.Fatalf("expected 1 created action, got %d (rejected: %+v)", len(result.Created), result.Rejected)
 	}
 
-	a := result.Created[0]
-	var src kernel.HTTPSource
-	if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
-		t.Fatalf("unmarshal source: %v", err)
-	}
-
+	src := sourceOf(t, result.Created[0])
 	paramsByName := make(map[string]string)
 	for _, p := range src.Params {
 		paramsByName[p.Name] = p.In
@@ -561,119 +621,5 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	}
 	if paramsByName["count"] != "body" {
 		t.Errorf("expected count param in=body, got %q", paramsByName["count"])
-	}
-}
-
-// appOpenAPISpec has two operations, one of them named index, so an import under a prefix produces
-// a group whose root is an ordinary imported action.
-const appOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"what this application is","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-
-// TestImportOpenAPIPrefix: --as places every imported operation under one name prefix, the
-// operation keyed index becomes the application root, and re-importing one spec_url under a
-// different prefix is refused rather than silently leaving the rows where they are.
-func TestImportOpenAPIPrefix(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	owner := setupUser(t, st, "acme", 0)
-	specURL := "http://api.example.com/openapi.json"
-
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail")
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	if len(result.Created) != 2 {
-		t.Fatalf("created: got %d, want 2", len(result.Created))
-	}
-	names := map[string]bool{}
-	for _, a := range result.Created {
-		names[a.Name] = true
-	}
-	if !names["mail/index"] || !names["mail/greet"] {
-		t.Fatalf("imported names: got %v, want mail/index and mail/greet", names)
-	}
-
-	// The group is now addressable by its own name: the root resolves to the imported index.
-	root, err := k.ResolveAction(ctx, "acme/mail")
-	if err != nil {
-		t.Fatalf("resolve acme/mail: %v", err)
-	}
-	if root.Name != "mail/index" {
-		t.Errorf("acme/mail resolved to %q, want mail/index", root.Name)
-	}
-
-	// Re-import under the same prefix reconciles as usual; identity and stats are untouched.
-	again, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail")
-	if err != nil {
-		t.Fatalf("re-import: %v", err)
-	}
-	if len(again.Unchanged) != 2 || len(again.Created) != 0 {
-		t.Errorf("re-import: unchanged=%d created=%d, want 2 and 0", len(again.Unchanged), len(again.Created))
-	}
-
-	// A different prefix would not move the rows, so it is refused, and nothing changes.
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "inbox"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("relocation: want ErrInvalidInput, got %v", err)
-	}
-	if a, _ := k.ReadActionByOwnerName(ctx, owner.ID, "mail/greet"); a == nil {
-		t.Error("a refused relocation must leave the imported rows in place")
-	}
-
-	// An unprefixed spec keeps its plain operation names, and its rows are their own group-free set.
-	plain := setupUser(t, st, "plain", 0)
-	flat, err := k.ImportOpenAPI(ctx, plain.ID, plain.ID, specURL, []byte(minOpenAPISpec), "")
-	if err != nil {
-		t.Fatalf("unprefixed import: %v", err)
-	}
-	if len(flat.Created) != 1 || flat.Created[0].Name != "sayHello" {
-		t.Errorf("unprefixed import must not prefix: got %+v", flat.Created)
-	}
-}
-
-// TestImportOpenAPIPrefixValidation: a prefix must be addressable as part of an action name — no
-// kernel qualifier, no empty path segment — and surrounding whitespace is not part of it.
-func TestImportOpenAPIPrefixValidation(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	owner := setupUser(t, st, "acme", 0)
-
-	for _, bad := range []string{"ma@il", "/mail", "mail/", "mail//x"} {
-		if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "http://api.example.com/s-"+bad, []byte(minOpenAPISpec), bad); !errors.Is(err, kernel.ErrInvalidInput) {
-			t.Errorf("prefix %q: want ErrInvalidInput, got %v", bad, err)
-		}
-	}
-	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "http://api.example.com/ok.json", []byte(minOpenAPISpec), "  mail  ")
-	if err != nil {
-		t.Fatalf("padded prefix: %v", err)
-	}
-	if len(result.Created) != 1 || result.Created[0].Name != "mail/sayHello" {
-		t.Errorf("padded prefix must trim: got %+v", result.Created)
-	}
-}
-
-// TestUnimportNameUnderPrefix: unimport stays provenance-scoped under a prefix, and its name filter
-// matches the action name or the operation key, so both forms address one operation.
-func TestUnimportNameUnderPrefix(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	owner := setupUser(t, st, "acme", 0)
-	specURL := "http://api.example.com/openapi.json"
-
-	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail"); err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	for _, ref := range []string{"greet", "mail/greet"} {
-		if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, specURL, []byte(appOpenAPISpec), "mail"); err != nil {
-			t.Fatalf("re-import: %v", err)
-		}
-		out, err := k.UnimportOpenAPI(ctx, owner.ID, owner.ID, specURL, ref)
-		if err != nil {
-			t.Fatalf("unimport %q: %v", ref, err)
-		}
-		if len(out) != 1 || out[0].Name != "mail/greet" {
-			t.Errorf("unimport %q: got %+v, want mail/greet alone", ref, out)
-		}
 	}
 }

@@ -2134,24 +2134,6 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 	}
 }
 
-// ---- OpenAPI well-known ownership proof tests ----
-
-// fakeURLFetcher implements both HTTPExecutor and URLFetcher for testing ownership proof.
-type fakeURLFetcher struct {
-	wellKnown map[string]string // URL -> response body
-}
-
-func (f *fakeURLFetcher) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
-	return nil, kernel.ErrInvalidState.Wrap("not used in tests")
-}
-
-func (f *fakeURLFetcher) FetchURL(_ context.Context, rawURL string) ([]byte, error) {
-	if body, ok := f.wellKnown[rawURL]; ok {
-		return []byte(body), nil
-	}
-	return nil, kernel.ErrNotFound.Wrapf("URL not found: %s", rawURL)
-}
-
 func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Kernel {
 	cfg := kernel.DefaultConfig()
 	cfg.TokenSecret = "test-secret"
@@ -2162,9 +2144,6 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 	// A test double may play several adapter roles; wire the ones it actually implements.
 	if fc, ok := http.(kernel.FederationClient); ok {
 		deps.Federation = fc
-	}
-	if uf, ok := http.(kernel.URLFetcher); ok {
-		deps.Fetcher = uf
 	}
 	return kernel.New(deps)
 }
@@ -3492,5 +3471,99 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	}
 	if _, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("re-revoking absent connection: got %v, want ErrNotFound", err)
+	}
+}
+
+// TestUpdateRevokesGrantsRegardlessOfActiveState freezes the rule that standing consent never
+// outlives the contract it was given for. A grant survives a plain disable on purpose, so the
+// revocation cannot be conditional on the action having been active: otherwise an owner could
+// disable an action, repoint it at another upstream host, re-enable it, and the caller's
+// credential would travel to a host nobody consented to.
+func TestUpdateRevokesGrantsRegardlessOfActiveState(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "revoke-owner", 0)
+	grantor := setupUser(t, st, "revoke-caller", 0)
+
+	newDelegatedAction := func(name string) *kernel.Action {
+		a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			Source: "https://api.example.com/one", Description: "delegated",
+			InputSchema:  map[string]any{"type": "object", "description": "in"},
+			OutputSchema: map[string]any{"type": "object", "description": "out"},
+			Auth:         &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	consent := func(a *kernel.Action) {
+		t.Helper()
+		g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: grantor.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
+		if err := st.CreateOrReplaceGrant(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	granted := func(a *kernel.Action) bool {
+		t.Helper()
+		_, err := st.ReadGrant(ctx, grantor.ID, a.ID)
+		return err == nil
+	}
+
+	// A disable leaves consent standing: the contract has not moved.
+	kept := newDelegatedAction("kept")
+	consent(kept)
+	if err := k.SetActive(ctx, owner.ID, kept.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if !granted(kept) {
+		t.Error("a plain disable must not revoke consent")
+	}
+
+	// Repointing that disabled action at another host revokes it, even though it was already off.
+	moved := "https://other.example.com/two"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: kept.ID, Source: &moved}); err != nil {
+		t.Fatal(err)
+	}
+	if granted(kept) {
+		t.Error("consent survived a source change on a disabled action")
+	}
+
+	// The same holds for a schema and a price change on a disabled action.
+	for _, tc := range []struct {
+		name string
+		req  func(id string) kernel.UpdateActionRequest
+	}{
+		{"schema", func(id string) kernel.UpdateActionRequest {
+			return kernel.UpdateActionRequest{ID: id, InputSchema: map[string]any{"type": "object", "description": "new"}}
+		}},
+		{"price", func(id string) kernel.UpdateActionRequest {
+			p := int64(9)
+			return kernel.UpdateActionRequest{ID: id, Price: &p}
+		}},
+	} {
+		a := newDelegatedAction("disabled-" + tc.name)
+		consent(a)
+		if _, err := k.UpdateAction(ctx, owner.ID, tc.req(a.ID)); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if granted(a) {
+			t.Errorf("consent survived a %s change on a never-activated action", tc.name)
+		}
+	}
+
+	// A description is quoted, not executed: it resets stats but leaves consent alone.
+	desc := newDelegatedAction("described")
+	consent(desc)
+	text := "a new description"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: desc.ID, Description: &text}); err != nil {
+		t.Fatal(err)
+	}
+	if !granted(desc) {
+		t.Error("a description change must not revoke consent")
 	}
 }

@@ -131,7 +131,7 @@ juice serve | health
 juice user create <user> | me | update | connect <action> | disconnect <action>
 juice auth login <user> | logout | recover <user>
 juice action create <name> | update <action> | enable/disable <action> | list | show <action>
-juice action delete <action> | import <spec-url> | unimport <spec-url> | stats <action>
+juice action delete <action> | import <name> [<spec-url>] | stats <action>
 juice run <action> [json]
 juice process list | show <id> | end <id>
 juice step create <action> | list | show <id> | complete <id> [json]

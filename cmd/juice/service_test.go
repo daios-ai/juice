@@ -435,7 +435,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	if err := k.SetActive(ctx, ownerID, a.ID, true); err != nil {
 		t.Fatalf("enableAction: %v", err)
 	}
-	if _, err := updateAction(k, ctx, ownerID, kernel.UpdateActionRequest{ID: a.ID, Visibility: visPtr(kernel.VisibilityPublic)}); err != nil {
+	if _, err := updateActions(k, ctx, ownerID, a.ID, kernel.UpdateActionRequest{Visibility: visPtr(kernel.VisibilityPublic)}); err != nil {
 		t.Fatalf("updateAction public: %v", err)
 	}
 
@@ -729,7 +729,7 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := updateAction(k, ctx, ownerID, kernel.UpdateActionRequest{ID: a.ID, Visibility: visPtr(kernel.VisibilityPublic)}); err != nil {
+	if _, err := updateActions(k, ctx, ownerID, a.ID, kernel.UpdateActionRequest{Visibility: visPtr(kernel.VisibilityPublic)}); err != nil {
 		t.Fatal(err)
 	}
 	// Left inactive (never enabled).

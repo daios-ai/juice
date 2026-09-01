@@ -474,7 +474,7 @@ func TestServeListActions(t *testing.T) {
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, tok).Body.Close()
 
 	// Authenticated owner sees their own active private action.
 	resp := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
@@ -500,7 +500,7 @@ func TestServeListActions(t *testing.T) {
 		t.Fatal("private action should not appear in unauthenticated list")
 	}
 
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, tok).Body.Close()
 	resp3 := httpDo(t, srv, "GET", "/v1/actions", nil, tok)
 	if resp3.StatusCode != http.StatusOK {
 		resp3.Body.Close()
@@ -529,7 +529,7 @@ func TestServeListPagination(t *testing.T) {
 		}, tok)
 		var a kernel.Action
 		decodeResponse(t, cr, &a)
-		httpDo(t, srv, "POST", "/v1/actions/"+a.ID+"/enable", nil, tok).Body.Close()
+		httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": a.ID}, tok).Body.Close()
 	}
 
 	listLen := func(query string) int {
@@ -568,8 +568,8 @@ func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, tok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, tok).Body.Close()
 
 	var before []kernel.Action
 	decodeResponse(t, httpDo(t, srv, "GET", "/v1/actions", nil, ""), &before)
@@ -623,7 +623,7 @@ func TestServeCreateWasmActionFromArtifact(t *testing.T) {
 	}
 
 	// The artifact-only action (empty source) must activate over HTTP.
-	en := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok)
+	en := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, tok)
 	if en.StatusCode != http.StatusOK {
 		en.Body.Close()
 		t.Fatalf("enable artifact-only wasm action: expected 200, got %d", en.StatusCode)
@@ -658,7 +658,7 @@ func TestMaxBytesMiddlewareActionRoute(t *testing.T) {
 		want               int
 	}{
 		{"action create accepts large body", http.MethodPost, "/v1/actions", http.StatusOK},
-		{"action update accepts large body", http.MethodPut, "/v1/actions/abc-123", http.StatusOK},
+		{"action update accepts large body", http.MethodPut, "/v1/actions", http.StatusOK},
 		{"run rejects large body", http.MethodPost, "/v1/run", http.StatusRequestEntityTooLarge},
 	}
 	for _, c := range cases {
@@ -687,7 +687,7 @@ func TestServeEnableDisableAction(t *testing.T) {
 	decodeResponse(t, cr, &action)
 
 	// Disable.
-	r1 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, tok)
+	r1 := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": action.ID}, tok)
 	defer r1.Body.Close()
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("disable: expected 200, got %d", r1.StatusCode)
@@ -701,7 +701,7 @@ func TestServeEnableDisableAction(t *testing.T) {
 	}
 
 	// Enable.
-	r2 := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok)
+	r2 := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, tok)
 	defer r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
 		t.Fatalf("enable: expected 200, got %d", r2.StatusCode)
@@ -727,10 +727,10 @@ func TestServeDeleteAction(t *testing.T) {
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
 
-	del := httpDo(t, srv, "DELETE", "/v1/actions/"+action.ID, nil, tok)
+	del := httpDo(t, srv, "DELETE", "/v1/actions?target="+action.ID, nil, tok)
 	defer del.Body.Close()
-	if del.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete: expected 204, got %d", del.StatusCode)
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d", del.StatusCode)
 	}
 
 	get := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, tok)
@@ -834,8 +834,8 @@ func TestServeCall(t *testing.T) {
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	// Make the call via /v1/run (new API — price=0, caller needs no credits).
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -907,8 +907,8 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "tx-owner/tx-action", "args": map[string]any{},
@@ -964,8 +964,8 @@ func TestServeRateTransaction(t *testing.T) {
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "rate-owner/rate-action", "args": map[string]any{},
@@ -1018,8 +1018,8 @@ func TestServeListActionRatings(t *testing.T) {
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
 		"action": "list-ratings-owner/list-ratings-action", "args": map[string]any{},
@@ -1076,13 +1076,13 @@ func TestServeListActionRatings(t *testing.T) {
 	}
 
 	// Reputation survives deactivation — the read is independent of active state (§8).
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
 	if resp, r := readRatings(""); resp.StatusCode != http.StatusOK || len(r) != 1 {
 		t.Errorf("deactivated public action ratings: got %d / %d rows, want 200 / 1", resp.StatusCode, len(r))
 	}
 
 	// A private action's ratings are owner-only: a non-owner (here anonymous) is refused.
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "private"}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "private"}, ownerTok).Body.Close()
 	if resp, _ := readRatings(""); resp.StatusCode == http.StatusOK {
 		t.Errorf("private action ratings must not be anonymously readable, got 200")
 	}
@@ -1127,8 +1127,8 @@ func TestServeGetStats(t *testing.T) {
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	// Make one call to generate stats.
 	httpDo(t, srv, "POST", "/v1/run", map[string]any{
@@ -1173,24 +1173,25 @@ func TestServeUpdateAction(t *testing.T) {
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
-	httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/enable", nil, tok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": action.ID}, tok).Body.Close()
 
 	newDesc := "updated description"
-	resp := httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{
+	resp := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID,
 		"description": newDesc,
 	}, tok)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("update action: expected 200, got %d", resp.StatusCode)
 	}
-	var updated kernel.Action
+	var updated []kernel.Action
 	decodeResponse(t, resp, &updated)
-	if updated.Description != newDesc {
-		t.Errorf("description: got %q, want %q", updated.Description, newDesc)
+	if len(updated) != 1 {
+		t.Fatalf("update must report the rows it wrote, got %d", len(updated))
 	}
-	// Update must deactivate the action (source/schema change wasn't made here but description is safe;
-	// price/source changes deactivate — just verify the response has the action).
-	if updated.ID != action.ID {
+	if updated[0].Description != newDesc {
+		t.Errorf("description: got %q, want %q", updated[0].Description, newDesc)
+	}
+	if updated[0].ID != action.ID {
 		t.Errorf("ID mismatch after update")
 	}
 }
@@ -1466,7 +1467,7 @@ func TestGetActionReadPermission(t *testing.T) {
 	}
 
 	// Making the action public allows anyone to read it.
-	httpDo(t, srv, "PUT", "/v1/actions/"+action.ID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 	r3 := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, strangerTok)
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
@@ -2112,7 +2113,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 	_, tok := makeUser(t, k, "import-srv-owner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions/import",
-		map[string]any{"spec_url": specSrv.URL + "/spec.json"}, tok)
+		map[string]any{"name": "mail", "spec_url": specSrv.URL + "/spec.json"}, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("import: want 200, got %d", resp.StatusCode)
@@ -2125,44 +2126,112 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if len(result.Created) != 1 {
 		t.Fatalf("expected 1 created action, got %d", len(result.Created))
 	}
-	if result.Created[0].Name != "sayHello" {
-		t.Errorf("name: got %q, want %q", result.Created[0].Name, "sayHello")
+	if result.Created[0].Name != "mail/sayHello" {
+		t.Errorf("name: got %q, want %q", result.Created[0].Name, "mail/sayHello")
+	}
+
+	// A re-import carries the name alone: the endpoint supplies the document URL it recorded.
+	again := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"name": "mail"}, tok)
+	defer again.Body.Close()
+	if again.StatusCode != http.StatusOK {
+		t.Fatalf("re-import by name: want 200, got %d", again.StatusCode)
+	}
+	var second kernel.ImportResult
+	if err := json.NewDecoder(again.Body).Decode(&second); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(second.Unchanged) != 1 {
+		t.Errorf("re-import by name: unchanged=%d, want 1", len(second.Unchanged))
+	}
+
+	// A name that holds no installation has no URL to re-read.
+	miss := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"name": "nothing"}, tok)
+	defer miss.Body.Close()
+	if miss.StatusCode != http.StatusNotFound {
+		t.Errorf("re-import of an unknown name: got %d, want 404", miss.StatusCode)
 	}
 }
 
-func TestServeUnimportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
-	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(spec))
-	}))
-	defer specSrv.Close()
-
+// TestServeActionTargets: one mutation endpoint per verb, addressed by target — an id names one
+// row, an owner/path names the whole subtree, and a row-specific field needs a single row.
+func TestServeActionTargets(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 
-	_, tok := makeUser(t, k, "unimport-srv-owner")
-	specURL := specSrv.URL + "/spec.json"
+	ownerID, tok := makeUser(t, k, "targetowner")
+	ctx := context.Background()
+	mk := func(name string) *kernel.Action {
+		a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
+			OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP,
+			Source: "http://api.example.com", Description: "an action",
+			InputSchema:  map[string]any{"type": "object", "description": "in"},
+			OutputSchema: map[string]any{"type": "object", "description": "out"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	root, member, sibling := mk("mail"), mk("mail/send"), mk("mailer")
 
-	// Import first.
-	ir := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"spec_url": specURL}, tok)
-	ir.Body.Close()
-	if ir.StatusCode != http.StatusOK {
-		t.Fatalf("import: want 200, got %d", ir.StatusCode)
+	en := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": "targetowner/mail"}, tok)
+	defer en.Body.Close()
+	if en.StatusCode != http.StatusOK {
+		t.Fatalf("enable subtree: got %d", en.StatusCode)
+	}
+	var enabled []actionResp
+	if err := json.NewDecoder(en.Body).Decode(&enabled); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(enabled) != 2 {
+		t.Fatalf("enable must report both rows, got %d", len(enabled))
+	}
+	if got, _ := k.ReadAction(ctx, sibling.ID); got.Active {
+		t.Error("mailer lies outside the mail subtree")
 	}
 
-	// Unimport all.
-	ur := httpDo(t, srv, "POST", "/v1/actions/unimport", map[string]any{"spec_url": specURL}, tok)
-	defer ur.Body.Close()
-	if ur.StatusCode != http.StatusOK {
-		t.Fatalf("unimport: want 200, got %d", ur.StatusCode)
+	// A uniform field applies to the whole subtree.
+	up := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner/mail", "visibility": "local"}, tok)
+	defer up.Body.Close()
+	if up.StatusCode != http.StatusOK {
+		t.Fatalf("subtree visibility: got %d", up.StatusCode)
 	}
-	var actions []kernel.Action
-	if err := json.NewDecoder(ur.Body).Decode(&actions); err != nil {
-		t.Fatalf("decode unimport result: %v", err)
+	for _, a := range []*kernel.Action{root, member} {
+		got, _ := k.ReadAction(ctx, a.ID)
+		if got.Visibility != kernel.VisibilityLocal {
+			t.Errorf("%s visibility = %q", got.Name, got.Visibility)
+		}
 	}
-	if len(actions) != 1 {
-		t.Errorf("expected 1 deactivated action, got %d", len(actions))
+
+	// A row-specific field needs a target that names one row.
+	bad := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner/mail", "description": "one only"}, tok)
+	defer bad.Body.Close()
+	if bad.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("description over a subtree: got %d, want 422", bad.StatusCode)
+	}
+	ok := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": member.ID, "description": "one only"}, tok)
+	defer ok.Body.Close()
+	if ok.StatusCode != http.StatusOK {
+		t.Errorf("description on one row: got %d", ok.StatusCode)
+	}
+
+	// A target naming nothing is a miss, not an empty success.
+	none := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": "targetowner/nothing"}, tok)
+	defer none.Body.Close()
+	if none.StatusCode != http.StatusNotFound {
+		t.Errorf("unmatched target: got %d, want 404", none.StatusCode)
+	}
+
+	del := httpDo(t, srv, "DELETE", "/v1/actions?target=targetowner/mail", nil, tok)
+	defer del.Body.Close()
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("delete subtree: got %d", del.StatusCode)
+	}
+	if got, _ := k.ReadAction(ctx, member.ID); got != nil {
+		t.Error("subtree member survived deletion")
+	}
+	if got, _ := k.ReadAction(ctx, sibling.ID); got == nil {
+		t.Error("mailer must survive deletion of the mail subtree")
 	}
 }
 
@@ -2604,10 +2673,10 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	}
 
 	// @sys may disable @alice's action over TCP (owner-or-superuser); @bob may not.
-	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, bobTok); resp.StatusCode < 400 {
+	if resp := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": action.ID}, bobTok); resp.StatusCode < 400 {
 		t.Errorf("bob disabling @alice's action should fail, got %d", resp.StatusCode)
 	}
-	if resp := httpDo(t, srv, "POST", "/v1/actions/"+action.ID+"/disable", nil, sysTok); resp.StatusCode >= 400 {
+	if resp := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": action.ID}, sysTok); resp.StatusCode >= 400 {
 		t.Errorf("sys disabling @alice's action should succeed, got %d", resp.StatusCode)
 	}
 }
@@ -3035,8 +3104,8 @@ func TestServeActionsRefMode(t *testing.T) {
 		}, tok)
 		var a kernel.Action
 		decodeResponse(t, cr, &a)
-		httpDo(t, srv, "PUT", "/v1/actions/"+a.ID, map[string]any{"visibility": "public"}, tok).Body.Close()
-		httpDo(t, srv, "POST", "/v1/actions/"+a.ID+"/enable", nil, tok).Body.Close()
+		httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": a.ID, "visibility": "public"}, tok).Body.Close()
+		httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": a.ID}, tok).Body.Close()
 		return a.ID
 	}
 	idxID := mk("mail/index")
@@ -3096,9 +3165,9 @@ func TestServeActionsRefMode(t *testing.T) {
 	}
 }
 
-// TestServeImportOpenAPIAs: the import endpoint carries the name prefix that makes one spec one
-// application, and the operation keyed index becomes its root.
-func TestServeImportOpenAPIAs(t *testing.T) {
+// TestServeImportOpenAPIName: the import endpoint takes the application's name, one document per
+// name, and the operation keyed index becomes its root.
+func TestServeImportOpenAPIName(t *testing.T) {
 	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3111,7 +3180,7 @@ func TestServeImportOpenAPIAs(t *testing.T) {
 	_, tok := makeUser(t, k, "app-import-owner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions/import",
-		map[string]any{"spec_url": specSrv.URL + "/spec.json", "as": "mail"}, tok)
+		map[string]any{"name": "mail", "spec_url": specSrv.URL + "/spec.json"}, tok)
 	defer resp.Body.Close()
 	var result kernel.ImportResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -3122,14 +3191,22 @@ func TestServeImportOpenAPIAs(t *testing.T) {
 		names[a.Name] = true
 	}
 	if !names["mail/index"] || !names["mail/greet"] {
-		t.Fatalf("imported under the prefix: got %v", names)
+		t.Fatalf("imported under the application name: got %v", names)
 	}
 
-	// Relocation is refused rather than silently leaving the rows under the old prefix.
+	// The same document under a second name is an independent application.
 	resp2 := httpDo(t, srv, "POST", "/v1/actions/import",
-		map[string]any{"spec_url": specSrv.URL + "/spec.json", "as": "inbox"}, tok)
+		map[string]any{"name": "inbox", "spec_url": specSrv.URL + "/spec.json"}, tok)
 	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("relocation: got %d, want 422", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("second installation: got %d, want 200", resp2.StatusCode)
+	}
+
+	// A second document under an occupied name is refused.
+	resp3 := httpDo(t, srv, "POST", "/v1/actions/import",
+		map[string]any{"name": "mail", "spec_url": specSrv.URL + "/other.json"}, tok)
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("re-binding a name: got %d, want 422", resp3.StatusCode)
 	}
 }

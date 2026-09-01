@@ -283,25 +283,19 @@ func TestActionUpdateSendsArtifact(t *testing.T) {
 	artifactB64 := base64.StdEncoding.EncodeToString([]byte{0x00, 0x61, 0x73, 0x6d})
 	var gotMethod, gotPath, gotArtifact string
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Every action subcommand resolves its reference server-side first (§14), so the listing
-		// endpoint answers that with a one-element list; the update itself is the call under test.
-		if r.URL.Path == "/v1/actions" {
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act1", "action": "a/m"}})
-			return
-		}
 		gotMethod, gotPath = r.Method, r.URL.Path
 		var req struct {
 			WasmArtifact string `json:"wasm_artifact"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotArtifact = req.WasmArtifact
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "act1", "action": "a/m"})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act1", "action": "a/m"}})
 	})
 	if _, err := execTestCmd(t, actionUpdateCmd(), "act1", "--artifact", artifactB64); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "PUT" || gotPath != "/v1/actions/act1" {
-		t.Fatalf("got %s %s, want PUT /v1/actions/act1", gotMethod, gotPath)
+	if gotMethod != "PUT" || gotPath != "/v1/actions" {
+		t.Fatalf("got %s %s, want PUT /v1/actions", gotMethod, gotPath)
 	}
 	if gotArtifact != artifactB64 {
 		t.Fatalf("wasm_artifact = %q, want %q", gotArtifact, artifactB64)

@@ -495,8 +495,8 @@ type IdempotencyRecord struct {
 type ImportResult struct {
 	Created     []*Action
 	Unchanged   []*Action
-	Updated     []*Action // deactivated: contract changed
-	Deactivated []*Action // deactivated: removed from spec
+	Updated     []*Action // rewritten: a contract change also deactivates; an auth-only change does not
+	Deactivated []*Action // deactivated: removed from the source
 	Rejected    []ImportRejection
 }
 
@@ -515,18 +515,20 @@ type HTTPParam struct {
 // HTTPSource is the structured request shape stored in Action.Source for every
 // kind=http action — both manually created actions and OpenAPI imports. Type is
 // "http" for manual actions and "openapi" for imports; the OpenAPI provenance
-// fields (SpecURL, OperationKey, OperationHash, OwnershipVerified) are empty for
-// manual actions, and import reconciliation is scoped to Type=="openapi" rows.
+// fields (SpecURL, OperationKey, PriceDeclared) are empty for manual actions, and
+// import reconciliation is scoped to Type=="openapi" rows. PriceDeclared records
+// whether the document set x-juice-price for this operation: an absent price
+// leaves the price to the owner, so it must be distinguishable from a declared
+// zero (§8).
 type HTTPSource struct {
-	Type              string      `json:"type"`
-	SpecURL           string      `json:"spec_url,omitempty"`
-	BaseURL           string      `json:"base_url"`
-	Method            string      `json:"method"`
-	Path              string      `json:"path"`
-	OperationKey      string      `json:"operation_key,omitempty"`
-	OperationHash     string      `json:"operation_hash,omitempty"`
-	Params            []HTTPParam `json:"params,omitempty"`
-	OwnershipVerified bool        `json:"ownership_verified,omitempty"`
+	Type          string      `json:"type"`
+	SpecURL       string      `json:"spec_url,omitempty"`
+	BaseURL       string      `json:"base_url"`
+	Method        string      `json:"method"`
+	Path          string      `json:"path"`
+	OperationKey  string      `json:"operation_key,omitempty"`
+	PriceDeclared bool        `json:"price_declared,omitempty"`
+	Params        []HTTPParam `json:"params,omitempty"`
 }
 
 // ActionManifest is a signed, exportable description of a public active action.

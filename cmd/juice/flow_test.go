@@ -74,7 +74,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
@@ -123,8 +123,8 @@ func createEnabledPublicAction(t *testing.T, srv *httptest.Server, ownerTok, nam
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	id := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+id, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": id}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": id, "visibility": "public"}, ownerTok).Body.Close()
 	return id
 }
 
@@ -324,8 +324,8 @@ func TestFlow_WASMSubcallProviderMargin(t *testing.T) {
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, mainProvTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, mainProvTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "visibility": "public"}, mainProvTok).Body.Close()
 
 	// Caller runs the orchestrated action.
 	callerID, callerTok := makeUser(t, k, "flow-orch-caller")
@@ -409,8 +409,8 @@ func TestFlow_FailMidTree(t *testing.T) {
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, mainProvTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, mainProvTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, mainProvTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "visibility": "public"}, mainProvTok).Body.Close()
 
 	callerID, callerTok := makeUser(t, k, "flow-fail-caller")
 	giveCredits(t, k, callerID, 500)
@@ -783,21 +783,13 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	}))
 	defer apiBackend.Close()
 
-	// Well-known ownership proof server.
 	ownerHandle := "oa-owner"
-	wkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/juice-owner.txt" {
-			w.Write([]byte(ownerHandle))
-		}
-	}))
-	defer wkServer.Close()
 
 	// Minimal OpenAPI 3.0 spec.
 	spec := map[string]any{
-		"openapi":       "3.0.0",
-		"x-juice-owner": ownerHandle,
-		"info":          map[string]any{"title": "Test API", "version": "1.0"},
-		"servers":       []any{map[string]any{"url": apiBackend.URL}},
+		"openapi": "3.0.0",
+		"info":    map[string]any{"title": "Test API", "version": "1.0"},
+		"servers": []any{map[string]any{"url": apiBackend.URL}},
 		"paths": map[string]any{
 			"/fetch": map[string]any{
 				"post": map[string]any{
@@ -833,11 +825,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	specBytes, _ := json.Marshal(spec)
 
 	// Serve the spec from a local HTTP server so ImportOpenAPI can fetch it.
-	specServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/juice-owner.txt" {
-			w.Write([]byte(ownerHandle))
-			return
-		}
+	specServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(specBytes)
 	}))
@@ -851,7 +839,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 
 	// Import via HTTP.
 	importResp := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{
-		"spec_url": specServer.URL + "/openapi.json",
+		"name": "shop", "spec_url": specServer.URL + "/openapi.json",
 	}, ownerTok)
 	if importResp.StatusCode != http.StatusOK {
 		importResp.Body.Close()
@@ -872,13 +860,13 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	actID := firstAct["id"].(string)
 
 	// Activate and make public.
-	if r := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok); r.StatusCode != http.StatusOK {
+	if r := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, ownerTok); r.StatusCode != http.StatusOK {
 		r.Body.Close()
 		t.Fatalf("enable action: expected 200, got %d", r.StatusCode)
 	} else {
 		r.Body.Close()
 	}
-	if r := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok); r.StatusCode != http.StatusOK {
+	if r := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "visibility": "public"}, ownerTok); r.StatusCode != http.StatusOK {
 		r.Body.Close()
 		t.Fatalf("make public: expected 200, got %d", r.StatusCode)
 	} else {
@@ -890,7 +878,7 @@ func TestFlow_OpenAPIImportActivateRun(t *testing.T) {
 	giveCredits(t, k, callerID, 100)
 
 	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": ownerHandle + "/fetchData",
+		"action": ownerHandle + "/shop/fetchData",
 		"args":   map[string]any{},
 	}, callerTok)
 	if runResp.StatusCode != http.StatusOK {
@@ -930,10 +918,9 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 	ownerHandle := "reimp-owner"
 	buildSpec := func(summary string) []byte {
 		spec := map[string]any{
-			"openapi":       "3.0.0",
-			"x-juice-owner": ownerHandle,
-			"info":          map[string]any{"title": "API", "version": "1.0"},
-			"servers":       []any{map[string]any{"url": apiBackend.URL}},
+			"openapi": "3.0.0",
+			"info":    map[string]any{"title": "API", "version": "1.0"},
+			"servers": []any{map[string]any{"url": apiBackend.URL}},
 			"paths": map[string]any{
 				"/do": map[string]any{
 					"post": map[string]any{
@@ -983,7 +970,7 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 
 	// First import.
 	currentSpec = buildSpec("original summary")
-	imp1 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"spec_url": specURL}, ownerTok)
+	imp1 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"name": "shop", "spec_url": specURL}, ownerTok)
 	if imp1.StatusCode != http.StatusOK {
 		imp1.Body.Close()
 		t.Fatalf("first import: expected 200, got %d", imp1.StatusCode)
@@ -997,12 +984,12 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 	actID := created1[0].(map[string]any)["id"].(string)
 
 	// Activate the action and run it once to generate a tx.
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "visibility": "public"}, ownerTok).Body.Close()
 
 	callerID, callerTok := makeUser(t, k, "reimp-caller")
 	giveCredits(t, k, callerID, 100)
-	runRep := runAction(t, srv, callerTok, ownerHandle+"/doSomething", map[string]any{})
+	runRep := runAction(t, srv, callerTok, ownerHandle+"/shop/doSomething", map[string]any{})
 	txID := runRep.TxID
 
 	// Stats should show at least 1 use.
@@ -1015,7 +1002,7 @@ func TestFlow_OpenAPIReimport(t *testing.T) {
 
 	// Second import with changed summary (triggers reimport / deactivate).
 	currentSpec = buildSpec("changed summary — triggers contract change")
-	imp2 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"spec_url": specURL}, ownerTok)
+	imp2 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"name": "shop", "spec_url": specURL}, ownerTok)
 	if imp2.StatusCode != http.StatusOK {
 		imp2.Body.Close()
 		t.Fatalf("second import: expected 200, got %d", imp2.StatusCode)
@@ -1046,10 +1033,9 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 
 	ownerHandle := "unimp-owner"
 	spec := map[string]any{
-		"openapi":       "3.0.0",
-		"x-juice-owner": ownerHandle,
-		"info":          map[string]any{"title": "API", "version": "1.0"},
-		"servers":       []any{map[string]any{"url": apiBackend.URL}},
+		"openapi": "3.0.0",
+		"info":    map[string]any{"title": "API", "version": "1.0"},
+		"servers": []any{map[string]any{"url": apiBackend.URL}},
 		"paths": map[string]any{
 			"/go": map[string]any{
 				"post": map[string]any{
@@ -1094,7 +1080,7 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 	_ = ownerID
 
 	// Import.
-	imp := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"spec_url": specURL}, ownerTok)
+	imp := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{"name": "shop", "spec_url": specURL}, ownerTok)
 	if imp.StatusCode != http.StatusOK {
 		imp.Body.Close()
 		t.Fatalf("import: expected 200, got %d", imp.StatusCode)
@@ -1108,27 +1094,27 @@ func TestFlow_OpenAPIUnimport(t *testing.T) {
 	actID := created[0].(map[string]any)["id"].(string)
 
 	// Enable and run once to generate history.
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, ownerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "visibility": "public"}, ownerTok).Body.Close()
 	callerID, callerTok := makeUser(t, k, "unimp-caller")
 	giveCredits(t, k, callerID, 100)
-	runRep := runAction(t, srv, callerTok, ownerHandle+"/goSomething", map[string]any{})
+	runRep := runAction(t, srv, callerTok, ownerHandle+"/shop/goSomething", map[string]any{})
 	txID := runRep.TxID
 
-	// Unimport.
-	unimp := httpDo(t, srv, "POST", "/v1/actions/unimport", map[string]any{"spec_url": specURL}, ownerTok)
-	if unimp.StatusCode != http.StatusOK {
-		unimp.Body.Close()
-		t.Fatalf("unimport: expected 200, got %d", unimp.StatusCode)
+	// Withdrawing an application is the ordinary disable verb over its path — no separate verb.
+	off := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": ownerHandle + "/shop"}, ownerTok)
+	if off.StatusCode != http.StatusOK {
+		off.Body.Close()
+		t.Fatalf("disable application: expected 200, got %d", off.StatusCode)
 	}
-	unimp.Body.Close()
+	off.Body.Close()
 
 	// Action should be deactivated.
 	actResp := httpDo(t, srv, "GET", "/v1/actions/"+actID, nil, ownerTok)
 	var act kernel.Action
 	decodeResponse(t, actResp, &act)
 	if act.Active {
-		t.Error("action should be inactive after unimport")
+		t.Error("action should be inactive after the application was disabled")
 	}
 
 	// Historical transaction still present.
@@ -1319,7 +1305,7 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	logger := log.Discard()
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
 	// The outbound federation adapter signs as this kernel, so signed calls to peer kernels work.
 	k.SetFederation(newFedAdapter("", k.SignFederation))
 
@@ -1498,7 +1484,7 @@ func TestFlow_LookupAndRun(t *testing.T) {
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, providerTok).Body.Close()
 	pubTrue := kernel.VisibilityPublic
 	if _, err := k.UpdateAction(ctx, providerID, kernel.UpdateActionRequest{ID: actID, Visibility: &pubTrue}); err != nil {
 		t.Fatalf("make public: %v", err)
@@ -1719,7 +1705,7 @@ func TestFlow_PrivateAction(t *testing.T) {
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	actID := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, providerTok).Body.Close()
 
 	// Owner can run their own private action.
 	reply := runAction(t, srv, providerTok, "priv-owner/private-action", map[string]any{})
@@ -2025,7 +2011,7 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 
 	// Provider updates price (deactivates action).
 	newPrice := int64(100)
-	putResp := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"price": newPrice}, providerTok)
+	putResp := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": actID, "price": newPrice}, providerTok)
 	putResp.Body.Close()
 	if putResp.StatusCode != http.StatusOK {
 		t.Fatalf("update price: expected 200, got %d", putResp.StatusCode)
@@ -2049,7 +2035,7 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 	}
 
 	// Provider re-enables.
-	enResp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, providerTok)
+	enResp := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": actID}, providerTok)
 	enResp.Body.Close()
 	if enResp.StatusCode != http.StatusOK {
 		t.Fatalf("re-enable: expected 200, got %d", enResp.StatusCode)
@@ -2065,156 +2051,6 @@ func TestFlow_ActionUpdateLive(t *testing.T) {
 	}
 }
 
-// TestFlow_OpenAPIOwnershipProof: import spec without x-juice-owner → making it public
-// is rejected; re-import with x-juice-owner (well-known file served) → making public
-// succeeds; a caller can run the action.
-func TestFlow_OpenAPIOwnershipProof(t *testing.T) {
-	apiBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"proof": true})
-	}))
-	defer apiBackend.Close()
-
-	const ownerHandle = "proof-owner"
-
-	// Spec WITHOUT x-juice-owner (first import — no ownership).
-	noProofSpec := map[string]any{
-		"openapi": "3.0.0",
-		"info":    map[string]any{"title": "Proof API", "version": "1.0"},
-		"servers": []any{map[string]any{"url": apiBackend.URL}},
-		"paths": map[string]any{
-			"/call": map[string]any{
-				"post": map[string]any{
-					"operationId": "proofCall",
-					"summary":     "call the proof api",
-					"requestBody": map[string]any{
-						"content": map[string]any{
-							"application/json": map[string]any{"schema": map[string]any{"type": "object"}},
-						},
-					},
-					"responses": map[string]any{
-						"200": map[string]any{
-							"description": "ok",
-							"content": map[string]any{
-								"application/json": map[string]any{"schema": map[string]any{"type": "object"}},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	noProofBytes, _ := json.Marshal(noProofSpec)
-
-	// Spec WITH x-juice-owner for the re-import.
-	withProofSpec := make(map[string]any)
-	for k2, v := range noProofSpec {
-		withProofSpec[k2] = v
-	}
-	withProofSpec["x-juice-owner"] = ownerHandle
-	withProofBytes, _ := json.Marshal(withProofSpec)
-
-	// Spec server serves the spec and the well-known ownership file.
-	var serveWithProof bool
-	specServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/juice-owner.txt" {
-			if serveWithProof {
-				w.Write([]byte(ownerHandle))
-			}
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if serveWithProof {
-			w.Write(withProofBytes)
-		} else {
-			w.Write(noProofBytes)
-		}
-	}))
-	defer specServer.Close()
-
-	srv, k, _ := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	ownerID, ownerTok := makeUser(t, k, ownerHandle)
-	callerID, callerTok := makeUser(t, k, "proof-caller")
-	giveCredits(t, k, callerID, 200)
-
-	// First import: no ownership.
-	importResp1 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{
-		"spec_url": specServer.URL + "/openapi.json",
-	}, ownerTok)
-	if importResp1.StatusCode != http.StatusOK {
-		importResp1.Body.Close()
-		t.Fatalf("first import: expected 200, got %d", importResp1.StatusCode)
-	}
-	var importResult1 map[string]any
-	decodeResponse(t, importResp1, &importResult1)
-
-	var actID string
-	if created, ok := importResult1["Created"].([]any); ok && len(created) > 0 {
-		actID = created[0].(map[string]any)["id"].(string)
-	}
-	if actID == "" {
-		t.Fatalf("first import: no action created, result: %v", importResult1)
-	}
-
-	// Enable (activate) succeeds.
-	enResp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok)
-	enResp.Body.Close()
-	if enResp.StatusCode != http.StatusOK {
-		t.Fatalf("enable before proof: expected 200, got %d", enResp.StatusCode)
-	}
-
-	// Making it public without ownership proof is rejected.
-	pubResp1 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok)
-	pubResp1.Body.Close()
-	if pubResp1.StatusCode == http.StatusOK {
-		t.Error("making public without ownership proof should be rejected")
-	}
-
-	// Re-import with x-juice-owner (spec server now serves proof).
-	serveWithProof = true
-	importResp2 := httpDo(t, srv, "POST", "/v1/actions/import", map[string]any{
-		"spec_url": specServer.URL + "/openapi.json",
-	}, ownerTok)
-	if importResp2.StatusCode != http.StatusOK {
-		importResp2.Body.Close()
-		t.Fatalf("second import: expected 200, got %d", importResp2.StatusCode)
-	}
-	importResp2.Body.Close()
-
-	// Re-enable (import deactivates).
-	en2Resp := httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok)
-	en2Resp.Body.Close()
-
-	// Now making it public succeeds.
-	pubResp2 := httpDo(t, srv, "PUT", "/v1/actions/"+actID, map[string]any{"visibility": "public"}, ownerTok)
-	pubResp2.Body.Close()
-	if pubResp2.StatusCode != http.StatusOK {
-		t.Fatalf("making public after ownership proof: expected 200, got %d", pubResp2.StatusCode)
-	}
-
-	// Re-enable after making public (UpdateAction deactivates).
-	httpDo(t, srv, "POST", "/v1/actions/"+actID+"/enable", nil, ownerTok).Body.Close()
-
-	// Caller can run the action.
-	runResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": ownerHandle + "/proofCall", "args": map[string]any{},
-	}, callerTok)
-	if runResp.StatusCode != http.StatusOK {
-		var body map[string]any
-		json.NewDecoder(runResp.Body).Decode(&body)
-		runResp.Body.Close()
-		t.Fatalf("caller run after proof: expected 200, got %d — %v", runResp.StatusCode, body)
-	}
-	runResp.Body.Close()
-
-	_ = ownerID
-}
-
-// TestFlow_ImportDutyAdjustment: two kernels sharing the same provider DB path but
-// configured with different RemoteBPS values import the same action; the proxy prices
-// reflect each kernel's duty rate, and original transactions are immutable.
 func TestFlow_ImportDutyAdjustment(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2255,7 +2091,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		cfg.RemoteBPS = importBPS
 		logger := log.Discard()
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-		kB := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+		kB := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
 
 		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
@@ -2339,9 +2175,9 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 	var pubAct map[string]any
 	decodeResponse(t, pubResp, &pubAct)
 	pubID := pubAct["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
-	httpDo(t, srv, "PUT", "/v1/actions/"+pubID, map[string]any{"visibility": "public"}, providerTok).Body.Close()
-	httpDo(t, srv, "POST", "/v1/actions/"+pubID+"/enable", nil, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": pubID}, providerTok).Body.Close()
+	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": pubID, "visibility": "public"}, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": pubID}, providerTok).Body.Close()
 
 	// Create private+active action (public defaults to false).
 	privResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
@@ -2355,7 +2191,7 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 	var privAct map[string]any
 	decodeResponse(t, privResp, &privAct)
 	privID := privAct["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+privID+"/enable", nil, providerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": privID}, providerTok).Body.Close()
 
 	hasID := func(list []map[string]any, id string) bool {
 		for _, a := range list {
@@ -2428,7 +2264,7 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	httpExec.auth = newAuthenticator(box, db, true, cfg.ScriptTimeout)
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: &flowScriptExec{}, HTTP: httpExec, Fetcher: httpExec, Config: cfg, Logger: logger})
+	k := kernel.New(kernel.Dependencies{Store: db, Scripts: &flowScriptExec{}, HTTP: httpExec, Config: cfg, Logger: logger})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
@@ -2467,7 +2303,7 @@ func createDelegatedActionHTTP(t *testing.T, srv *httptest.Server, ownerTok, nam
 	var act map[string]any
 	decodeResponse(t, cr, &act)
 	id := act["id"].(string)
-	httpDo(t, srv, "POST", "/v1/actions/"+id+"/enable", nil, ownerTok).Body.Close()
+	httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": id}, ownerTok).Body.Close()
 	return id
 }
 
@@ -2613,7 +2449,7 @@ func TestFlow_DelegatedBearer(t *testing.T) {
 		}
 		var act map[string]any
 		decodeResponse(t, cr, &act)
-		httpDo(t, srv, "POST", "/v1/actions/"+act["id"].(string)+"/enable", nil, ownerTok).Body.Close()
+		httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": act["id"].(string)}, ownerTok).Body.Close()
 	}
 	const sendRef, readRef, selector = "bearer-owner/inbox/send", "bearer-owner/inbox/read", "bearer-owner/inbox"
 	providerKey := "bearer:" + strings.TrimPrefix(upstream.URL, "http://")

@@ -2,17 +2,13 @@ package kernel
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	yaml "go.yaml.in/yaml/v2"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
-	yaml "go.yaml.in/yaml/v2"
 )
 
 // yamlToJSON converts a YAML byte slice to canonical JSON bytes.
@@ -46,17 +42,13 @@ func normalizeYAML(v any) any {
 
 // rawOp is one parsed OpenAPI operation before it is bound to an owner.
 type rawOp struct {
-	key          string
-	description  string
-	method       string
-	path         string
-	baseURL      string
-	params       []HTTPParam
-	inputSchema  map[string]any
-	outputSchema map[string]any
-	price        int64
-	hash         string
-	sourceJSON   string
+	key           string
+	description   string
+	inputSchema   map[string]any
+	outputSchema  map[string]any
+	price         int64
+	priceDeclared bool // the document set x-juice-price; an absent price leaves it to the owner (§8)
+	source        HTTPSource
 }
 
 // resolveJSONPointer follows a JSON Pointer path (e.g. "components/schemas/Foo") inside doc.
@@ -206,9 +198,6 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
-			// Operations with security requirements are imported inactive.
-			// Configure upstream auth via POST/PUT /v1/actions and activate once ready.
-
 			_, hasBody := op["requestBody"].(map[string]any)
 			if hasBody {
 				rb := op["requestBody"].(map[string]any)
@@ -226,14 +215,14 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			}
 
 			var price int64
+			priceDeclared := false
 			if v, ok := op["x-juice-price"]; ok {
-				if f, ok := v.(float64); ok {
-					if int64(f) < 0 || f != float64(int64(f)) {
-						rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be a non-negative integer"})
-						continue
-					}
-					price = int64(f)
+				f, isNum := v.(float64)
+				if !isNum || f < 0 || f != float64(int64(f)) {
+					rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be a non-negative integer"})
+					continue
 				}
+				price, priceDeclared = int64(f), true
 			}
 
 			inputSchema, params := openAPICompileOperation(op, pathItem, spec)
@@ -244,32 +233,23 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 				continue
 			}
 
-			hash := openAPIOperationHash(baseURL, desc, method, path, inputSchema, outputSchema, price, params)
-
-			src := HTTPSource{
-				Type:          "openapi",
-				SpecURL:       specURL,
-				BaseURL:       baseURL,
-				Method:        strings.ToUpper(method),
-				Path:          path,
-				OperationKey:  key,
-				OperationHash: hash,
-				Params:        params,
-			}
-			srcBytes, _ := json.Marshal(src)
-
 			ops = append(ops, rawOp{
-				key:          key,
-				description:  desc,
-				method:       strings.ToUpper(method),
-				path:         path,
-				baseURL:      baseURL,
-				params:       params,
-				inputSchema:  inputSchema,
-				outputSchema: outputSchema,
-				price:        price,
-				hash:         hash,
-				sourceJSON:   string(srcBytes),
+				key:           key,
+				description:   desc,
+				inputSchema:   inputSchema,
+				outputSchema:  outputSchema,
+				price:         price,
+				priceDeclared: priceDeclared,
+				source: HTTPSource{
+					Type:          "openapi",
+					SpecURL:       specURL,
+					BaseURL:       baseURL,
+					Method:        strings.ToUpper(method),
+					Path:          path,
+					OperationKey:  key,
+					PriceDeclared: priceDeclared,
+					Params:        params,
+				},
 			})
 		}
 	}
@@ -428,30 +408,11 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 	if len(required) > 0 {
 		result["required"] = required
 	}
+	// Body fields come out of a map, so their order varies between parses of one document. Bindings
+	// are looked up by name and never by position, so ordering them by name costs nothing and makes
+	// a stored source compare equal to itself on the next import (§8).
+	sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
 	return result, params
-}
-
-func openAPIOperationHash(baseURL, description, method, path string, inputSchema, outputSchema map[string]any, price int64, params []HTTPParam) string {
-	sorted := make([]HTTPParam, len(params))
-	copy(sorted, params)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	paramsSlice := make([]any, len(sorted))
-	for i, p := range sorted {
-		paramsSlice[i] = map[string]any{"in": p.In, "name": p.Name}
-	}
-	payload := map[string]any{
-		"base_url":      baseURL,
-		"description":   description,
-		"input_schema":  inputSchema,
-		"method":        method,
-		"output_schema": outputSchema,
-		"params":        paramsSlice,
-		"path":          path,
-		"price":         price,
-	}
-	b, _ := CanonicalJSON(payload)
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
 
 func openAPISlug(s string) string {
@@ -470,108 +431,182 @@ func openAPISlug(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// ImportOpenAPI parses specBytes (caller-fetched OpenAPI JSON), reconciles operations with
-// existing OpenAPI-imported actions for the owner, and returns the diff. It is idempotent.
-// validateImportPrefix checks the name prefix an import lands under: no kernel qualifier, and no
-// empty segment — one rule covering a leading, trailing, or doubled slash. Nothing further, since
-// action names carry no character class of their own and inventing one here would be a second
-// naming authority. An empty prefix is valid.
-func validateImportPrefix(prefix string) (string, error) {
-	prefix = strings.TrimSpace(prefix)
-	if prefix == "" {
-		return "", nil
+// validateImportName checks the application path an import lands under: non-empty, no kernel
+// qualifier, and no empty segment — one rule covering a leading, trailing, or doubled slash.
+// Nothing further, since action names carry no character class of their own and inventing one here
+// would be a second naming authority.
+func validateImportName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ErrInvalidInput.Wrap("import name is required: it is the application's path under your account")
 	}
-	if strings.Contains(prefix, "@") {
-		return "", ErrInvalidInput.Wrap("import prefix must not contain @: it qualifies a kernel")
+	if strings.Contains(name, "@") {
+		return "", ErrInvalidInput.Wrap("import name must not contain @: it qualifies a kernel")
 	}
-	for _, seg := range strings.Split(prefix, "/") {
+	if looksLikeID(name) {
+		return "", ErrInvalidInput.Wrap("import name must not be id-shaped")
+	}
+	for _, seg := range strings.Split(name, "/") {
 		if seg == "" {
-			return "", ErrInvalidInput.Wrap("import prefix must not have an empty path segment")
+			return "", ErrInvalidInput.Wrap("import name must not have an empty path segment")
 		}
 	}
-	return prefix, nil
+	return name, nil
 }
 
-// importedPrefix derives the prefix a spec's rows were imported under by taking each row's name
-// apart from its own operation key. Nothing stores it: a stored copy could drift from the names
-// themselves, and creation is the only writer of a name — there is no rename path. Rows that
-// disagree, or a name not ending in its key, report false and are treated as a conflict.
-func importedPrefix(existing []*Action) (string, bool) {
+// installRootOf derives the application path a row was imported under, by taking its name apart
+// from its own operation key. Nothing stores it: a stored copy could drift from the names
+// themselves, and creation is the only writer of a name — there is no rename path. The derivation
+// is exact, so an application installed beneath another (mail and mail/calendar) keeps its own
+// rows: re-importing the parent classifies only rows whose root is the parent (§8).
+func installRootOf(a *Action) (string, bool) {
+	var src HTTPSource
+	if err := json.Unmarshal([]byte(a.Source), &src); err != nil || src.Type != "openapi" || src.OperationKey == "" {
+		return "", false
+	}
+	switch {
+	case a.Name == src.OperationKey:
+		return "", true
+	case strings.HasSuffix(a.Name, "/"+src.OperationKey):
+		return strings.TrimSuffix(a.Name, "/"+src.OperationKey), true
+	}
+	return "", false
+}
+
+// installedRows returns the owner's OpenAPI rows whose derived application root is exactly name.
+func (k *Kernel) installedRows(ctx context.Context, ownerID, name string) ([]*Action, error) {
+	all, err := k.store.ListActionsByOwner(ctx, ownerID, maxOwnerActions, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []*Action
+	for _, a := range all {
+		if root, ok := installRootOf(a); ok && root == name {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// storedSpecURL reports the document an installed application was imported from, so a re-import
+// needs only the application's name. Rows that disagree are a conflict rather than a coin toss.
+func (k *Kernel) storedSpecURL(rows []*Action) (string, error) {
 	found := ""
-	for i, a := range existing {
+	for _, a := range rows {
 		var src HTTPSource
 		if err := json.Unmarshal([]byte(a.Source), &src); err != nil {
-			return "", false
+			return "", ErrInvalidState.Wrap("installed action has an unreadable source")
 		}
-		var p string
-		switch {
-		case a.Name == src.OperationKey:
-			p = ""
-		case strings.HasSuffix(a.Name, "/"+src.OperationKey):
-			p = strings.TrimSuffix(a.Name, "/"+src.OperationKey)
-		default:
-			return "", false
+		if found != "" && src.SpecURL != found {
+			return "", ErrInvalidState.Wrapf("actions under %q come from more than one document", a.Name)
 		}
-		if i > 0 && p != found {
-			return "", false
-		}
-		found = p
+		found = src.SpecURL
 	}
-	return found, true
+	if found == "" {
+		return "", ErrNotFound.Wrap("no OpenAPI application is installed under that name")
+	}
+	return found, nil
 }
 
-func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL string, specBytes []byte, prefix string) (*ImportResult, error) {
+// StoredOpenAPISpecURL returns the document URL an installed application was imported from.
+func (k *Kernel) StoredOpenAPISpecURL(ctx context.Context, subjectID, ownerID, name string) (string, error) {
+	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
+		return "", err
+	}
+	name, err := validateImportName(name)
+	if err != nil {
+		return "", err
+	}
+	rows, err := k.installedRows(ctx, ownerID, name)
+	if err != nil {
+		return "", err
+	}
+	return k.storedSpecURL(rows)
+}
+
+// documentMoved reports whether the document now offers something different from what the stored
+// row holds. The comparison is against the row's current values rather than a hash recorded at the
+// last import, so it answers one question in both directions: the document changed, or the row was
+// edited away from the document. Either way the document owns these fields and restores them. The
+// price is the owner's unless the document declares one (§8).
+func documentMoved(existing *Action, raw rawOp) bool {
+	var src HTTPSource
+	if err := json.Unmarshal([]byte(existing.Source), &src); err != nil {
+		return true
+	}
+	if existing.Description != raw.description ||
+		src.BaseURL != raw.source.BaseURL || src.Method != raw.source.Method || src.Path != raw.source.Path ||
+		src.SpecURL != raw.source.SpecURL || src.PriceDeclared != raw.priceDeclared {
+		return true
+	}
+	if raw.priceDeclared && existing.Price != raw.price {
+		return true
+	}
+	if !jsonEqual(src.Params, raw.source.Params) {
+		return true
+	}
+	return !jsonEqual(existing.InputSchema, raw.inputSchema) || !jsonEqual(existing.OutputSchema, raw.outputSchema)
+}
+
+// jsonEqual compares two JSON-shaped values by their canonical encoding.
+func jsonEqual(a, b any) bool {
+	ab, aerr := CanonicalJSON(a)
+	bb, berr := CanonicalJSON(b)
+	return aerr == nil && berr == nil && string(ab) == string(bb)
+}
+
+// ImportOpenAPI installs or re-installs one OpenAPI document as the application at name, under the
+// owner's account: one ordinary action per representable operation, created and updated through the
+// same requests `action create` and `action update` use, so an imported action is held to exactly
+// the rules a hand-written one is (§8). The application's path is its identity — one name holds one
+// document, and re-importing needs only the name — while the same document may be installed under
+// several names as independent applications. Every operation is parsed, checked, and prepared
+// before the first row is written, and the writes then run in name order, so an interrupted import
+// leaves whole actions and re-running it continues where it stopped.
+func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, specURL string, specBytes []byte, auth *AuthInput) (*ImportResult, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
-	logger.Info("openapi.import.start", "spec_url", specURL)
+	logger.Info("openapi.import.start", "name", name, "spec_url", specURL)
 	if err := k.requireSelf(ctx, subjectID, ownerID); err != nil {
-		logger.Warn("openapi.import.failed", "spec_url", specURL, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		logger.Warn("openapi.import.failed", "name", name, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	prefix, err := validateImportPrefix(prefix)
+	name, err := validateImportName(name)
 	if err != nil {
 		return nil, err
 	}
-	owner, rerr := k.store.ReadUser(ctx, ownerID)
-	if rerr != nil {
-		return nil, rerr
-	}
-
-	rawOps, rejected, baseURL, err := parseOpenAPISpec(specBytes, specURL)
-	if err != nil {
-		return nil, err
-	}
-
-	// Proof 1: well-known challenge — GET {baseURL}/.well-known/juice-owner.txt must return the owner handle.
-	// Proof 2: x-juice-owner field in the spec document (embedded challenge, less strong).
-	ownershipVerified := false
-	if baseURL != "" {
-		if uf := k.fetcher; uf != nil {
-			wkURL := strings.TrimRight(baseURL, "/") + "/.well-known/juice-owner.txt"
-			if body, fetchErr := uf.FetchURL(ctx, wkURL); fetchErr == nil {
-				ownershipVerified = strings.TrimSpace(string(body)) == owner.Handle
-			}
+	// Credentials are the caller's one input for the whole application, so a bad scheme or a
+	// missing key fails the import outright rather than as a defect of each operation in turn.
+	if auth != nil {
+		if err := k.validateAuthInput(ctx, auth); err != nil {
+			return nil, err
+		}
+		if k.secretBox == nil {
+			return nil, ErrInvalidState.Wrap("credential encryption is not configured; cannot store upstream auth")
 		}
 	}
-	if !ownershipVerified {
-		var specMap map[string]any
-		_ = json.Unmarshal(specBytes, &specMap)
-		ownershipVerified = specMap["x-juice-owner"] == owner.Handle
-	}
 
-	existing, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
+	rawOps, rejected, _, err := parseOpenAPISpec(specBytes, specURL)
 	if err != nil {
 		return nil, err
 	}
 
-	// Reconcile matches by operation key and never renames, so a second prefix would leave the rows
-	// where they are and silently mean nothing. Refused instead, keeping identity and history.
+	existing, err := k.installedRows(ctx, ownerID, name)
+	if err != nil {
+		return nil, err
+	}
+	// One name holds one document: re-importing a different document under an occupied name would
+	// silently mix two upstreams under one application, so it is refused and the rows stay put. The
+	// same document under a second name is an independent application and needs no permission.
 	if len(existing) > 0 {
-		if inUse, ok := importedPrefix(existing); !ok || inUse != prefix {
-			return nil, ErrInvalidInput.Wrapf("spec already imported under prefix %q; a different prefix would not move it", inUse)
+		bound, berr := k.storedSpecURL(existing)
+		if berr != nil {
+			return nil, berr
+		}
+		if bound != specURL {
+			return nil, ErrInvalidInput.Wrapf("%q already holds the application imported from %s", name, bound)
 		}
 	}
-
 	existingByKey := make(map[string]*Action, len(existing))
 	for _, a := range existing {
 		var src HTTPSource
@@ -580,31 +615,35 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 		}
 	}
 
-	hashOf := func(a *Action) string {
-		var src HTTPSource
-		if err := json.Unmarshal([]byte(a.Source), &src); err == nil {
-			return src.OperationHash
+	// Operations come out of a map-ordered parse, so order them before anything selects among them:
+	// which of two operations claiming one key is kept must not vary between runs.
+	sort.Slice(rawOps, func(i, j int) bool {
+		if rawOps[i].key != rawOps[j].key {
+			return rawOps[i].key < rawOps[j].key
 		}
-		return ""
-	}
+		if rawOps[i].source.Path != rawOps[j].source.Path {
+			return rawOps[i].source.Path < rawOps[j].source.Path
+		}
+		return rawOps[i].source.Method < rawOps[j].source.Method
+	})
 
+	// Preflight the whole document: a duplicate key or name, an unusable schema, or an unsafe
+	// upstream is reported before anything is written, never halfway through.
+	seenKey := map[string]struct{}{}
+	seenName := map[string]struct{}{}
+	byKey := map[string]rawOp{}
 	var incoming []incomingOp
 	for _, raw := range rawOps {
 		raw := raw
-		// The prefix is what turns a spec into a group, and it is why an operation already mapped to
-		// "index" becomes that group's root without any further rule.
-		name := raw.key
-		if prefix != "" {
-			name = prefix + "/" + raw.key
+		actionName := name + "/" + raw.key
+		if _, dup := seenKey[raw.key]; dup {
+			rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "duplicate operation key in document"})
+			continue
 		}
-		// Name collision: only check for truly new ops (not already imported).
-		if _, exists := existingByKey[raw.key]; !exists {
-			if _, err := k.store.ReadActionByOwnerName(ctx, ownerID, name); err == nil {
-				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "name collision with existing action"})
-				continue
-			}
+		if _, dup := seenName[actionName]; dup {
+			rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "duplicate action name in document"})
+			continue
 		}
-		// Validate schemas before storing to prevent invalid data from being written.
 		if raw.inputSchema != nil {
 			if err := ValidateSchema(raw.inputSchema); err != nil {
 				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "invalid input schema: " + err.Error()})
@@ -617,109 +656,124 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, specURL 
 				continue
 			}
 		}
-		// Validate base URL against SSRF rules (same as CreateAction for KindHTTP).
-		if raw.baseURL != "" {
-			if err := k.validateHTTPSource(ctx, raw.baseURL, k.cfg.AllowLocalSources); err != nil {
-				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "unsafe source URL: " + err.Error()})
+		// A name already held by an action outside this application is not ours to take.
+		if _, held := existingByKey[raw.key]; !held {
+			if other, rerr := k.store.ReadActionByOwnerName(ctx, ownerID, actionName); rerr == nil && other != nil {
+				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "name collision with existing action"})
 				continue
 			}
 		}
-		sourceJSON := raw.sourceJSON
-		if ownershipVerified {
-			var osrc HTTPSource
-			_ = json.Unmarshal([]byte(raw.sourceJSON), &osrc)
-			osrc.OwnershipVerified = true
-			if b, marshalErr := json.Marshal(osrc); marshalErr == nil {
-				sourceJSON = string(b)
-			}
-		}
-		incoming = append(incoming, incomingOp{
-			key:  raw.key,
-			hash: raw.hash,
-			apply: func(a *Action) {
-				a.Description = raw.description
-				a.Price = raw.price
-				a.InputSchema = raw.inputSchema
-				a.OutputSchema = raw.outputSchema
-				a.Source = sourceJSON
-			},
-			// Identity and lifecycle only; reconcileImport calls apply for the contract fields.
-			new: func() *Action {
-				now := time.Now().UTC()
-				return &Action{
-					ID:          uuid.New().String(),
-					OwnerUserID: ownerID,
-					Name:        name,
-					Kind:        KindHTTP,
-					Active:      false,
-					Visibility:  VisibilityPrivate,
-					CreatedAt:   now,
-					UpdatedAt:   now,
-				}
-			},
+		seenKey[raw.key] = struct{}{}
+		seenName[actionName] = struct{}{}
+		byKey[raw.key] = raw
+		incoming = append(incoming, incomingOp{key: raw.key, name: actionName})
+	}
+
+	plan := classifyImport(existingByKey, incoming, func(ex *Action, op incomingOp) bool {
+		return documentMoved(ex, byKey[op.key])
+	})
+
+	// Prepare every write before committing any of them: an unsafe upstream URL or a credential the
+	// kernel cannot seal fails here, with the installation untouched.
+	type pendingUpdate struct {
+		a                        *Action
+		resetStats, revokeGrants bool
+	}
+	var creates []*Action
+	var updates []pendingUpdate
+	var updatedRows, unchangedRows []*Action
+
+	for _, op := range plan.New {
+		raw := byKey[op.key]
+		src := raw.source
+		a, perr := k.prepareCreateAction(ctx, CreateActionRequest{
+			OwnerUserID:  ownerID,
+			Name:         op.name,
+			Kind:         KindHTTP,
+			Price:        raw.price,
+			Description:  raw.description,
+			InputSchema:  raw.inputSchema,
+			OutputSchema: raw.outputSchema,
+			HTTP:         &src,
+			Auth:         auth,
 		})
-	}
-
-	result, err := k.reconcileImport(ctx, existingByKey, hashOf, incoming, true)
-	if err != nil {
-		return nil, err
-	}
-
-	// Staleness fix: re-evaluate ownership on Unchanged actions too.
-	// Proof state may have changed since the last import (e.g., well-known file removed).
-	for _, a := range result.Unchanged {
-		var src HTTPSource
-		if jsonErr := json.Unmarshal([]byte(a.Source), &src); jsonErr == nil && src.OwnershipVerified != ownershipVerified {
-			src.OwnershipVerified = ownershipVerified
-			if b, marshalErr := json.Marshal(src); marshalErr == nil {
-				a.Source = string(b)
-				a.UpdatedAt = time.Now().UTC()
-				_ = k.store.UpdateAction(ctx, a)
-			}
+		if perr != nil {
+			rejected = append(rejected, ImportRejection{Key: op.key, Reason: perr.Error()})
+			continue
 		}
+		creates = append(creates, a)
 	}
 
-	result.Rejected = append(result.Rejected, rejected...)
-	logger.Info("openapi.import.done", "spec_url", specURL, "created", len(result.Created), "updated", len(result.Updated), "unchanged", len(result.Unchanged), "deactivated", len(result.Deactivated), "status", "success", "duration_ms", time.Since(start).Milliseconds())
+	for _, ch := range plan.Changed {
+		raw := byKey[ch.op.key]
+		src := raw.source
+		req := UpdateActionRequest{
+			Description:  &raw.description,
+			InputSchema:  raw.inputSchema,
+			OutputSchema: raw.outputSchema,
+			HTTP:         &src,
+			Auth:         auth,
+		}
+		// The price is the document's only where the document declares one; otherwise it is the
+		// owner's number and survives every re-import.
+		if raw.priceDeclared {
+			price := raw.price
+			req.Price = &price
+		}
+		resetStats, revokeGrants, perr := k.prepareUpdateAction(ctx, ch.existing, req)
+		if perr != nil {
+			rejected = append(rejected, ImportRejection{Key: ch.op.key, Reason: perr.Error()})
+			continue
+		}
+		updates = append(updates, pendingUpdate{a: ch.existing, resetStats: resetStats, revokeGrants: revokeGrants})
+		updatedRows = append(updatedRows, ch.existing)
+	}
+
+	for _, ch := range plan.Unchanged {
+		// The document says nothing new, but the caller may still be attaching credentials to the
+		// whole application; that is a write, and the row is reported as updated because it is.
+		if auth != nil {
+			resetStats, revokeGrants, perr := k.prepareUpdateAction(ctx, ch.existing, UpdateActionRequest{Auth: auth})
+			if perr != nil {
+				rejected = append(rejected, ImportRejection{Key: ch.op.key, Reason: perr.Error()})
+				continue
+			}
+			updates = append(updates, pendingUpdate{a: ch.existing, resetStats: resetStats, revokeGrants: revokeGrants})
+			updatedRows = append(updatedRows, ch.existing)
+			continue
+		}
+		unchangedRows = append(unchangedRows, ch.existing)
+	}
+
+	// Rejections come out of a map-ordered parse; order them so one document always reports the
+	// same way.
+	sort.Slice(rejected, func(i, j int) bool { return rejected[i].Key < rejected[j].Key })
+	result := &ImportResult{Unchanged: unchangedRows, Rejected: rejected}
+	// Commit. Deactivations first, so a document that renamed an operation frees nothing it still
+	// needs; then updates and creates in name order.
+	for _, a := range plan.Stale {
+		a.Active = false
+		if err := k.commitUpdateAction(ctx, a, true, true); err != nil {
+			return result, err
+		}
+		result.Deactivated = append(result.Deactivated, a)
+	}
+	for _, u := range updates {
+		if err := k.commitUpdateAction(ctx, u.a, u.resetStats, u.revokeGrants); err != nil {
+			return result, err
+		}
+		k.indexForLookup(ctx, u.a)
+	}
+	result.Updated = updatedRows
+	for _, a := range creates {
+		if err := k.store.CreateAction(ctx, a); err != nil {
+			return result, err
+		}
+		result.Created = append(result.Created, a)
+	}
+
+	logger.Info("openapi.import.done", "name", name, "spec_url", specURL, "created", len(result.Created),
+		"updated", len(result.Updated), "unchanged", len(result.Unchanged), "deactivated", len(result.Deactivated),
+		"rejected", len(result.Rejected), "status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return result, nil
-}
-
-// UnimportOpenAPI deactivates all OpenAPI-imported actions with matching owner + spec_url.
-// If name is non-empty, only actions whose name or operation_key matches are deactivated.
-// The subject must be the owner or the platform superuser.
-func (k *Kernel) UnimportOpenAPI(ctx context.Context, subjectID, ownerID, specURL, name string) ([]*Action, error) {
-	// Always require an authenticated, non-suspended subject.
-	if _, err := k.requireActiveUser(ctx, subjectID); err != nil {
-		return nil, err
-	}
-	actions, err := k.store.ListActionsByOwnerOpenAPISpec(ctx, ownerID, specURL)
-	if err != nil {
-		return nil, err
-	}
-	if name != "" {
-		var filtered []*Action
-		for _, a := range actions {
-			var src HTTPSource
-			json.Unmarshal([]byte(a.Source), &src)
-			if a.Name == name || src.OperationKey == name {
-				filtered = append(filtered, a)
-			}
-		}
-		actions = filtered
-	}
-	// If no actions match the spec, require subject == owner (or @sys) to prevent
-	// arbitrary users from probing spec URLs for existence.
-	if len(actions) == 0 {
-		return nil, k.requireSelf(ctx, subjectID, ownerID)
-	}
-	// For each matched action, require owner or superuser.
-	for _, a := range actions {
-		if err := k.requireAdmin(ctx, subjectID, a); err != nil {
-			return nil, err
-		}
-	}
-	if err := k.deactivateImported(ctx, actions, false); err != nil {
-		return nil, err
-	}
-	return actions, nil
 }
