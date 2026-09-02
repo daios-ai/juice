@@ -245,7 +245,7 @@ func init() {
 func userCreateCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "create <user>",
+		Use:   "create USER",
 		Short: "Create a user account",
 		Long:  "Create a user account. USER is a bare handle — letters and digits, no @ or /.\n\nPrints a one-time recovery phrase; write it down. It is the only way to reset a lost\npassword (`juice auth recover`).",
 		Args:  cobra.ExactArgs(1),
@@ -328,7 +328,7 @@ func userUpdateCmd() *cobra.Command {
 func userTransferCmd() *cobra.Command {
 	var reason, externalKey string
 	cmd := &cobra.Command{
-		Use:   "transfer <recipient> <amount>",
+		Use:   "transfer RECIPIENT AMOUNT",
 		Short: "Send credits to another user",
 		Long:  "Send credits to another user, directly and without fee. RECIPIENT is another user's\nhandle on this kernel (a public key also resolves a local account).",
 		Args:  cobra.ExactArgs(2),
@@ -419,7 +419,7 @@ func actionCreateCmd() *cobra.Command {
 	var price int64
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   "create NAME",
 		Short: "Create an action",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -479,7 +479,7 @@ func actionUpdateCmd() *cobra.Command {
 	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
-		Use:   "update <action|path>",
+		Use:   "update ACTION|PATH",
 		Short: "Update an action or a path",
 		Long:  "Update an action or a path.\n\n" + actionPathHelp + "\n\nVisibility, price, and auth may target a whole path; a description, schema, or source\nneeds a target naming exactly one action. Changing source, schema, or price disables the\naction until re-enabled.",
 		Args:  cobra.ExactArgs(1),
@@ -550,11 +550,11 @@ func actionUpdateCmd() *cobra.Command {
 }
 
 func actionEnableCmd() *cobra.Command {
-	return actionActiveCmd("enable <action|path>", "Enable an action or a path", "enable", "enabled", true)
+	return actionActiveCmd("enable ACTION|PATH", "Enable an action or a path", "enable", "enabled", true)
 }
 
 func actionDisableCmd() *cobra.Command {
-	return actionActiveCmd("disable <action|path>", "Disable an action or a path", "disable", "disabled", false)
+	return actionActiveCmd("disable ACTION|PATH", "Disable an action or a path", "disable", "disabled", false)
 }
 
 // targetRequest addresses a mutation: an action id names exactly one row, an owner/path names the
@@ -680,7 +680,7 @@ func actionListCmd() *cobra.Command {
 
 func actionShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <action>",
+		Use:   "show ACTION",
 		Short: "Show action details",
 		Long:  "Show action details.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
@@ -692,7 +692,7 @@ func actionShowCmd() *cobra.Command {
 
 func actionDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <action|path>",
+		Use:   "delete ACTION|PATH",
 		Short: "Delete an action or a path, keeping history",
 		Long:  "Delete an action or a path; transactions, receipts, and ratings survive.\n\n" + actionPathHelp,
 		Args:  cobra.ExactArgs(1),
@@ -710,10 +710,10 @@ func actionDeleteCmd() *cobra.Command {
 func actionImportCmd() *cobra.Command {
 	var authStr string
 	cmd := &cobra.Command{
-		Use:   "import <name> [<spec-url>]",
+		Use:   "import NAME [SPEC_URL]",
 		Short: "Import an OpenAPI document as one application",
-		Long: "Import one OpenAPI document as the application at <name>, one action per operation.\n" +
-			"SPEC-URL is the http(s) address of the document; give it on the first import — later\n" +
+		Long: "Import one OpenAPI document as the application at NAME, one action per operation.\n" +
+			"SPEC_URL is the http(s) address of the document; give it on the first import — later\n" +
 			"imports reuse the recorded one and reconcile changes, keeping each action's id,\n" +
 			"history, credentials, and any price you set yourself.",
 		Args: cobra.RangeArgs(1, 2),
@@ -773,7 +773,7 @@ func actionImportCmd() *cobra.Command {
 
 func actionStatsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stats <action>",
+		Use:   "stats ACTION",
 		Short: "Show an action's statistics",
 		Long:  "Show an action's statistics.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
@@ -797,7 +797,7 @@ func actionStatsCmd() *cobra.Command {
 func actionRatingsCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "ratings <action>",
+		Use:   "ratings ACTION",
 		Short: "Show an action's public ratings",
 		Long:  "Show an action's public ratings, one per line: value (0 bad, 1 good), date, note.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
@@ -884,7 +884,7 @@ func processListCmd() *cobra.Command {
 
 func processEndCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "end <id>",
+		Use:   "end ID",
 		Short: "End a process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -899,7 +899,7 @@ func processEndCmd() *cobra.Command {
 
 func processShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <id>",
+		Use:   "show ID",
 		Short: "Show process details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -920,7 +920,7 @@ func stepCreateCmd() *cobra.Command {
 	var traceID, requiredCaller string
 	var partialArgs string
 	cmd := &cobra.Command{
-		Use:   "create <action>",
+		Use:   "create ACTION",
 		Short: "Create a step",
 		Long:  "Create a step: a prepaid continuation of a running call, addressed to one user who\nlater completes it with `step complete`. The step's price is reserved now, so completion\nneeds no further funds.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
@@ -1010,7 +1010,7 @@ func stepListCmd() *cobra.Command {
 
 func stepShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <id>",
+		Use:   "show ID",
 		Short: "Show step details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1022,9 +1022,9 @@ func stepShowCmd() *cobra.Command {
 func stepCompleteCmd() *cobra.Command {
 	var peer string
 	cmd := &cobra.Command{
-		Use:   "complete <id> [json]",
+		Use:   "complete ID [JSON]",
 		Short: "Complete a waiting step",
-		Long:  "Complete a waiting step addressed to you, supplying what is missing.\n\n[json] is the completion input as a JSON object, default {}; @file.json reads it from a\nfile. `step show` lists the fields still expected under allowed_input.",
+		Long:  "Complete a waiting step addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a\nfile. `step show` lists the fields still expected under allowed_input.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			raw := ""
@@ -1108,7 +1108,7 @@ func txListCmd() *cobra.Command {
 
 func txShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <id>",
+		Use:   "show ID",
 		Short: "Show transaction details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1119,7 +1119,7 @@ func txShowCmd() *cobra.Command {
 
 func txVerifyReceiptCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "verify <id>",
+		Use:   "verify ID",
 		Short: "Verify a transaction's remote receipt",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1131,7 +1131,7 @@ func txVerifyReceiptCmd() *cobra.Command {
 func txRateCmd() *cobra.Command {
 	var note string
 	cmd := &cobra.Command{
-		Use:   "rate <id> <0|1>",
+		Use:   "rate ID 0|1",
 		Short: "Rate a transaction (0 bad, 1 good)",
 		Long:  "Rate a transaction (0 bad, 1 good). The rating and note are visible wherever the action is visible.",
 		Args:  cobra.ExactArgs(2),
@@ -1160,9 +1160,9 @@ func init() {
 func runCmd() *cobra.Command {
 	var quoteHash string
 	cmd := &cobra.Command{
-		Use:   "run <action> [json]",
+		Use:   "run ACTION [JSON]",
 		Short: "Run an action",
-		Long:  "Run an action and print its result. The advertised price is the most the whole call can\ncost you; a failed call refunds what was not consumed.\n\n" + actionRefHelp + "\n\n[json] is the arguments as a JSON object, default {}; @file.json reads it from a file.",
+		Long:  "Run an action and print its result. The advertised price is the most the whole call can\ncost you; a failed call refunds what was not consumed.\n\n" + actionRefHelp + "\n\n[JSON] is the arguments as a JSON object, default {}; @file.json reads it from a file.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, cmdArgs []string) error {
 			argsStr := "{}"

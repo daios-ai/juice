@@ -75,7 +75,7 @@ Log lines, progress messages, and error text go to stderr. The only content writ
 Every command runs by calling the server over HTTP; the base URL is `--server`, defaulting to `http://localhost:4040`. `admin *` are superuser supervision served on that same public TCP API, on routes gated by an `IsSuperuser` check — authority is the `sys` bearer token (keep it secret; expose `serve` only behind TLS or on loopback), not a separate socket or filesystem access. `juice serve` is the sole process that opens the database. Supervision over ordinary resources is **scope**, not a separate surface: a superuser sees all rows on `action/process/tx/step list` and may `action disable`/`enable` any action, all over the normal TCP API.
 
 **C14 — Help text is plain operator English.**
-Every command's help is written for an operator who has not read requirements.md: no spec symbols (Q, X, bps), no section references, no protocol jargon without an in-sentence explanation; config concepts are named by their config key (`settlement_quantum`, never Q). Every placeholder in a `Use:` line (`<peer>`, `<target>`, `<action|path>`) is defined in that command's own help. Flag descriptions are sentence case without trailing periods.
+Every command's help is written for an operator who has not read requirements.md: no spec symbols (Q, X, bps), no section references, no protocol jargon without an in-sentence explanation; config concepts are named by their config key (`settlement_quantum`, never Q). Use lines use uppercase metavariables; square brackets indicate optional arguments. Non-obvious metavariables are explained in the command's help. Flag descriptions are sentence case without trailing periods.
 
 ---
 

@@ -30,7 +30,7 @@ func init() {
 func loginCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "login <user>",
+		Use:   "login USER",
 		Short: "Log in",
 		Long:  "Log in. USER is your bare handle — no @ or /.",
 		Args:  cobra.ExactArgs(1),
@@ -249,7 +249,7 @@ func signRecoveryChallenge(priv ed25519.PrivateKey, nonce string) (string, error
 func recoverCmd() *cobra.Command {
 	var phrase, newPassword string
 	cmd := &cobra.Command{
-		Use:   "recover <user>",
+		Use:   "recover USER",
 		Short: "Reset a lost password using your recovery phrase",
 		Long:  "Reset a lost password using the 12-word recovery phrase printed when the account was\ncreated. USER is your bare handle — no @ or /.",
 		Args:  cobra.ExactArgs(1),

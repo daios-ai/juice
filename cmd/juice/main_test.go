@@ -80,7 +80,7 @@ func TestUsageShownOnlyForParseErrors(t *testing.T) {
 			PersistentPreRun: func(_ *cobra.Command, _ []string) { entered = true },
 		}
 		sub := &cobra.Command{
-			Use: "deposit <user> <amount>", Args: cobra.ExactArgs(2),
+			Use: "deposit USER AMOUNT", Args: cobra.ExactArgs(2),
 			RunE: func(_ *cobra.Command, _ []string) error { return errors.New("runtime failure") },
 		}
 		root.AddCommand(sub)
@@ -112,6 +112,21 @@ func TestUsageShownOnlyForParseErrors(t *testing.T) {
 	if !*entered {
 		t.Fatal("runtime error must have entered the command body")
 	}
+}
+
+// TestUseLinesUseUppercaseMetavariables enforces C14's notation on the real command tree:
+// Use lines carry uppercase metavariables, never the old <angle-bracket> form.
+func TestUseLinesUseUppercaseMetavariables(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		if strings.Contains(c.Use, "<") {
+			t.Errorf("command %q: Use line %q contains '<'; metavariables are uppercase (API.md C14)", c.CommandPath(), c.Use)
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(rootCmd)
 }
 
 func TestMain(m *testing.M) {

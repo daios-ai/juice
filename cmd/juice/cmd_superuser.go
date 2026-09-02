@@ -151,7 +151,7 @@ const targetHelp = "TARGET is a local user's handle, or a peer kernel's local na
 
 func adminShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <target>",
+		Use:   "show TARGET",
 		Short: "Show a local account or a remote kernel",
 		Long:  "Show a local account or a remote kernel.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
@@ -163,7 +163,7 @@ func adminShowCmd() *cobra.Command {
 
 func adminSuspendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "suspend <target>",
+		Use:   "suspend TARGET",
 		Short: "Suspend a local account or a remote kernel",
 		Long:  "Suspend a local account or a remote kernel: a suspended user cannot log in, and a\nsuspended peer's calls are refused. Reversible with `admin unsuspend`.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
@@ -179,7 +179,7 @@ func adminSuspendCmd() *cobra.Command {
 
 func adminUnsuspendCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unsuspend <target>",
+		Use:   "unsuspend TARGET",
 		Short: "Unsuspend a local account or a remote kernel",
 		Long:  "Unsuspend a local account or a remote kernel, restoring it fully.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
@@ -195,11 +195,11 @@ func adminUnsuspendCmd() *cobra.Command {
 
 func adminRenameCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rename <target> <new-name>",
+		Use:   "rename TARGET NEW_NAME",
 		Short: "Rename a local account, or bind a kernel's petname",
 		Long: "Rename a local account, or bind a kernel's petname.\n\n" + targetHelp + "\n\n" +
-			"For a user target, NEW-NAME becomes its handle and the old handle is freed. For a\n" +
-			"kernel target, NEW-NAME becomes its petname — the local name your commands use for\n" +
+			"For a user target, NEW_NAME becomes its handle and the old handle is freed. For a\n" +
+			"kernel target, NEW_NAME becomes its petname — the local name your commands use for\n" +
 			"that peer. A name already in use is refused.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -237,17 +237,17 @@ func adjustCmd(use, short, path string) *cobra.Command {
 }
 
 func adminDepositCmd() *cobra.Command {
-	return adjustCmd("deposit <target> <amount>", "Add credits to an account or kernel", "/control/deposit")
+	return adjustCmd("deposit TARGET AMOUNT", "Add credits to an account or kernel", "/control/deposit")
 }
 
 func adminWithdrawCmd() *cobra.Command {
-	return adjustCmd("withdraw <target> <amount>", "Deduct credits from an account or kernel", "/control/withdraw")
+	return adjustCmd("withdraw TARGET AMOUNT", "Deduct credits from an account or kernel", "/control/withdraw")
 }
 
 func adminSettleCmd() *cobra.Command {
 	var cash string
 	cmd := &cobra.Command{
-		Use:   "settle <peer>",
+		Use:   "settle PEER",
 		Short: "Settle what this kernel owes a peer kernel",
 		Long: "Settle this kernel's debt to a peer. PEER is the peer's local name (petname) or its\n" +
 			"public key — both are shown by `admin peers`.\n\n" +
@@ -259,7 +259,7 @@ func adminSettleCmd() *cobra.Command {
 			"full quantum becomes payable instead. Over many settlements this averages out exactly,\n" +
 			"so debts too small to pay economically still settle fairly.\n\n" +
 			"When a draw ends payable, pay the quantum on the rail, then record it with\n" +
-			"--cash <settlement_id> on both kernels.",
+			"--cash SETTLEMENT_ID on both kernels.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
@@ -271,7 +271,7 @@ func adminSettleCmd() *cobra.Command {
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect <key|petname>",
+		Use:   "inspect KEY|PETNAME",
 		Short: "Inspect a remote kernel (by public key or bound petname)",
 		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and\n" +
 			"reachability. The petname is the local name this kernel gave the peer (`admin rename`);\n" +
@@ -303,7 +303,7 @@ func peerInspectCmd() *cobra.Command {
 				Source string `json:"source"`
 				Online bool   `json:"online"`
 				// Steps this peer has parked for THIS kernel: work awaiting us, and the ids
-				// `step complete <id> --peer` takes (§13). A peer account holds no session token,
+				// `step complete ID --peer` takes (§13). A peer account holds no session token,
 				// so this is the only place an operator sees them.
 				Steps []struct {
 					ID           string          `json:"id"`
@@ -420,7 +420,7 @@ func peerInspectCmd() *cobra.Command {
 				}
 			}
 			if len(out.Steps) > 0 {
-				fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete <id> --peer %s\n",
+				fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete ID --peer %s\n",
 					len(out.Steps), args[0])
 				for _, st := range out.Steps {
 					fmt.Printf("  %s  price=%d  %s\n", st.ID, st.Price, st.CreatedAt.Format(time.RFC3339))
