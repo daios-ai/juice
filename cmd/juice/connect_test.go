@@ -33,11 +33,11 @@ func createDelegatedCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name stri
 	return a.ID
 }
 
-// TestUserConnectCommandTree pins the CLI surface: `user connect <selector>` (with --device,
-// --token, --yes) and `user disconnect [selector]` (with --account).
+// TestUserConnectCommandTree pins the CLI surface: `user connect SELECTOR` (with --device,
+// --token, --yes) and `user disconnect [SELECTOR]` (with --account).
 func TestUserConnectCommandTree(t *testing.T) {
 	c := userConnectCmd()
-	if c.Use != "connect <selector>" {
+	if c.Use != "connect SELECTOR" {
 		t.Errorf("connect Use = %q", c.Use)
 	}
 	for _, f := range []string{"device", "token", "yes"} {
@@ -46,7 +46,7 @@ func TestUserConnectCommandTree(t *testing.T) {
 		}
 	}
 	d := userDisconnectCmd()
-	if d.Use != "disconnect [selector]" {
+	if d.Use != "disconnect [SELECTOR]" {
 		t.Errorf("disconnect Use = %q", d.Use)
 	}
 	if d.Flags().Lookup("account") == nil {
