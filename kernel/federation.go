@@ -989,6 +989,21 @@ func stepReply(status int, body []byte, notDispatched bool, err error, peerKey s
 	return decoded, nil
 }
 
+// settleRefusal maps a peer's non-200 settle reply to a typed error the stepReply way: the peer's
+// code decides the class, its concise message rides along (the wire carries class and message
+// only, never internal detail).
+func settleRefusal(round string, body []byte) error {
+	var decoded struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	_ = json.Unmarshal(body, &decoded)
+	if decoded.Error == "" {
+		decoded.Error = "peer rejected the settlement request"
+	}
+	return ErrorFromCode(decoded.Code).Wrapf("peer refused settlement %s: %s", round, decoded.Error)
+}
+
 // PeerStepsAwaitingUs lists the steps a peer holds for this kernel (§13), for admin inspect and for
 // the payment-descriptor lookup below. One bounded fetch: the queue is a handful of pending
 // cross-kernel approvals, not a corpus.
@@ -2474,7 +2489,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		}
 		// Our books must agree that this peer owes us exactly the claimed debt d (= −available).
 		if -peer.Available != amount {
-			b, _ := json.Marshal(map[string]any{"error": "receivable mismatch", "receivable": -peer.Available})
+			b, _ := json.Marshal(map[string]any{"error": "receivable mismatch", "code": KernelErrorCode(ErrInvalidState), "receivable": -peer.Available})
 			return 409, b, nil
 		}
 		Q := k.cfg.SettlementQuantum
@@ -2641,7 +2656,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 		return nil, err
 	}
 	if status != 200 {
-		return nil, ErrInvalidState.Wrapf("peer refused settlement open (status %d): %s", status, string(body))
+		return nil, settleRefusal("open", body)
 	}
 	open := SettlementRecord{}
 	if err := json.Unmarshal(body, &open); err != nil {
@@ -2667,7 +2682,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 		return nil, err
 	}
 	if status != 200 {
-		return nil, ErrInvalidState.Wrapf("peer refused settlement finish (status %d): %s", status, string(body))
+		return nil, settleRefusal("finish", body)
 	}
 	final := SettlementRecord{}
 	if err := json.Unmarshal(body, &final); err != nil {

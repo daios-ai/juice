@@ -1038,22 +1038,48 @@ func TestCommitSettlement(t *testing.T) {
 		t.Errorf("cash replay changed the row: %d", u.Available)
 	}
 
-	// (8) Debtor cash with insufficient sys reserve rolls back — no partial writes, still pending. A
-	// debtor owes d (row +d); paying Q needs sys ≥ Q−d, but sys here (a fresh user) has 0.
+	// (8) Debtor cash with insufficient sys reserve refuses typed — no partial writes, still pending.
+	// A debtor owes d (row +d); paying Q needs sys ≥ Q−d, but sys here (a fresh user) has 0.
 	poor := newUser("poorSys", 0)
 	_ = db.CreateUser(ctx, poor)
 	dbtr := newPeer(t, db, "peerDebtor", "pkDebtor", d, 0, now)
 	if _, err := db.CommitSettlement(ctx, "sid-dp", dbtr.ID, poor.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CommitSettlementCash(ctx, "sid-dp", dbtr.ID, poor.ID, -d, -(Q - d), Q, `{"outcome":"cash"}`); err == nil {
-		t.Error("cash with insufficient debtor reserve should fail")
+	if _, err := db.CommitSettlementCash(ctx, "sid-dp", dbtr.ID, poor.ID, -d, -(Q - d), Q, `{"outcome":"cash"}`); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("cash with insufficient debtor reserve: got %v, want ErrInsufficientFunds", err)
 	}
 	if u, _ := db.ReadUser(ctx, dbtr.ID); u.Available != d {
 		t.Errorf("failed cash left a partial write on the row: got %d, want %d", u.Available, d)
 	}
 	if pending, _ := db.HasPendingSettlement(ctx, dbtr.ID); !pending {
 		t.Error("failed cash should leave the settlement pending")
+	}
+
+	// Creditor clear against an empty reserve refuses the same way: ErrInsufficientFunds, no
+	// message SQL, full rollback, and the same commit succeeds once the reserve exists.
+	pcr := newPeer(t, db, "peerClearPoor", "pkClearPoor", -d, 0, now)
+	_, cerr := db.CommitSettlement(ctx, "sid-poor", pcr.ID, poor.ID, d, -d, d, `{"outcome":"clear"}`)
+	if !errors.Is(cerr, kernel.ErrInsufficientFunds) {
+		t.Errorf("clear with empty creditor reserve: got %v, want ErrInsufficientFunds", cerr)
+	}
+	if cerr != nil && strings.Contains(cerr.Error(), "CHECK") {
+		t.Errorf("reserve refusal leaks constraint text: %v", cerr)
+	}
+	if u, _ := db.ReadUser(ctx, pcr.ID); u.Available != -d {
+		t.Errorf("failed clear left a partial write on the row: got %d, want %d", u.Available, -d)
+	}
+	if u, _ := db.ReadUser(ctx, poor.ID); u.Available != 0 {
+		t.Errorf("failed clear moved the poor reserve: got %d, want 0", u.Available)
+	}
+	if err := db.CreateLedgerEntry(ctx, &kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, ToUserID: poor.ID, Amount: d, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitSettlement(ctx, "sid-poor", pcr.ID, poor.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
+		t.Errorf("clear after funding the reserve should succeed: %v", err)
+	}
+	if u, _ := db.ReadUser(ctx, pcr.ID); u.Available != 0 {
+		t.Errorf("funded clear: peer row got %d, want 0", u.Available)
 	}
 
 	// The conservation guard rejects a non-conservative outcome record.

@@ -2641,8 +2641,8 @@ func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string
 // anti-grinding); ledgerAmt>0 is the debt/cash magnitude for the audit row; conserve requires
 // dClear+variance==0 (internal-only outcome records — clear applies ±d/∓d, a pending pay applies
 // 0/0). A cash finalization sets conserve=false, since it is the point where external cash Q enters
-// (dClear+variance==Q). A debtor's negative sys variance exceeding its reserve trips the
-// accounts.available CHECK, rolling the whole tx back → the settlement stays pending, no partial writes.
+// (dClear+variance==Q). A negative sys variance is guarded like lockReserveTx: a reserve short of
+// it refuses ErrInsufficientFunds, rolling the whole tx back → the settlement stays pending, no partial writes.
 func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sysID string, dClear, variance, ledgerAmt int64, recordJSON string, conserve bool) (string, error) {
 	if conserve && dClear+variance != 0 {
 		return "", fmt.Errorf("commit settlement: non-conservative outcome (dClear=%d variance=%d)", dClear, variance)
@@ -2663,8 +2663,12 @@ func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sy
 			}
 		}
 		if variance != 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, variance, sysID); err != nil {
+			res, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=? AND available >= ?`, variance, sysID, -variance)
+			if err != nil {
 				return dbErr(err, "commit settlement: sys variance")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInsufficientFunds.Wrap("operator reserve below settlement variance")
 			}
 		}
 		// to_user_id names the settled peer/proxy row (non-null from/to CHECK + attribution); the

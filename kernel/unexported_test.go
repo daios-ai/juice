@@ -587,6 +587,22 @@ func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
 	}
 }
 
+// TestSettleRefusalMapsPeerCode: a peer's non-200 settle reply surfaces under the code it carried
+// (a typed reserve refusal stays insufficient_funds), and a codeless or malformed body still yields
+// an error rather than a panic.
+func TestSettleRefusalMapsPeerCode(t *testing.T) {
+	err := settleRefusal("finish", []byte(`{"code":"insufficient_funds","error":"operator reserve below settlement variance"}`))
+	if !errors.Is(err, ErrInsufficientFunds) {
+		t.Errorf("typed refusal lost its class: %v", err)
+	}
+	if !strings.Contains(err.Error(), "peer refused settlement finish") || !strings.Contains(err.Error(), "operator reserve") {
+		t.Errorf("refusal message lost its context: %v", err)
+	}
+	if err := settleRefusal("open", []byte(`not json`)); err == nil {
+		t.Error("malformed refusal body must still be an error")
+	}
+}
+
 // TestSettleOutcomeAndPayloads exercises the residual-settlement primitives (§13): the fair outcome
 // function's determinism, boundaries, and E[pay]≈d/Q distribution; the creditor record sign/verify
 // roundtrip with tamper detection; and the disjointness of the settle_open / settle_finish scopes.

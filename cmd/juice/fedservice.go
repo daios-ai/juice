@@ -54,11 +54,22 @@ func (kl *keyLimiter) allow(key string) bool {
 	return l.Allow()
 }
 
+// wireError is the one boundary shaping an error for a peer (§14): the code and its concise
+// message cross; an internal error crosses as its class alone, so SQL and store text never
+// leave the kernel.
+func wireError(err error) (code, msg string) {
+	code = kernel.KernelErrorCode(err)
+	if code == kernel.KernelErrorCode(kernel.ErrInternal) {
+		return code, "internal error"
+	}
+	return code, err.Error()
+}
+
 // fedError renders a typed error as the {error, code} envelope every protocol reply uses (§14), so
 // an offline-verifiable rejection always carries a code and its derived status.
 func fedError(err error) fed.Response {
-	code := kernel.KernelErrorCode(err)
-	b, _ := json.Marshal(map[string]string{"error": err.Error(), "code": code})
+	code, msg := wireError(err)
+	b, _ := json.Marshal(map[string]string{"error": msg, "code": code})
 	return fed.Response{Status: kernel.HTTPStatusFromCode(code), Body: b}
 }
 
@@ -558,10 +569,8 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 
 	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID)
 	if callErr != nil {
-		errJSON, _ := json.Marshal(map[string]string{
-			"error": callErr.Error(),
-			"code":  kernel.KernelErrorCode(callErr),
-		})
+		wireCode, wireMsg := wireError(callErr)
+		errJSON, _ := json.Marshal(map[string]string{"error": wireMsg, "code": wireCode})
 		// A committed transaction (reply carries a receipt) means the call settled — possibly
 		// with charge > 0 from settled descendants. Return THAT receipt so the caller settles
 		// the real charge, preserving bilateral conservation rather than under-paying with 0.
@@ -569,7 +578,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)
 			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-			return kernel.HTTPStatus(callErr), map[string]any{"error": callErr.Error(), "code": kernel.KernelErrorCode(callErr), "receipt": receipt}, nil
+			return kernel.HTTPStatus(callErr), map[string]any{"error": wireMsg, "code": wireCode, "receipt": receipt}, nil
 		}
 		// A parked remote dispatch has committed nothing yet and may still settle with a real
 		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
@@ -582,7 +591,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		// trace pending. Status and code derive from the error — HTTPStatus maps both
 		// ErrInsufficientFunds and ErrPeerUnfunded to 402, so its settleRemoteCall attributes them
 		// to the operator (settle/deposit), never to the caller's own funds (§13).
-		msg, code := callErr.Error(), kernel.KernelErrorCode(callErr)
+		msg, code := wireMsg, wireCode
 		// A pre-execution rejection here (non-executable action, suspended caller, bad input, or funding)
 		// is not a contract-hash fault — re-resolving would not change the outcome — so refresh_proxy is
 		// false. Only the If-Match mismatch above sets it (§13).

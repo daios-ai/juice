@@ -135,6 +135,23 @@ func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, st
 	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input, "", "", "")
 }
 
+// TestWireErrorShieldsInternal: the one wire boundary sends code + concise message; an internal
+// error crosses as its class alone, so store/SQL text never reaches a peer (§14 error hygiene).
+func TestWireErrorShieldsInternal(t *testing.T) {
+	code, msg := wireError(kernel.ErrInternal.Wrapf("commit settlement: sys variance: %s", "constraint failed: CHECK constraint failed: accounts"))
+	if code != "internal" || msg != "internal error" {
+		t.Errorf("internal error crossed with detail: code=%q msg=%q", code, msg)
+	}
+	code, msg = wireError(kernel.ErrInsufficientFunds.Wrap("operator reserve below settlement variance"))
+	if code != "insufficient_funds" || msg != "operator reserve below settlement variance" {
+		t.Errorf("typed error lost code or message: code=%q msg=%q", code, msg)
+	}
+	resp := fedError(kernel.ErrInternal.Wrap("constraint failed: CHECK constraint failed: accounts"))
+	if resp.Status != 500 || strings.Contains(string(resp.Body), "CHECK") {
+		t.Errorf("fedError leaked internal detail: status=%d body=%s", resp.Status, resp.Body)
+	}
+}
+
 func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
