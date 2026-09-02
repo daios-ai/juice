@@ -32,6 +32,7 @@ func loginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login <user>",
 		Short: "Log in",
+		Long:  "Log in. USER is your bare handle — no @ or /.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			handle := args[0]
@@ -250,6 +251,7 @@ func recoverCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "recover <user>",
 		Short: "Reset a lost password using your recovery phrase",
+		Long:  "Reset a lost password using the 12-word recovery phrase printed when the account was\ncreated. USER is your bare handle — no @ or /.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			handle := args[0]

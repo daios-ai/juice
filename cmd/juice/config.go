@@ -253,7 +253,7 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 		{"import_bps", c.ImportBPS, &cfg.ImportBPS},
 	} {
 		if bps.value < 0 || bps.value > 10000 {
-			return kernel.Config{}, fmt.Errorf("%s must be 0–10000", bps.name)
+			return kernel.Config{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
 		}
 		*bps.dst = bps.value
 	}

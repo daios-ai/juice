@@ -2622,7 +2622,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 		return nil, err
 	} else if pending {
 		return map[string]any{"status": "pending_cash", "handle": name,
-			"message": "a paid probabilistic outcome is awaiting its rail record; pay the quantum, then run `admin settle <peer> --cash <settlement_id>`"}, nil
+			"message": "an earlier draw ended payable and awaits its payment record; pay the amount shown then, and record it with `admin settle <peer> --cash <settlement_id>`"}, nil
 	}
 	d := peer.Available // > 0 ⇒ this kernel owes the peer (we are the debtor)
 	switch {
@@ -2630,13 +2630,13 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 		return map[string]any{"status": "settled", "amount": int64(0), "handle": name}, nil
 	case d < 0:
 		return map[string]any{"status": "creditor", "amount": -d, "handle": name,
-			"message": "the peer owes you; its operator initiates settlement"}, nil
+			"message": "the peer owes this kernel; settlement is started from the peer's side"}, nil
 	}
 	Q := k.cfg.SettlementQuantum
 	settlementID := uuid.NewString()
 	if Q <= 0 || d >= Q {
 		return map[string]any{"status": "exact", "mode": "exact", "amount": d, "settlement_id": settlementID, "handle": name,
-			"message": fmt.Sprintf("pay %d on the rail, then run `admin withdraw %s %d --external-key %s`", d, name, d, settlementID)}, nil
+			"message": fmt.Sprintf("pay %d to the peer outside the kernel, then record it with `admin withdraw %s %d --external-key %s` (the peer records the matching deposit)", d, name, d, settlementID)}, nil
 	}
 
 	settler := k.fedClient
@@ -2712,7 +2712,7 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 	if pay {
 		res["status"] = "pending_cash"
 		res["amount"] = open.Quantum
-		res["message"] = fmt.Sprintf("you owe %d; pay it on the rail, then run `admin settle %s --cash %s`", open.Quantum, name, settlementID)
+		res["message"] = fmt.Sprintf("the draw ended payable: pay %d to the peer outside the kernel, then record it with `admin settle %s --cash %s` (the peer runs the same)", open.Quantum, name, settlementID)
 	} else {
 		res["status"] = "settled"
 		res["amount"] = int64(0)

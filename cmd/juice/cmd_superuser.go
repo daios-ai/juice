@@ -97,11 +97,13 @@ func identityCmd() *cobra.Command {
 			if out.About != "" {
 				fmt.Printf("About:      %s\n", out.About)
 			}
-			// Global exposure policy and current standing (§13).
-			fmt.Printf("Exposure:   max=%d gross_receivables=%d trigger=%d quantum=%d\n",
+			// Global exposure policy and current standing (§13), in operator words: how much
+			// unsecured credit this kernel extends serving peers, how much peers owe right now,
+			// and the two settlement thresholds from config.
+			fmt.Printf("Credit:     serving-cap=%d owed-by-peers=%d settle-signal-at=%d small-debt-threshold=%d\n",
 				out.ExposureMax, out.GrossReceivables, out.SettlementTrigger, out.SettlementQuantum)
 			if out.SettlementDue {
-				fmt.Println("Settlement: DUE (gross receivables ≥ trigger)")
+				fmt.Println("Settlement: DUE (peers owe at least the settle signal)")
 			}
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
@@ -144,10 +146,14 @@ func adminUsersCmd() *cobra.Command {
 	return cmd
 }
 
+// targetHelp defines the shared TARGET placeholder of the mixed account/kernel admin commands.
+const targetHelp = "TARGET is a local user's handle, or a peer kernel's local name (petname) or\npublic key; names are shown by `admin users` and `admin peers`."
+
 func adminShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <target>",
 		Short: "Show a local account or a remote kernel",
+		Long:  "Show a local account or a remote kernel.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
@@ -159,6 +165,7 @@ func adminSuspendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "suspend <target>",
 		Short: "Suspend a local account or a remote kernel",
+		Long:  "Suspend a local account or a remote kernel: a suspended user cannot log in, and a\nsuspended peer's calls are refused. Reversible with `admin unsuspend`.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
@@ -174,6 +181,7 @@ func adminUnsuspendCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unsuspend <target>",
 		Short: "Unsuspend a local account or a remote kernel",
+		Long:  "Unsuspend a local account or a remote kernel, restoring it fully.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
@@ -189,7 +197,11 @@ func adminRenameCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rename <target> <new-name>",
 		Short: "Rename a local account, or bind a kernel's petname",
-		Args:  cobra.ExactArgs(2),
+		Long: "Rename a local account, or bind a kernel's petname.\n\n" + targetHelp + "\n\n" +
+			"For a user target, NEW-NAME becomes its handle and the old handle is freed. For a\n" +
+			"kernel target, NEW-NAME becomes its petname — the local name your commands use for\n" +
+			"that peer. A name already in use is refused.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"new_name": args[1]}
 			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
@@ -207,6 +219,7 @@ func adjustCmd(use, short, path string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: short,
+		Long:  short + ", reflecting a payment made outside the system.\n\n" + targetHelp,
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			amount, err := parseAmount(args[1])
@@ -219,7 +232,7 @@ func adjustCmd(use, short, path string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	cmd.Flags().StringVar(&externalKey, "external-key", "", "Optional idempotency token")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id of the outside payment; repeating the command with the same id never moves money twice")
 	return cmd
 }
 
@@ -235,14 +248,24 @@ func adminSettleCmd() *cobra.Command {
 	var cash string
 	cmd := &cobra.Command{
 		Use:   "settle <peer>",
-		Short: "Settle the bilateral position with a peer",
-		Long:  "Settle the bilateral position with a peer.\n\nWith no flags: exact settlement if the debt ≥ Q, otherwise the two-party probabilistic\ncommit/reveal. A paid probabilistic outcome does NOT move money — it leaves a debt of Q pending.\n\nAfter paying that Q on your rail, record it with --cash <settlement_id> (run on both kernels).",
+		Short: "Settle what this kernel owes a peer kernel",
+		Long: "Settle this kernel's debt to a peer. PEER is the peer's local name (petname) or its\n" +
+			"public key — both are shown by `admin peers`.\n\n" +
+			"The kernel only keeps the books; real money moves outside it, on whatever payment rail\n" +
+			"the two operators share. If the debt is at least `settlement_quantum` (config), the\n" +
+			"command prints the amount to pay and the exact `admin withdraw` command that records\n" +
+			"the payment. A smaller debt is settled by a fair random draw with the peer: usually\n" +
+			"the debt is cancelled outright and nothing is paid; with probability debt/quantum the\n" +
+			"full quantum becomes payable instead. Over many settlements this averages out exactly,\n" +
+			"so debts too small to pay economically still settle fairly.\n\n" +
+			"When a draw ends payable, pay the quantum on the rail, then record it with\n" +
+			"--cash <settlement_id> on both kernels.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
 		},
 	}
-	cmd.Flags().StringVar(&cash, "cash", "", "Record the rail payment for a paid probabilistic outcome (settlement_id)")
+	cmd.Flags().StringVar(&cash, "cash", "", "Record the rail payment for a payable draw (takes the settlement_id printed earlier)")
 	return cmd
 }
 
@@ -250,7 +273,11 @@ func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect <key|petname>",
 		Short: "Inspect a remote kernel (by public key or bound petname)",
-		Args:  cobra.ExactArgs(1),
+		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and\n" +
+			"reachability. The petname is the local name this kernel gave the peer (`admin rename`);\n" +
+			"the nickname is what the peer calls itself, shown for recognition but never usable as a\n" +
+			"name. An offline peer degrades to locally cached data.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			var out struct {
 				Petname   string `json:"petname"`
