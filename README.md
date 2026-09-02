@@ -42,6 +42,7 @@ so the commands below work against any kernel you can reach and log in to.
 
 ```bash
 ./juice user create alice        # prints alice's one-time recovery phrase
+./juice user create bob
 ./juice auth login alice
 ./juice user me                  # handle, balance, locked funds
 ```
@@ -50,7 +51,9 @@ Credits enter by operator deposit (reflecting a payment made outside the system)
 move freely between local users:
 
 ```bash
+./juice auth login sys
 ./juice admin deposit alice 1000   # operator only
+./juice auth login alice
 ./juice user transfer bob 250      # alice pays bob directly, no fee
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
@@ -64,7 +67,9 @@ An action needs a name, a description, input/output schemas, and a price. It sta
 disabled and private, so nothing is callable by accident:
 
 ```bash
-./juice action create echo --kind http --source https://httpbin.org/post --price 5
+./juice action create echo --kind http --source https://httpbin.org/post --price 5 \
+  --description "Echo a message" \
+  --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}}}'
 ./juice action enable alice/echo
 ./juice run alice/echo '{"msg":"hello"}'
 ```
@@ -83,9 +88,9 @@ the result:
 Only the payer can rate, once, and ratings are immutable — they are the market's
 public evidence about the action.
 
-Three visibility levels control the audience, each widened deliberately by the owner:
-`private` (owner only), `local` (users of this kernel), `public` (everyone, including
-other kernels). Changing an action's terms never surprises a buyer: a call pinned to
+Three visibility levels control the audience, each widened deliberately by the owner
+(`action update alice/echo --visibility public`): `private` (owner only), `local`
+(users of this kernel), `public` (everyone, including other kernels). Changing an action's terms never surprises a buyer: a call pinned to
 terms that changed is refused and re-quoted, never silently repriced.
 
 As a provider, the price is your bound and your margin: sub-actions you call are paid
@@ -101,8 +106,9 @@ no filesystem, network, or token access. Write the handler in Go and compile it 
 kernel:
 
 ```bash
-./juice run sys/tinygo/compile '{"source": "@handler.go"}'
-./juice action create pipeline --kind wasm --artifact @artifact.b64 --price 100
+./juice run sys/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
+  | jq -r .result.artifact | base64 -d > pipeline.wasm
+./juice action create pipeline --kind wasm --artifact pipeline.wasm --price 100
 ```
 
 An HTTP-backed action can compose too: each dispatch carries a capability header the
@@ -131,7 +137,7 @@ multi-user APIs, each caller connects their **own** upstream account once:
 
 ```bash
 ./juice user connect alice/mail            # browser consent (OAuth), or:
-./juice user connect alice/mail --token    # paste a personal API key
+./juice user connect alice/mail --token KEY   # or a personal API key
 ./juice user me                            # lists connections, never tokens
 ./juice user disconnect alice/mail
 ```
@@ -200,7 +206,7 @@ and trust verbs:
 ./juice admin deposit carol 500        # credit/debit against outside payments
 ./juice admin withdraw carol 200
 ./juice admin suspend carol            # one reversible lever, humans and kernels alike
-./juice admin rename k-3f8a2c weather-farm   # give a peer a memorable local name
+./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
 ./juice admin peers                    # counterparties and discovered kernels, balances, last seen
 ./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
 ./juice admin identity                 # own key, addresses, exposure position
