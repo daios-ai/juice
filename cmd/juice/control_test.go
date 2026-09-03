@@ -72,7 +72,7 @@ func TestAdminDepositOverTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": "rcpt", "amount": 500})
+		map[string]any{"handle": "rcpt", "amount": 500, "ref": "test-payment"})
 	if status != http.StatusOK {
 		t.Fatalf("deposit status %d: %s", status, body)
 	}
@@ -101,7 +101,7 @@ func TestAdminDepositByKey(t *testing.T) {
 
 	// Address the peer by key, not by @handle.
 	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": keyB64, "amount": 300})
+		map[string]any{"handle": keyB64, "amount": 300, "ref": "test-payment"})
 	if status != http.StatusOK {
 		t.Fatalf("deposit-by-key status %d: %s", status, body)
 	}
@@ -168,7 +168,7 @@ func TestAdminSuperuserGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, status := tcpDo(t, regTok, "POST", "/control/deposit",
-		map[string]any{"handle": "regular", "amount": 1})
+		map[string]any{"handle": "regular", "amount": 1, "ref": "test-payment"})
 	if status == http.StatusOK {
 		t.Fatalf("non-superuser deposit should be rejected, got 200")
 	}

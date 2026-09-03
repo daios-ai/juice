@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -238,7 +239,8 @@ func renderValue(raw json.RawMessage) string {
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
-	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(), userConnectCmd(), userDisconnectCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
+		userConnectCmd(), userDisconnectCmd(), userAddressCmd(), userDepositCmd(), userWithdrawCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -333,11 +335,12 @@ func userTransferCmd() *cobra.Command {
 		Long:  "Send credits to another user, directly and without fee. RECIPIENT is another user's\nhandle on this kernel (a public key also resolves a local account).",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			amount, err := parseAmount(args[1])
+			ctx := context.Background()
+			amount, err := parseAmount(args[1], amountDecimals(ctx))
 			if err != nil {
 				return err
 			}
-			return apiEmit("POST", "/v1/transfers", map[string]any{
+			return apiEmitCtx(ctx, "POST", "/v1/transfers", map[string]any{
 				"recipient": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
 			})
 		},
@@ -369,6 +372,7 @@ func userLedgerCmd() *cobra.Command {
 				}
 				return nil
 			}
+			decimals := amountDecimals(context.Background())
 			for _, e := range entries {
 				from, to := e.FromHandle, e.ToHandle
 				if from == "" {
@@ -377,14 +381,171 @@ func userLedgerCmd() *cobra.Command {
 				if to == "" {
 					to = "—"
 				}
-				fmt.Printf("[%s] amount:%-6d  from:%-12s  to:%-12s  %s\n",
+				fmt.Printf("[%s] amount:%-10s  from:%-12s  to:%-12s  %s\n",
 					e.CreatedAt.Format(time.RFC3339),
-					e.Amount, from, to, e.Reason)
+					formatAmount(e.Amount, decimals), from, to, e.Reason)
 			}
 			return nil
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
+	return cmd
+}
+
+// meView is the caller's own record, the only place a client reads its own id and payout address.
+type meView struct {
+	ID          string `json:"id"`
+	Handle      string `json:"handle"`
+	RailAddress string `json:"rail_address"`
+}
+
+func readMe(ctx context.Context) (*meView, error) {
+	var me meView
+	if err := apiCall(ctx, "GET", "/v1/me", nil, &me); err != nil {
+		return nil, err
+	}
+	return &me, nil
+}
+
+// userAddressCmd registers where the caller is paid. The kernel credits money to whoever finally
+// sent it, so an account is paid out only to an address its holder has proved is theirs: the proof
+// is a signature over a message naming this kernel, this account, and that address, and nothing
+// else. The signing happens in the wallet, not here — this command composes the message and takes
+// the signature back.
+func userAddressCmd() *cobra.Command {
+	var signature string
+	cmd := &cobra.Command{
+		Use:   "address [ADDRESS]",
+		Short: "Show or register the address you are paid at",
+		Long: "Show or register the address you are paid at. With no arguments, shows the address\n" +
+			"registered for your account.\n\n" +
+			"ADDRESS registers that address. It is yours only once you prove it: this command prints a\n" +
+			"message naming this kernel, your account, and the address; sign that message with the\n" +
+			"wallet that holds the address and paste the signature back, or pass it with --signature.\n" +
+			"Registering also credits you for payments already received from that address.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ctx := context.Background()
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				if me.RailAddress == "" {
+					fmt.Println("No address registered.")
+					return nil
+				}
+				fmt.Println(me.RailAddress)
+				return nil
+			}
+			h, err := probeHealth(ctx, serverBaseURL())
+			if err != nil {
+				return err
+			}
+			if signature == "" {
+				if !interactiveTTY() {
+					return kernel.ErrInvalidInput.Wrap("--signature is required when nobody is at the terminal to sign")
+				}
+				fmt.Fprintf(os.Stderr, "Sign this message with the wallet holding %s:\n\n%s\n\n",
+					args[0], string(kernel.RailAddressMessage(h.PublicKey, me.ID, args[0])))
+				fmt.Fprint(os.Stderr, "Signature: ")
+				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+				signature = strings.TrimSpace(line)
+			}
+			return apiEmitCtx(ctx, "PUT", "/v1/me/address", map[string]any{
+				"address": args[0], "signature": signature,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&signature, "signature", "", "Signature of the registration message, produced by the wallet holding the address")
+	return cmd
+}
+
+// userDepositCmd answers "how do I put money in?" and writes nothing. The answer depends on the
+// world this kernel serves, so it is composed from what the server says about itself and about the
+// caller rather than from anything stored here.
+func userDepositCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "deposit",
+		Short: "Show how to put money into your account",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			ctx := context.Background()
+			h, err := probeHealth(ctx, serverBaseURL())
+			if err != nil {
+				return err
+			}
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
+			}
+			if h.RailAddress == "" {
+				fmt.Printf("Money on the %s network has no addresses to send to.\n", h.Network)
+				fmt.Println("The operator of this kernel records payments here; there is nothing to send from your side.")
+				return nil
+			}
+			fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.RailAddress)
+			if me.RailAddress == "" {
+				fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
+				fmt.Println("Register the address you will pay from first:  juice user address ADDRESS")
+				return nil
+			}
+			fmt.Printf("Pay from your registered address:\n  %s\n\n", me.RailAddress)
+			fmt.Println("Money is credited to whoever finally sent it, so it must arrive from that address.")
+			fmt.Println("An exchange paying this kernel on your behalf would be crediting itself, not you:")
+			fmt.Println("withdraw to your own wallet first, then pay from there.")
+			return nil
+		},
+	}
+}
+
+// userWithdrawCmd sends the caller's own credits back out, and bare lists what they have sent.
+// The id is minted here and is the row's own, so a reply lost in transit is safe to ask for again.
+func userWithdrawCmd() *cobra.Command {
+	var reason string
+	cmd := &cobra.Command{
+		Use:   "withdraw [AMOUNT]",
+		Short: "Withdraw your credits, or list your withdrawals",
+		Long: "Withdraw your credits to the address you registered with `juice user address`. With no\n" +
+			"arguments, lists the withdrawals you have made and where each stands.\n\n" +
+			"A withdrawal fixes its destination when it is made, so registering another address later\n" +
+			"never redirects one already under way.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ctx := context.Background()
+			if len(args) == 0 {
+				return apiEmitCtx(ctx, "GET", "/v1/withdrawals", nil)
+			}
+			decimals := amountDecimals(ctx)
+			amount, err := parseAmount(args[0], decimals)
+			if err != nil {
+				return err
+			}
+			// A human at a terminal is asked before money leaves; an agent driving the CLI with no
+			// terminal is taken at its word, deliberately — agents are first-class callers here.
+			if interactiveTTY() {
+				me, err := readMe(ctx)
+				if err != nil {
+					return err
+				}
+				destination := "your account"
+				if me.RailAddress != "" {
+					destination = me.RailAddress
+				}
+				network := ""
+				if h, err := probeHealth(ctx, serverBaseURL()); err == nil {
+					network = h.Network + " "
+				}
+				if !promptYesNo(fmt.Sprintf("Withdraw %s %sto %s?", formatAmount(amount, decimals), network, destination)) {
+					return nil
+				}
+			}
+			return apiEmitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{
+				"id": uuid.NewString(), "amount": amount, "reason": reason,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	return cmd
 }
 

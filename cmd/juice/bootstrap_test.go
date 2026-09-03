@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/native"
-	"github.com/daios-ai/juice/store"
 )
 
 // TestFirstBootRequiresKernelName: a headless first boot with no kernel name configured must fail
@@ -20,14 +17,14 @@ func TestFirstBootRequiresKernelName(t *testing.T) {
 	t.Setenv("JUICE_BOOTSTRAP_PASSWORD", "pw")
 
 	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err == nil ||
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil ||
 		!strings.Contains(err.Error(), "kernel name is required") {
 		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
 	}
 
 	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "acme")
 	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
+	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("boot with name via env: %v", err)
 	}
 	if globalCfg.KernelHandle != "acme" {
@@ -75,15 +72,9 @@ func TestFirstBootAtomic(t *testing.T) {
 
 func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "bootstrap_test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+	db := newTestStore(t)
+	cfg := testConfig("bootstrap-test-secret")
+	return newKernel(cfg, kernel.Dependencies{Store: db})
 }
 
 // sysSpec returns the shipped native.Spec for name, with the configured default price (§9/§14).
@@ -192,7 +183,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	}
 
 	// bootstrap must reject the mismatch.
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err == nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
 		t.Error("expected error for mismatched signing keys, got nil")
 	}
 }
@@ -259,16 +250,10 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 // Distinct kernel instances over one shared DB simulate successive builds (registered handlers differ).
 func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "reintro.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "bootstrap-test-secret"
+	db := newTestStore(t)
+	cfg := testConfig("bootstrap-test-secret")
 	newBuild := func(withWidget bool) *kernel.Kernel {
-		k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+		k := newKernel(cfg, kernel.Dependencies{Store: db})
 		if withWidget {
 			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return map[string]any{}, nil
@@ -349,7 +334,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -383,7 +368,7 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 

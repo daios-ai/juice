@@ -25,14 +25,16 @@ func isTimeoutErr(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// serverBaseURL resolves the Juice server base URL for user-facing (client) commands: --server,
-// else the local kernel on http://localhost:4040. One override, because the CLI drives a kernel it
-// is co-located with — a second address is a federation identity, which is a key, not a URL (§13).
+// serverBaseURL resolves the Juice server base URL for user-facing (client) commands: --server for
+// one invocation, else the address the profile in use recorded (§14). A second address is not a
+// second kernel identity — that is a public key, never a URL (§13) — which is why the token that
+// travels there is decided by the pinned key, not by this address (tokenFor).
 func serverBaseURL() string {
 	if flagServer != "" {
 		return strings.TrimRight(flagServer, "/")
 	}
-	return "http://localhost:4040"
+	_, _, p := activeProfile()
+	return p.Endpoint
 }
 
 // errUnreachable reports that the juice server/peer at url couldn't be reached, retaining
@@ -61,14 +63,15 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 		rdr = bytes.NewReader(b)
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
-	// Remember whether we had a token at all: the server can only answer "missing bearer token",
-	// which tells the user nothing about what to do. With no token file the actionable answer is
-	// local — run juice auth login — so it replaces the 401 below rather than being discarded here.
-	tok, tokErr := loadToken()
+	base := serverBaseURL()
+	// Remember why no token was attached: the server can only answer "missing bearer token", which
+	// tells the user nothing about what to do. Whether they are not logged in or are addressing a
+	// server their login does not belong to, the actionable answer is local, so it replaces the 401
+	// below rather than being discarded here.
+	tok, tokErr := tokenFor(base)
 	if tokErr == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}
-	base := serverBaseURL()
 	respBody, status, err := doHTTP(ctx, method, base+path, headers, rdr, 0, true)
 	if err != nil && status == 0 {
 		// The server was reachable but too slow (e.g. a slow upstream during OAuth consent) vs.
@@ -81,7 +84,9 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	if err != nil {
 		return err
 	}
-	if status == 401 && retry && refreshToken(ctx) {
+	// The refresh token is a credential too, and goes only where the access token may: an expired
+	// login at home is refreshed, a stranger's 401 is not answered with anything.
+	if status == 401 && retry && atHome(base) && refreshToken(ctx) {
 		return apiDo(ctx, method, path, body, out, false)
 	}
 	if status == 401 && tokErr != nil {
@@ -123,7 +128,8 @@ func refreshToken(ctx context.Context) bool {
 		return false
 	}
 	body, _ := json.Marshal(map[string]string{"refresh_token": rt})
-	respBody, status, err := doHTTP(ctx, "POST", serverBaseURL()+"/v1/auth/refresh",
+	_, _, p := activeProfile()
+	respBody, status, err := doHTTP(ctx, "POST", strings.TrimRight(p.Endpoint, "/")+"/v1/auth/refresh",
 		map[string]string{"Content-Type": "application/json"}, bytes.NewReader(body), 0, true)
 	if err != nil || status != 200 {
 		return false
@@ -175,4 +181,43 @@ func errorFromResponse(status int, body []byte) error {
 		msg = fmt.Sprintf("server returned status %d", status)
 	}
 	return &kernel.KernelError{Code: "internal", HTTP: status, Message: msg}
+}
+
+// serverHealth is the open identity banner every client reads before it trusts a server: which
+// kernel this is, and which network it serves (D23). It needs no token.
+type serverHealth struct {
+	Status      string `json:"status"`
+	Handle      string `json:"handle"`
+	PublicKey   string `json:"public_key"`
+	Network     string `json:"network"`
+	Digest      string `json:"network_digest"`
+	Decimals    uint8  `json:"decimals"`
+	RailAddress string `json:"rail_address"`
+}
+
+// health reads the banner from a specific base URL. It reuses the one HTTP path every other
+// request takes, so a proxy or timeout behaves identically here.
+func health(ctx context.Context, base string) (*serverHealth, error) {
+	body, status, err := doHTTP(ctx, "GET", base+"/health", nil, nil, 0, true)
+	if err != nil {
+		return nil, kernel.ErrPeerUnreachable.Wrapf("cannot reach %s: %v", base, err)
+	}
+	if status != 200 {
+		return nil, errorFromResponse(status, body)
+	}
+	var h serverHealth
+	if err := json.Unmarshal(body, &h); err != nil || h.PublicKey == "" {
+		return nil, kernel.ErrInvalidState.Wrapf("%s is not a juice server", base)
+	}
+	return &h, nil
+}
+
+// serverNetwork returns the network of the server this invocation is talking to. Signatures a
+// client produces are bound to it, so it is read from the server rather than assumed.
+func serverNetwork(ctx context.Context) (kernel.Network, error) {
+	h, err := probeHealth(ctx, serverBaseURL())
+	if err != nil {
+		return kernel.Network{}, err
+	}
+	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals}, nil
 }

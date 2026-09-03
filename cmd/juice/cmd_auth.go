@@ -237,9 +237,10 @@ func enrollRecovery(label string, commit func(recoveryPublicKey string) error) e
 }
 
 // signRecoveryChallenge signs the recovery nonce with the phrase-derived key, matching the kernel's
-// verification payload exactly (kernel.RecoveryChallenge, a disjoint signature domain).
-func signRecoveryChallenge(priv ed25519.PrivateKey, nonce string) (string, error) {
-	payload, err := kernel.RecoveryChallengeSigningBytes(nonce)
+// verification payload exactly (kernel.RecoveryChallenge, a disjoint signature domain). net carries
+// the server's network digest, which the prefix binds the signature to (D23).
+func signRecoveryChallenge(net kernel.Network, priv ed25519.PrivateKey, nonce string) (string, error) {
+	payload, err := net.RecoveryChallengeSigningBytes(nonce)
 	if err != nil {
 		return "", err
 	}
@@ -280,7 +281,11 @@ func recoverCmd() *cobra.Command {
 			if err := apiCall(ctx, "POST", "/v1/auth/recover/start", map[string]any{"handle": handle}, &started); err != nil {
 				return err
 			}
-			sig, err := signRecoveryChallenge(priv, started.Nonce)
+			net, err := serverNetwork(ctx)
+			if err != nil {
+				return err
+			}
+			sig, err := signRecoveryChallenge(net, priv, started.Nonce)
 			if err != nil {
 				return err
 			}

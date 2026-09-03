@@ -49,12 +49,12 @@ func TestRecoveryKeyDerivation(t *testing.T) {
 	}
 
 	const nonce = "test-nonce"
-	sigB64, err := signRecoveryChallenge(priv, nonce)
+	sigB64, err := signRecoveryChallenge(testNet, priv, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sig, _ := base64.RawURLEncoding.DecodeString(sigB64)
-	payload, _ := kernel.RecoveryChallengeSigningBytes(nonce)
+	payload, _ := testNet.RecoveryChallengeSigningBytes(nonce)
 	pub, _ := base64.RawURLEncoding.DecodeString(pubB64)
 	if !ed25519.Verify(ed25519.PublicKey(pub), payload, sig) {
 		t.Error("recovery challenge signature did not verify against the enrolled key")

@@ -6,13 +6,21 @@ import (
 	"time"
 )
 
+// playNetworkDigest is the play world's digest, pinned identically in rail/world_test.go. These
+// fixtures are signatures on that network, so the two constants must agree or kernels that believe
+// they share a world would reject each other.
+const playNetworkDigest = "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"
+
+// playNet is the network every test signs on, so a fixture and a round-trip agree by construction.
+var playNet = Network{Name: "play", Digest: playNetworkDigest}
+
 // Golden signature fixtures. Every signed federation payload (§12 signature domains, §13 protocols)
 // is pinned here as an exact signature string over a fixed key and fixed field values. These digests
 // ARE the wire contract: a peer verifies them offline, and the network upgrades in lockstep, so no
-// refactor of how a payload is represented in Go may move a single byte. Generated from the payload
-// builders before they became typed structs, and never edited since — a failure here means the
-// canonical JSON changed, which is a protocol break, not a test to update.
+// refactor of how a payload is represented in Go may move a single byte — and neither may the
+// network digest the prefix carries. A failure here is a protocol break, not a test to update.
 func TestSignedPayloadGoldenFixtures(t *testing.T) {
+	net := playNet
 	seed := make([]byte, ed25519.SeedSize)
 	for i := range seed {
 		seed[i] = byte(i + 1)
@@ -45,26 +53,29 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		}
 	}
 
-	sig, err := SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash)
-	check("fed_call", "tgkkjlOrslDe2bWXhqfWuZ60pkFUFl86Gq8BhpnrzsFAjwheifU1Oi8W1Jj83kRYPm_QOkovsGlLyHOMgkAiAg", sig, err)
+	sig, err := net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash)
+	check("fed_call", "7nvN8-uTEDnPSjjxUvSNBp-pfbUIgtKe3SvSRWv2hPCoELwhjoz_Z3TrRkde8c08qCyGnCy4HbZcUb2V7B-zCw", sig, err)
 
-	sig, err = SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash)
-	check("step_complete", "7jYqR305sA1RrHr3nB8zopv19xkzFMIM7-5jlJrZIyBzr6gw003057A8VNJbAnE2u5NWnq8W-eucwQa3ROUUBw", sig, err)
+	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash)
+	check("step_complete", "pG89K-ofhZ8xs-ggsVRJ9eNGeOsTcTFQejYfyIboALe7WyHVjZl2qKEF2-Gk4YDCk8vL37QWlIHOwPXHkiueDA", sig, err)
 
-	sig, err = SignStepAuthPayload(key, cp, recipient, userID, stepID, ts)
-	check("step_auth", "mERJPFyqpfC3hBehbsp9dV6rQNW-jHdi7uLotLhCq0acCix0QJEoByVzNHfoXP_klmZPkd0B1zFxz7Gt9SRwBQ", sig, err)
+	sig, err = net.SignStepAuthPayload(key, cp, recipient, userID, stepID, ts)
+	check("step_auth", "qxmzAfhsS8m80NKP_DTapYAyso-wR_zxDYvOQtDqO9LJonZZOp1hlpj6oBycpfopKaitmgnKrsQfndJkYp2VDA", sig, err)
 
-	sig, err = SignStepListPayload(key, cp, recipient, ts)
-	check("step_list", "1cvubu5dOuQbBkdJRzka8IEtzsZle_AolJZ8mZE0hY-ie8mip-G8xKXd6lDvbArDY8L-rqRDdUfpljOvnAJkBA", sig, err)
+	sig, err = net.SignStepListPayload(key, cp, recipient, ts)
+	check("step_list", "hWP8ddJWQ4eDzSPL9T55CVoFzKhWOvlgiZpBfZtNQC1Z4BA1nhU0bFxDCXvrdDE0ZN8xUG-9xB0KOLo9vyjnCg", sig, err)
 
-	sig, err = signJCS(key, sigDomainSettleOpen, settleOpenPayload(cp, recipient, settleID, 42, ts))
-	check("settle_open", "bHpQWWC8QiT-zZKep_7tW_0CgzAtpyD-swxWnF4oDPi9LOz0-ue2HMejiyLYEqQfUxWDc-ZVdpHK-4VcjX7sDQ", sig, err)
+	sig, err = net.sign(key, sigDomainSettleOpen, settleOpenPayload(cp, recipient, settleID, 42, ts))
+	check("settle_open", "pw7IjPlg2dO4N6zDTPfdpV8aRiNzthHy7e9TXlERHC6WZW0yYqm3hIi-wxrfi6QkhjOttbgYCqaFIfCTqPWuDg", sig, err)
 
-	sig, err = signJCS(key, sigDomainSettleFinish, settleFinishPayload(cp, recipient, settleID, nonce, ts))
-	check("settle_finish", "Yp1LzUnvUfl7sJeBtGG-qS3O9D4lrRXhfeZYJ3ps2ViN5s0p-67r6EgpZlQIvc8hTbftOogsQOX1W77Jra4NDQ", sig, err)
+	sig, err = net.sign(key, sigDomainSettleFinish, settleFinishPayload(cp, recipient, settleID, nonce, ts))
+	check("settle_finish", "FL4cBKM0uSLirTLoEVSGo55Yto5CnHkWZujVL9r_2cScomtl_J6WVgXay-UvQ0vNjnWjfp8-X0t0WB95ctU-Dg", sig, err)
 
-	sig, err = signJCS(key, sigDomainSettleReconcile, settleReconcilePayload(cp, recipient, settleID, ts))
-	check("settle_reconcile", "T8z-n9Wc_pPBRjlJNbfkbcBJI06Ap4vcNphAQOJzHImYul133alf-X9OC3hCu5Z6vwi1Ptb7-C6VB8UzJGq-Dw", sig, err)
+	sig, err = net.sign(key, sigDomainSettleAnnounce, settleAnnouncePayload(cp, recipient, settleID, "tx-1", ts))
+	check("settle_announce", "s-xO3HCxXhZLhGQuX_lAa6djf9AGtVuj7cP--pViJkRpcS8Ss52t_wfx0BbIKqKTtubKFNhpcJCglhzf7ZT7CQ", sig, err)
+
+	sig, err = net.sign(key, sigDomainSettleReconcile, settleReconcilePayload(cp, recipient, settleID, ts))
+	check("settle_reconcile", "YtLuLELLzN69HTiLQi6OaOXJADKHk6rth9Ly9r9n5aGtwkWnTHADveN6vLRuaiV-0NKwC2cdVvnKqxAOpGS_Dw", sig, err)
 
 	m := &ActionManifest{
 		ActionID: actionID, OwnerID: "owner-1", OwnerHandle: "alice", Name: "greet",
@@ -72,14 +83,14 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		UpdatedAt:   fixedTime,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
-	sig, err = SignManifest(key, m)
-	check("manifest", "KFLZ2FOnyH1GmAFVuUGp7R1Ks4Bl5iqCkb0VTZKkmKWn38EShXYcVywxk8nwDDbc9DXAZWB5_XmVAI5hY-UVBg", sig, err)
+	sig, err = net.SignManifest(key, m)
+	check("manifest", "WOYz6ZZKYV4jhDweoekj5wGyTWPbtY-e-Jgpb5RAVJ-cUOUiglPttUo2YrjZK51RhJaKYpknvMIZhUggOBEpDw", sig, err)
 
 	rec := &SettlementRecord{
 		SettlementID: settleID, Creditor: cp, Debtor: recipient, Amount: 42, Quantum: 100,
 		Mode: "probabilistic", Commitment: "H", Nonce: nonce, Secret: "s", Outcome: "pay",
 		ExpiresAt: fixedTime, CreatedAt: fixedTime,
 	}
-	sig, err = signJCS(key, sigDomainSettlementRec, rec)
-	check("settlement_record", "4AerKb9Yx5FCYG2aHT5VMaDk-eMV8FFqmoXeFwB8vZk3hYDMpZhKWQS2AqAuVGoOLisaFBP5q3vROhd1sxqlDw", sig, err)
+	sig, err = net.sign(key, sigDomainSettlementRec, rec)
+	check("settlement_record", "5le2X3fMYhyPPZvbERmeaqNABEwr5qBNq5-MvqLzW9u_EyKc4wH0mXJX_ZArQvDdaxYMEisiEyVYjoKYWqIdAg", sig, err)
 }

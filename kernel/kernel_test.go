@@ -19,6 +19,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
@@ -32,6 +33,14 @@ func TestMain(m *testing.M) {
 // testIssuerUserID is a fixed sentinel user ID inserted into every test store.
 // All test kernels use this as their IssuerUserID so that receipt FK constraints pass.
 const testIssuerUserID = "00000000-0000-0000-0000-000000000001"
+
+// testNet is the play network every test signs on. The kernels these helpers build carry it too, so
+// a signature made in a test verifies in the kernel under test rather than by coincidence.
+var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+
+// newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
+// a test that funds an account twice must name two payments (U3).
+func newRef() string { return "test:" + uuid.NewString() }
 
 func newTestStore(t testing.TB) kernel.Store {
 	t.Helper()
@@ -58,22 +67,40 @@ func newTestStore(t testing.TB) kernel.Store {
 	return db
 }
 
-func newTestKernel(st kernel.Store) *kernel.Kernel {
+// testConfig is the policy every test kernel starts from; a test with another policy edits the copy.
+func testConfig() kernel.Config {
 	cfg := kernel.DefaultConfig()
+	cfg.Network = testNet
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
+	return cfg
+}
+
+// newKernel builds a kernel from cfg and the adapters in deps. What every test wires the same way —
+// the logger, a double that also speaks federation, the manual rail (every world runs the same
+// money rules, and play's finalized facts are the operator's own records, D23) — is wired here, so
+// a new kernel dependency is added once rather than at each construction site.
+func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
+	deps.Config = cfg
+	if deps.Logger == nil {
+		deps.Logger = log.Default()
+	}
+	if fc, ok := deps.HTTP.(kernel.FederationClient); ok && deps.Federation == nil {
+		deps.Federation = fc
+	}
+	k := kernel.New(deps)
+	k.SetRail(rail.NewManual())
+	return k
+}
+
+func newTestKernel(st kernel.Store) *kernel.Kernel {
+	return newKernel(testConfig(), kernel.Dependencies{Store: st})
 }
 
 func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	return kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg, Logger: log.Default()})
+	return newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec})
 }
 
 func testSigningKey() ed25519.PrivateKey {
@@ -157,7 +184,12 @@ func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
 func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.Account {
 	t.Helper()
-	return setupUser(t, st, "sys", 0)
+	u := setupUser(t, st, "sys", 0)
+	// The operator account is named by config, which is how the rail's crossings find it (D23).
+	if err := st.SetConfig(context.Background(), "superuser_handle", "sys"); err != nil {
+		t.Fatalf("setupSys: %v", err)
+	}
+	return u
 }
 
 func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
@@ -1148,11 +1180,11 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	recipient := setupUser(t, st, "recipient", 0)
 
 	// Superuser can deposit.
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", newRef()); err != nil {
 		t.Fatalf("superuser deposit: %v", err)
 	}
 	// Regular user cannot deposit.
-	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad", ""); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad", newRef()); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for non-superuser deposit, got %v", err)
 	}
 }
@@ -1244,34 +1276,43 @@ func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	}
 
 	// Empty key never dedups: both apply.
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	if balance() != 220 {
 		t.Errorf("balance after two empty-key deposits: got %d, want 220", balance())
 	}
 
-	// Withdraw replay returns the existing record before the available-balance guard:
-	// after the first debit drops the balance below amount, the replay still succeeds.
-	w, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	// A withdrawal carries the caller's own id, so a reply lost in transit is safe to ask for
+	// again: the same id returns the same row and moves nothing, even after the first debit has
+	// taken the balance below the amount (U51).
+	id := uuid.NewString()
+	wd, err := k.Withdraw(ctx, recipient.ID, id, 200, "redeem")
 	if err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
 	if balance() != 20 {
 		t.Fatalf("balance after withdraw: got %d, want 20", balance())
 	}
-	wReplay, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	again, err := k.Withdraw(ctx, recipient.ID, id, 200, "redeem")
 	if err != nil {
-		t.Fatalf("withdraw replay must not fail on dropped balance: %v", err)
+		t.Fatalf("replaying a withdrawal must not fail: %v", err)
 	}
-	if wReplay.ID != w.ID {
-		t.Errorf("withdraw replay returned a new record: got %s, want %s", wReplay.ID, w.ID)
+	if again.ID != wd.ID {
+		t.Errorf("replay made a second withdrawal: got %s, want %s", again.ID, wd.ID)
 	}
 	if balance() != 20 {
-		t.Errorf("balance after withdraw replay: got %d, want 20 (debited once)", balance())
+		t.Errorf("balance after replay: got %d, want 20 (debited once)", balance())
+	}
+	// The same id on other terms is a different intention, and is refused rather than guessed at.
+	if _, err := k.Withdraw(ctx, recipient.ID, id, 5, "redeem"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("same id, other amount: want ErrInvalidInput, got %v", err)
+	}
+	if _, err := k.Withdraw(ctx, recipient.ID, uuid.NewString(), 999, ""); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("withdrawing more than the balance: want ErrInsufficientFunds, got %v", err)
 	}
 }
 
@@ -1310,7 +1351,7 @@ func TestTransfer(t *testing.T) {
 	}
 
 	// Peer/proxy recipient (kernel_public_key set) rejected.
-	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{
@@ -1373,7 +1414,7 @@ func TestListLedger(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	bob := setupUser(t, st, "bob", 0)
 
-	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "", ""); err != nil {
@@ -2135,17 +2176,7 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 }
 
 func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	deps := kernel.Dependencies{Store: st, HTTP: http, Config: cfg, Logger: log.Default()}
-	// A test double may play several adapter roles; wire the ones it actually implements.
-	if fc, ok := http.(kernel.FederationClient); ok {
-		deps.Federation = fc
-	}
-	return kernel.New(deps)
+	return newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: http})
 }
 
 // ---- Remote proxy execution test ----
@@ -2208,7 +2239,7 @@ func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (
 }
 
 // Settle completes kernel.FederationClient; residual settlement has its own dedicated fakes.
-func (f *fakeFederationHTTP) Settle(_ context.Context, _, _, _, _, _ string, _ int64, _ string, _ []byte) (int, []byte, error) {
+func (f *fakeFederationHTTP) Settle(_ context.Context, _, _, _, _, _ string, _ int64, _, _ string, _ []byte) (int, []byte, error) {
 	return 0, nil, kernel.ErrPeerUnreachable.Wrap("settle not used in these tests")
 }
 
@@ -2253,7 +2284,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
 			RefreshProxy: f.rejectRefreshProxy, StartedAt: now, CreatedAt: now,
 		}
-		payload, _ := kernel.ReceiptSigningBytes(r)
+		payload, _ := testNet.ReceiptSigningBytes(r)
 		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
 		b, _ := json.Marshal(r)
 		status := f.httpStatus // 403 by default: a refusal, not a funding condition
@@ -2292,7 +2323,7 @@ func jcsHashForTest(t *testing.T, jsonStr string) string {
 // Ed25519 over CanonicalJSON of the receipt with Signature cleared.
 func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
 	t.Helper()
-	payload, err := kernel.ReceiptSigningBytes(r)
+	payload, err := testNet.ReceiptSigningBytes(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2557,7 +2588,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer proxy user: a set kernel_public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
-	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{
@@ -2641,12 +2672,7 @@ func TestCallLogsTxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: &fakeScriptExec{result: `{"ok":true}`}, Config: cfg, Logger: logger})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: &fakeScriptExec{result: `{"ok":true}`}, Logger: logger})
 
 	ctx := context.Background()
 	alice := setupUser(t, st, "alice", 2000)

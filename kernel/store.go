@@ -66,7 +66,7 @@ type FederationExecutor interface {
 // peer (§13), addressing it by Ed25519 public key. It returns the peer's raw response body (a signed
 // SettlementRecord) and status. The kernel never imports fed.
 type FederationSettler interface {
-	Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (status int, body []byte, err error)
+	Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce, txHash string, record []byte) (status int, body []byte, err error)
 }
 
 // RemoteResolver resolves a single remote action or user on demand over /juice/fed/resolve/1
@@ -459,6 +459,82 @@ type Store interface {
 	// debit's available-balance guard.
 	CreateLedgerEntry(ctx context.Context, e *LedgerEntry) error
 
+	// ---- Rail (D23) ----
+	// Every external movement is one row keyed by the fact that caused it, so booking a payment
+	// twice is impossible however it was found, and the money in transit is one query.
+
+	// CreateRailDeposit records a payment in: the crossing credits sys and holds it, and when
+	// toUserID is set the same commit delivers row.Credit to that account and keeps the rest as the
+	// operator's. Replaying the same fact returns what was written and moves nothing; the same fact
+	// on other terms is refused, since the stateless manual rail cannot refuse it itself.
+	CreateRailDeposit(ctx context.Context, sys string, row *RailTransfer, toUserID string) (*LedgerEntry, error)
+
+	// AttributeRailDeposit delivers a held payment to its owner, releasing the remainder to sys.
+	// claimID, when set, is the settlement this closes, marked credited in the same commit.
+	AttributeRailDeposit(ctx context.Context, sys, depositID, toUserID string, credit int64, claimID string) (*LedgerEntry, error)
+
+	// ListRailDeposits returns deposits in one status, optionally only those from one sender —
+	// which is how registering an address attributes what it has already paid in.
+	ListRailDeposits(ctx context.Context, status, fromAddress string) ([]*RailTransfer, error)
+
+	// ReserveRailTransfer opens an outgoing payment: it debits the party, moves what the operator
+	// adds, holds the whole amount on sys, records the ledger leg, and writes the row with its
+	// destination. From this instant the money is unavailable to everyone.
+	ReserveRailTransfer(ctx context.Context, sys string, row *RailTransfer) error
+
+	// RecordRailOutcome stores what presenting the payment produced. A refill, when given, is
+	// locked from sys in the same commit, so the authorization and its lock cannot diverge.
+	RecordRailOutcome(ctx context.Context, sys, id, status, txHash, reason string, refill *RailTransfer) error
+
+	// FinalizeRailTransfer closes a confirmed payment: the hold is released and the money crosses
+	// out of the ledger under the transaction that carried it.
+	FinalizeRailTransfer(ctx context.Context, sys, id, txHash string, at time.Time) error
+
+	// CompensateRailTransfer undoes a reservation whose payment finalized without executing,
+	// returning the credit to its owner. The original entries are never edited.
+	CompensateRailTransfer(ctx context.Context, sys, id string, at time.Time) (*LedgerEntry, error)
+
+	// BindRefill ties the lock taken before the rail signed to the purchase it made and settles the
+	// lock at that purchase's maximum; idempotent for the same purchase. ReleaseRefill returns a lock
+	// that bought nothing. ReadRailTransferByRefill finds the lock a purchase is bound to.
+	BindRefill(ctx context.Context, sys, id, refillID string, max int64) error
+	ReleaseRefill(ctx context.Context, sys, id string) error
+	ReadRailTransferByRefill(ctx context.Context, refillID string) (*RailTransfer, error)
+
+	// BookRefill closes a refill against the exact amount it consumed, releasing the rest of the
+	// authorized maximum. The maximum is authority; only the cost is ever booked.
+	BookRefill(ctx context.Context, sys, id string, cost int64, executed bool, at time.Time) error
+
+	// CreateRailClaim records a settlement a peer says it has paid, to be closed by the payment it
+	// named. Replaying one announcement returns what was written.
+	CreateRailTransfer(ctx context.Context, row *RailTransfer) error
+
+	// MarkRailTransfer moves a row to a terminal status that involves no money. SaveRailRecord
+	// replaces what a row remembers. DeleteRailTransfer removes a draw that ended without a payment.
+	MarkRailTransfer(ctx context.Context, id, status string) error
+	SaveRailRecord(ctx context.Context, id, record string) error
+	DeleteRailTransfer(ctx context.Context, id string) error
+
+	// ReadRailTransfer returns one row, or nil when the fact is unknown here.
+	ReadRailTransfer(ctx context.Context, id string) (*RailTransfer, error)
+
+	// ListRailTransfers filters by kind, party and status — any of which may be empty for all —
+	// oldest first, bounded by limit. It answers what happened, so finished rows are included.
+	ListRailTransfers(ctx context.Context, kind, party, status string, limit int) ([]*RailTransfer, error)
+
+	// ListOpenRailTransfers returns the rows that still have work to do. Kept apart from the reading
+	// question so a long history cannot crowd out the few rows the worker must drive.
+	ListOpenRailTransfers(ctx context.Context, limit int) ([]*RailTransfer, error)
+
+	// RailPosition sums the ledger into the operator's account of external money (D23).
+	RailPosition(ctx context.Context, sys string) (*RailPosition, error)
+
+	// SetRailAddress records where an account is paid. The address is unique across accounts.
+	SetRailAddress(ctx context.Context, userID, address string, at time.Time) error
+
+	// ReadUserByRailAddress finds the account a payment's sender belongs to, or ErrNotFound.
+	ReadUserByRailAddress(ctx context.Context, address string) (*Account, error)
+
 	// ListLedgerByUser returns ledger entries where userID is the source or the
 	// destination, most recent first, bounded by limit/offset.
 	ListLedgerByUser(ctx context.Context, userID string, limit, offset int) ([]*LedgerEntry, error)
@@ -486,24 +562,18 @@ type Store interface {
 
 	// CommitSettlement records one finish outcome atomically, keyed idempotently by settlementID (§13,
 	// the external_key read-first short-circuit — anti-grinding). A "clear" outcome passes dClear=±d,
-	// variance=∓d (internally conservative) and extinguishes the debt; a "pay" outcome passes
-	// dClear=variance=0, leaving the debt on the row until the cash record. `debt` (>0) is the ledger
-	// row amount. A replay returns the stored record via storedRecord; "" on first application.
+	// variance=∓d and extinguishes the debt; a "pay" outcome passes dClear=variance=0, leaving the
+	// debt on the row until the rail closes it. Every outcome is internally conservative: cash that
+	// crosses the rail is booked by the rail table. `debt` (>0) is the ledger row amount. A replay
+	// returns the stored record via storedRecord; "" on first application.
 	CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (storedRecord string, err error)
-
-	// CommitSettlementCash finalizes a paid probabilistic outcome (§13), keyed idempotently by
-	// settlementID.cash: it clears the debt d on rowUserID, books the variance ±(Q−d) on sysID, and
-	// records the external cash Q — the sole non-conservative settlement move (this is where cash
-	// crosses the rail). A debtor with insufficient sys reserve trips the users CHECK and the tx rolls
-	// back, leaving the settlement pending with no partial writes.
-	CommitSettlementCash(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, q int64, recordJSON string) (storedRecord string, err error)
 
 	// ReadSettlementRecord returns the stored record for a settlement (by settlementID), or "" if none
 	// exists yet — the creditor's idempotency/anti-grinding lookup before a finish flip.
 	ReadSettlementRecord(ctx context.Context, settlementID string) (string, error)
 
-	// HasPendingSettlement reports whether peerID has a paid probabilistic outcome awaiting its rail
-	// record (§13): a "pay" settlement with no companion .cash finalization.
+	// HasPendingSettlement reports whether peerID has a paid outcome the rail has not closed (§13):
+	// a "pay" settlement whose rail transfer has not reached a final state.
 	HasPendingSettlement(ctx context.Context, peerID string) (bool, error)
 
 	// GrossReceivables returns Σ over peer rows of max(0, −available): the kernel's total unsecured
@@ -515,7 +585,7 @@ type Store interface {
 	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
 	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen/peer_credit, each
 	// of which advances only after its own work is verified and committed (§13).
-	UpsertKernel(ctx context.Context, publicKey, nickname, about string, now time.Time) error
+	UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.

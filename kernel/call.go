@@ -365,7 +365,7 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	if m == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
 	}
-	if err := VerifyManifestSignature(peerKey, m); err != nil {
+	if err := k.cfg.Network.VerifyManifestSignature(peerKey, m); err != nil {
 		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
 	}
 	// The reply must answer the request, or a peer could serve any signed action of its own and we

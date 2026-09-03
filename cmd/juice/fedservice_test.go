@@ -109,7 +109,7 @@ func fedStepList(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey) (int, 
 	t.Helper()
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := kernel.SignStepListPayload(priv, cp, selfKey(t, k), ts)
+	sig, err := testNet.SignStepListPayload(priv, cp, selfKey(t, k), ts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, st
 	t.Helper()
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := kernel.SignStepPayload(priv, stepID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input))
+	sig, err := testNet.SignStepPayload(priv, stepID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,19 +229,19 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 		}},
 		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
 			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-			sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
+			sig, _ := testNet.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
 			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig)
 			return err
 		}},
 		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := kernel.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
+			sig, _ := testNet.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
 			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`), "", "", "")
 			return err
 		}},
 		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := kernel.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts)
+			sig, _ := testNet.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts)
 			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig)
 			return err
 		}},
@@ -499,28 +499,28 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	const hash = "abc123"
 
 	const rcpt = "recipient-kernel-key"
-	stepSig, _ := kernel.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
-	listSig, _ := kernel.SignStepListPayload(priv, cp, rcpt, ts)
-	callSig, _ := kernel.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash)
+	stepSig, _ := testNet.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
+	listSig, _ := testNet.SignStepListPayload(priv, cp, rcpt, ts)
+	callSig, _ := testNet.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash)
 
 	// A call signature must not pass as a step signature, nor either step kind as the other.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
 		t.Error("a federation call signature must not verify as a step completion")
 	}
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
 		t.Error("a step list signature must not verify as a step completion")
 	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
+	if err := testNet.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
 		t.Error("a step completion signature must not verify as a step list")
 	}
-	if err := kernel.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, stepSig); err == nil {
+	if err := testNet.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, stepSig); err == nil {
 		t.Error("a step signature must not verify as a federation call")
 	}
 	// Sanity: each verifies under its own domain.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
 		t.Errorf("step signature should verify in its own domain: %v", err)
 	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, listSig); err != nil {
+	if err := testNet.VerifyStepListSignature(cp, cp, rcpt, ts, listSig); err != nil {
 		t.Errorf("list signature should verify in its own domain: %v", err)
 	}
 }

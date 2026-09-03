@@ -69,17 +69,17 @@ func TestCanCallVisibilityMatrix(t *testing.T) {
 func TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	r := &Receipt{ID: "r1", ActionID: "a1", Status: TxSuccess, Gross: 5, Net: 5}
-	sig, err := signReceipt(priv, r)
+	sig, err := signReceipt(playNet, priv, r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Signature = sig
 
-	if err := verifyRemoteReceiptSignature(r, ""); err == nil {
+	if err := playNet.verifyRemoteReceiptSignature(r, ""); err == nil {
 		t.Fatal("empty peer key: got nil, want error (must fail closed)")
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if err := verifyRemoteReceiptSignature(r, pubB64); err != nil {
+	if err := playNet.verifyRemoteReceiptSignature(r, pubB64); err != nil {
 		t.Fatalf("valid signature with correct key: %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 }
 
 func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
-	_, err := signRating(nil, &Rating{
+	_, err := signRating(playNet, nil, &Rating{
 		ID:          "rating-id",
 		RatedTxID:   "tx-id",
 		RaterUserID: "user-id",
@@ -634,7 +634,7 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 	creditor := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Record sign/verify roundtrip with tamper detection.
-	k := &Kernel{cfg: Config{SigningKey: priv}}
+	k := &Kernel{cfg: Config{SigningKey: priv, Network: playNet}}
 	rec := &SettlementRecord{
 		SettlementID: "sid", Creditor: creditor, Debtor: "debtor-key", Amount: 3, Quantum: 10,
 		Mode: "probabilistic", Commitment: "abc", ExpiresAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
@@ -642,24 +642,24 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 	if err := k.signSettlementRecord(rec); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySettlementRecord(rec, creditor); err != nil {
+	if err := playNet.verifySettlementRecord(rec, creditor); err != nil {
 		t.Fatalf("record should verify: %v", err)
 	}
 	rec.Amount = 4 // tamper
-	if err := verifySettlementRecord(rec, creditor); err == nil {
+	if err := playNet.verifySettlementRecord(rec, creditor); err == nil {
 		t.Error("a tampered record must not verify")
 	}
 
 	// Domain disjointness: a signature made under the settle_open domain must not verify under the
 	// settle_finish domain (§12), even for the SAME payload — disjointness is now the domain prefix.
-	sig, err := signJCS(priv, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"))
+	sig, err := playNet.sign(priv, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyJCS(pub, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
+	if err := playNet.verify(pub, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
 		t.Fatalf("settle_open should verify against itself: %v", err)
 	}
-	if err := verifyJCS(pub, sigDomainSettleFinish, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err == nil {
+	if err := playNet.verify(pub, sigDomainSettleFinish, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err == nil {
 		t.Error("a settle_open signature must not verify under the settle_finish domain")
 	}
 }
@@ -713,38 +713,35 @@ func TestReceiptHashJoinDefinition(t *testing.T) {
 	}
 }
 
-// TestSignatureDomainStoredVsWire: a legacy (undomained) signature verifies only via the stored-artifact
-// fallback (signature_version 1), never on the wire; a v0.13 domained signature verifies on the wire and
-// reports version 2. A signature made under one domain never verifies under another (§12).
-func TestSignatureDomainStoredVsWire(t *testing.T) {
+// TestSignatureBindsDomainAndNetwork: one verification rule serves the wire and storage alike, so a
+// signature made before this network's digest existed — or on another network — is reported invalid
+// rather than repaired (U36, G7, D23). A signature made under one domain never verifies under another.
+func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	payload := map[string]string{"k": "v"}
+	net := playNet
 
-	// Legacy: raw ed25519 over CanonicalJSON with no domain prefix.
+	// A signature with no network prefix at all — what a kernel produced before worlds existed.
 	canon, _ := CanonicalJSON(payload)
 	legacySig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, canon))
-	if err := verifyJCS(pub, sigDomainReceipt, payload, legacySig); err == nil {
-		t.Error("a legacy undomained signature must NOT verify on the wire")
-	}
-	if v, err := verifyJCSStored(pub, sigDomainReceipt, payload, legacySig); err != nil || v != 1 {
-		t.Errorf("legacy signature must verify stored as version 1, got v=%d err=%v", v, err)
+	if err := net.verify(pub, sigDomainReceipt, payload, legacySig); err == nil {
+		t.Error("a signature made before the network digest existed must be reported invalid")
 	}
 
-	// v0.13: domained signature.
-	sig, err := signJCS(priv, sigDomainReceipt, payload)
+	sig, err := net.sign(priv, sigDomainReceipt, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyJCS(pub, sigDomainReceipt, payload, sig); err != nil {
-		t.Errorf("a domained signature must verify on the wire: %v", err)
+	if err := net.verify(pub, sigDomainReceipt, payload, sig); err != nil {
+		t.Errorf("a signature must verify on its own network: %v", err)
 	}
-	if v, err := verifyJCSStored(pub, sigDomainReceipt, payload, sig); err != nil || v != 2 {
-		t.Errorf("domained signature must verify stored as version 2, got v=%d err=%v", v, err)
-	}
-	// Cross-domain: same payload, different domain must not verify.
-	if err := verifyJCS(pub, sigDomainRating, payload, sig); err == nil {
+	if err := net.verify(pub, sigDomainRating, payload, sig); err == nil {
 		t.Error("a receipt-domain signature must not verify under the rating domain")
+	}
+	other := Network{Digest: "0000000000000000000000000000000000000000000000000000000000000000"}
+	if err := other.verify(pub, sigDomainReceipt, payload, sig); err == nil {
+		t.Error("a signature from one network must not verify on another")
 	}
 }
 
@@ -754,7 +751,7 @@ func TestSignatureDomainStoredVsWire(t *testing.T) {
 func TestProjectRatingPrivacy(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
-	k := &Kernel{cfg: Config{SigningKey: priv}}
+	k := &Kernel{cfg: Config{SigningKey: priv, Network: playNet}}
 
 	note := "frequently timed out"
 	r := &Rating{
@@ -782,20 +779,20 @@ func TestProjectRatingPrivacy(t *testing.T) {
 	// The projection signature verifies under its own domain.
 	unsigned := *proj
 	unsigned.Signature = ""
-	if err := verifyJCS(pub, sigDomainRating, unsigned, proj.Signature); err != nil {
+	if err := playNet.verify(pub, sigDomainRating, unsigned, proj.Signature); err != nil {
 		t.Errorf("projection signature must verify: %v", err)
 	}
 	// Tampering the value breaks it.
 	tampered := unsigned
 	tampered.Rating = 0
-	if err := verifyJCS(pub, sigDomainRating, tampered, proj.Signature); err == nil {
+	if err := playNet.verify(pub, sigDomainRating, tampered, proj.Signature); err == nil {
 		t.Error("a tampered projection value must fail verification")
 	}
 	// A full-Rating signature (over the identity-bearing record) does not verify over the projection.
 	rc := *r
 	rc.Signature = ""
-	fullSig, _ := signJCS(priv, sigDomainRating, rc)
-	if err := verifyJCS(pub, sigDomainRating, unsigned, fullSig); err == nil {
+	fullSig, _ := playNet.sign(priv, sigDomainRating, rc)
+	if err := playNet.verify(pub, sigDomainRating, unsigned, fullSig); err == nil {
 		t.Error("a full-Rating signature must not verify over the projection")
 	}
 }

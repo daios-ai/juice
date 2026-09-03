@@ -31,12 +31,21 @@ reset the superuser password (`juice auth recover sys`). Subsequent boots are
 idempotent.
 
 All state lives under `$JUICE_HOME/kernel/` (default `~/.juice/kernel/`): the database
-(which holds the signing key), `config.json`, and auth tokens. Set `JUICE_HOME` to
-relocate everything, or `--db ./juice.db` for a per-folder kernel. The `kernel/cache/`
-subdirectory is regenerable and safe to delete.
+(which holds the signing key), `config.json`, and the rail's key and records. A kernel
+*is* its home — set `JUICE_HOME` to run a second one; there is no `--db` and no
+`--config`. The `kernel/cache/` subdirectory is regenerable and safe to delete.
 
-The CLI is a pure client of the server (`--server`, default `http://localhost:4040`),
-so the commands below work against any kernel you can reach and log in to.
+The CLI is a pure client of the server and keeps its own named profiles under
+`$JUICE_HOME/client/`, each pinning one kernel's endpoint, public key, and network:
+
+```bash
+./juice use work --endpoint http://localhost:4040   # add and switch to a kernel
+./juice use                                         # list profiles
+```
+
+`juice use` dials the server and refuses one whose key or network is not what the
+profile pinned, so a command never reaches a kernel you did not mean. `--server` sets
+the endpoint for one invocation, `JUICE_PROFILE` the profile.
 
 ## Accounts and credits
 
@@ -47,16 +56,27 @@ so the commands below work against any kernel you can reach and log in to.
 ./juice user me                  # handle, balance, locked funds
 ```
 
-Credits enter by operator deposit (reflecting a payment made outside the system) and
-move freely between local users:
+Credits enter only by operator deposit against a payment made outside the system, named
+by the fact that witnesses it, and then move freely between local users:
 
 ```bash
 ./juice auth login sys
-./juice admin deposit alice 1000   # operator only
+./juice admin deposit alice 1000 --ref wire-8823   # operator only
 ./juice auth login alice
 ./juice user transfer bob 250      # alice pays bob directly, no fee
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
+
+Money leaves only by its owner's withdrawal:
+
+```bash
+./juice user deposit               # where to send money, and whether you are registered
+./juice user address 0xAbC...      # register a payout address, proving you control it
+./juice user withdraw 100          # pays out to that address
+```
+
+On the default `play` world no crypto is involved at all: the operator records the
+payments they receive and make, and `--ref` is whatever names one in their own books.
 
 If you lose your password, `juice auth recover <user>` restores the account from the
 recovery phrase. There is no email anywhere in the system.
@@ -203,14 +223,14 @@ and trust verbs:
 
 ```bash
 ./juice admin users                    # all local accounts
-./juice admin deposit carol 500        # credit/debit against outside payments
-./juice admin withdraw carol 200
+./juice admin deposit carol 500 --ref wire-4471   # credit against a payment received
+./juice admin deposit                  # payments held for a sender nobody has registered
 ./juice admin suspend carol            # one reversible lever, humans and kernels alike
 ./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
 ./juice admin peers                    # counterparties and discovered kernels, balances, last seen
 ./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
-./juice admin identity                 # own key, addresses, exposure position
-./juice admin settle <peer>            # settle the bilateral balance over your chosen rail
+./juice admin identity                 # own key, addresses, rail and exposure position
+./juice admin settle <peer>            # pay off the bilateral balance on the network's rail
 ./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
 ```
 
@@ -228,6 +248,8 @@ The ones you are most likely to touch:
 | Key | Purpose |
 |---|---|
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
+| `world` | The network this kernel serves for life: `play` (default, no crypto), `test`, `real`, or a path to a world file |
+| `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
 | `exposure_max` / `settlement_trigger` | Unsecured-credit cap across all peers, and the "please settle" threshold |

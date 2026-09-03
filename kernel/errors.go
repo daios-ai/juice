@@ -88,7 +88,7 @@ func ErrorFromCode(code string) *KernelError {
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
 		ErrSchemaViolation, ErrTimeout, ErrInternal, ErrGrantRequired,
-		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged,
+		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged, ErrRailStopped,
 	} {
 		if sentinel.Code == code {
 			return sentinel
@@ -142,6 +142,11 @@ var (
 	// only at a price the caller has not agreed to — and a client must tell "re-confirm the new
 	// terms" from "this action is disabled" by code, never by sniffing Meta.
 	ErrTermsChanged = &KernelError{Code: "terms_changed", HTTP: 409}
+	// ErrRailStopped: an outgoing rail operation is blocked — the rail refused to sign (a shortage
+	// it names), or the world's domain has not been verified yet. Distinct from the caller's own
+	// insufficient funds: nothing is wrong with the caller, and the condition clears on its own
+	// once the operator's balance or the endpoint recovers (D23).
+	ErrRailStopped = &KernelError{Code: "rail_stopped", HTTP: 503}
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and

@@ -50,9 +50,11 @@ type Account struct {
 	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
 	// creation from a client-held seed phrase; the server stores only the public half and never
 	// the mnemonic (§12).
-	RecoveryPublicKey string    `json:"-"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	RecoveryPublicKey string `json:"-"`
+	// RailAddress is where this account is paid on the rail, proven and canonical (D23).
+	RailAddress string    `json:"rail_address,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // IsPeer reports whether a is a remote kernel's account (§13): it authenticates by federation
@@ -351,15 +353,16 @@ type LedgerEntry struct {
 // key-set (creditor+debtor+quantum+commitment) is disjoint from every other signed payload (§12).
 type SettlementRecord struct {
 	SettlementID string    `json:"settlement_id"`
-	Creditor     string    `json:"creditor"`          // creditor kernel public key (base64url)
-	Debtor       string    `json:"debtor"`            // debtor kernel public key (base64url)
-	Amount       int64     `json:"amount"`            // d, the residual debt being settled
-	Quantum      int64     `json:"quantum"`           // Q, the creditor's fee-rational quantum
-	Mode         string    `json:"mode"`              // "probabilistic"
-	Commitment   string    `json:"commitment"`        // SHA-256(secret) hex — binds the creditor before the nonce
-	Nonce        string    `json:"nonce,omitempty"`   // final only: the debtor's committed nonce
-	Secret       string    `json:"secret,omitempty"`  // final only: revealed secret s (hex)
-	Outcome      string    `json:"outcome,omitempty"` // final only: "pay" | "clear"
+	Creditor     string    `json:"creditor"`              // creditor kernel public key (base64url)
+	Debtor       string    `json:"debtor"`                // debtor kernel public key (base64url)
+	Amount       int64     `json:"amount"`                // d, the residual debt being settled
+	Quantum      int64     `json:"quantum"`               // Q, the creditor's fee-rational quantum
+	Mode         string    `json:"mode"`                  // "exact" or "probabilistic"
+	Destination  string    `json:"destination,omitempty"` // where the debtor pays the creditor on the rail
+	Commitment   string    `json:"commitment"`            // SHA-256(secret) hex — binds the creditor before the nonce
+	Nonce        string    `json:"nonce,omitempty"`       // final only: the debtor's committed nonce
+	Secret       string    `json:"secret,omitempty"`      // final only: revealed secret s (hex)
+	Outcome      string    `json:"outcome,omitempty"`     // final only: "pay" | "clear"
 	ExpiresAt    time.Time `json:"expires_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	Signature    string    `json:"signature"`
@@ -373,9 +376,13 @@ type SettlementRecord struct {
 // LastSeen, LastContactFailedAt, and PeerCredit are the contact display cache: the latest successful
 // and latest failed contact, each only ever moving forward, plus the credit a peer last reported.
 type RemoteKernel struct {
-	PublicKey           string     `json:"public_key"`
-	Petname             string     `json:"petname,omitempty"`
-	Nickname            string     `json:"nickname,omitempty"`
+	PublicKey string `json:"public_key"`
+	Petname   string `json:"petname,omitempty"`
+	Nickname  string `json:"nickname,omitempty"`
+	// RailAddress is where this peer is paid, with RailProof its signature proving control of it.
+	// A merely declared address could name a stranger's and claim their payment (D23).
+	RailAddress         string     `json:"rail_address,omitempty"`
+	RailProof           string     `json:"-"`
 	About               string     `json:"about,omitempty"`
 	GossipCursor        string     `json:"gossip_cursor,omitempty"`
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
@@ -551,15 +558,12 @@ type ActionManifest struct {
 
 // ReceiptVerification is the result of VerifyRemoteReceipt.
 type ReceiptVerification struct {
-	TransactionID         string `json:"transaction_id"`
-	Valid                 bool   `json:"valid"`
-	RemoteKernelHandle    string `json:"remote_kernel_handle"`
-	RemoteKernelPublicKey string `json:"remote_kernel_public_key"`
-	// SignatureVersion is which signing scheme verified the stored receipt: 2 = v0.13
-	// domain-prefixed, 1 = legacy undomained (a pre-v0.13 audit record, still authentic), 0 = none.
-	SignatureVersion int           `json:"signature_version"`
-	Checks           ReceiptChecks `json:"checks"`
-	Receipt          *Receipt      `json:"receipt"`
+	TransactionID         string        `json:"transaction_id"`
+	Valid                 bool          `json:"valid"`
+	RemoteKernelHandle    string        `json:"remote_kernel_handle"`
+	RemoteKernelPublicKey string        `json:"remote_kernel_public_key"`
+	Checks                ReceiptChecks `json:"checks"`
+	Receipt               *Receipt      `json:"receipt"`
 }
 
 // ReceiptChecks holds the per-field results of a remote receipt verification.
@@ -670,8 +674,15 @@ type EvidenceBundle struct {
 // ordered by effective time (a rating's created_at when rated, else the receipt's) so a late
 // rating re-surfaces its bundle. NextCursor is the exclusive high-watermark to send on the next pull.
 type GossipResponse struct {
-	PublicKey       string            `json:"public_key"`
-	Handle          string            `json:"handle"`
+	PublicKey string `json:"public_key"`
+	Handle    string `json:"handle"`
+	// Network and NetworkDigest name the world this kernel serves. A reply from another network is
+	// not accumulated: its artifacts could never verify here anyway (P9, D23).
+	Network       string `json:"network,omitempty"`
+	NetworkDigest string `json:"network_digest,omitempty"`
+	// RailAddress is where this kernel is paid, with RailProof its own rail key's signature over it.
+	RailAddress     string            `json:"rail_address,omitempty"`
+	RailProof       string            `json:"rail_proof,omitempty"`
 	About           string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
 	ActionManifests []*ActionManifest `json:"action_manifests,omitempty"`
 	Evidence        []EvidenceBundle  `json:"evidence,omitempty"`

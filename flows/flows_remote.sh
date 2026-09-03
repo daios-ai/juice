@@ -4,7 +4,7 @@
 
 flow_pkce_auth() {
     echo "=== FLOW pkce_auth ==="
-    local dir db hs base v ch code; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs base v ch code; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "pkce_auth.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$(home "$dir" alice)" alice
     base=$(url "$db")
@@ -27,37 +27,38 @@ flow_pkce_auth() {
 
 flow_refresh_rotation() {
     echo "=== FLOW refresh_rotation ==="
-    local dir db hs ha tdir; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "refresh_rotation.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice   # CLI login uses PKCE → stores a refresh token
-    tdir=$(juice_token_dir "$ha" "$db")
 
     # Refresh is automatic on a 401 (no standalone command): dropping the access token makes the
     # next authenticated call transparently refresh and rotate the refresh token.
-    local rt1; rt1=$(cat "$tdir/refresh_token" 2>/dev/null)
-    rm -f "$tdir/token"
+    local rt1; rt1=$(profile_get "$ha" refresh_token)
+    profile_set "$ha" token ""
     assert_json "refresh_rotation.refresh_succeeds" "$(jj "$db" "$ha" user me)" handle alice
-    local rt2; rt2=$(cat "$tdir/refresh_token" 2>/dev/null)
+    local rt2; rt2=$(profile_get "$ha" refresh_token)
     assert_ne "refresh_rotation.rt_rotated" "$rt1" "$rt2"
 
     # Old (rotated-away) refresh token is rejected: a stale access token 401s, and its auto-refresh
     # with the old refresh token is refused.
-    local ho; ho=$(home "$dir" old); mkdir -p "$(juice_token_dir "$ho" "$db")"
-    printf 'stale.access.token' > "$(juice_token_dir "$ho" "$db")/token"
-    echo "$rt1" > "$(juice_token_dir "$ho" "$db")/refresh_token"
+    local ho; ho=$(home "$dir" old)
+    profile_set "$ho" endpoint "$(url "$db")"
+    profile_set "$ho" token 'stale.access.token'
+    profile_set "$ho" refresh_token "$rt1"
     assert_fails "refresh_rotation.old_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$ho" user me
 
     # Logout revokes the current refresh token.
     j "$db" "$ha" auth logout >/dev/null 2>&1
-    local hr; hr=$(home "$dir" rt2); mkdir -p "$(juice_token_dir "$hr" "$db")"
-    printf 'stale.access.token' > "$(juice_token_dir "$hr" "$db")/token"
-    echo "$rt2" > "$(juice_token_dir "$hr" "$db")/refresh_token"
+    local hr; hr=$(home "$dir" rt2)
+    profile_set "$hr" endpoint "$(url "$db")"
+    profile_set "$hr" token 'stale.access.token'
+    profile_set "$hr" refresh_token "$rt2"
     assert_fails "refresh_rotation.revoked_rt_rejected" "invalid\|expired\|unauthenticated" -- j "$db" "$hr" user me
 }
 
 flow_successful_receipt() {
     echo "=== FLOW successful_receipt ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     make_admin "$db" "$hs" || { fail "successful_receipt.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -73,7 +74,7 @@ flow_successful_receipt() {
 
 flow_failed_receipt() {
     echo "=== FLOW failed_receipt ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     make_admin "$db" "$hs" || { fail "failed_receipt.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -91,7 +92,7 @@ flow_failed_receipt() {
 
 flow_lookup() {
     echo "=== FLOW lookup ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # sys/lookup requires "query"; missing it → schema violation.
@@ -108,7 +109,7 @@ flow_lookup() {
 
 flow_chat() {
     echo "=== FLOW chat ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
@@ -148,7 +149,7 @@ PY
 
 flow_openapi_import_execute() {
     echo "=== FLOW openapi_import_execute ==="
-    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json"; start_api_server "$aport" "$dir/spec.json"
     make_admin "$db" "$hs" || { fail "openapi_import.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -172,7 +173,7 @@ flow_openapi_import_execute() {
 
 flow_openapi_application() {
     echo "=== FLOW openapi_application ==="
-    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb aport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     aport=$(backend_port)
     python3 - "$aport" "$dir/spec.json" <<'PY'
 import json,sys
@@ -217,7 +218,7 @@ PY
 
 flow_openapi_changed_reimport() {
     echo "=== FLOW openapi_changed_reimport ==="
-    local dir db hs ha aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port); _greet_spec "$aport" "$dir/spec.json" "hello v1"; start_api_server "$aport" "$dir/spec.json"
     make_admin "$db" "$hs" || { fail "openapi_reimport.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -244,7 +245,7 @@ flow_openapi_changed_reimport() {
 
 flow_openapi_disable_tree() {
     echo "=== FLOW openapi_disable_tree ==="
-    local dir db hs ha aport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     aport=$(backend_port)
     python3 - "$aport" "$dir/spec.json" <<'PY'
 import json,sys

@@ -1844,7 +1844,7 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})
 
 	a, err := k.ResolveAction(ctx, "bob@"+pubB64+"/greet")

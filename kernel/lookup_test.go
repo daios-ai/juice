@@ -32,11 +32,9 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 }
 
 func newTestKernelWithEmbedder(st kernel.Store, emb kernel.Embedder) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
+	cfg := testConfig()
 	cfg.FeeBPS = 2000
-	cfg.IssuerUserID = testIssuerUserID
-	return kernel.New(kernel.Dependencies{Store: st, Embedder: emb, Config: cfg})
+	return newKernel(cfg, kernel.Dependencies{Store: st, Embedder: emb})
 }
 
 func TestLookupRanking(t *testing.T) {
@@ -448,11 +446,9 @@ func TestLookupMatchesOwnerHandle(t *testing.T) {
 // fee. Config is copied into the kernel at construction, so varying it means a second kernel over
 // the same store — which is also the honest simulation of an operator restarting with new policy.
 func newTestKernelWithImportBPS(st kernel.Store, importBPS int64) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
+	cfg := testConfig()
 	cfg.ImportBPS = importBPS
-	return kernel.New(kernel.Dependencies{Store: st, Embedder: &fakeEmbedder{}, Config: cfg})
+	return newKernel(cfg, kernel.Dependencies{Store: st, Embedder: &fakeEmbedder{}})
 }
 
 // TestLookupDiscoveredActionPrice: a discovered-but-unresolved remote action is priced from its

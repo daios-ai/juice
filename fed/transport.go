@@ -95,6 +95,7 @@ type Transport struct {
 	disc      *drouting.RoutingDiscovery
 	relay     *relayv2.Relay
 	cfg       Config
+	namespace string
 	bootstrap []peer.AddrInfo
 
 	mu     sync.Mutex
@@ -126,6 +127,9 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	var bo buildOptions
 	for _, opt := range opts {
 		opt(&bo)
+	}
+	if cfg.Namespace == "" {
+		return nil, fmt.Errorf("fed: discovery namespace is required")
 	}
 	hostKey, err := deriveHostKey(cfg.SigningKey)
 	if err != nil {
@@ -211,7 +215,7 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return nil, fmt.Errorf("fed: bootstrap dht: %w", err)
 	}
 
-	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg, bootstrap: bootstrap}
+	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg, namespace: cfg.Namespace, bootstrap: bootstrap}
 
 	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
 	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
@@ -317,11 +321,6 @@ func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error
 // identity, credit, callability, or alias; a verified first-party gossip pull is what a kernel
 // actually believes (§13).
 
-// discoveryNamespace is the fixed rendezvous string every kernel advertises and enumerates.
-// RoutingDiscovery hashes it to a CID whose providers are the known kernels. Changing it partitions
-// the network, so it is a protocol constant that upgrades in lockstep (§13).
-const discoveryNamespace = "juice/fed/discovery/1"
-
 // discoveryLimit bounds the providers enumerated per pass, so one enumeration cannot be made
 // unboundedly expensive by a large (or flooded) namespace.
 const discoveryLimit = 100
@@ -331,7 +330,7 @@ const discoveryLimit = 100
 // Called once per discovery pass (§13). Provide needs only query capability, so a DHT-client kernel
 // behind NAT advertises successfully and becomes findable through the public servers.
 func (t *Transport) Advertise(ctx context.Context) (time.Duration, error) {
-	return t.disc.Advertise(ctx, discoveryNamespace)
+	return t.disc.Advertise(ctx, t.namespace)
 }
 
 // DiscoverProviders enumerates the discovery namespace's providers, refreshes each provider's
@@ -340,7 +339,7 @@ func (t *Transport) Advertise(ctx context.Context) (time.Duration, error) {
 // membership feed the discovery loop pulls gossip from; a returned key grants nothing until a
 // verified first-party gossip pull (§13).
 func (t *Transport) DiscoverProviders(ctx context.Context) ([]string, error) {
-	infos, err := dutil.FindPeers(ctx, t.disc, discoveryNamespace, discovery.Limit(discoveryLimit))
+	infos, err := dutil.FindPeers(ctx, t.disc, t.namespace, discovery.Limit(discoveryLimit))
 	if err != nil {
 		return nil, err
 	}
@@ -475,11 +474,15 @@ func (t *Transport) handleStep(s network.Stream) {
 }
 
 func (t *Transport) handleResolve(s network.Stream) {
-	serveReq(s, func(key string, req ResolveRequest) any { return t.cfg.Handlers.OnResolve(context.Background(), key, req) })
+	serveReq(s, func(key string, req ResolveRequest) any {
+		return t.cfg.Handlers.OnResolve(context.Background(), key, req)
+	})
 }
 
 func (t *Transport) handleSettle(s network.Stream) {
-	serveReq(s, func(key string, req SettleRequest) any { return t.cfg.Handlers.OnSettle(context.Background(), key, req) })
+	serveReq(s, func(key string, req SettleRequest) any {
+		return t.cfg.Handlers.OnSettle(context.Background(), key, req)
+	})
 }
 
 func (t *Transport) handleGossip(s network.Stream) {

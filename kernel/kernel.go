@@ -36,9 +36,12 @@ type Config struct {
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit private/LAN/reserved URLs as action sources (loopback is allowed by default)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
-	IssuerUserID      string             // @sys user ID, set during bootstrap
-	AuthIssuer        string             // config.json auth_issuer — iss claim in JWTs; empty = no claim
-	AuthAudience      string             // config.json auth_audience — aud claim in JWTs; empty = no validation
+	// Network is the one network this kernel serves for life (D23); its digest rides in every
+	// signature prefix and in the discovery namespace.
+	Network      Network
+	IssuerUserID string // @sys user ID, set during bootstrap
+	AuthIssuer   string // config.json auth_issuer — iss claim in JWTs; empty = no claim
+	AuthAudience string // config.json auth_audience — aud claim in JWTs; empty = no validation
 	// RemotePendingMaxAge bounds how long a remote-proxy call may stay pending before it settles
 	// as a failure with full refund, so a silent peer can't pin a process open. 0 = default 24h.
 	RemotePendingMaxAge time.Duration
@@ -92,8 +95,13 @@ type Kernel struct {
 	nativeHandlers map[string]NativeFunc
 	valueFuncs     map[string]ValueFunc
 	secretBox      SecretBox
-	lookupHost     func(context.Context, string) ([]string, error)
-	userHandles    sync.Map // user ID → handle, cached for readable logging
+	rail           Rail
+	// railMu serializes outgoing rail work. juice-rail admits one operation in flight per signing
+	// key, and one signer per key, so the worker and an interactive withdrawal must not present two
+	// payments at once (D23).
+	railMu      sync.Mutex
+	lookupHost  func(context.Context, string) ([]string, error)
+	userHandles sync.Map // user ID → handle, cached for readable logging
 	// traceStripes serialize a trace's fund-spends against that trace's settlement (§9): with
 	// out-of-kernel capability composition, callbacks mutate a live trace concurrently with the
 	// settlement that reads its taxable available, so the two must be mutually exclusive.
@@ -1269,48 +1277,6 @@ func newLedgerEntry(operatorID, fromUserID, toUserID string, amount int64, reaso
 		ExternalKey:    externalKey,
 		CreatedAt:      time.Now().UTC(),
 	}
-}
-
-func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
-	start := time.Now()
-	logger := k.log.With(ctx)
-	logger.Info("deposit.start", "target_user_id", targetUserID, "amount", amount)
-	if err := k.requireSuperuser(ctx, operatorID); err != nil {
-		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return nil, err
-	}
-	if amount <= 0 {
-		return nil, ErrInvalidInput.Wrap("amount must be positive")
-	}
-	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
-		return nil, err
-	}
-	e := newLedgerEntry(operatorID, "", targetUserID, amount, reason, externalKey)
-	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
-		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return nil, err
-	}
-	logger.Info("deposit.created", "deposit_id", e.ID, "target_user_id", targetUserID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return e, nil
-}
-
-// Withdraw deducts credits from a user's available balance. Superuser only.
-func (k *Kernel) Withdraw(ctx context.Context, operatorID, targetUserID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
-	if err := k.requireSuperuser(ctx, operatorID); err != nil {
-		return nil, err
-	}
-	if amount <= 0 {
-		return nil, ErrInvalidInput.Wrap("amount must be positive")
-	}
-	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
-		return nil, err
-	}
-	e := newLedgerEntry(operatorID, targetUserID, "", amount, reason, externalKey)
-	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
-		return nil, err
-	}
-	k.log.With(ctx).Info("withdrawal.created", "withdrawal_id", e.ID, "target_user_id", targetUserID, "amount", amount)
-	return e, nil
 }
 
 // Transfer moves credits from the caller's own available balance to another local
@@ -2741,7 +2707,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 		}
 		r.RatedReceiptHash = h
 	}
-	sig, err := signRating(k.cfg.SigningKey, r)
+	sig, err := signRating(k.cfg.Network, k.cfg.SigningKey, r)
 	if err != nil {
 		return nil, err
 	}
@@ -3138,6 +3104,9 @@ func (k *Kernel) isUserSuperuser(_ context.Context, u *Account) bool {
 
 // IsSuperuser reports whether userID is the configured superuser. Exported so the service
 // layer can widen read scope for @sys (supervision is scope on the normal endpoints, §14).
+// Network returns the network this kernel serves (D23) — the digest every signature is bound to.
+func (k *Kernel) Network() Network { return k.cfg.Network }
+
 func (k *Kernel) IsSuperuser(ctx context.Context, userID string) bool {
 	u, err := k.store.ReadUser(ctx, userID)
 	if err != nil || u == nil {
@@ -3267,7 +3236,7 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, val
 		StartedAt:    tx.StartedAt,
 		CreatedAt:    time.Now().UTC().Truncate(time.Second),
 	}
-	sig, err := signReceipt(k.cfg.SigningKey, r)
+	sig, err := signReceipt(k.cfg.Network, k.cfg.SigningKey, r)
 	if err != nil {
 		return nil, err
 	}
@@ -3283,17 +3252,17 @@ func (k *Kernel) requireReceiptSigningReady() error {
 }
 
 // signReceipt signs the canonical Receipt object (with Signature cleared) under the receipt domain.
-func signReceipt(key ed25519.PrivateKey, r *Receipt) (string, error) {
+func signReceipt(net Network, key ed25519.PrivateKey, r *Receipt) (string, error) {
 	cp := *r
 	cp.Signature = ""
-	return signJCS(key, sigDomainReceipt, cp)
+	return net.sign(key, sigDomainReceipt, cp)
 }
 
 // signRating signs the canonical Rating object (with Signature cleared) under the rating domain.
-func signRating(key ed25519.PrivateKey, r *Rating) (string, error) {
+func signRating(net Network, key ed25519.PrivateKey, r *Rating) (string, error) {
 	cp := *r
 	cp.Signature = ""
-	return signJCS(key, sigDomainRating, cp)
+	return net.sign(key, sigDomainRating, cp)
 }
 
 // ---- Import shared logic ----

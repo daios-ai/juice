@@ -82,7 +82,7 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 	rk, _ := s.kernel.ReadKernel(r.Context(), key)
 	out := map[string]any{"public_key": key}
 	if rk != nil {
-		out["petname"], out["nickname"], out["about"] = rk.Petname, rk.Nickname, rk.About
+		out["petname"], out["nickname"], out["about"], out["rail_address"] = rk.Petname, rk.Nickname, rk.About, rk.RailAddress
 		out["last_seen"], out["peer_credit"] = rk.LastSeen, rk.PeerCredit
 	}
 	if acct != nil {
@@ -145,57 +145,62 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"handle": out.Handle})
 }
 
-func (s *server) ctlAdjust(credit bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Handle      string `json:"handle"`
-			Amount      int64  `json:"amount"`
-			Reason      string `json:"reason"`
-			ExternalKey string `json:"external_key"`
-		}
-		if !decodeBody(w, r, &req) {
-			return
-		}
-		u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		if u == nil {
-			// Deposit-by-kernel opens the billing account (§13): the provider's single deposit both
-			// provisions and funds a not-yet-known kernel. Provisioning only — a deposit is not our
-			// act of naming, so no petname is bound; the operator binds one with `admin rename`.
-			// Withdraw never provisions: there is nothing to redeem from a fresh row.
-			if !credit || key == "" {
-				writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
-				return
-			}
-			if u, err = s.kernel.EnsureKernelAccount(r.Context(), key); err != nil {
-				writeErr(w, err)
-				return
-			}
-		}
-		var e *kernel.LedgerEntry
-		if credit {
-			e, err = s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
-		} else {
-			e, err = s.kernel.Withdraw(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.ExternalKey)
-		}
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
+// ctlDeposit records money that arrived from outside (U3). ref names the payment: the operator's own
+// record of one where the world has no chain, the transaction that carried it where it has, or the
+// settlement a peer says it has paid. Nothing is credited without it (D23).
+func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Handle string `json:"handle"`
+		Amount int64  `json:"amount"`
+		Reason string `json:"reason"`
+		Ref    string `json:"ref"`
 	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if u == nil {
+		// Deposit-by-kernel opens the billing account (§13): the provider's single deposit both
+		// provisions and funds a not-yet-known kernel. Provisioning only — a deposit is not our
+		// act of naming, so no petname is bound; the operator binds one with `admin rename`.
+		if key == "" {
+			writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
+			return
+		}
+		if u, err = s.kernel.EnsureKernelAccount(r.Context(), key); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	e, err := s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.Ref)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
 }
 
-// ctlSettlePeer settles the bilateral position with a peer (§13): exact when |d| ≥ Q, otherwise the
-// probabilistic residual protocol. With a settlement_id it instead records the rail payment for a
-// paid probabilistic outcome (SettleCash). Superuser only; the kernel decides direction and mode.
+// ctlListDeposits shows what is waiting on the operator: money whose sender nobody has claimed, and
+// settlements a peer says it has paid.
+func (s *server) ctlListDeposits(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.kernel.ListHeldDeposits(r.Context(), callerFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOr(w, railTransferViews(s.kernel, r.Context(), rows), nil)
+}
+
+// ctlSettlePeer settles the bilateral position with a peer (§13): exact when the debt is at least Q,
+// otherwise the probabilistic residual protocol. Either way the kernel pays on the rail and announces
+// the payment; the creditor closes its own books when that payment arrives. Superuser only.
 func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Handle       string `json:"handle"`
-		SettlementID string `json:"settlement_id"`
+		Handle string `json:"handle"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -212,12 +217,7 @@ func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
 		return
 	}
-	var res map[string]any
-	if req.SettlementID != "" {
-		res, err = s.kernel.SettleCash(r.Context(), callerFrom(r), u.ID, req.SettlementID)
-	} else {
-		res, err = s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
-	}
+	res, err := s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -378,10 +378,28 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 		addrs = s.fed.ListenAddrs()
 	}
 	gross, _ := s.kernel.GrossReceivables(ctx)
-	writeJSON(w, http.StatusOK, map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
+	out := map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
 		"exposure_max": globalCfg.ExposureMax, "settlement_trigger": globalCfg.SettlementTrigger,
 		"settlement_quantum": globalCfg.SettlementQuantum, "gross_receivables": gross,
-		"settlement_due": settlementDueConfigured() && gross >= globalCfg.SettlementTrigger})
+		"settlement_due": settlementDueConfigured() && gross >= globalCfg.SettlementTrigger}
+	// The rail position: what is held, what is promised elsewhere, and whether the books still add
+	// up (D23). An operator reads this before believing any other number here.
+	if rep, err := s.kernel.RailInspect(ctx, callerFrom(r)); err == nil {
+		out["network"] = rep.Network.Name
+		out["network_digest"] = rep.Network.Digest
+		out["rail_address"] = rep.Address
+		out["finalized"] = rep.Finalized
+		out["sys"] = map[string]any{"earnings": rep.Position.SysAvailable,
+			"pending_payouts": rep.Position.PendingPayouts, "held_deposits": rep.Position.HeldDeposits,
+			"refill_locks": rep.Position.RefillLocks}
+		out["solvency"] = map[string]any{"liabilities": rep.Position.Liabilities,
+			"receivables": rep.Position.Receivables, "vault": rep.Position.Vault, "gap": rep.Gap}
+		out["custody"] = map[string]any{"checked": rep.CustodyChecked, "difference": rep.Custody, "ok": rep.CustodyOK}
+		if rep.StopReason != "" {
+			out["stop"] = map[string]any{"reason": rep.StopReason, "since": rep.StopSince}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // writeOr writes v as JSON on success, or the error otherwise.

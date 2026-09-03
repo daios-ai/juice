@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -31,16 +30,8 @@ func lastSeenStr(t *time.Time) string {
 	}
 }
 
-func parseAmount(s string) (int64, error) {
-	amount, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || amount <= 0 {
-		return 0, kernel.ErrInvalidInput.Wrap("amount must be a positive integer")
-	}
-	return amount, nil
-}
-
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
-// performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
+// performs: money (deposit, settle), access (suspend/unsuspend), federation trust
 // (peers/inspect/settle), and the global roster (users/show). They are ordinary TCP
 // clients like every other command (apiCall/apiEmit); the server gates the routes with
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
@@ -57,7 +48,6 @@ func init() {
 		adminUnsuspendCmd(),
 		adminRenameCmd(),
 		adminDepositCmd(),
-		adminWithdrawCmd(),
 		adminSettleCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
@@ -66,36 +56,94 @@ func init() {
 	rootCmd.AddCommand(adminCmd)
 }
 
-// identityCmd prints this kernel's own federation identity: its public key (which peers address
-// it by), handle, and libp2p listen addresses. Federation no longer exposes a .well-known
-// document, so this is how an operator learns the key to share.
+// identityCmd prints who this kernel is and where it stands. Federation exposes no .well-known
+// document, so this is how an operator learns the key to share; it is also the one place the money
+// picture is read whole — what the rail holds against what the books say, so an operator sees a
+// disagreement here rather than in a user's failed withdrawal.
 func identityCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "identity",
-		Short: "Show this kernel's federation identity",
+		Short: "Show this kernel's identity, money position, and federation standing",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var out struct {
-				Handle            string   `json:"handle"`
-				PublicKey         string   `json:"public_key"`
-				About             string   `json:"about"`
-				Addrs             []string `json:"addrs"`
-				ExposureMax       int64    `json:"exposure_max"`
-				SettlementTrigger int64    `json:"settlement_trigger"`
-				SettlementQuantum int64    `json:"settlement_quantum"`
-				GrossReceivables  int64    `json:"gross_receivables"`
-				SettlementDue     bool     `json:"settlement_due"`
+				Handle      string   `json:"handle"`
+				PublicKey   string   `json:"public_key"`
+				About       string   `json:"about"`
+				Addrs       []string `json:"addrs"`
+				Network     string   `json:"network"`
+				RailAddress string   `json:"rail_address"`
+				Finalized   *struct {
+					Token int64  `json:"token"`
+					Gas   string `json:"gas"`
+					Block uint64 `json:"block"`
+				} `json:"finalized"`
+				Sys struct {
+					Earnings       int64 `json:"earnings"`
+					PendingPayouts int64 `json:"pending_payouts"`
+					HeldDeposits   int64 `json:"held_deposits"`
+					RefillLocks    int64 `json:"refill_locks"`
+				} `json:"sys"`
+				Solvency struct {
+					Liabilities int64 `json:"liabilities"`
+					Receivables int64 `json:"receivables"`
+					Vault       int64 `json:"vault"`
+					Gap         int64 `json:"gap"`
+				} `json:"solvency"`
+				Custody *struct {
+					Checked    bool  `json:"checked"`
+					Difference int64 `json:"difference"`
+					OK         bool  `json:"ok"`
+				} `json:"custody"`
+				Stop *struct {
+					Reason string `json:"reason"`
+					Since  string `json:"since"`
+				} `json:"stop"`
+				ExposureMax       int64 `json:"exposure_max"`
+				SettlementTrigger int64 `json:"settlement_trigger"`
+				SettlementQuantum int64 `json:"settlement_quantum"`
+				GrossReceivables  int64 `json:"gross_receivables"`
+				SettlementDue     bool  `json:"settlement_due"`
 			}
-			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
+			ctx := context.Background()
+			if err := apiCall(ctx, "GET", "/control/identity", nil, &out); err != nil {
 				return err
 			}
 			if flagJSON {
 				return printJSON(out)
 			}
+			decimals := amountDecimals(ctx)
 			fmt.Printf("Handle:     %s\n", out.Handle)
 			fmt.Printf("Public key: %s\n", out.PublicKey)
 			if out.About != "" {
 				fmt.Printf("About:      %s\n", out.About)
+			}
+			if out.Network != "" {
+				fmt.Printf("Network:    %s\n", out.Network)
+			}
+			if out.RailAddress != "" {
+				fmt.Printf("Paid at:    %s\n", out.RailAddress)
+			}
+			if out.Finalized != nil {
+				fmt.Printf("Holdings:   %s (fee balance %s) as of block %d\n",
+					formatAmount(out.Finalized.Token, decimals), out.Finalized.Gas, out.Finalized.Block)
+			}
+			// What the operator's own account holds, split by what it is: money earned and spendable,
+			// versus money merely passing through (owed out, unattributed, or locked for rail fees).
+			fmt.Printf("Operator:   earned=%d paying-out=%d unattributed=%d fee-locks=%d\n",
+				out.Sys.Earnings, out.Sys.PendingPayouts, out.Sys.HeldDeposits, out.Sys.RefillLocks)
+			// The books add up when what users hold, minus what peers owe us, equals what came in.
+			fmt.Printf("Solvency:   user-credits=%d owed-by-peers=%d money-in=%d difference=%d\n",
+				out.Solvency.Liabilities, out.Solvency.Receivables, out.Solvency.Vault, out.Solvency.Gap)
+			if out.Solvency.Gap != 0 {
+				fmt.Printf("ALARM: the books do not add up — off by %d\n", out.Solvency.Gap)
+			}
+			// An audit that could not run says nothing either way; only a checked mismatch is an alarm.
+			if out.Custody != nil && out.Custody.Checked && !out.Custody.OK {
+				fmt.Printf("ALARM: the money the rail holds differs from the books by %d\n", out.Custody.Difference)
+			}
+			if out.Stop != nil {
+				fmt.Printf("ALARM: outgoing payments are halted since %s: %s\n", out.Stop.Since, out.Stop.Reason)
 			}
 			// Global exposure policy and current standing (§13), in operator words: how much
 			// unsecured credit this kernel extends serving peers, how much peers owe right now,
@@ -213,60 +261,77 @@ func adminRenameCmd() *cobra.Command {
 	}
 }
 
-// adjustCmd builds the shared deposit/withdraw command (path is /control/deposit|withdraw).
-func adjustCmd(use, short, path string) *cobra.Command {
-	var reason, externalKey string
+// adminDepositCmd records money that came in from outside, and bare lists what is waiting to be
+// recorded. Money is credited against a fact the rail witnesses, never on the operator's say-so
+// alone, which is why --ref is required to credit anything. There is no matching withdraw: money
+// leaves only by its owner's own `user withdraw`.
+func adminDepositCmd() *cobra.Command {
+	var reason, ref string
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: short,
-		Long:  short + ", reflecting a payment made outside the system.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(2),
+		Use:   "deposit [TARGET [AMOUNT]]",
+		Short: "Credit an account or kernel for a payment received, or list payments awaiting it",
+		Long: "Credit an account or kernel for a payment received from outside.\n\n" + targetHelp + "\n\n" +
+			"With no arguments, lists the money waiting to be recorded: payments whose sender nobody\n" +
+			"has registered, and settlements a peer says it has paid.\n\n" +
+			"Three forms:\n" +
+			"  admin deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
+			"  admin deposit USER --ref TXHASH        assign a received payment to its sender\n" +
+			"  admin deposit PEER [AMOUNT] --ref ID   record a peer's settlement payment\n\n" +
+			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
+			"transaction that carried it where it has. Repeating the same fact never moves money\n" +
+			"twice, and the same fact with a different amount is refused.",
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			amount, err := parseAmount(args[1])
-			if err != nil {
-				return err
+			ctx := context.Background()
+			if len(args) == 0 {
+				return apiEmitCtx(ctx, "GET", "/control/deposits", nil)
 			}
-			return apiEmit("POST", path, map[string]any{
-				"handle": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
+			var amount int64
+			if len(args) == 2 {
+				var err error
+				if amount, err = parseAmount(args[1], amountDecimals(ctx)); err != nil {
+					return err
+				}
+			}
+			return apiEmitCtx(ctx, "POST", "/control/deposit", map[string]any{
+				"handle": args[0], "amount": amount, "reason": reason, "ref": ref,
 			})
 		},
 	}
+	cmd.Flags().StringVar(&ref, "ref", "", "The payment this credit records: your own record of it, a transaction hash, or a settlement id")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id of the outside payment; repeating the command with the same id never moves money twice")
 	return cmd
 }
 
-func adminDepositCmd() *cobra.Command {
-	return adjustCmd("deposit TARGET AMOUNT", "Add credits to an account or kernel", "/control/deposit")
-}
-
-func adminWithdrawCmd() *cobra.Command {
-	return adjustCmd("withdraw TARGET AMOUNT", "Deduct credits from an account or kernel", "/control/withdraw")
-}
-
 func adminSettleCmd() *cobra.Command {
-	var cash string
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "settle PEER",
 		Short: "Settle what this kernel owes a peer kernel",
 		Long: "Settle this kernel's debt to a peer. PEER is the peer's local name (petname) or its\n" +
 			"public key — both are shown by `admin peers`.\n\n" +
-			"The kernel only keeps the books; real money moves outside it, on whatever payment rail\n" +
-			"the two operators share. If the debt is at least `settlement_quantum` (config), the\n" +
-			"command prints the amount to pay and the exact `admin withdraw` command that records\n" +
-			"the payment. A smaller debt is settled by a fair random draw with the peer: usually\n" +
-			"the debt is cancelled outright and nothing is paid; with probability debt/quantum the\n" +
-			"full quantum becomes payable instead. Over many settlements this averages out exactly,\n" +
-			"so debts too small to pay economically still settle fairly.\n\n" +
-			"When a draw ends payable, pay the quantum on the rail, then record it with\n" +
-			"--cash SETTLEMENT_ID on both kernels.",
-		Args:  cobra.ExactArgs(1),
+			"This kernel pays the peer on the rail and announces the payment; the peer closes its own\n" +
+			"books when the money arrives. A debt of at least `settlement_quantum` (config) is paid\n" +
+			"exactly. A smaller one is settled by a fair draw with the peer: usually the debt is\n" +
+			"cancelled and nothing is paid, and occasionally the full `settlement_quantum` is paid\n" +
+			"instead. Over many settlements the two average out, so debts too small to pay\n" +
+			"economically still settle fairly.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
+			ctx := context.Background()
+			// This moves real money on the rail, so a human at a terminal is asked first; an agent
+			// with no terminal is taken at its word.
+			if interactiveTTY() {
+				network := "this kernel's"
+				if h, err := probeHealth(ctx, serverBaseURL()); err == nil {
+					network = h.Network
+				}
+				if !promptYesNo(fmt.Sprintf("Pay %s what this kernel owes it, on the %s network?", args[0], network)) {
+					return nil
+				}
+			}
+			return apiEmitCtx(ctx, "POST", "/control/peers/settle", map[string]any{"handle": args[0]})
 		},
 	}
-	cmd.Flags().StringVar(&cash, "cash", "", "Record the rail payment for a payable draw (takes the settlement_id printed earlier)")
-	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {

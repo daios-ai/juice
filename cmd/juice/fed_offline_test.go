@@ -96,7 +96,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x", Stats: &kernel.Stats{},
 		UpdatedAt: time.Now(),
 	}
-	sig, _ := kernel.SignManifest(priv, &m)
+	sig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = sig
 	// Cold resolve caches and activates the proxy (§8): the sole import path.
 	if _, err := k.ImportPeerAction(ctx, peer.ID, m); err != nil {
@@ -445,7 +445,7 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 		t.Fatalf("input is not a marshal fixed point:\n sent:     %s\n received: %s",
 			f.lastStep.Input, received.Input)
 	}
-	if err := kernel.VerifyStepSignature(received.Counterparty, received.StepID, received.Counterparty,
+	if err := testNet.VerifyStepSignature(received.Counterparty, received.StepID, received.Counterparty,
 		key, received.IdempotencyKey, received.Timestamp,
 		sha256HexBytes(received.Input), received.Signature); err != nil {
 		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
@@ -531,7 +531,7 @@ func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	if _, _, err := adapter.ResolveRemoteUser(context.Background(), key, "bob"); !named(err, key) {
 		t.Errorf("user resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
-	if _, _, err := adapter.Settle(context.Background(), key, "open", "", "", "s1", 0, "", nil); !named(err, key) {
+	if _, _, err := adapter.Settle(context.Background(), key, "open", "", "", "s1", 0, "", "", nil); !named(err, key) {
 		t.Errorf("settle with an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
 }

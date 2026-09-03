@@ -167,7 +167,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC(),
 	}
-	sig, err := kernel.SignManifest(peerPriv, good)
+	sig, err := testNet.SignManifest(peerPriv, good)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -35,6 +35,7 @@ fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; 
 declare -a _PIDS=()
 _RUNROOT="$(mktemp -d)"
 declare -A SERVER_URL=()   # db path -> http://host:port of its running server
+declare -A SERVER_OLD
 declare -A SERVER_PID=()   # db path -> serve pid
 
 track_pid() { _PIDS+=("$1"); }
@@ -68,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500
+    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500 world="play" rail_rpc=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -81,6 +82,8 @@ write_config() {
         settlement_trigger=*)            settlement_trigger=${a#*=} ;;
         settlement_quantum=*)            settlement_quantum=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
+        world=*)                         world=${a#*=} ;;
+        rail_rpc=*)                      rail_rpc=${a#*=} ;;
     esac; done
     local bp_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
@@ -97,6 +100,8 @@ write_config() {
   "log_level": "info",
   "log_format": "json",
   "allow_local_sources": true,
+  "world": "$world",
+  "rail_rpc": "$rail_rpc",
   "kernel_handle": "$kernel_handle",
   "bootstrap_peers": $bp_json,
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
@@ -129,10 +134,15 @@ kernel_key() {
 # returns 1 (never a silent timeout).
 start_server() {
     local db="$1" home="$2"; shift 2
+    mkdir -p "$(dirname "$db")"
     write_config "$db" "$@"
     local log; log="$(dirname "$db")/server.log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" \
-        "$JUICE" --db "$db" serve --addr 127.0.0.1:0 >"$log" 2>&1 &
+    # Truncate here, in the parent, before the server is launched: the redirection below truncates
+    # only once the background child runs, and on a restart the wait loop could otherwise grep this
+    # server's predecessor's `server.ready` line and lock onto its now-dead port.
+    : >"$log"
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
+        "$JUICE" serve --addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -148,6 +158,7 @@ start_server() {
     done
     SERVER_URL["$db"]="http://$addr"
     SERVER_PID["$db"]="$pid"
+    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_profiles "${SERVER_OLD[$db]}" "http://$addr"
     return 0
 }
 
@@ -156,7 +167,26 @@ start_server() {
 stop_server() {
     local pid="${SERVER_PID[$1]:-}"
     [ -n "$pid" ] && { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    SERVER_OLD["$1"]="${SERVER_URL[$1]:-}"
     unset "SERVER_URL[$1]" "SERVER_PID[$1]" 2>/dev/null
+}
+
+# repoint_profiles old new — a restarted server answers on a new address, and a client's login is
+# sent only to the address it was pinned to. Every client that knew the old address is told the
+# new one, which is what an operator does with `juice use --endpoint` after a restart.
+repoint_profiles() {
+    local f
+    while IFS= read -r f; do
+        python3 -c '
+import json, sys
+path, old, new = sys.argv[1:4]
+d = json.load(open(path))
+for p in d.get("profiles", {}).values():
+    if p.get("endpoint", "").rstrip("/") == old.rstrip("/"):
+        p["endpoint"] = new
+json.dump(d, open(path, "w"))
+' "$f" "$1" "$2"
+    done < <(find "$_RUNROOT" -path "*/.juice/client/profiles.json" 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
@@ -165,8 +195,25 @@ stop_server() {
 # as user commands.
 # ---------------------------------------------------------------------------
 _srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s\n' "${SERVER_URL[$db]}"; }
-j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" "$@" 2>&1; }
-jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" --json "$@" 2>/dev/null; }
+j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" "$@" 2>&1; }
+jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
+
+# khome db — the kernel home a database belongs to. A kernel is its home: $JUICE_HOME/kernel/ holds
+# the ledger, the config, the rail key and the single-server lock (D23).
+khome() { dirname "$(dirname "$1")"; }
+
+# await_login db home — log in and wait until the server actually answers as that user. A restart
+# under load can bind its port a moment before it is serving, and a flow that reads too early sees
+# an empty answer rather than the truth it is asserting about.
+await_login() {
+    local db="$1" home="$2" i
+    for i in $(seq 20); do
+        j "$db" "$home" auth login sys --password sys-pass >/dev/null 2>&1
+        [ -n "$(strfield "$(jj "$db" "$home" user me)" handle)" ] && return 0
+        sleep 0.5
+    done
+    return 1
+}
 
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }
@@ -250,10 +297,38 @@ token() {
         -d "{\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token
 }
 
-# juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:
-# $HOME/.juice/kernel/tokens/{sha256(abs(db))[:12]}
-juice_token_dir() {
-    python3 -c "import hashlib,os,sys; print(os.path.join(sys.argv[1],'.juice','kernel','tokens',hashlib.sha256(os.path.abspath(sys.argv[2]).encode()).hexdigest()[:12]))" "$1" "$2"
+# A client keeps the kernels it knows in $HOME/.juice/client/profiles.json: each profile pins a
+# kernel's key and network and holds its tokens (D20). These read and write one field of the active
+# profile, which is how a flow plants a stale token or checks that logout dropped one.
+juice_profile_file() { echo "$1/.juice/client/profiles.json"; }
+
+profile_get() {
+    python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+p = d.get("profiles", {}).get(d.get("active", ""), {})
+print(p.get(sys.argv[2], ""))
+' "$(juice_profile_file "$1")" "$2"
+}
+
+profile_set() {
+    python3 -c '
+import json, os, sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+try:
+    d = json.load(open(path))
+except Exception:
+    d = {"active": "default", "profiles": {"default": {}}}
+name = d.get("active") or "default"
+d.setdefault("profiles", {}).setdefault(name, {})[sys.argv[2]] = sys.argv[3]
+d["active"] = name
+json.dump(d, open(path, "w"))
+os.chmod(path, 0o600)
+' "$(juice_profile_file "$1")" "$2" "$3"
 }
 
 # ---------------------------------------------------------------------------
@@ -269,7 +344,14 @@ make_user() {
     j "$db" "$uh" auth login "$h" --password "$pw" >/dev/null 2>&1
 }
 # deposit db sys_home handle amount
-deposit() { j "$1" "$2" admin deposit "$3" "$4" >/dev/null 2>&1; :; }
+# newref — a distinct name for one payment. Every crossing names the payment it records, so two
+# fundings of the same account are two payments rather than one repeated (U3). It reads the clock
+# rather than a counter because it is called from a subshell, where a counter would never advance.
+newref() { echo "flow-$(date +%s%N)-$RANDOM"; }
+
+# deposit db home target amount [ref] — records money that arrived from outside. Every crossing
+# names the payment it stands for, so a reference is minted when the caller does not give one (U3).
+deposit() { j "$1" "$2" admin deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" >/dev/null 2>&1; :; }
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4
@@ -444,6 +526,66 @@ wasm = (b'\x00asm\x01\x00\x00\x00'+sec(1,types)+sec(2,imports)+sec(3,funcs)
         +sec(5,mems)+sec(6,globs)+sec(7,exports)+sec(10,codes)+sec(11,data))
 open(outfile,'wb').write(wasm)
 PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# Local chain. Only the rail's opt-in release gate uses these, and they need Foundry
+# (anvil, cast) on PATH; anvil goes into the same process registry as everything else.
+# ---------------------------------------------------------------------------
+ANVIL_RPC=""
+# anvil's first account is funded at genesis and signs every setup transaction.
+ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+# start_anvil — boot a chain on a free port and set ANVIL_RPC. One slot per epoch, so the
+# finalized head trails the tip by two blocks and a flow can say what has settled.
+start_anvil() {
+    local port; port=$(backend_port)
+    anvil --port "$port" --chain-id 31337 --slots-in-an-epoch 1 --silent >/dev/null 2>&1 &
+    track_pid $!
+    ANVIL_RPC="http://127.0.0.1:$port"
+    local deadline=$(( $(date +%s) + 20 ))
+    while ! cast block-number --rpc-url "$ANVIL_RPC" >/dev/null 2>&1; do
+        [ "$(date +%s)" -ge "$deadline" ] && return 1
+        sleep 0.1
+    done
+    return 0
+}
+
+# rail_contracts — juice-rail's compiled mocks. The published module carries their sources but
+# not the artifacts, so a sibling checkout that has run `forge build` is what supplies them.
+rail_contracts() {
+    local dir="${JUICE_RAIL_CONTRACTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/juice-rail/contracts/out}"
+    [ -d "$dir" ] || return 1
+    echo "$dir"
+}
+
+# anvil_deploy name [value] [abi-encoded constructor args] — deploy one mock; echo its address.
+anvil_deploy() {
+    local name="$1" value="${2:-0}" args="${3:-}" out code
+    out=$(rail_contracts) || return 1
+    code=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['bytecode']['object'])" \
+        "$out/$name.sol/$name.json") || return 1
+    strfield "$(cast send --rpc-url "$ANVIL_RPC" --private-key "$ANVIL_KEY" --value "$value" \
+        --create "${code}${args#0x}" --json 2>/dev/null)" contractAddress
+}
+
+# anvil_send key to [cast send arguments...] — one transaction, mined at once.
+anvil_send() {
+    local key="$1" to="$2"; shift 2
+    cast send --rpc-url "$ANVIL_RPC" --private-key "$key" "$to" "$@" >/dev/null 2>&1
+}
+
+# anvil_mine n — advance the chain, which is how a flow reaches finality on demand.
+anvil_mine() {
+    local i
+    for ((i=0; i<$1; i++)); do cast rpc --rpc-url "$ANVIL_RPC" evm_mine >/dev/null 2>&1; done
+}
+
+# anvil_uint to signature args... — read one number straight from the chain, never through the
+# kernel, so an assertion about money has an independent witness.
+anvil_uint() {
+    local to="$1" sig="$2"; shift 2
+    cast call --rpc-url "$ANVIL_RPC" "$to" "$sig" "$@" 2>/dev/null | awk '{print $1}'
 }
 
 # ---------------------------------------------------------------------------

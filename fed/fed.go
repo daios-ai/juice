@@ -115,14 +115,15 @@ type StepResponse = Response
 // applies the three-way settlement; "reconcile" re-presents an expired open record so the creditor
 // applies the binding clear-for-zero (FIX 2). Signatures are over disjoint scoped payloads (§12).
 type SettleRequest struct {
-	Kind         string          `json:"kind"`             // "open" | "finish" | "reconcile"
-	Counterparty string          `json:"counterparty"`     // debtor's base64url Ed25519 public key
-	Timestamp    string          `json:"timestamp"`        // RFC3339
-	Signature    string          `json:"signature"`        // Ed25519 over the kind's scoped canonical payload
-	SettlementID string          `json:"settlement_id"`    // debtor-chosen unique id, binds the whole exchange
-	Amount       int64           `json:"amount,omitempty"` // open: the debt d the debtor owes (creditor checks == its receivable)
-	Nonce        string          `json:"nonce,omitempty"`  // finish: the debtor's committed nonce
-	Record       json.RawMessage `json:"record,omitempty"` // finish/reconcile: the creditor-signed open record carried back
+	Kind         string          `json:"kind"`              // "open" | "finish" | "reconcile"
+	Counterparty string          `json:"counterparty"`      // debtor's base64url Ed25519 public key
+	Timestamp    string          `json:"timestamp"`         // RFC3339
+	Signature    string          `json:"signature"`         // Ed25519 over the kind's scoped canonical payload
+	SettlementID string          `json:"settlement_id"`     // debtor-chosen unique id, binds the whole exchange
+	Amount       int64           `json:"amount,omitempty"`  // open: the debt d the debtor owes (creditor checks == its receivable)
+	Nonce        string          `json:"nonce,omitempty"`   // finish: the debtor's committed nonce
+	TxHash       string          `json:"tx_hash,omitempty"` // announce: the payment that closes the debt
+	Record       json.RawMessage `json:"record,omitempty"`  // finish/reconcile: the creditor-signed open record carried back
 }
 
 // SettleResponse carries a signed SettlementRecord (open → commitment; finish/reconcile → final
@@ -161,4 +162,8 @@ type Config struct {
 	// AllowPrivateAddrs keeps loopback/private multiaddrs usable so the flow harness can run a
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).
 	AllowPrivateAddrs bool
+	// Namespace is the rendezvous string this kernel advertises and enumerates. It carries the
+	// network digest, so kernels of different worlds never find each other (D23). Empty is a
+	// configuration error, not a default: an unnamespaced kernel would meet every world at once.
+	Namespace string
 }

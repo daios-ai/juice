@@ -141,7 +141,7 @@ func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
 	if err != nil {
 		t.Fatalf("giveCredits: @sys not found: %v", err)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test", newRef()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -214,7 +214,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
 	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	sig, err := kernel.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash)
+	sig, err := testNet.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestServeHealth(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
@@ -1266,17 +1266,11 @@ func TestServeLogout(t *testing.T) {
 }
 
 func TestRateLimitLogin(t *testing.T) {
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rl.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := newTestStore(t)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "rl-test-secret"
+	cfg := testConfig("rl-test-secret")
 	logger := log.Discard()
-	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db})
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: "rlu", Password: "pass",
 	}); err != nil {
@@ -1619,7 +1613,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-far", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
 	if err != nil {
 		t.Fatal(err)
@@ -2457,7 +2451,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	argsHash := sha256HexBytes(body)
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
-	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
 	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
@@ -2504,7 +2498,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

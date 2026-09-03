@@ -162,13 +162,13 @@ func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Dura
 
 // Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
 // signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
-func (c *fedAdapter) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, record []byte) (int, []byte, error) {
+func (c *fedAdapter) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce, txHash string, record []byte) (int, []byte, error) {
 	if c.transport == nil {
 		return 0, nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
 	resp, err := c.transport.Settle(ctx, peerPublicKey, fed.SettleRequest{
 		Kind: kind, Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
-		SettlementID: settlementID, Amount: amount, Nonce: nonce, Record: record,
+		SettlementID: settlementID, Amount: amount, Nonce: nonce, TxHash: txHash, Record: record,
 	})
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {

@@ -11,10 +11,14 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/native"
+	"github.com/daios-ai/juice/rail"
 	"golang.org/x/term"
 )
 
 const (
+	// configKeyWorldDigest records the network this database belongs to, written once and checked
+	// at every startup (D9, D23).
+	configKeyWorldDigest    = "world_digest"
 	configKeySuperuser      = "superuser_handle"
 	configKeySigningPublic  = "signing_public_key"
 	configKeySigningPrivate = "signing_private_key"
@@ -53,7 +57,7 @@ func requireKernelName() (string, error) {
 }
 
 // On first boot (no superuser configured), it prompts for credentials interactively.
-func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) error {
+func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, net kernel.Network) error {
 	ctx := context.Background()
 
 	// The name is resolved BEFORE anything is written, so a boot that cannot be named leaves no
@@ -69,10 +73,38 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) er
 	}
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
-	if err != nil || handle == "" {
+	fresh := err != nil || handle == ""
+	if fresh {
 		if handle, err = firstBoot(ctx, k); err != nil {
 			return err
 		}
+	}
+
+	// One kernel, one network, for life (D23). A database records the world it was made for, and
+	// refuses to serve any other: its balances, receipts and debts mean one thing only. A database
+	// that predates the rail is bound to play, whose credits were always the operator's own records
+	// — binding it to a token world would silently turn them into claims on real money.
+	stored, _ := k.GetConfig(ctx, configKeyWorldDigest)
+	switch {
+	case stored == "" && fresh:
+		if err := k.SetConfig(ctx, configKeyWorldDigest, net.Digest); err != nil {
+			return err
+		}
+	case stored == "":
+		play, lerr := rail.Load("play")
+		if lerr != nil {
+			return lerr
+		}
+		if net.Digest != play.Network().Digest {
+			return fmt.Errorf("this database was made before networks existed, so it belongs to play; "+
+				"config selects %q — start a new kernel for that network instead", net.Name)
+		}
+		if err := k.SetConfig(ctx, configKeyWorldDigest, net.Digest); err != nil {
+			return err
+		}
+	case stored != net.Digest:
+		return fmt.Errorf("this database was made for another network; config selects %q — "+
+			"one kernel serves one network, so use its own home or start a new kernel", net.Name)
 	}
 
 	// Verify both signing keys are present, valid, and consistent.
@@ -128,8 +160,8 @@ func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
 	// Announce the location loudly: a first boot mints a NEW kernel identity and signing
 	// key, so an operator who launched against the wrong DB path (a fresh, unintended
 	// federation identity) sees it here — including in headless mode, before any prompt.
-	loc := flagDB
-	if abs, err := filepath.Abs(flagDB); err == nil {
+	loc := dbPath
+	if abs, err := filepath.Abs(dbPath); err == nil {
 		loc = abs
 	}
 	fmt.Fprintf(os.Stderr, "First boot: creating a NEW kernel — new identity and signing key — at %s\n", loc)

@@ -2,25 +2,17 @@ package main
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/log"
-	"github.com/daios-ai/juice/store"
 )
 
 func newAdminTestKernel(t *testing.T) *kernel.Kernel {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "admin_test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "admin-test-secret"
-	return kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+	db := newTestStore(t)
+	cfg := testConfig("admin-test-secret")
+	k := newKernel(cfg, kernel.Dependencies{Store: db})
+	return k
 }
 
 func TestAdminListUsers(t *testing.T) {
@@ -104,7 +96,7 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Deposit succeeds and balance increases.
-	d, err := k.Deposit(ctx, admin.ID, u.ID, 500, "initial grant", "")
+	d, err := k.Deposit(ctx, admin.ID, u.ID, 500, "initial grant", newRef())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +116,7 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Second deposit accumulates.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, 200, "top-up", ""); err != nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 200, "top-up", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	u3, _ := k.ReadUser(ctx, u.ID)
@@ -133,17 +125,17 @@ func TestAdminDeposit(t *testing.T) {
 	}
 
 	// Zero amount rejected.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, 0, "", ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, 0, "", newRef()); err == nil {
 		t.Error("expected error for zero amount")
 	}
 
 	// Negative amount rejected.
-	if _, err := k.Deposit(ctx, admin.ID, u.ID, -1, "", ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, u.ID, -1, "", newRef()); err == nil {
 		t.Error("expected error for negative amount")
 	}
 
 	// Unknown user rejected.
-	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, "", ""); err == nil {
+	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, "", newRef()); err == nil {
 		t.Error("expected error for unknown target user")
 	}
 }
@@ -186,4 +178,3 @@ func TestAdminListAllActions(t *testing.T) {
 // The @sys system-wide tx view is now the standard `tx list` (ListTransactions already drops
 // the party filter for superusers); superuser scope on the read endpoints is covered in
 // control/serve tests. The bespoke enriched admin-txs view was removed with adminListTxRows.
-

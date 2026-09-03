@@ -338,40 +338,54 @@ const (
 	sigDomainStepAuth        = "step_auth"
 	sigDomainSettleOpen      = "settle_open"
 	sigDomainSettleFinish    = "settle_finish"
+	sigDomainSettleAnnounce  = "settle_announce"
 	sigDomainSettleReconcile = "settle_reconcile"
 	sigDomainSettlementRec   = "settlement_record"
 	sigDomainCapability      = "capability"
 	sigDomainRecovery        = "recovery"
 )
 
-// domainPayload prepends the versioned domain tag to the JCS-canonical bytes of v, giving the
-// exact byte string that is signed/verified under domain.
-func domainPayload(domain string, v any) ([]byte, error) {
+// Network identifies the one network a kernel belongs to for life (D23). Digest is the SHA-256 of
+// the JCS of the world file's defining part; it rides inside every signature prefix, so no artifact
+// of one network can verify on another. Name and Decimals are display only.
+type Network struct {
+	Name     string `json:"name"`
+	Digest   string `json:"digest"`
+	Decimals uint8  `json:"decimals"`
+}
+
+// DiscoveryNamespace is the rendezvous string kernels of one network advertise and enumerate. It
+// carries the network digest, so worlds cannot meet even when they share a bootstrap node (D23).
+func DiscoveryNamespace(n Network) string { return "juice/fed/discovery/1/" + n.Digest }
+
+// payload prepends the versioned network-and-domain tag to the JCS-canonical bytes of v, giving the
+// exact byte string signed and verified under domain on this network.
+func (n Network) payload(domain string, v any) ([]byte, error) {
 	canon, err := CanonicalJSON(v)
 	if err != nil {
 		return nil, ErrInternal.Wrapf("canonicalize: %v", err)
 	}
-	prefix := []byte("juice/v1/" + domain + "\n")
+	prefix := []byte("juice/v1/" + n.Digest + "/" + domain + "\n")
 	return append(prefix, canon...), nil
 }
 
-// signJCS signs the domain-prefixed JCS-canonical form of v with key.
-func signJCS(key ed25519.PrivateKey, domain string, v any) (string, error) {
+// sign signs the prefixed JCS-canonical form of v with key.
+func (n Network) sign(key ed25519.PrivateKey, domain string, v any) (string, error) {
 	if len(key) != ed25519.PrivateKeySize {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	payload, err := domainPayload(domain, v)
+	payload, err := n.payload(domain, v)
 	if err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
 }
 
-// verifyJCS checks that sigB64 is a valid Ed25519 signature over the domain-prefixed JCS-canonical
-// form of v. Wire ingress must always pass the payload's own domain; the legacy (undomained)
-// fallback for stored historical artifacts lives in verifyJCSStored.
-func verifyJCS(pub ed25519.PublicKey, domain string, v any, sigB64 string) error {
-	payload, err := domainPayload(domain, v)
+// verify checks that sigB64 is a valid Ed25519 signature over the prefixed JCS-canonical form of v.
+// One rule serves wire and storage alike: an artifact signed before this network's digest existed is
+// reported invalid rather than repaired (U36).
+func (n Network) verify(pub ed25519.PublicKey, domain string, v any, sigB64 string) error {
+	payload, err := n.payload(domain, v)
 	if err != nil {
 		return err
 	}
@@ -380,26 +394,6 @@ func verifyJCS(pub ed25519.PublicKey, domain string, v any, sigB64 string) error
 		return ErrUnauthorized.Wrap("signature is invalid")
 	}
 	return nil
-}
-
-// verifyJCSStored verifies a locally STORED signed artifact (a receipt or rating persisted before
-// or after the v0.13 domain break), returning the signature_version that matched: 2 for a
-// domain-prefixed signature, 1 for a legacy undomained one, 0 (with error) for neither. This
-// keeps authentic pre-v0.13 audit records verifiable without re-signing them (§12). It must never
-// be used on wire ingress — network traffic is domained-only.
-func verifyJCSStored(pub ed25519.PublicKey, domain string, v any, sigB64 string) (int, error) {
-	if err := verifyJCS(pub, domain, v, sigB64); err == nil {
-		return 2, nil
-	}
-	canon, err := CanonicalJSON(v)
-	if err != nil {
-		return 0, ErrInternal.Wrapf("canonicalize: %v", err)
-	}
-	sig, derr := base64.RawURLEncoding.DecodeString(sigB64)
-	if derr == nil && ed25519.Verify(pub, canon, sig) {
-		return 1, nil
-	}
-	return 0, ErrUnauthorized.Wrap("signature is invalid")
 }
 
 // VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
@@ -442,19 +436,15 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 	// 1. Hash integrity.
 	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
 
-	// 2. Signature. A stored remote receipt may predate the v0.13 domain break, so audit it with the
-	// legacy fallback and surface which signature version matched (§12).
-	sigVer := 0
+	// 2. Signature, under this kernel's own network prefix — a receipt signed under any other is
+	// reported invalid, never re-signed (U36, G7).
 	if owner.KernelPublicKey != "" {
 		if pub, derr := decodeRemotePublicKey(owner.KernelPublicKey); derr == nil {
 			cp := r
 			cp.Signature = ""
-			if v, verr := verifyJCSStored(pub, sigDomainReceipt, cp, r.Signature); verr == nil {
-				sigVer = v
-			}
+			checks.Signature = k.cfg.Network.verify(pub, sigDomainReceipt, cp, r.Signature) == nil
 		}
 	}
-	checks.Signature = sigVer > 0
 
 	// 3. ActionID: receipt carries the remote action's ID.
 	if tx.RemoteActionID != "" {
@@ -525,7 +515,6 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		Valid:                 valid,
 		RemoteKernelHandle:    owner.Handle,
 		RemoteKernelPublicKey: owner.KernelPublicKey,
-		SignatureVersion:      sigVer,
 		Checks:                checks,
 		Receipt:               &r,
 	}, nil
@@ -534,15 +523,15 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 // ReceiptSigningBytes returns the exact domain-prefixed bytes a receipt signature covers (§12) — the
 // serving kernel signs these; the origin verifies them. Exposed so an external signer (or a test)
 // reconstructs the identical payload.
-func ReceiptSigningBytes(r *Receipt) ([]byte, error) {
+func (n Network) ReceiptSigningBytes(r *Receipt) ([]byte, error) {
 	cp := *r
 	cp.Signature = ""
-	return domainPayload(sigDomainReceipt, cp)
+	return n.payload(sigDomainReceipt, cp)
 }
 
 // verifyRemoteReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
 // closed on an empty key: a missing key must never let an unverified receipt pass as valid (§13).
-func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
+func (n Network) verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	if pubKeyB64 == "" {
 		return ErrInvalidState.Wrap("peer public key is not configured; cannot verify receipt signature")
 	}
@@ -552,7 +541,7 @@ func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	}
 	cp := *r
 	cp.Signature = ""
-	return verifyJCS(pub, sigDomainReceipt, cp, r.Signature)
+	return n.verify(pub, sigDomainReceipt, cp, r.Signature)
 }
 
 // parseAndVerifyRemoteReceipt parses receiptJSON and enforces the settlement preconditions:
@@ -560,7 +549,7 @@ func verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
 // (keep-trace-open) on absent, unparseable, invalidly signed, or mismatched receipts so the
 // trace is never settled against a receipt that fails the invariants VerifyRemoteReceipt audits.
 // Settlement must only proceed when this function returns without error.
-func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash string) (*Receipt, error) {
+func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash string) (*Receipt, error) {
 	if receiptJSON == "" {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
@@ -568,7 +557,7 @@ func parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expec
 	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
-	if err := verifyRemoteReceiptSignature(&r, pubKeyB64); err != nil {
+	if err := n.verifyRemoteReceiptSignature(&r, pubKeyB64); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt: invalid signature")
 	}
 	if expectedActionID != "" && r.ActionID != expectedActionID {
@@ -643,7 +632,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
 	// action_id and args_hash are enforced here so settlement is valid by construction.
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
-	rp, err := parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash)
+	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash)
 	if err != nil {
 		// The call is parked, not lost: no receipt has settled it, so the allocation stays locked and
 		// the process open until one arrives or the pending bound expires (§13). Hand back the durable
@@ -906,7 +895,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 // (signature, timestamp). Returns an error if the signing key is not configured.
 func (k *Kernel) SignFederation(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignFederationPayload(k.cfg.SigningKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, ts, argsHash)
+	sig, err = k.cfg.Network.SignFederationPayload(k.cfg.SigningKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, ts, argsHash)
 	return
 }
 
@@ -915,7 +904,7 @@ func (k *Kernel) SignFederation(action, counterparty, recipient, expectedContrac
 // key is not configured.
 func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, inputHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash)
+	sig, err = k.cfg.Network.SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash)
 	return
 }
 
@@ -923,7 +912,7 @@ func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, input
 // (signature, timestamp). recipient is the peer being addressed.
 func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts)
+	sig, err = k.cfg.Network.SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts)
 	return
 }
 
@@ -1165,10 +1154,15 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (userID, hand
 // and about. It binds no petname, opens no account, and never advances the evidence cursor or the
 // peer-sync cache — those have their own narrow paths, run only after their own work commits.
 func (k *Kernel) ObserveKernel(ctx context.Context, publicKey, nickname, about string) error {
+	return k.observeKernel(ctx, publicKey, nickname, about, "", "")
+}
+
+// observeKernel records what a verified reply said about a kernel, including where it is paid.
+func (k *Kernel) observeKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string) error {
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return err
 	}
-	return k.store.UpsertKernel(ctx, publicKey, nickname, about, time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, nickname, about, railAddress, railProof, time.Now().UTC())
 }
 
 // BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming). Automatic binding
@@ -1181,7 +1175,7 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, desired string, exa
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return "", err
 	}
-	if err := k.store.UpsertKernel(ctx, publicKey, "", "", time.Now().UTC()); err != nil {
+	if err := k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC()); err != nil {
 		return "", err
 	}
 	seed := NormalizeHandle(desired)
@@ -1215,7 +1209,7 @@ func (k *Kernel) EnsureKernelAccount(ctx context.Context, publicKey string) (*Ac
 	if existing, err := k.store.ReadAccountByKernelKey(ctx, publicKey); err == nil && existing != nil {
 		return existing, nil
 	}
-	if err := k.store.UpsertKernel(ctx, publicKey, "", "", time.Now().UTC()); err != nil {
+	if err := k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -1478,10 +1472,15 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		return nil, err
 	}
 
+	railAddr, railProof := k.RailIdentity(ctx)
 	resp := &GossipResponse{
 		PublicKey:       ourKey,
 		Handle:          handle,
 		About:           about,
+		Network:         k.cfg.Network.Name,
+		NetworkDigest:   k.cfg.Network.Digest,
+		RailAddress:     railAddr,
+		RailProof:       railProof,
 		ActionManifests: manifests,
 		Evidence:        bundles,
 		NextCursor:      nextCursor,
@@ -1530,7 +1529,7 @@ func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*Ev
 	}
 	cp := *er
 	cp.Signature = ""
-	sig, err := signJCS(k.cfg.SigningKey, sigDomainEvidenceReceipt, cp)
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainEvidenceReceipt, cp)
 	if err != nil {
 		return nil, err
 	}
@@ -1634,7 +1633,7 @@ func (k *Kernel) projectRating(r *Rating) (*RatingEvidence, error) {
 		RatedReceiptHash: r.RatedReceiptHash,
 		CreatedAt:        r.CreatedAt,
 	}
-	sig, err := signJCS(k.cfg.SigningKey, sigDomainRating, re)
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainRating, re)
 	if err != nil {
 		return nil, err
 	}
@@ -1780,7 +1779,7 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsH
 		StartedAt:    now,
 		CreatedAt:    now,
 	}
-	sig, err := signReceipt(k.cfg.SigningKey, r)
+	sig, err := signReceipt(k.cfg.Network, k.cfg.SigningKey, r)
 	if err != nil {
 		return nil, err
 	}
@@ -1808,8 +1807,18 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	if err := validateHandle(gossip.Handle); err != nil {
 		return "", ErrInvalidInput.Wrap("gossip handle invalid")
 	}
+	// A reply from another world is not ours to accumulate: nothing it carries could verify here,
+	// and adopting its catalog would offer actions no call could ever pay for (D23).
+	if gossip.NetworkDigest != "" && gossip.NetworkDigest != k.cfg.Network.Digest {
+		return "", ErrInvalidInput.Wrapf("peer serves network %q, not ours", gossip.Network)
+	}
+	// Where the rail has addresses, a kernel must prove it controls the one it advertises: an
+	// address merely declared could name a third party's and claim their payment (D23).
+	if err := k.verifyRailIdentity(gossip.PublicKey, gossip.RailAddress, gossip.RailProof); err != nil {
+		return "", ErrInvalidInput.Wrap("peer rail address is unproven")
+	}
 	now := time.Now().UTC()
-	if err := k.ObserveKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About); err != nil {
+	if err := k.observeKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About, gossip.RailAddress, gossip.RailProof); err != nil {
 		return "", err
 	}
 
@@ -1820,7 +1829,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		if i >= maxGossipElements {
 			break
 		}
-		if m == nil || VerifyManifestSignature(gossip.PublicKey, m) != nil {
+		if m == nil || k.cfg.Network.VerifyManifestSignature(gossip.PublicKey, m) != nil {
 			continue // only verified first-party manifests are indexed
 		}
 		// The catalog price a browser sees without resolving: the peer's signed serving markup now,
@@ -1879,7 +1888,7 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 	}
 	cp := *er
 	cp.Signature = ""
-	if err := verifyJCS(pub, sigDomainEvidenceReceipt, cp, er.Signature); err != nil {
+	if err := k.cfg.Network.verify(pub, sigDomainEvidenceReceipt, cp, er.Signature); err != nil {
 		return ErrUnauthorized.Wrap("evidence receipt signature invalid")
 	}
 	row := &EvidenceRow{
@@ -1903,7 +1912,7 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 		}
 		rc := *b.Rating
 		rc.Signature = ""
-		if err := verifyJCS(pub, sigDomainRating, rc, b.Rating.Signature); err != nil {
+		if err := k.cfg.Network.verify(pub, sigDomainRating, rc, b.Rating.Signature); err != nil {
 			return ErrUnauthorized.Wrap("rating signature invalid")
 		}
 		rJSON, _ := json.Marshal(b.Rating)
@@ -2003,7 +2012,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
 	}
-	if err := VerifyManifestSignature(remoteUser.KernelPublicKey, &m); err != nil {
+	if err := k.cfg.Network.VerifyManifestSignature(remoteUser.KernelPublicKey, &m); err != nil {
 		return nil, err
 	}
 	switch {
@@ -2175,7 +2184,7 @@ func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (
 		UpdatedAt:    a.UpdatedAt,
 		Stats:        stats,
 	}
-	sig, err := SignManifest(k.cfg.SigningKey, m)
+	sig, err := k.cfg.Network.SignManifest(k.cfg.SigningKey, m)
 	if err != nil {
 		return nil, err
 	}
@@ -2196,10 +2205,10 @@ func (k *Kernel) CurrentContractHash(ctx context.Context, actionID string) (stri
 }
 
 // SignManifest creates a base64url Ed25519 signature over the canonical ActionManifest.
-func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
+func (n Network) SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 	cp := *m
 	cp.Signature = ""
-	return signJCS(key, sigDomainManifest, cp)
+	return n.sign(key, sigDomainManifest, cp)
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
@@ -2207,7 +2216,7 @@ func SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
 // origin prices from are in range. A signature proves authorship, not sanity: a signed negative
 // price or out-of-range markup would otherwise flow into the proxy price. This is the single
 // funnel for all three trust boundaries — gossip ingest, authoritative import, and resolve.
-func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
+func (n Network) VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return err
@@ -2217,7 +2226,7 @@ func VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
 	}
 	cp := *m
 	cp.Signature = ""
-	if err := verifyJCS(pub, sigDomainManifest, cp, m.Signature); err != nil {
+	if err := n.verify(pub, sigDomainManifest, cp, m.Signature); err != nil {
 		return ErrUnauthorized.Wrap("manifest signature is invalid")
 	}
 	return nil
@@ -2269,46 +2278,46 @@ type stepListPayload struct {
 // verifyPeerSignature verifies a peer's base64url Ed25519 signature over a payload in its own
 // domain. It owns the cryptographic mechanics only; each exported verifier below translates a
 // failure into its own typed, protocol-specific error.
-func verifyPeerSignature(pubKeyB64, domain string, payload any, sigB64 string) error {
+func (n Network) verifyPeer(pubKeyB64, domain string, payload any, sigB64 string) error {
 	pub, err := decodeRemotePublicKey(pubKeyB64)
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid counterparty public key")
 	}
-	return verifyJCS(pub, domain, payload, sigB64)
+	return n.verify(pub, domain, payload, sigB64)
 }
 
 // VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
-func VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, sigB64 string) error {
+func (n Network) VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, sigB64 string) error {
 	p := fedCallPayload{Action: action, ArgsHash: argsHash, Counterparty: counterparty,
 		ExpectedContractHash: expectedContractHash, IdempotencyKey: idempotencyKey,
 		Recipient: recipient, Timestamp: timestamp}
-	if err := verifyPeerSignature(pubKeyB64, sigDomainFedCall, p, sigB64); err != nil {
+	if err := n.verifyPeer(pubKeyB64, sigDomainFedCall, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
 }
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func SignFederationPayload(key ed25519.PrivateKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) (string, error) {
-	return signJCS(key, sigDomainFedCall, fedCallPayload{Action: action, ArgsHash: argsHash,
+func (n Network) SignFederationPayload(key ed25519.PrivateKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash string) (string, error) {
+	return n.sign(key, sigDomainFedCall, fedCallPayload{Action: action, ArgsHash: argsHash,
 		Counterparty: counterparty, ExpectedContractHash: expectedContractHash,
 		IdempotencyKey: idempotencyKey, Recipient: recipient, Timestamp: timestamp})
 }
 
 // SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
 // — a key-set disjoint from every other signed Juice payload (§12, §13).
-func SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
-	return signJCS(key, sigDomainStepComplete, stepCompletePayload{Counterparty: counterparty,
+func (n Network) SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
+	return n.sign(key, sigDomainStepComplete, stepCompletePayload{Counterparty: counterparty,
 		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
 		StepID: stepID, Timestamp: timestamp})
 }
 
 // VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
 // recipient must be the verifying kernel's own public key.
-func VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, sigB64 string) error {
+func (n Network) VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, sigB64 string) error {
 	p := stepCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
 		InputHash: inputHash, Recipient: recipient, StepID: stepID, Timestamp: timestamp}
-	if err := verifyPeerSignature(pubKeyB64, sigDomainStepComplete, p, sigB64); err != nil {
+	if err := n.verifyPeer(pubKeyB64, sigDomainStepComplete, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
@@ -2317,16 +2326,16 @@ func VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotency
 // SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
 // authorized completing step stepID (§13). recipient binds it to the serving kernel, closing
 // cross-kernel replay.
-func SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
-	return signJCS(key, sigDomainStepAuth, stepAuthPayload{Counterparty: counterparty,
+func (n Network) SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
+	return n.sign(key, sigDomainStepAuth, stepAuthPayload{Counterparty: counterparty,
 		Recipient: recipient, StepID: stepID, Timestamp: timestamp, UserID: userID})
 }
 
 // VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
-func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
+func (n Network) VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
 	p := stepAuthPayload{Counterparty: counterparty, Recipient: recipient, StepID: stepID,
 		Timestamp: timestamp, UserID: userID}
-	if err := verifyPeerSignature(pubKeyB64, sigDomainStepAuth, p, sigB64); err != nil {
+	if err := n.verifyPeer(pubKeyB64, sigDomainStepAuth, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step attestation is invalid")
 	}
 	return nil
@@ -2336,22 +2345,22 @@ func VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID,
 // platform key. counterparty is this kernel's own key; recipient is the serving peer's key.
 func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts)
+	sig, err = k.cfg.Network.SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts)
 	return
 }
 
 // SignStepListPayload creates a base64url Ed25519 signature over the canonical step-list payload.
 // The sigDomainStepList prefix keeps this key-set disjoint from every other signed payload (§12).
-func SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
-	return signJCS(key, sigDomainStepList, stepListPayload{Counterparty: counterparty,
+func (n Network) SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
+	return n.sign(key, sigDomainStepList, stepListPayload{Counterparty: counterparty,
 		Recipient: recipient, Timestamp: timestamp})
 }
 
 // VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
 // recipient must be the verifying kernel's own public key.
-func VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB64 string) error {
+func (n Network) VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB64 string) error {
 	p := stepListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp}
-	if err := verifyPeerSignature(pubKeyB64, sigDomainStepList, p, sigB64); err != nil {
+	if err := n.verifyPeer(pubKeyB64, sigDomainStepList, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
@@ -2390,7 +2399,7 @@ func (k *Kernel) ourKeyB64() string {
 // signSettlementRecord fixes the creditor signature over JCS(record with Signature="").
 func (k *Kernel) signSettlementRecord(r *SettlementRecord) error {
 	r.Signature = ""
-	sig, err := signJCS(k.cfg.SigningKey, sigDomainSettlementRec, r)
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainSettlementRec, r)
 	if err != nil {
 		return err
 	}
@@ -2399,14 +2408,14 @@ func (k *Kernel) signSettlementRecord(r *SettlementRecord) error {
 }
 
 // verifySettlementRecord checks the creditor's signature on a record.
-func verifySettlementRecord(r *SettlementRecord, creditorB64 string) error {
+func (n Network) verifySettlementRecord(r *SettlementRecord, creditorB64 string) error {
 	pub, err := decodeRemotePublicKey(creditorB64)
 	if err != nil {
 		return ErrUnauthenticated.Wrap("invalid creditor public key")
 	}
 	cp := *r
 	cp.Signature = ""
-	if err := verifyJCS(pub, sigDomainSettlementRec, cp, r.Signature); err != nil {
+	if err := n.verify(pub, sigDomainSettlementRec, cp, r.Signature); err != nil {
 		return ErrUnauthenticated.Wrap("settlement record signature is invalid")
 	}
 	return nil
@@ -2433,6 +2442,17 @@ type settleFinishReq struct {
 	Timestamp    string `json:"timestamp"`
 }
 
+// settleAnnounceReq carries the debtor's claim that it has paid: the fact on the rail that names
+// the payment. The creditor closes the debt only against a finalized payment matching it, so an
+// announcement of a payment that was never made settles nothing.
+type settleAnnounceReq struct {
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	SettlementID string `json:"settlement_id"`
+	Timestamp    string `json:"timestamp"`
+	TxHash       string `json:"tx_hash"`
+}
+
 type settleReconcileReq struct {
 	Counterparty string `json:"counterparty"`
 	Recipient    string `json:"recipient"`
@@ -2443,6 +2463,11 @@ type settleReconcileReq struct {
 func settleOpenPayload(counterparty, recipient, settlementID string, amount int64, timestamp string) settleOpenReq {
 	return settleOpenReq{Amount: strconv.FormatInt(amount, 10), Counterparty: counterparty,
 		Recipient: recipient, SettlementID: settlementID, Timestamp: timestamp}
+}
+
+func settleAnnouncePayload(counterparty, recipient, settlementID, txHash, timestamp string) settleAnnounceReq {
+	return settleAnnounceReq{Counterparty: counterparty, Recipient: recipient,
+		SettlementID: settlementID, Timestamp: timestamp, TxHash: txHash}
 }
 
 func settleFinishPayload(counterparty, recipient, settlementID, nonce, timestamp string) settleFinishReq {
@@ -2467,7 +2492,7 @@ func (k *Kernel) GrossReceivables(ctx context.Context) (int64, error) {
 // and applies the creditor three-way legs (idempotent by settlement_id — anti-grinding); "reconcile"
 // binds a clear-for-zero when this creditor failed to reveal before expiry (FIX 2). Returns
 // (status, body, err): a business rejection uses a non-200 status with a body; a protocol error uses err.
-func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, signature, settlementID string, amount int64, nonce string, recordJSON []byte) (int, []byte, error) {
+func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, signature, settlementID string, amount int64, nonce, txHash string, recordJSON []byte) (int, []byte, error) {
 	peer, err := k.store.ReadAccountByKernelKey(ctx, debtorKey)
 	if err != nil || peer == nil || !peer.IsPeer() {
 		return 0, nil, ErrNotFound.Wrap("unknown settlement counterparty")
@@ -2484,7 +2509,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 
 	switch kind {
 	case "open":
-		if err := verifyJCS(debtorPub, sigDomainSettleOpen, settleOpenPayload(debtorKey, our, settlementID, amount, timestamp), signature); err != nil {
+		if err := k.cfg.Network.verify(debtorPub, sigDomainSettleOpen, settleOpenPayload(debtorKey, our, settlementID, amount, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_open signature invalid")
 		}
 		// Our books must agree that this peer owes us exactly the claimed debt d (= −available).
@@ -2495,6 +2520,9 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		Q := k.cfg.SettlementQuantum
 		if amount <= 0 || Q <= 0 || amount >= Q {
 			return 0, nil, ErrInvalidState.Wrap("debt is not within the probabilistic band 0 < d < Q")
+		}
+		if busy, err := k.settlementAwaitingPayment(ctx, peer.ID); err != nil || busy != nil {
+			return 409, busy, err
 		}
 		s := k.settleSecret(settlementID)
 		now := time.Now().UTC()
@@ -2510,7 +2538,7 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		return 200, b, nil
 
 	case "finish":
-		if err := verifyJCS(debtorPub, sigDomainSettleFinish, settleFinishPayload(debtorKey, our, settlementID, nonce, timestamp), signature); err != nil {
+		if err := k.cfg.Network.verify(debtorPub, sigDomainSettleFinish, settleFinishPayload(debtorKey, our, settlementID, nonce, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_finish signature invalid")
 		}
 		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
@@ -2549,8 +2577,62 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 		}
 		return 200, fb, nil
 
+	case "announce":
+		// The debtor says it has paid, and names the payment. Nothing is credited here: the claim
+		// waits for the payment itself to arrive and match, which is what makes an announcement of a
+		// payment nobody made settle nothing (P10).
+		if err := k.cfg.Network.verify(debtorPub, sigDomainSettleAnnounce,
+			settleAnnouncePayload(debtorKey, our, settlementID, txHash, timestamp), signature); err != nil {
+			return 0, nil, ErrUnauthenticated.Wrap("settle_announce signature invalid")
+		}
+		if txHash == "" {
+			return 0, nil, ErrInvalidInput.Wrap("announcement names no payment")
+		}
+		var rec SettlementRecord
+		if err := json.Unmarshal(recordJSON, &rec); err != nil {
+			return 0, nil, ErrInvalidInput.Wrap("missing or invalid settlement record")
+		}
+		if rec.SettlementID != settlementID || rec.Creditor != our || rec.Debtor != debtorKey {
+			return 0, nil, ErrInvalidState.Wrap("settlement record does not match request")
+		}
+		switch rec.Mode {
+		case "exact":
+			// The debtor authored this one, so its own signature is what binds the terms.
+			if err := k.cfg.Network.verifySettlementRecord(&rec, debtorKey); err != nil {
+				return 0, nil, err
+			}
+			if rec.Amount <= 0 || rec.Amount != rec.Quantum {
+				return 0, nil, ErrInvalidState.Wrap("exact settlement must pay the whole debt")
+			}
+		case "probabilistic":
+			// We authored the draw, so we check it against what we stored rather than what we are told.
+			stored, err := k.store.ReadSettlementRecord(ctx, settlementID)
+			if err != nil {
+				return 0, nil, err
+			}
+			var own SettlementRecord
+			if stored == "" || json.Unmarshal([]byte(stored), &own) != nil || own.Outcome != "pay" {
+				return 0, nil, ErrInvalidState.Wrap("no payable draw stands for this settlement")
+			}
+			if own.Amount != rec.Amount || own.Quantum != rec.Quantum {
+				return 0, nil, ErrInvalidState.Wrap("settlement record contradicts the draw")
+			}
+		default:
+			return 0, nil, ErrInvalidInput.Wrap("unknown settlement mode")
+		}
+		claim := &RailTransfer{ID: settlementID, Kind: RailKindClaim, Party: peer.ID,
+			Amount: rec.Quantum, Credit: rec.Amount, Destination: rec.Destination,
+			TxHash: txHash, Status: RailStatusAnnounced, Record: string(recordJSON),
+			CreatedAt: time.Now().UTC()}
+		if err := k.store.CreateRailTransfer(ctx, claim); err != nil {
+			return 0, nil, err
+		}
+		k.matchRailClaims(ctx)
+		body, _ := json.Marshal(map[string]any{"settlement_id": settlementID, "status": "announced"})
+		return 200, body, nil
+
 	case "reconcile":
-		if err := verifyJCS(debtorPub, sigDomainSettleReconcile, settleReconcilePayload(debtorKey, our, settlementID, timestamp), signature); err != nil {
+		if err := k.cfg.Network.verify(debtorPub, sigDomainSettleReconcile, settleReconcilePayload(debtorKey, our, settlementID, timestamp), signature); err != nil {
 			return 0, nil, ErrUnauthenticated.Wrap("settle_reconcile signature invalid")
 		}
 		if stored, err := k.store.ReadSettlementRecord(ctx, settlementID); err != nil {
@@ -2581,6 +2663,21 @@ func (k *Kernel) HandleSettle(ctx context.Context, debtorKey, kind, timestamp, s
 	return 0, nil, ErrInvalidInput.Wrap("unknown settle kind")
 }
 
+// settlementAwaitingPayment reports, as a ready 409 body, that this peer already owes a settlement
+// it has not paid, so an opening round can be refused before a draw is made for nothing. The rule
+// itself — one debt draws once — is enforced by the store when an outcome is committed, where two
+// draws finishing at once cannot both pass it.
+func (k *Kernel) settlementAwaitingPayment(ctx context.Context, peerID string) ([]byte, error) {
+	pending, err := k.store.HasPendingSettlement(ctx, peerID)
+	if err != nil || !pending {
+		return nil, err
+	}
+	b, _ := json.Marshal(map[string]any{
+		"error": "a settlement of this debt is already awaiting payment",
+		"code":  KernelErrorCode(ErrInvalidState)})
+	return b, nil
+}
+
 // verifyOwnOpenRecord parses and validates that recordJSON is an open record this kernel signed for
 // this debtor and settlement (the trustless state carriage that lets the creditor stay stateless).
 func (k *Kernel) verifyOwnOpenRecord(recordJSON []byte, our, debtorKey, settlementID string) (*SettlementRecord, error) {
@@ -2588,7 +2685,7 @@ func (k *Kernel) verifyOwnOpenRecord(recordJSON []byte, our, debtorKey, settleme
 	if err := json.Unmarshal(recordJSON, &open); err != nil {
 		return nil, ErrInvalidInput.Wrap("missing or invalid open record")
 	}
-	if err := verifySettlementRecord(&open, our); err != nil {
+	if err := k.cfg.Network.verifySettlementRecord(&open, our); err != nil {
 		return nil, ErrUnauthenticated.Wrap("open record is not ours")
 	}
 	if open.SettlementID != settlementID || open.Debtor != debtorKey || open.Amount <= 0 || open.Quantum <= 0 {
@@ -2597,11 +2694,12 @@ func (k *Kernel) verifyOwnOpenRecord(recordJSON []byte, our, debtorKey, settleme
 	return &open, nil
 }
 
-// SettlePeer is the debtor side of residual settlement (§13), invoked by the operator via
-// `admin settle <peer>`. It settles the position this kernel owes the peer: exact when |d| ≥ Q (the
-// operator records the rail payment with deposit/withdraw --external-key), otherwise the two-party
-// probabilistic commit/reveal. When the peer owes this kernel instead, settlement is theirs to
-// initiate (Y only signals). Superuser only.
+// SettlePeer is the debtor side of settlement (§13, P10), invoked by the operator via
+// `admin settle <peer>`. It settles what this kernel owes: exact when the debt is at least the
+// quantum, otherwise the two-party commit/reveal that makes a debt too small to pay economically
+// still settle fairly. Either way the money then moves the same way — reserve, pay, announce — and
+// the creditor closes its own books against the payment. When the peer owes us instead, settlement
+// is theirs to start. Superuser only.
 func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (map[string]any, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
@@ -2616,13 +2714,30 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 	// Every name in a settlement result is one an operator retypes into the next command, so it
 	// must resolve: the kernel's petname, else its key (§13). A kernel account has no handle.
 	name := k.KernelName(ctx, peer.KernelPublicKey)
-	// A prior paid outcome still awaiting its rail record must be finalized (admin settle --cash)
-	// before opening a new lottery on the same position.
-	if pending, err := k.store.HasPendingSettlement(ctx, peer.ID); err != nil {
+	if err := k.requireRailRunning(ctx); err != nil {
 		return nil, err
-	} else if pending {
-		return map[string]any{"status": "pending_cash", "handle": name,
-			"message": "an earlier draw ended payable and awaits its payment record; pay the amount shown then, and record it with `admin settle <peer> --cash <settlement_id>`"}, nil
+	}
+	// Reading the debt, drawing for it, and reserving the payment are one decision: two operators
+	// settling at once would otherwise both see the same debt and pay it twice.
+	k.railMu.Lock()
+	defer k.railMu.Unlock()
+
+	// A settlement already under way is finished, never restarted: a draw resumes by its own id,
+	// and a payable one is paid. Starting another on the same position is what the creditor's
+	// books would never agree with.
+	if open, err := k.openSettlement(ctx, peer.ID); err != nil {
+		return nil, err
+	} else if open != nil {
+		if open.Status == RailStatusDrawing {
+			return k.finishDraw(ctx, peer, open, name)
+		}
+		k.driveRailTransfer(ctx, open)
+		return k.settlementResult(ctx, open, name), nil
+	}
+
+	// The debt as it stands under the lock, not as it stood when the peer was resolved.
+	if peer, err = k.store.ReadUser(ctx, peer.ID); err != nil || peer == nil {
+		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
 	}
 	d := peer.Available // > 0 ⇒ this kernel owes the peer (we are the debtor)
 	switch {
@@ -2632,136 +2747,264 @@ func (k *Kernel) SettlePeer(ctx context.Context, operatorID, peerRef string) (ma
 		return map[string]any{"status": "creditor", "amount": -d, "handle": name,
 			"message": "the peer owes this kernel; settlement is started from the peer's side"}, nil
 	}
+
+	kern, err := k.store.ReadKernel(ctx, peer.KernelPublicKey)
+	if err != nil {
+		return nil, err
+	}
+	rail, err := k.railOrFail(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dest, err := rail.Destination(kernelRailAddress(kern))
+	if err != nil {
+		return nil, ErrInvalidState.Wrapf("cannot pay %s: %v", name, err)
+	}
+
 	Q := k.cfg.SettlementQuantum
 	settlementID := uuid.NewString()
-	if Q <= 0 || d >= Q {
-		return map[string]any{"status": "exact", "mode": "exact", "amount": d, "settlement_id": settlementID, "handle": name,
-			"message": fmt.Sprintf("pay %d to the peer outside the kernel, then record it with `admin withdraw %s %d --external-key %s` (the peer records the matching deposit)", d, name, d, settlementID)}, nil
-	}
-
-	settler := k.fedClient
-	if settler == nil {
-		return nil, ErrInvalidState.Wrap("federation transport does not support settlement")
-	}
 	our := k.ourKeyB64()
 
+	if Q > 0 && d < Q {
+		// The debt is too small to pay economically: draw for it, so that over many settlements
+		// each side pays exactly what it owes in expectation (U33). The draw is written down before
+		// its first round — its id and the nonce it will reveal — so that whatever is lost after the
+		// creditor has answered, this kernel can only ever finish this draw, never start another.
+		state, _ := json.Marshal(settlementDraw{Nonce: uuid.NewString()})
+		row := &RailTransfer{ID: settlementID, Kind: RailKindSettlement, Party: peer.ID,
+			Amount: Q, Credit: d, Destination: dest, Status: RailStatusDrawing,
+			Record: string(state), CreatedAt: time.Now().UTC()}
+		if err := k.store.CreateRailTransfer(ctx, row); err != nil {
+			return nil, err
+		}
+		return k.finishDraw(ctx, peer, row, name)
+	}
+	rec := &SettlementRecord{SettlementID: settlementID, Creditor: peer.KernelPublicKey,
+		Debtor: our, Amount: d, Quantum: d, Mode: "exact", Destination: dest,
+		CreatedAt: time.Now().UTC()}
+	if err := k.signSettlementRecord(rec); err != nil {
+		return nil, err
+	}
+	return k.paySettlement(ctx, rec, peer, d, d, dest, name)
+}
+
+// paySettlement reserves and drives the payment a settlement record calls for.
+func (k *Kernel) paySettlement(ctx context.Context, rec *SettlementRecord, peer *Account, cash, d int64, dest, name string) (map[string]any, error) {
+	rec.Destination = dest
+	recJSON, err := json.Marshal(rec)
+	if err != nil {
+		return nil, ErrInternal.Wrap("encode settlement record")
+	}
+	row := &RailTransfer{ID: rec.SettlementID, Kind: RailKindSettlement, Party: peer.ID,
+		Amount: cash, Credit: d, Destination: dest, Status: RailStatusPending,
+		Record: string(recJSON), CreatedAt: time.Now().UTC()}
+	if err := k.store.ReserveRailTransfer(ctx, k.cfg.FeeRecipientID, row); err != nil {
+		return nil, err
+	}
+	k.driveRailTransfer(ctx, row)
+	return k.settlementResult(ctx, row, name), nil
+}
+
+// finishDraw takes a draw from wherever its row says it stands to its end: a cleared debt, whose
+// row is then removed, or a payment, which the same row becomes.
+func (k *Kernel) finishDraw(ctx context.Context, peer *Account, row *RailTransfer, name string) (map[string]any, error) {
+	final, pay, err := k.drawSettlement(ctx, peer, row)
+	if err != nil {
+		return nil, err
+	}
+	if !pay {
+		if err := k.store.DeleteRailTransfer(ctx, row.ID); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "settled", "mode": "probabilistic", "outcome": "clear",
+			"settlement_id": row.ID, "amount": int64(0), "handle": name}, nil
+	}
+	return k.paySettlement(ctx, final, peer, final.Quantum, row.Credit, row.Destination, name)
+}
+
+// settlementDraw is what a settlement row remembers while it is being drawn for: the nonce this
+// kernel committed to before the first round, then each round's signed answer as it arrives.
+type settlementDraw struct {
+	Nonce string          `json:"nonce"`
+	Open  json.RawMessage `json:"open,omitempty"`
+	Final json.RawMessage `json:"final,omitempty"`
+}
+
+// openSettlement returns the peer's settlement still working its way out, if any.
+func (k *Kernel) openSettlement(ctx context.Context, peerID string) (*RailTransfer, error) {
+	rows, err := k.store.ListRailTransfers(ctx, RailKindSettlement, peerID, "", 20)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if r.Open() {
+			return r, nil
+		}
+	}
+	return nil, nil
+}
+
+// settlementResult reports a settlement row the way the operator reads it.
+func (k *Kernel) settlementResult(ctx context.Context, row *RailTransfer, name string) map[string]any {
+	fresh, err := k.store.ReadRailTransfer(ctx, row.ID)
+	if err == nil && fresh != nil {
+		row = fresh
+	}
+	res := map[string]any{"settlement_id": row.ID, "status": row.Status, "amount": row.Amount,
+		"handle": name, "destination": row.Destination}
+	// Every settlement reports how it was reached, so an operator reading two of them side by side
+	// can tell an exact payment from a draw without inferring it from the amounts.
+	var rec SettlementRecord
+	if json.Unmarshal([]byte(row.Record), &rec) == nil && rec.Mode != "" {
+		res["mode"] = rec.Mode
+		if rec.Outcome != "" {
+			res["outcome"] = rec.Outcome
+		}
+	}
+	if row.TxHash != "" {
+		res["tx_hash"] = row.TxHash
+	}
+	if row.Reason != "" {
+		res["reason"] = row.Reason
+	}
+	return res
+}
+
+// drawSettlement runs the two-round commit/reveal with the creditor and reports whether the draw
+// came out payable. A cleared draw extinguishes the debt here and now; a payable one leaves it
+// standing until the cash actually moves (P10).
+func (k *Kernel) drawSettlement(ctx context.Context, peer *Account, row *RailTransfer) (*SettlementRecord, bool, error) {
+	settler := k.fedClient
+	if settler == nil {
+		return nil, false, ErrInvalidState.Wrap("federation transport does not support settlement")
+	}
+	settlementID, d, our := row.ID, row.Credit, k.ourKeyB64()
+	var st settlementDraw
+	if err := json.Unmarshal([]byte(row.Record), &st); err != nil || st.Nonce == "" {
+		return nil, false, ErrInvalidState.Wrapf("settlement %s has no draw to finish", settlementID)
+	}
+	// Each round is written down as soon as it is answered and before the next begins, so a reply
+	// lost on the way, or a crash here, resumes at the round that was reached rather than at the
+	// start — and the creditor, which answers a finished round with the same record every time,
+	// can never be asked for a second draw on this debt.
+	remember := func() error {
+		b, _ := json.Marshal(st)
+		return k.store.SaveRailRecord(ctx, settlementID, string(b))
+	}
+
 	// Round 1 — open: the creditor commits H(s).
-	ts := time.Now().UTC().Format(time.RFC3339)
-	openSig, err := signJCS(k.cfg.SigningKey, sigDomainSettleOpen, settleOpenPayload(our, peer.KernelPublicKey, settlementID, d, ts))
-	if err != nil {
-		return nil, err
-	}
-	status, body, err := settler.Settle(ctx, peer.KernelPublicKey, "open", ts, openSig, settlementID, d, "", nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, settleRefusal("open", body)
+	if st.Open == nil {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		openSig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainSettleOpen, settleOpenPayload(our, peer.KernelPublicKey, settlementID, d, ts))
+		if err != nil {
+			return nil, false, err
+		}
+		status, body, err := settler.Settle(ctx, peer.KernelPublicKey, "open", ts, openSig, settlementID, d, "", "", nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if status != 200 {
+			return nil, false, settleRefusal("open", body)
+		}
+		st.Open = body
+		if err := remember(); err != nil {
+			return nil, false, err
+		}
 	}
 	open := SettlementRecord{}
-	if err := json.Unmarshal(body, &open); err != nil {
-		return nil, ErrInvalidState.Wrap("invalid open record")
+	if err := json.Unmarshal(st.Open, &open); err != nil {
+		return nil, false, ErrInvalidState.Wrap("invalid open record")
 	}
-	if err := verifySettlementRecord(&open, peer.KernelPublicKey); err != nil {
-		return nil, err
+	if err := k.cfg.Network.verifySettlementRecord(&open, peer.KernelPublicKey); err != nil {
+		return nil, false, err
 	}
 	if open.SettlementID != settlementID || open.Amount != d || open.Creditor != peer.KernelPublicKey || open.Quantum <= 0 {
-		return nil, ErrInvalidState.Wrap("open record does not match request")
+		return nil, false, ErrInvalidState.Wrap("open record does not match request")
 	}
-	openJSON := body
 
 	// Round 2 — finish: reveal the nonce; the creditor reveals s and applies its legs.
-	nonce := uuid.NewString()
-	ts2 := time.Now().UTC().Format(time.RFC3339)
-	finishSig, err := signJCS(k.cfg.SigningKey, sigDomainSettleFinish, settleFinishPayload(our, peer.KernelPublicKey, settlementID, nonce, ts2))
-	if err != nil {
-		return nil, err
-	}
-	status, body, err = settler.Settle(ctx, peer.KernelPublicKey, "finish", ts2, finishSig, settlementID, 0, nonce, openJSON)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, settleRefusal("finish", body)
+	if st.Final == nil {
+		ts := time.Now().UTC().Format(time.RFC3339)
+		finishSig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainSettleFinish, settleFinishPayload(our, peer.KernelPublicKey, settlementID, st.Nonce, ts))
+		if err != nil {
+			return nil, false, err
+		}
+		status, body, err := settler.Settle(ctx, peer.KernelPublicKey, "finish", ts, finishSig, settlementID, 0, st.Nonce, "", st.Open)
+		if err != nil {
+			return nil, false, err
+		}
+		if status != 200 {
+			return nil, false, settleRefusal("finish", body)
+		}
+		st.Final = body
+		if err := remember(); err != nil {
+			return nil, false, err
+		}
 	}
 	final := SettlementRecord{}
-	if err := json.Unmarshal(body, &final); err != nil {
-		return nil, ErrInvalidState.Wrap("invalid final record")
+	if err := json.Unmarshal(st.Final, &final); err != nil {
+		return nil, false, ErrInvalidState.Wrap("invalid final record")
 	}
-	if err := verifySettlementRecord(&final, peer.KernelPublicKey); err != nil {
-		return nil, err
+	if err := k.cfg.Network.verifySettlementRecord(&final, peer.KernelPublicKey); err != nil {
+		return nil, false, err
 	}
 	if final.SettlementID != settlementID || sha256Hex(final.Secret) != open.Commitment {
-		return nil, ErrInvalidState.Wrap("final record fails the commitment check")
+		return nil, false, ErrInvalidState.Wrap("final record fails the commitment check")
 	}
 	// Recompute the flip ourselves — the creditor cannot misreport it once s is revealed.
-	pay := settleOutcome(settlementID, final.Secret, nonce, open.Quantum, d)
+	pay := settleOutcome(settlementID, final.Secret, st.Nonce, open.Quantum, d)
 	if (pay && final.Outcome != "pay") || (!pay && final.Outcome != "clear") {
-		return nil, ErrInvalidState.Wrap("final outcome contradicts the revealed secret")
+		return nil, false, ErrInvalidState.Wrap("final outcome contradicts the revealed secret")
 	}
-	// A pay outcome changes NO balance: the debt stays d until the operator records the rail payment
-	// (§13). A clear outcome extinguishes it now (debtor: clear −d, sys gains +d).
+	// A cleared draw extinguishes the debt now (debtor: clear −d, sys gains +d). A payable one
+	// moves nothing here: the debt stands until the cash does. Idempotent by id, so a resumed draw
+	// applies its outcome once.
 	dClear, variance := int64(0), int64(0)
 	if !pay {
 		dClear, variance = -d, d
 	}
-	if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, d, string(body)); err != nil {
-		return nil, err
+	if _, err := k.store.CommitSettlement(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, d, string(st.Final)); err != nil {
+		return nil, false, err
 	}
-	res := map[string]any{"mode": "probabilistic", "outcome": final.Outcome, "settlement_id": settlementID, "handle": name}
-	if pay {
-		res["status"] = "pending_cash"
-		res["amount"] = open.Quantum
-		res["message"] = fmt.Sprintf("the draw ended payable: pay %d to the peer outside the kernel, then record it with `admin settle %s --cash %s` (the peer runs the same)", open.Quantum, name, settlementID)
-	} else {
-		res["status"] = "settled"
-		res["amount"] = int64(0)
-	}
-	return res, nil
+	return &final, pay, nil
 }
 
-// SettleCash finalizes a paid probabilistic outcome on this kernel after the operator moved the
-// quantum on the rail (§13): it clears the debt d and books the variance ±(Q−d), deriving this
-// kernel's side (creditor or debtor) from the stored signed record. Run on BOTH kernels — the debtor
-// after paying, the creditor after receiving. Superuser only; idempotent by settlement_id.
-func (k *Kernel) SettleCash(ctx context.Context, operatorID, peerRef, settlementID string) (map[string]any, error) {
-	if err := k.requireSuperuser(ctx, operatorID); err != nil {
-		return nil, err
+// announceSettlement tells the creditor which payment closes the debt. It is the last step of a
+// settlement and it is idempotent: the creditor stores one claim per settlement, and the debtor
+// re-announces until it is acknowledged, since a lost announcement would otherwise leave a paid
+// debt open on the creditor's books forever.
+func (k *Kernel) announceSettlement(ctx context.Context, row *RailTransfer, fact RailFact) {
+	settler := k.fedClient
+	if settler == nil {
+		return
 	}
-	peer, err := k.ResolveUser(ctx, peerRef)
-	if err != nil || peer == nil || !peer.IsPeer() {
-		return nil, ErrNotFound.Wrapf("peer %q not found", peerRef)
+	peer, err := k.store.ReadUser(ctx, row.Party)
+	if err != nil || peer == nil || peer.KernelPublicKey == "" {
+		return
 	}
-	name := k.KernelName(ctx, peer.KernelPublicKey)
-	recJSON, err := k.store.ReadSettlementRecord(ctx, settlementID)
+	txHash := fact.TxHash
+	if txHash == "" {
+		txHash = row.TxHash
+	}
+	our := k.ourKeyB64()
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainSettleAnnounce,
+		settleAnnouncePayload(our, peer.KernelPublicKey, row.ID, txHash, ts))
 	if err != nil {
-		return nil, err
+		return
 	}
-	if recJSON == "" {
-		return nil, ErrNotFound.Wrapf("no settlement %q", settlementID)
+	status, _, err := settler.Settle(ctx, peer.KernelPublicKey, "announce", ts, sig, row.ID, 0, "", txHash, []byte(row.Record))
+	if err != nil || status != 200 {
+		k.log.With(ctx).Warn("rail.settlement.announce_failed", "settlement_id", row.ID, "status", status)
+		return
 	}
-	var rec SettlementRecord
-	if err := json.Unmarshal([]byte(recJSON), &rec); err != nil {
-		return nil, ErrInternal.Wrap("stored settlement record is invalid")
+	_ = k.store.MarkRailTransfer(ctx, row.ID, RailStatusAnnounced)
+}
+
+// kernelRailAddress reads a peer's advertised rail address, empty when it has none.
+func kernelRailAddress(kern *RemoteKernel) string {
+	if kern == nil {
+		return ""
 	}
-	if rec.Outcome != "pay" {
-		return nil, ErrInvalidState.Wrap("settlement is not an unpaid probabilistic outcome")
-	}
-	d, q := rec.Amount, rec.Quantum
-	// Creditor: clear +d on the peer row, sys += (Q−d). Debtor: clear −d, sys −= (Q−d) (guarded by the
-	// users CHECK — insufficient reserve rolls back and the settlement stays pending).
-	var dClear, variance int64
-	switch k.ourKeyB64() {
-	case rec.Creditor:
-		dClear, variance = d, q-d
-	case rec.Debtor:
-		dClear, variance = -d, -(q - d)
-	default:
-		return nil, ErrInvalidState.Wrap("this kernel is not a party to the settlement")
-	}
-	cashRec := fmt.Sprintf(`{"settlement_id":%q,"cash":%d,"outcome":"cash"}`, settlementID, q)
-	if _, err := k.store.CommitSettlementCash(ctx, settlementID, peer.ID, k.cfg.FeeRecipientID, dClear, variance, q, cashRec); err != nil {
-		return nil, err
-	}
-	return map[string]any{"status": "settled", "settlement_id": settlementID, "cash": q, "handle": name}, nil
+	return kern.RailAddress
 }

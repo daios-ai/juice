@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -41,16 +43,48 @@ func init() {
 	rootCmd.AddCommand(healthCmd())
 }
 
+// holdHome takes the one lock a kernel's home has, for as long as this process serves it. One
+// server per home is not a convenience: two would race the same signing key on the rail, where the
+// chain admits one transaction per nonce, and would double-drive every background worker (D23).
+func holdHome() (func(), error) {
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(kernelHome(), "serve.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another server is already running for %s", kernelHome())
+	}
+	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
 func runServer(addr string) error {
-	k, db, logger, httpExec, fedAdapter, specs, err := openKernel()
+	release, err := holdHome()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	k, db, logger, httpExec, fedAdapter, specs, world, err := openKernel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	if err := bootstrap(k, globalCfg.Native, specs); err != nil {
+	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	// The rail witnesses external money (D23). A world whose chain or token is wrong refuses the
+	// boot; one whose endpoint is merely down serves, and money verbs wait for it.
+	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC)
+	if err != nil {
+		return fmt.Errorf("rail: %w", err)
+	}
+	k.SetRail(railway)
 	// Prune natives the build no longer ships (e.g. after a native action is removed): a
 	// kind=native row with no registered handler is soft-deleted so it stops being listed and
 	// callable on an existing database. Non-fatal — a leftover orphan is not corruption.
@@ -150,6 +184,13 @@ func runServer(addr string) error {
 			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
 		})
 	}
+
+	// Drive external money (D23): re-present everything still open, observe payments in, close any
+	// settlement whose payment has arrived, and audit. It rides the retry cadence rather than adding
+	// a knob of its own, and does nothing until the rail is verified.
+	railCtx, railCancel := context.WithCancel(context.Background())
+	defer railCancel()
+	go startDiscoveryLoop(railCtx, globalCfg.remoteRetryInterval(), k.RailPass)
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
 	// DB-only, so it runs regardless of the federation transport; started only when enabled.
@@ -467,16 +508,27 @@ const fedOpTimeout = 8 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
+// railAddress is where this kernel is paid, empty on a world with no addresses.
+func (s *server) railAddress(ctx context.Context) string {
+	addr, _ := s.kernel.RailIdentity(ctx)
+	return addr
+}
+
 func registerRoutes(r chi.Router, srv *server) {
 	// Health (unauthenticated). Doubles as an identity banner so someone can see which kernel
 	// they're pointed at before logging in: the handle and public key are the kernel's advertised
 	// federation identity (§13), not secrets — only the private key is withheld.
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		pub, _ := srv.kernel.GetConfig(r.Context(), configKeySigningPublic)
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":     "ok",
-			"handle":     globalCfg.KernelHandle,
-			"public_key": pub,
+		net := srv.kernel.Network()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":         "ok",
+			"handle":         globalCfg.KernelHandle,
+			"public_key":     pub,
+			"network":        net.Name,
+			"network_digest": net.Digest,
+			"decimals":       net.Decimals,
+			"rail_address":   srv.railAddress(r.Context()),
 		})
 	})
 
@@ -528,6 +580,9 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
+		r.Put("/v1/me/address", srv.putRailAddress)
+		r.Post("/v1/withdrawals", srv.postWithdrawal)
+		r.Get("/v1/withdrawals", srv.getWithdrawals)
 		r.Post("/v1/transfers", srv.postTransfer)
 		r.Get("/v1/ledger", srv.getLedger)
 
@@ -555,8 +610,8 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
 		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
 		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
-		r.Post("/control/deposit", srv.ctlAdjust(true))
-		r.Post("/control/withdraw", srv.ctlAdjust(false))
+		r.Post("/control/deposit", srv.ctlDeposit)
+		r.Get("/control/deposits", srv.ctlListDeposits)
 		r.Post("/control/peers/settle", srv.ctlSettlePeer)
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
@@ -1271,6 +1326,58 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 // getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
+// putRailAddress registers where the caller is paid, against a signature proving they hold it.
+// Registering also delivers anything that address has already paid in (D23).
+func (s *server) putRailAddress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Address   string `json:"address"`
+		Signature string `json:"signature"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, attributed, err := s.kernel.SetRailAddress(r.Context(), callerFrom(r), req.Address, req.Signature)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	uc := newAccountCache(s.kernel, r.Context())
+	views := make([]*ledgerView, 0, len(attributed))
+	for _, e := range attributed {
+		views = append(views, enrichLedger(e, uc))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"address": u.RailAddress, "attributed": views})
+}
+
+// postWithdrawal sends the caller's own credits back out. The id is theirs and is the row, so a
+// reply lost in transit is safe to ask for again (U51).
+func (s *server) postWithdrawal(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID     string `json:"id"`
+		Amount int64  `json:"amount"`
+		Reason string `json:"reason"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	row, err := s.kernel.Withdraw(r.Context(), callerFrom(r), req.ID, req.Amount, req.Reason)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOr(w, railTransferViews(s.kernel, r.Context(), []*kernel.RailTransfer{row})[0], nil)
+}
+
+func (s *server) getWithdrawals(w http.ResponseWriter, r *http.Request) {
+	limit, _ := listBounds(r)
+	rows, err := s.kernel.ListWithdrawals(r.Context(), callerFrom(r), limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOr(w, railTransferViews(s.kernel, r.Context(), rows), nil)
+}
+
 func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	entries, err := s.kernel.ListLedger(r.Context(), callerFrom(r), limit, offset)
@@ -1381,7 +1488,10 @@ func healthCmd() *cobra.Command {
 			}
 			h, _ := body["handle"].(string)
 			pk, _ := body["public_key"].(string)
-			fmt.Printf("ok  %s  %s\n", h, pk)
+			net, _ := body["network"].(string)
+			// The network comes first after the name: a kernel serves one for life, and it decides
+			// what every balance and every signature here means (D23).
+			fmt.Printf("ok  %s  network %s  %s\n", h, net, pk)
 			return nil
 		},
 	}
@@ -1462,6 +1572,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		BootstrapPeers:    globalCfg.BootstrapPeers,
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,
+		Namespace:         kernel.DiscoveryNamespace(k.Network()),
 	})
 	if err != nil {
 		return nil, err

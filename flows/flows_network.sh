@@ -34,7 +34,7 @@ flow_network_reachability() {
     fi
 
     local dir; dir=$(new_dir)
-    local db="$dir/n/juice.db" hm="$dir/nsys"
+    local db="$dir/n/kernel/juice.db" hm="$dir/nsys"
     mkdir -p "$dir/n" "$hm/.juice"
     # allow_local_sources=false: a REAL network run, public addresses only. Only the public bootstrap
     # is configured — the remote peer must be found through routing discovery, never a manual address.
@@ -51,13 +51,13 @@ flow_network_reachability() {
     # gossip are pulled — the address-bearing discovery the key-only PEX path could not do.
     local found=no
     for _ in $(seq 1 30); do
-        if jj "$db" "$hm" admin peers | grep -q "$peer"; then found=yes; break; fi
+        if jj "$db" "$hm" admin peers | grep -q -- "$peer"; then found=yes; break; fi
         sleep 2
     done
     assert_eq "net.peer_discovered" yes "$found"
 
     # And the live connection is hole-punched (direct) or relayed — the path loopback cannot reproduce.
-    local path; path=$(pathf "$(jj "$db" "$hm" admin inspect "$peer")" reachability.path)
+    local path; path=$(pathf "$(jj "$db" "$hm" admin inspect -- "$peer")" reachability.path)
     echo "  reachability to remote peer: $path"
     assert_eq "net.reachable" yes "$([ "$path" = "direct" ] || [ "$path" = "relayed" ] && echo yes || echo no)"
 }

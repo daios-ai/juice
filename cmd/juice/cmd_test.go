@@ -18,6 +18,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,42 @@ import (
 )
 
 // ---- CLI test helpers ----
+
+// testNet is the play network these tests sign on, matching what a kernel serves by default.
+var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+
+// newTestStore opens a fresh database that closes with the test.
+func newTestStore(t *testing.T) *store.DB {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// testConfig is the policy every test kernel starts from: the play network and the token secret
+// the test's environment names.
+func testConfig(secret string) kernel.Config {
+	cfg := kernel.DefaultConfig()
+	cfg.Network = testNet
+	cfg.TokenSecret = secret
+	return cfg
+}
+
+// newKernel builds a kernel from cfg and the adapters in deps, with a discarded logger and the
+// manual rail, so what every test wires the same way is wired once.
+func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
+	deps.Config, deps.Logger = cfg, log.Discard()
+	k := kernel.New(deps)
+	k.SetRail(rail.NewManual())
+	return k
+}
+
+// newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
+// a test that funds an account twice must name two payments (U3).
+func newRef() string { return "test:" + uuid.NewString() }
 
 type testEnv struct {
 	db  *store.DB
@@ -38,9 +75,9 @@ const cmdTestIssuerID = "00000000-0000-0000-0000-000000000001"
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
+	dbFile := filepath.Join(dir, "test.db")
 
-	db, err := store.Open(dbPath)
+	db, err := store.Open(dbFile)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -57,25 +94,22 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "cli-test-secret"
-	cfg.IssuerUserID = cmdTestIssuerID
-	cfg.FeeRecipientID = cmdTestIssuerID
-	cfg.SigningKey = signingKey
+	cfg := testConfig("cli-test-secret")
+	cfg.IssuerUserID, cfg.FeeRecipientID, cfg.SigningKey = cmdTestIssuerID, cmdTestIssuerID, signingKey
 	// Credential encryption is mandatory (§8): the production binary always wires a box,
 	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
 	box, _ := newAESGCMBox(make([]byte, 32))
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), allowLocal: true}
 	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Config: cfg, Logger: log.Discard()})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec})
 	k.SetSecretBox(box)
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })
 
-	origDB := flagDB
-	flagDB = dbPath
-	t.Cleanup(func() { flagDB = origDB })
+	origDB := dbPath
+	dbPath = dbFile
+	t.Cleanup(func() { dbPath = origDB })
 
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
@@ -316,7 +350,7 @@ func TestUserUpdateProxyUser(t *testing.T) {
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}
-	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", time.Now().UTC()); err != nil {
+	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.db.CreateUser(ctx, proxy); err != nil {
@@ -1435,28 +1469,13 @@ func TestCallInsufficientFunds(t *testing.T) {
 
 func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "remote_test.db")
-	db, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
+	db := newTestStore(t)
 	t.Setenv("JUICE_SECRET_KEY", "remote-test-secret")
-
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "remote-test-secret"
-	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+	k := newKernel(testConfig("remote-test-secret"), kernel.Dependencies{Store: db})
 
 	if err := k.FirstBoot(t.Context(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
-
-	origDB := flagDB
-	flagDB = dbPath
-	t.Cleanup(func() { flagDB = origDB })
-
 	return k, db
 }
 
@@ -1482,7 +1501,7 @@ func TestRemoteImport(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -98,6 +98,8 @@ type ServerConfig struct {
 	AllowLocalSources          bool         `json:"allow_local_sources"`
 	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
+	World                      string       `json:"world"`                         // the network this kernel serves: play, test, real, or a world file's path (D23)
+	RailRPC                    string       `json:"rail_rpc"`                      // endpoint the chain adaptor dials; required where the world has a chain
 	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
 	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
@@ -145,6 +147,9 @@ func DefaultServerConfig() ServerConfig {
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
+		// Every kernel joins one network for life. play is the one where the operator's own records
+		// are the finalized facts, so a kernel runs with no chain, no wallet, and no crypto (D23).
+		World:             "play",
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,

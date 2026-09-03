@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/log"
 	"github.com/google/uuid"
 )
 
@@ -162,7 +161,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +214,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +227,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 
 	// Reimport with updated price — content hash changes → the row is updated in place.
 	m.Price = 99
-	sig2, err := kernel.SignManifest(priv, &m)
+	sig2, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +272,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +331,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	}
 	sign := func() {
 		t.Helper()
-		sig, err := kernel.SignManifest(priv, &m)
+		sig, err := testNet.SignManifest(priv, &m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +417,7 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +470,7 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m := base
 			tc.mutate(&m)
-			sig, _ := kernel.SignManifest(priv, &m)
+			sig, _ := testNet.SignManifest(priv, &m)
 			m.Signature = sig
 			_, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 			if !errors.Is(err, kernel.ErrInvalidInput) {
@@ -618,7 +617,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +698,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
@@ -721,12 +720,7 @@ func TestRemoteDispatchUsesStableActionID(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
 	fake := &fakeFederationHTTP{} // no receipt → the call parks, so the retry path is reachable
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "stable-action", 1000)
 	a.Source = "@settle-peer/settleact" // the legacy sigil form a v0.12.4+ peer rejects
@@ -769,13 +763,9 @@ func TestRetryExpiredRemoteTraceSettlesAsFailure(t *testing.T) {
 
 	// Empty receiptJSON → ExecuteFederation always reports "pending" (genuine silence).
 	fake := &fakeFederationHTTP{}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
+	cfg := testConfig()
 	cfg.RemotePendingMaxAge = time.Nanosecond // any pending trace is immediately past the bound
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "exp-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
@@ -826,13 +816,9 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 
 	// Empty receiptJSON → the peer is "offline": ExecuteFederation returns no receipt → pending.
 	fake := &fakeFederationHTTP{}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
+	cfg := testConfig()
 	// Default RemotePendingMaxAge (24h): the trace stays pending, not force-expired.
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "ret-action", 1000)
 	mp := *a.BasePrice
@@ -888,12 +874,7 @@ func TestAwaitingReceiptSince(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
 	fake := &fakeFederationHTTP{} // offline: no receipt → pending
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "await-action", 1000)
 
@@ -935,12 +916,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	bps := kernel.DefaultConfig().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // offline: no receipt → pending
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "wrap-action", 1000)
 	mp := *a.BasePrice
@@ -1445,7 +1421,7 @@ func TestProxyMutationsRejected(t *testing.T) {
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
@@ -1482,7 +1458,7 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
@@ -1518,7 +1494,7 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	if _, err := k.ImportPeerAction(ctx, peer.ID, m); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("import with owner_handle=@bob: want ErrInvalidInput, got %v", err)
 	}
@@ -1546,7 +1522,7 @@ func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
@@ -1580,7 +1556,7 @@ func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	sig, _ := kernel.SignManifest(priv, &m)
+	sig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = sig
 	result, err := k.ImportPeerAction(ctx, peer.ID, m)
 	if err != nil {
@@ -1619,7 +1595,7 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 		}
-		m.Signature, _ = kernel.SignManifest(priv, &m)
+		m.Signature, _ = testNet.SignManifest(priv, &m)
 		if _, err := k.ImportPeerAction(ctx, peer.ID, m); err != nil {
 			t.Fatalf("import %s: %v", owner, err)
 		}
@@ -1647,23 +1623,23 @@ func TestStepAuthSignatureDomainDisjoint(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	cp, recip, uid, sid, ts := "cpkey", "recipkey", "user-1", "step-1", "2026-07-31T00:00:00Z"
 
-	sig, err := kernel.SignStepAuthPayload(priv, cp, recip, uid, sid, ts)
+	sig, err := testNet.SignStepAuthPayload(priv, cp, recip, uid, sid, ts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kernel.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, sig); err != nil {
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, sig); err != nil {
 		t.Fatalf("valid attestation rejected: %v", err)
 	}
 	// A different user_id must not verify against the same signature.
-	if err := kernel.VerifyStepAuthSignature(pubB64, cp, recip, "other", sid, ts, sig); err == nil {
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, "other", sid, ts, sig); err == nil {
 		t.Error("wrong user_id verified")
 	}
 	// Domain disjointness: step-complete and step_auth signatures never verify as each other.
-	csig, _ := kernel.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash")
-	if err := kernel.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, csig); err == nil {
+	csig, _ := testNet.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash")
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, csig); err == nil {
 		t.Error("step-complete signature verified as step_auth")
 	}
-	if err := kernel.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", sig); err == nil {
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", sig); err == nil {
 		t.Error("step_auth signature verified as step-complete")
 	}
 }
@@ -1701,7 +1677,7 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1768,7 +1744,7 @@ func TestColdResolveIndexesAndBinds(t *testing.T) {
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 		}
-		sig, err := kernel.SignManifest(priv, &m)
+		sig, err := testNet.SignManifest(priv, &m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1792,7 +1768,7 @@ func TestColdResolveIndexesAndBinds(t *testing.T) {
 			k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})
 			ctx := context.Background()
 			// A valid, free nickname is available for the bind to seed from.
-			if err := st.UpsertKernel(ctx, key, tc.nickname, "", time.Now().UTC()); err != nil {
+			if err := st.UpsertKernel(ctx, key, tc.nickname, "", "", "", time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if tc.preAccount {
@@ -1852,7 +1828,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	msig, _ := kernel.SignManifest(priv, &m)
+	msig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = msig
 	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
@@ -1974,7 +1950,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	msig, _ := kernel.SignManifest(priv, &m)
+	msig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = msig
 	result, _ := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	a := result // proxy is active+local after import (§8)
@@ -2032,7 +2008,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	msig, _ := kernel.SignManifest(priv, &m)
+	msig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = msig
 	result, err := k.ImportPeerAction(ctx, remoteUser.ID, m)
 	if err != nil {
@@ -2138,16 +2114,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	baseCfg := func() kernel.Config {
-		cfg := kernel.DefaultConfig()
-		cfg.TokenSecret = "test-secret"
-		cfg.IssuerUserID = testIssuerUserID
-		cfg.FeeRecipientID = testIssuerUserID
-		cfg.SigningKey = testSigningKey()
-		return cfg
-	}
-
-	kDisabled := kernel.New(kernel.Dependencies{Store: st, Config: baseCfg(), Logger: log.Default()})
+	kDisabled := newKernel(testConfig(), kernel.Dependencies{Store: st})
 	setupSys(t, kDisabled, st)
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -2171,7 +2138,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: act.ID, Uses: 3, Successes: 3, LastUsedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertKernel(ctx, pubB64, "old-peer", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, pubB64, "old-peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2184,9 +2151,9 @@ func TestPurgeIdlePeers(t *testing.T) {
 	}
 
 	// Enabled with a tiny retention so the just-created peer is immediately idle.
-	cfg := baseCfg()
+	cfg := testConfig()
 	cfg.PeerRetention = time.Nanosecond
-	kEnabled := kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
+	kEnabled := newKernel(cfg, kernel.Dependencies{Store: st})
 	n, err := kEnabled.PurgeIdlePeers(ctx)
 	if err != nil {
 		t.Fatalf("PurgeIdlePeers: %v", err)
@@ -2247,7 +2214,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-c", Stats: &kernel.Stats{},
 		UpdatedAt: time.Now(),
 	}
-	sig, _ := kernel.SignManifest(priv, &m)
+	sig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = sig
 	proxy, err := k.ImportPeerAction(ctx, peerC.ID, m)
 	if err != nil {
@@ -2293,12 +2260,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
 	fake := &fakeFederationHTTP{notDispatched: true} // resolve/connect failed: provably never sent
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, _, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "nd-action", 1000)
 	before, _ := st.ReadUser(ctx, caller.ID)
@@ -2336,12 +2298,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	bps := kernel.DefaultConfig().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // first dispatch: offline (no receipt) → parked pending
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "retry-nd-action", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
@@ -2472,7 +2429,7 @@ func TestGetGossipCounterpartyBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, friend.ID, 777, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, friend.ID, 777, "", newRef()); err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}
 
@@ -2582,12 +2539,7 @@ func TestParkedDispatchCompletesInboundIdempotencyRecordOnRetry(t *testing.T) {
 	bps := kernel.DefaultConfig().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // no receipt yet → the dispatch parks
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "inbound-rec", 1000)
 	mp := a.Price * 10000 / (10000 + bps)
@@ -2648,12 +2600,7 @@ func TestEndProcessCompletesInboundIdempotencyRecordOfAParkedDispatch(t *testing
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
 	fake := &fakeFederationHTTP{} // offline peer → the dispatch parks
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 
 	_, a, caller := setupSettleProxyWithKernel(t, st, k, priv, pub, "close-rec", 1000)
 	rec := &kernel.IdempotencyRecord{
@@ -2692,12 +2639,7 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}, Config: cfg, Logger: log.Default()})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}})
 
 	owner := setupUser(t, st, "local-owner", 0)
 	peer := setupUser(t, st, "local-peer", 500)
@@ -2743,13 +2685,9 @@ func TestCrashRecoveryCompletesInboundRecordForALocalAction(t *testing.T) {
 // discovery interval.
 func pexKernel(st kernel.Store, interval time.Duration) (*kernel.Kernel, string) {
 	priv := testSigningKey()
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = priv
-	cfg.DiscoveryInterval = interval
-	k := kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
+	cfg := testConfig()
+	cfg.SigningKey, cfg.DiscoveryInterval = priv, interval
+	k := newKernel(cfg, kernel.Dependencies{Store: st})
 	return k, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 }
 
@@ -3141,7 +3079,7 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 100, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 100, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.RenameUser(ctx, sys.ID, tomb.ID, "resurrected"); !errors.Is(err, kernel.ErrInvalidInput) {
@@ -3152,11 +3090,13 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	}
 	// The kernel enforces it too, not only the HTTP resolver: supervision cannot fund or freeze a
 	// tombstone, and a step parked on one would hold its price with no actor able to free it (§10).
-	if _, err := k.Deposit(ctx, sys.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.Deposit(ctx, sys.ID, tomb.ID, 10, "", newRef()); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("deposit to a tombstone: want ErrNotFound, got %v", err)
 	}
-	if _, err := k.Withdraw(ctx, sys.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("withdraw from a tombstone: want ErrNotFound, got %v", err)
+	// A tombstone holds no credential, so it cannot act at all — which is what stops the anchor
+	// row for a purged peer's history from being mistaken for an account.
+	if _, err := k.Withdraw(ctx, tomb.ID, uuid.NewString(), 10, ""); !errors.Is(err, kernel.ErrUnauthenticated) {
+		t.Errorf("a tombstone cannot withdraw: want ErrUnauthenticated, got %v", err)
 	}
 	if err := k.SuspendUser(ctx, sys.ID, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("suspend a tombstone: want ErrNotFound, got %v", err)
@@ -3191,7 +3131,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Stats: &kernel.Stats{}, UpdatedAt: time.Now().UTC(),
 		}
-		sig, serr := kernel.SignManifest(priv, m)
+		sig, serr := testNet.SignManifest(priv, m)
 		if serr != nil {
 			t.Fatal(serr)
 		}
@@ -3245,20 +3185,16 @@ func TestProxyRepricesOnImportBPSChange(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Signature = sig
 
 	kernelAt := func(importBPS int64) *kernel.Kernel {
-		cfg := kernel.DefaultConfig()
-		cfg.TokenSecret = "test-secret"
-		cfg.IssuerUserID = testIssuerUserID
-		cfg.FeeRecipientID = testIssuerUserID
-		cfg.SigningKey = testSigningKey()
+		cfg := testConfig()
 		cfg.ImportBPS = importBPS
-		return kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Federation: &fakeFederationHTTP{resolveManifest: &m}, Config: cfg, Logger: log.Default()})
+		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}})
 	}
 	ctx := context.Background()
 
@@ -3312,7 +3248,7 @@ func TestLegacyProxyHealsOnNextFundedUse(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3388,10 +3324,9 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 	}
 
 	// The operator now quadruples the import fee. The catalog reprices; this in-flight call must not.
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
-	cfg.SigningKey, cfg.ImportBPS = testSigningKey(), 2000
-	repriced := kernel.New(kernel.Dependencies{Store: st, HTTP: fake, Federation: fake, Config: cfg, Logger: log.Default()})
+	cfg := testConfig()
+	cfg.ImportBPS = 2000
+	repriced := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake})
 	if got, _ := repriced.ReadAction(ctx, a.ID); got.Price != 1260 { // 1050 + ceil(1050*2000/10000)
 		t.Fatalf("catalog price after the change = %d, want 1260", got.Price)
 	}
@@ -3431,13 +3366,12 @@ func TestEveryReadPathReprices(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 
 	at := func(importBPS int64) *kernel.Kernel {
-		cfg := kernel.DefaultConfig()
-		cfg.TokenSecret, cfg.IssuerUserID, cfg.FeeRecipientID = "test-secret", testIssuerUserID, testIssuerUserID
-		cfg.SigningKey, cfg.ImportBPS = testSigningKey(), importBPS
-		return kernel.New(kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Federation: &fakeFederationHTTP{resolveManifest: &m}, Embedder: &fakeEmbedder{}, Config: cfg, Logger: log.Default()})
+		cfg := testConfig()
+		cfg.ImportBPS = importBPS
+		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Embedder: &fakeEmbedder{}})
 	}
 	a, err := at(500).ResolveAction(ctx, "bob@"+pubB64+"/greet")
 	if err != nil {
@@ -3525,7 +3459,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 		OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-parity", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3582,7 +3516,7 @@ func TestResolveRemoteApplicationRoot(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	sign := func(m *kernel.ActionManifest) *kernel.ActionManifest {
-		sig, err := kernel.SignManifest(priv, m)
+		sig, err := testNet.SignManifest(priv, m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3658,7 +3592,7 @@ func TestResolveRemoteManifestBoundToRequest(t *testing.T) {
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 		}
-		sig, err := kernel.SignManifest(priv, m)
+		sig, err := testNet.SignManifest(priv, m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3714,7 +3648,7 @@ func TestStaleExactProxyReResolvesBeforeIndex(t *testing.T) {
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 		}
-		sig, err := kernel.SignManifest(priv, m)
+		sig, err := testNet.SignManifest(priv, m)
 		if err != nil {
 			t.Fatal(err)
 		}

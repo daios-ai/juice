@@ -112,13 +112,9 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 
 	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "inner"}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeBPS = 2000
-	cfg.FeeRecipientID = feeUser.ID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
+	cfg := testConfig()
+	cfg.FeeBPS, cfg.FeeRecipientID = 2000, feeUser.ID
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	_, tr := beginTestRun(t, st, carol.ID, outer)
 
@@ -1024,13 +1020,9 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeBPS = 2000
-	cfg.FeeRecipientID = feeUser.ID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
+	cfg := testConfig()
+	cfg.FeeBPS, cfg.FeeRecipientID = 2000, feeUser.ID
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
 
@@ -1503,12 +1495,7 @@ func (f *fakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.Ch
 }
 
 func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st})
 	native.Register(k, []native.Spec{native.Chat(c)})
 	return k
 }
@@ -1632,9 +1619,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("missing recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
-		cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		cfg := testConfig()
+		cfg.FeeBPS, cfg.FeeRecipientID = 2000, "" // 20% fee — no recipient set
+		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
 		}
@@ -1642,10 +1629,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("nonexistent recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
-		cfg.FeeBPS = 2000
-		cfg.FeeRecipientID = "no-such-user"
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		cfg := testConfig()
+		cfg.FeeBPS, cfg.FeeRecipientID = 2000, "no-such-user"
+		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
 		}
@@ -1653,9 +1639,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("zero fee_bps passes with no recipient", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
+		cfg := testConfig()
 		cfg.FeeBPS = 0
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); err != nil {
 			t.Errorf("expected no error when fee_bps=0, got %v", err)
 		}
@@ -1904,7 +1890,7 @@ func TestResolveUser(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	// A key account, to exercise public-key resolution.
 	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	if err := st.UpsertKernel(ctx, pub, "peer", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, pub, "peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{

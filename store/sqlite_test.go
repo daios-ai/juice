@@ -503,7 +503,7 @@ func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, 
 	u.CreatedAt = createdAt
 	u.UpdatedAt = createdAt
 	// The kernel row must exist first — accounts.kernel_public_key is a restrictive foreign key.
-	if err := db.UpsertKernel(context.Background(), key, handle, "", createdAt); err != nil {
+	if err := db.UpsertKernel(context.Background(), key, handle, "", "", "", createdAt); err != nil {
 		t.Fatalf("upsert kernel %s: %v", handle, err)
 	}
 	if _, err := db.BindPetname(context.Background(), key, handle, false); err != nil {
@@ -1016,45 +1016,25 @@ func TestCommitSettlement(t *testing.T) {
 		t.Errorf("pay replay: got %q, want the stored pay record", stored)
 	}
 
-	// (3) Cash finalization (creditor): clear +d on the row, sys += (Q−d), record cash Q.
-	sysBefore, _ := db.ReadUser(ctx, sys.ID)
-	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
+	// (3) The rail closes it: the debt stays on the books until a transfer row for that settlement
+	// reaches a final state, which is the only thing that can end a paid outcome now.
+	if err := db.CreateRailTransfer(ctx, &kernel.RailTransfer{
+		ID: "sid-pay", Kind: kernel.RailKindClaim, Party: pp.ID, Amount: Q, Credit: d,
+		Status: kernel.RailStatusAnnounced, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
-		t.Errorf("cash: peer row got %d, want 0 (debt cleared)", u.Available)
+	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); !pending {
+		t.Error("a settlement whose payment has not arrived is still pending")
 	}
-	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sysBefore.Available+(Q-d) {
-		t.Errorf("cash: sys variance got %d, want +%d", u.Available-sysBefore.Available, Q-d)
+	if err := db.MarkRailTransfer(ctx, "sid-pay", kernel.RailStatusCredited); err != nil {
+		t.Fatal(err)
 	}
 	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); pending {
-		t.Error("cash: settlement should no longer be pending")
-	}
-	// Cash replay is a no-op.
-	if _, err := db.CommitSettlementCash(ctx, "sid-pay", pp.ID, sys.ID, d, Q-d, Q, `{"outcome":"cash"}`); err != nil {
-		t.Fatal(err)
-	}
-	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != 0 {
-		t.Errorf("cash replay changed the row: %d", u.Available)
+		t.Error("a settlement the rail has closed is no longer pending")
 	}
 
-	// (8) Debtor cash with insufficient sys reserve refuses typed — no partial writes, still pending.
-	// A debtor owes d (row +d); paying Q needs sys ≥ Q−d, but sys here (a fresh user) has 0.
 	poor := newUser("poorSys", 0)
 	_ = db.CreateUser(ctx, poor)
-	dbtr := newPeer(t, db, "peerDebtor", "pkDebtor", d, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-dp", dbtr.ID, poor.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.CommitSettlementCash(ctx, "sid-dp", dbtr.ID, poor.ID, -d, -(Q - d), Q, `{"outcome":"cash"}`); !errors.Is(err, kernel.ErrInsufficientFunds) {
-		t.Errorf("cash with insufficient debtor reserve: got %v, want ErrInsufficientFunds", err)
-	}
-	if u, _ := db.ReadUser(ctx, dbtr.ID); u.Available != d {
-		t.Errorf("failed cash left a partial write on the row: got %d, want %d", u.Available, d)
-	}
-	if pending, _ := db.HasPendingSettlement(ctx, dbtr.ID); !pending {
-		t.Error("failed cash should leave the settlement pending")
-	}
 
 	// Creditor clear against an empty reserve refuses the same way: ErrInsufficientFunds, no
 	// message SQL, full rollback, and the same commit succeeds once the reserve exists.
@@ -1080,6 +1060,34 @@ func TestCommitSettlement(t *testing.T) {
 	}
 	if u, _ := db.ReadUser(ctx, pcr.ID); u.Available != 0 {
 		t.Errorf("funded clear: peer row got %d, want 0", u.Available)
+	}
+
+	// A draw that came out payable holds the debt until it is paid: no other outcome for that peer
+	// commits meanwhile, whatever it says, and the rule lives in the commit itself so that two draws
+	// finishing together cannot both slip past it.
+	ph := newPeer(t, db, "peerHeld", "pkHeld", -d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-h1", ph.ID, sys.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitSettlement(ctx, "sid-h2", ph.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a clear while a payable draw stands: got %v, want ErrInvalidState", err)
+	}
+	if u, _ := db.ReadUser(ctx, ph.ID); u.Available != -d {
+		t.Errorf("the held debt moved: %d, want %d", u.Available, -d)
+	}
+
+	// Two settlements drawn on one debt: the first clears it, and the second finds nothing left to
+	// clear. Without that the row would be credited twice for one debt and the creditor would lose
+	// it twice over.
+	pdd := newPeer(t, db, "peerTwice", "pkTwice", -d, 0, now)
+	if _, err := db.CommitSettlement(ctx, "sid-t1", pdd.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CommitSettlement(ctx, "sid-t2", pdd.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("clearing a debt that is already gone: got %v, want ErrInvalidState", err)
+	}
+	if u, _ := db.ReadUser(ctx, pdd.ID); u.Available != 0 {
+		t.Errorf("one debt cleared twice left the row at %d, want 0", u.Available)
 	}
 
 	// The conservation guard rejects a non-conservative outcome record.
@@ -3512,10 +3520,10 @@ func TestPurgePeerCascade(t *testing.T) {
 	// A discovered_kernels row about the peer (must be deleted) and one about another kernel (must
 	// survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.UpsertKernel(ctx, "peerkeyAAA", "peerP", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "peerkeyAAA", "peerP", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3568,7 +3576,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 
 	// A stale never-peer kernel with a discovery doc and an evidence row (both must be evicted).
-	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", "", "", old); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
@@ -3578,12 +3586,12 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A fresh never-peer kernel survives.
-	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", fresh); err != nil {
+	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", "", "", fresh); err != nil {
 		t.Fatal(err)
 	}
 	// A stale but peer-backed kernel survives here (peer retention governs it, not this sweep).
 	newPeer(t, db, "peerP", "peerKey", 0, 0, old)
-	if err := db.UpsertKernel(ctx, "peerKey", "peerP", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, "peerKey", "peerP", "", "", "", old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3630,7 +3638,7 @@ func TestListPurgeablePeers(t *testing.T) {
 
 	// excluded: a recent gossip mention keeps it live
 	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
-	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4210,7 +4218,7 @@ func TestKernelAccountCredentialSeparation(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	const key = "credsepkey"
-	if err := db.UpsertKernel(ctx, key, "credsep", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, key, "credsep", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	base := func() *kernel.Account {
@@ -4292,10 +4300,10 @@ func TestListKernelsRoster(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Discovery-only: a kernel row with a nickname and no account or petname.
-	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, "SELF", "me", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "SELF", "me", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4338,7 +4346,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	now := time.Now().UTC()
 	const key = "narrowkey"
 
-	if err := db.UpsertKernel(ctx, key, "nick", "about", now); err != nil {
+	if err := db.UpsertKernel(ctx, key, "nick", "about", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetGossipCursor(ctx, key, "cursor-1"); err != nil {
@@ -4350,7 +4358,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	}
 	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)
 	// must not reset any of it.
-	if err := db.UpsertKernel(ctx, key, "", "", now.Add(time.Minute)); err != nil {
+	if err := db.UpsertKernel(ctx, key, "", "", "", "", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	rk, err := db.ReadKernel(ctx, key)
@@ -4603,10 +4611,10 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 
 	// Stale eviction of k1 (never a peer) must not clear k2's rows either.
 	old := now.Add(-100 * 24 * time.Hour)
-	if err := db.UpsertKernel(ctx, k1, "one", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, k1, "one", "", "", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, k2, "two", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, k2, "two", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour)); err != nil {
@@ -4669,5 +4677,74 @@ func TestPriceSnapshotColumnsRoundTrip(t *testing.T) {
 	back, err := db.ReadStep(ctx, step.ID)
 	if err != nil || back.ImportBPS == nil || *back.ImportBPS != 500 {
 		t.Errorf("step import_bps round-trip = %v (err %v), want 500", back.ImportBPS, err)
+	}
+}
+
+// A settlement closed under the retired cash record is history the rail table must carry: the debt
+// is gone, the payment is final, and the money that crossed the rail has to keep counting in the
+// solvency audit. 047 converts both sides — a creditor's credited claim, a debtor's announced
+// settlement — and gives the cash record the shape of the crossing it always was.
+func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		exec := func(q string, args ...any) {
+			t.Helper()
+			if _, err := raw.Exec(q, args...); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+		exec(`INSERT INTO config (key,value) VALUES ('signing_public_key','ourkey')`)
+		for _, p := range []struct{ id, key string }{{"peerA", "keyA"}, {"peerB", "keyB"}} {
+			exec(`INSERT INTO kernels (public_key,first_seen,updated_at) VALUES (?,?,?)`, p.key, now, now)
+			exec(`INSERT INTO "accounts" (id,kernel_public_key,available,locked,created_at,updated_at)
+			      VALUES (?,?,0,0,?,?)`, p.id, p.key, now, now)
+		}
+		// We are the creditor of sidA (peerA paid us Q=100 against a debt of 30) and the debtor of
+		// sidB (we paid peerB Q=120 against a debt of 40).
+		for _, s := range []struct {
+			sid, party, creditor string
+			debt, cash           int64
+		}{
+			{"sidA", "peerA", "ourkey", 30, 100},
+			{"sidB", "peerB", "otherkey", 40, 120},
+		} {
+			record := fmt.Sprintf(`{"settlement_id":%q,"creditor":%q,"outcome":"pay"}`, s.sid, s.creditor)
+			exec(`INSERT INTO ledger (id,operator_user_id,to_user_id,amount,reason,external_key,created_at)
+			      VALUES (?,?,?,?,?,?,?)`, "st_"+s.sid, "u1", s.party, s.debt, record, s.sid, now)
+			exec(`INSERT INTO ledger (id,operator_user_id,to_user_id,amount,reason,external_key,created_at)
+			      VALUES (?,?,?,?,?,?,?)`, "st_"+s.sid+".cash", "u1", s.party, s.cash, record, s.sid+".cash", now)
+		}
+	})
+
+	db := openAt(t, path)
+	ctx := context.Background()
+	for _, want := range []*kernel.RailTransfer{
+		{ID: "sidA", Kind: kernel.RailKindClaim, Party: "peerA", Amount: 100, Credit: 30, Status: kernel.RailStatusCredited},
+		{ID: "sidB", Kind: kernel.RailKindSettlement, Party: "peerB", Amount: 120, Credit: 40, Status: kernel.RailStatusAnnounced},
+	} {
+		got, err := db.ReadRailTransfer(ctx, want.ID)
+		if err != nil || got == nil {
+			t.Fatalf("%s was not converted: %v", want.ID, err)
+		}
+		if got.Kind != want.Kind || got.Party != want.Party || got.Amount != want.Amount ||
+			got.Credit != want.Credit || got.Status != want.Status {
+			t.Errorf("%s converted to %+v, want %+v", want.ID, got, want)
+		}
+		// Nothing is left for the worker to drive: both sides are finished history.
+		if got.Open() {
+			t.Errorf("%s is still open after conversion", want.ID)
+		}
+		if pending, _ := db.HasPendingSettlement(ctx, got.Party); pending {
+			t.Errorf("%s still reads as an unsettled debt", want.ID)
+		}
+	}
+	// The cash rows now read as crossings in the direction the money went, so the vault counts them:
+	// 100 in from the payment we received, 120 out for the one we made.
+	pos, err := db.RailPosition(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos.Vault != -20 {
+		t.Errorf("vault after conversion = %d, want -20 (100 received, 120 paid)", pos.Vault)
 	}
 }

@@ -158,7 +158,7 @@ func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.Sett
 		return fedError(err)
 	}
 	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
-		req.SettlementID, req.Amount, req.Nonce, []byte(req.Record))
+		req.SettlementID, req.Amount, req.Nonce, req.TxHash, []byte(req.Record))
 	if err != nil {
 		return fedError(err)
 	}
@@ -278,7 +278,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	if err != nil || self == "" {
 		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := kernel.VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, sigStr); err != nil {
+	if err := k.Network().VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A store failure must not read as "nothing is parked for you" — that is precisely the
@@ -322,7 +322,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	if err != nil || self == "" {
 		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := kernel.VerifyStepSignature(cpPubKey, stepID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), sigStr); err != nil {
+	if err := k.Network().VerifyStepSignature(cpPubKey, stepID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A stranger can hold no step here: CreateStep resolves required_caller to an existing user,
@@ -346,7 +346,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		if err := checkFederationTimestamp(userTimestamp); err != nil {
 			return 0, nil, err
 		}
-		if err := kernel.VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userAttestation); err != nil {
+		if err := k.Network().VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userAttestation); err != nil {
 			return 0, nil, err
 		}
 		if forUserID != *remoteID {
@@ -490,7 +490,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
 	// transport-authenticated caller key (OnCall proved connection key == counterparty).
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	if err := kernel.VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+	if err := k.Network().VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a

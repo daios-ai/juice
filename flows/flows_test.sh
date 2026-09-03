@@ -13,6 +13,7 @@
 #
 # Opt-in suites (excluded from the default run; each needs a heavy external toolchain):
 #   JUICE_TINYGO_FLOWS=1 ... — @sys/tinygo/compile (real TinyGo toolchain on PATH)
+#   JUICE_RAIL_FLOWS=1 ...   — the rail against a local chain (Foundry + juice-rail's mocks)
 #
 # Via the Go suite:  go test -tags integration ./cmd/juice/ -run TestFlowsIntegration
 #
@@ -27,6 +28,8 @@ source "$here/flows_calls.sh"
 source "$here/flows_wasm.sh"
 source "$here/flows_remote.sh"
 source "$here/flows_federation.sh"
+source "$here/flows_rail.sh"
+source "$here/flows_rail_chain.sh"
 source "$here/flows_network.sh"
 source "$here/flows_admin.sh"
 
@@ -34,6 +37,13 @@ source "$here/flows_admin.sh"
 if [ "${JUICE_NETWORK_FLOWS:-0}" = "1" ]; then
     echo "=== real-network federation check ONLY (JUICE_NETWORK_FLOWS=1) ==="
     run_flows flow_network_reachability
+    exit $?
+fi
+
+# Opt-in: the rail's local-chain release gate (Foundry on PATH; juice-rail's compiled mocks).
+if [ "${JUICE_RAIL_FLOWS:-0}" = "1" ]; then
+    echo "=== rail local-chain gate ONLY (JUICE_RAIL_FLOWS=1) ==="
+    run_flows flow_rail_chain flow_rail_chain_settlement
     exit $?
 fi
 
@@ -46,6 +56,8 @@ fi
 
 # Default suite. Excludes flow_tinygo_compile (opt-in above).
 run_flows \
+    flow_rail_onboard flow_rail_withdraw flow_rail_settlement flow_rail_isolation \
+    flow_rail_world_mismatch flow_rail_lock flow_rail_profile flow_rail_economic_loop \
     flow_bootstrap flow_signup_errors flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
     flow_action_lifecycle flow_action_owner_visibility \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \

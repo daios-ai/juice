@@ -271,8 +271,8 @@ type RecoveryChallenge struct {
 // RecoveryChallengeSigningBytes returns the exact domain-prefixed bytes a recovery key signs and the
 // kernel verifies (§12). Both the CLI signer and the kernel verifier route through it, so the
 // v0.13 domain prefix stays in sync across the wire.
-func RecoveryChallengeSigningBytes(nonce string) ([]byte, error) {
-	return domainPayload(sigDomainRecovery, RecoveryChallenge{Challenge: nonce})
+func (n Network) RecoveryChallengeSigningBytes(nonce string) ([]byte, error) {
+	return n.payload(sigDomainRecovery, RecoveryChallenge{Challenge: nonce})
 }
 
 // StartRecovery issues a single-use nonce for a password-recovery attempt. The account must have a
@@ -319,7 +319,7 @@ func (k *Kernel) CompleteRecovery(ctx context.Context, handle, nonce, signatureB
 	if err != nil {
 		return ErrInvalidState.Wrap("stored recovery key is invalid")
 	}
-	if err := verifyJCS(pub, sigDomainRecovery, RecoveryChallenge{Challenge: nonce}, signatureB64); err != nil {
+	if err := k.cfg.Network.verify(pub, sigDomainRecovery, RecoveryChallenge{Challenge: nonce}, signatureB64); err != nil {
 		return ErrUnauthorized.Wrap("recovery signature is invalid")
 	}
 	hash, err := HashPassword(newPassword)

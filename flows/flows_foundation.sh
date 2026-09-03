@@ -7,7 +7,7 @@
 
 flow_bootstrap() {
     echo "=== FLOW bootstrap ==="
-    local dir db hs; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
@@ -35,7 +35,7 @@ flow_bootstrap() {
 # failure and every flow only ever checked success paths.
 flow_signup_errors() {
     echo "=== FLOW signup_errors ==="
-    local dir db hs ha base; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha base; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "signup_errors.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     base=$(url "$db")
@@ -64,31 +64,30 @@ flow_signup_errors() {
 
 flow_local_auth() {
     echo "=== FLOW local_auth ==="
-    local dir db hs tdir; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
-    tdir=$(juice_token_dir "$hs" "$db")
 
-    assert_eq "local_auth.token_stored" yes "$([ -f "$tdir/token" ] && echo yes || echo no)"
+    assert_nonempty "local_auth.token_stored" "$(profile_get "$hs" token)"
     assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" handle sys
 
     # Refresh is automatic on a 401 (no standalone command): drop the access token, and the next
     # authenticated call transparently refreshes and rotates the refresh token.
-    local old_rt=""; [ -f "$tdir/refresh_token" ] && old_rt=$(cat "$tdir/refresh_token")
-    rm -f "$tdir/token"
+    local old_rt; old_rt=$(profile_get "$hs" refresh_token)
+    profile_set "$hs" token ""
     assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle sys
-    local new_rt=""; [ -f "$tdir/refresh_token" ] && new_rt=$(cat "$tdir/refresh_token")
+    local new_rt; new_rt=$(profile_get "$hs" refresh_token)
     assert_ne "local_auth.refresh_rotates_token" "$old_rt" "$new_rt"
 
     # A reused (rotated-away) refresh token must be rejected: a stale access token 401s and its
     # auto-refresh with the old refresh token is refused.
     if [ -n "$old_rt" ]; then
-        printf 'stale.access.token' > "$tdir/token"; echo "$old_rt" > "$tdir/refresh_token"
+        profile_set "$hs" token 'stale.access.token'; profile_set "$hs" refresh_token "$old_rt"
         assert_fails "local_auth.refresh_rotation_enforced" "expired\|invalid\|unauthenticated" -- j "$db" "$hs" user me
-        echo "$new_rt" > "$tdir/refresh_token"
+        profile_set "$hs" refresh_token "$new_rt"
     fi
 
     j "$db" "$hs" auth logout >/dev/null 2>&1
-    assert_eq "local_auth.logout_removes_token" no "$([ -f "$tdir/token" ] && echo yes || echo no)"
+    assert_eq "local_auth.logout_removes_token" "" "$(profile_get "$hs" token)"
     assert_fails "local_auth.post_logout_rejected" "login\|not logged in\|error" -- j "$db" "$hs" user me
 
     # HTTP-only: the auth middleware rejects a malformed bearer token (body carries the error).
@@ -98,7 +97,7 @@ flow_local_auth() {
 
 flow_suspension() {
     echo "=== FLOW suspension ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -115,15 +114,15 @@ flow_suspension() {
 
 flow_deposits() {
     echo "=== FLOW deposits ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
     assert_jnum "deposits.initial_zero" "$(jj "$db" "$ha" user me)" available 0
-    j "$db" "$hs" admin deposit alice 500 >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" >/dev/null 2>&1
     assert_jnum "deposits.balance_updated" "$(jj "$db" "$ha" user me)" available 500
-    j "$db" "$hs" admin deposit alice 200 >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 200 --ref "$(newref)" >/dev/null 2>&1
     assert_jnum "deposits.accumulates" "$(jj "$db" "$ha" user me)" available 700
 
     assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin deposit alice 10
@@ -132,11 +131,11 @@ flow_deposits() {
 
 flow_transfers() {
     echo "=== FLOW transfers ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin deposit alice 500 >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" >/dev/null 2>&1
 
     # Alice transfers 200 to bob by handle; balances move by exactly the amount.
     j "$db" "$ha" user transfer bob 200 --reason gift >/dev/null 2>&1
@@ -159,7 +158,7 @@ flow_transfers() {
 
 flow_action_lifecycle() {
     echo "=== FLOW action_lifecycle ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -204,7 +203,7 @@ flow_action_lifecycle() {
 
 flow_action_owner_visibility() {
     echo "=== FLOW action_owner_visibility ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -227,7 +226,7 @@ flow_action_owner_visibility() {
 # description is the kernel "about" surfaced by admin identity.
 flow_recovery() {
     echo "=== FLOW recovery ==="
-    local dir db hs uh phrase; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
+    local dir db hs uh phrase; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
     make_admin "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
 
     # sys's description is the kernel "about" (surfaced by admin identity).

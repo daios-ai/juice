@@ -13,10 +13,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,15 +56,9 @@ func (e *flowScriptExec) Execute(ctx context.Context, artifact []byte, input []b
 // It mirrors newTestHTTPServerFull but lets the caller inject a ScriptExecutor.
 func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, *kernel.Kernel, *store.DB) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "flow.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := newTestStore(t)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "flow-test-secret"
+	cfg := testConfig("flow-test-secret")
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
 	// Credential encryption is mandatory (§8); the production binary always wires a box to
@@ -74,7 +68,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec})
 	k.SetSecretBox(box)
 
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
@@ -1292,20 +1286,14 @@ func TestFlow_RatingVisibility(t *testing.T) {
 // federation calls to other in-process httptest.Servers work correctly.
 func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed25519.PrivateKey) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "fed.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := newTestStore(t)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "fed-test-secret"
+	cfg := testConfig("fed-test-secret")
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
 	// The outbound federation adapter signs as this kernel, so signed calls to peer kernels work.
 	k.SetFederation(newFedAdapter("", k.SignFederation))
 
@@ -1863,8 +1851,9 @@ func TestFlow_AccountSelfService(t *testing.T) {
 	}
 }
 
-// TestFlow_DepositSpendWithdraw: admin deposits, user spends some, admin withdraws a
-// partial amount, then a withdrawal exceeding the remaining balance is rejected.
+// TestFlow_DepositSpendWithdraw: the operator records money that arrived, the user spends some of
+// it, then withdraws part of what is left — their own act — and a withdrawal beyond the remaining
+// balance is refused.
 func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1882,7 +1871,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	_ = providerID
 
 	// Deposit 100.
-	if _, err := k.Deposit(ctx, sys.ID, userID, 100, "initial", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, userID, 100, "initial", newRef()); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 	if getBalance(t, srv, userTok) != 100 {
@@ -1897,8 +1886,8 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 		t.Errorf("balance after spend: got %d, want 80", getBalance(t, srv, userTok))
 	}
 
-	// Withdraw 50.
-	if _, err := k.Withdraw(ctx, sys.ID, userID, 50, "partial withdrawal", ""); err != nil {
+	// Withdraw 50 — the owner's own act, under an id they mint (U51).
+	if _, err := k.Withdraw(ctx, userID, uuid.NewString(), 50, "partial withdrawal"); err != nil {
 		t.Fatalf("withdraw 50: %v", err)
 	}
 	if getBalance(t, srv, userTok) != 30 {
@@ -1906,7 +1895,7 @@ func TestFlow_DepositSpendWithdraw(t *testing.T) {
 	}
 
 	// Withdraw 100 is rejected (only 30 remain).
-	_, err := k.Withdraw(ctx, sys.ID, userID, 100, "too much", "")
+	_, err := k.Withdraw(ctx, userID, uuid.NewString(), 100, "too much")
 	if err == nil {
 		t.Error("over-withdrawal should be rejected")
 	}
@@ -1940,7 +1929,7 @@ func TestFlow_Transfer(t *testing.T) {
 	aliceID, aliceTok := makeUser(t, k, "xfer-alice")
 	_, bobTok := makeUser(t, k, "xfer-bob")
 
-	if _, err := k.Deposit(ctx, sys.ID, aliceID, 100, "seed", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, aliceID, 100, "seed", newRef()); err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
 
@@ -2078,20 +2067,13 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 
 	// Helper: build a fed kernel with a specific RemoteBPS and import A's action.
 	importWithBPS := func(importBPS int64) int64 {
-		dir := t.TempDir()
-		db, err := store.Open(filepath.Join(dir, "duty.db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { db.Close() })
+		db := newTestStore(t)
 
-		cfg := kernel.DefaultConfig()
-		cfg.TokenSecret = fmt.Sprintf("duty-secret-%d", importBPS)
+		cfg := testConfig(fmt.Sprintf("duty-secret-%d", importBPS))
 		cfg.AllowLocalSources = true
 		cfg.RemoteBPS = importBPS
-		logger := log.Discard()
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-		kB := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
+		kB := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
 
 		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
@@ -2116,7 +2098,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		// remote_bps yields a higher proxy price on import. Vary it and re-sign with the provider key.
 		m := manifest
 		m.RemoteBPS = importBPS
-		msig, err := kernel.SignManifest(privA, &m)
+		msig, err := testNet.SignManifest(privA, &m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2247,15 +2229,9 @@ func TestFlow_AuthenticatedActionList(t *testing.T) {
 // returning the executor so the test can point it at fake endpoints.
 func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "flow.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := newTestStore(t)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "flow-test-secret"
+	cfg := testConfig("flow-test-secret")
 	cfg.AllowLocalSources = true
 	logger := log.Discard()
 	box, err := newAESGCMBox(make([]byte, 32))
@@ -2264,7 +2240,7 @@ func newOAuthFlowServer(t *testing.T) (*httptest.Server, *kernel.Kernel) {
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	httpExec.auth = newAuthenticator(box, db, true, cfg.ScriptTimeout)
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: &flowScriptExec{}, HTTP: httpExec, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, Scripts: &flowScriptExec{}, HTTP: httpExec})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)

@@ -185,6 +185,31 @@ type ledgerView struct {
 	ToHandle       string `json:"to_handle,omitempty"`
 }
 
+// railTransferView renders one external movement the way a person reads it: the party by name, and
+// the internal account id withheld (§14).
+type railTransferView struct {
+	*kernel.RailTransfer
+	Party     string `json:"party,omitempty"`
+	PartyName string `json:"party_handle,omitempty"`
+}
+
+// railTransferViews names the party on each row. A deposit's party is a sender's address, which has
+// no account behind it until somebody registers it, so it is shown as it stands.
+func railTransferViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.RailTransfer) []*railTransferView {
+	uc := newAccountCache(k, ctx)
+	out := make([]*railTransferView, 0, len(rows))
+	for _, r := range rows {
+		v := &railTransferView{RailTransfer: r}
+		if r.Kind == kernel.RailKindDeposit {
+			v.PartyName = r.Party
+		} else {
+			v.PartyName = uc.reference(r.Party)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 func enrichLedger(e *kernel.LedgerEntry, uc *accountCache) *ledgerView {
 	v := &ledgerView{LedgerEntry: e, OperatorHandle: uc.reference(e.OperatorUserID)}
 	if e.FromUserID != "" {
@@ -266,13 +291,17 @@ func parseParams(specs []string) ([]kernel.HTTPParam, error) {
 }
 
 func userView(u *kernel.Account) map[string]any {
-	return map[string]any{
+	v := map[string]any{
 		"id":          u.ID,
 		"handle":      u.Handle,
 		"description": u.Description,
 		"available":   u.Available,
 		"locked":      u.Locked,
 	}
+	if u.RailAddress != "" {
+		v["rail_address"] = u.RailAddress
+	}
+	return v
 }
 
 // ---- Resolution helpers ----

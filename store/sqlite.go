@@ -292,7 +292,7 @@ func strVal(s *string) string {
 
 // ---- Accounts ----
 
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,rail_address,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.Account) error {
 	_, err := s.db.ExecContext(ctx,
@@ -478,12 +478,13 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, er
 func scanUserFn(scan func(...any) error) (*kernel.Account, error) {
 	var u kernel.Account
 	var createdAt, updatedAt string
-	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey *string
+	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey, railAddress *string
 	if err := scan(&u.ID, &handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey,
+		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey, &railAddress,
 		&createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	u.RailAddress = strVal(railAddress)
 	u.Handle = strVal(handle)
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.KernelPublicKey = strVal(kernelPublicKey)
@@ -2636,20 +2637,20 @@ func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string
 	return &e, nil
 }
 
-// commitSettlementRow applies a settlement's balance legs and records one idempotent ledger row (§13).
-// externalKey is the idempotency key (a replay returns the stored record with no balance change —
-// anti-grinding); ledgerAmt>0 is the debt/cash magnitude for the audit row; conserve requires
-// dClear+variance==0 (internal-only outcome records — clear applies ±d/∓d, a pending pay applies
-// 0/0). A cash finalization sets conserve=false, since it is the point where external cash Q enters
-// (dClear+variance==Q). A negative sys variance is guarded like lockReserveTx: a reserve short of
-// it refuses ErrInsufficientFunds, rolling the whole tx back → the settlement stays pending, no partial writes.
-func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sysID string, dClear, variance, ledgerAmt int64, recordJSON string, conserve bool) (string, error) {
-	if conserve && dClear+variance != 0 {
+// CommitSettlement records one finish outcome (§13) and its idempotent ledger row: a clear applies
+// ±d/∓d and extinguishes the debt; a pending pay applies no legs and leaves the debt on the row
+// until the rail closes it. Every outcome is internally conservative — the money that crosses the
+// rail is booked by the rail table, never here. settlementID is the idempotency key: a replay
+// returns the stored record and changes no balance (anti-grinding). A negative sys variance is
+// guarded like lockReserveTx: a reserve short of it refuses ErrInsufficientFunds and rolls the whole
+// transaction back, leaving the settlement pending with no partial writes.
+func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (string, error) {
+	if dClear+variance != 0 {
 		return "", fmt.Errorf("commit settlement: non-conservative outcome (dClear=%d variance=%d)", dClear, variance)
 	}
 	var stored string
 	err := s.withTx(ctx, "commit settlement", func(tx *sql.Tx) error {
-		existing, err := readLedgerByExternalKey(ctx, tx, externalKey)
+		existing, err := readLedgerByExternalKey(ctx, tx, settlementID)
 		if err != nil {
 			return err
 		}
@@ -2657,9 +2658,27 @@ func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sy
 			stored = existing.Reason
 			return nil
 		}
+		// One debt draws once, and this is where that holds: the check and the outcome are one
+		// transaction, so two draws finishing at once cannot both pass it. Anything checked before
+		// the transaction is only a courtesy to the debtor.
+		if pending, err := hasPendingSettlement(ctx, tx, rowUserID); err != nil {
+			return err
+		} else if pending {
+			return kernel.ErrInvalidState.Wrap("a settlement of this debt is already awaiting payment")
+		}
 		if dClear != 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, dClear, rowUserID); err != nil {
+			// The debt must still be outstanding to be cleared, and by at least what is being
+			// cleared. Two settlements drawn on one position would otherwise both forgive it, and
+			// one debt would be paid for twice.
+			res, err := tx.ExecContext(ctx,
+				`UPDATE accounts SET available=available+? WHERE id=?
+				   AND ((?>0 AND available<=-?) OR (?<0 AND available>=-?))`,
+				dClear, rowUserID, dClear, dClear, dClear, dClear)
+			if err != nil {
 				return dbErr(err, "commit settlement: clear row")
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return kernel.ErrInvalidState.Wrap("the debt this settlement clears is no longer outstanding")
 			}
 		}
 		if variance != 0 {
@@ -2674,24 +2693,11 @@ func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sy
 		// to_user_id names the settled peer/proxy row (non-null from/to CHECK + attribution); the
 		// signed balance change is applied above; reason carries the record JSON.
 		return insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
-			ID: "st_" + externalKey, OperatorUserID: sysID, ToUserID: rowUserID,
-			Amount: ledgerAmt, Reason: recordJSON, ExternalKey: externalKey, CreatedAt: time.Now().UTC(),
+			ID: "st_" + settlementID, OperatorUserID: sysID, ToUserID: rowUserID,
+			Amount: debt, Reason: recordJSON, ExternalKey: settlementID, CreatedAt: time.Now().UTC(),
 		})
 	})
 	return stored, err
-}
-
-// CommitSettlement records a finish outcome (§13): clear applies ±d/∓d and extinguishes the debt; a
-// pending pay applies no legs (dClear=variance=0) and leaves the debt on the row until the cash record.
-func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (string, error) {
-	return s.commitSettlementRow(ctx, settlementID, rowUserID, sysID, dClear, variance, debt, recordJSON, true)
-}
-
-// CommitSettlementCash finalizes a paid probabilistic outcome (§13): it clears the debt d on the row,
-// books the variance ±(Q−d) on sys, and records the external cash Q under settlementID.cash — the
-// only settlement move that is not internally conservative, because it is where cash crosses the rail.
-func (s *DB) CommitSettlementCash(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, q int64, recordJSON string) (string, error) {
-	return s.commitSettlementRow(ctx, settlementID+".cash", rowUserID, sysID, dClear, variance, q, recordJSON, false)
 }
 
 // ReadSettlementRecord returns the stored final record for settlementID, or "" if none exists.
@@ -2704,17 +2710,30 @@ func (s *DB) ReadSettlementRecord(ctx context.Context, settlementID string) (str
 	return reason, dbErr(err, "read settlement record")
 }
 
-// HasPendingSettlement reports whether peerID has a paid probabilistic outcome awaiting its rail
-// record (§13): a settlement row with outcome "pay" and no companion .cash finalization. The serving
-// side gates obligation-increasing calls on this; the debtor side reports it instead of re-flipping.
+// HasPendingSettlement reports whether peerID has a paid outcome the rail has not closed (§13): a
+// settlement audit row with outcome "pay" whose money has not finished moving. What finishes it
+// differs by side, and each side asks about its own row: the creditor's claim is closed when the
+// payment has been credited, the debtor's settlement when the payment is final. The serving side
+// gates obligation-increasing calls on this; the debtor side reports it instead of re-flipping.
 func (s *DB) HasPendingSettlement(ctx context.Context, peerID string) (bool, error) {
+	return hasPendingSettlement(ctx, s.db, peerID)
+}
+
+// hasPendingSettlement is the predicate itself, runnable inside a transaction so that a commit can
+// require it and act on it in one step.
+func hasPendingSettlement(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, peerID string) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT EXISTS(
 		   SELECT 1 FROM ledger l
-		   WHERE l.to_user_id=? AND l.external_key IS NOT NULL AND l.external_key NOT LIKE '%.cash'
+		   WHERE l.to_user_id=? AND l.id LIKE 'st_%' AND l.external_key IS NOT NULL
 		     AND l.reason LIKE '%"outcome":"pay"%'
-		     AND NOT EXISTS (SELECT 1 FROM ledger c WHERE c.external_key = l.external_key || '.cash'))`,
+		     AND NOT EXISTS (SELECT 1 FROM rail_transfers r
+		                      WHERE r.id = l.external_key
+		                        AND (r.status = 'credited'
+		                             OR (r.kind = 'settlement' AND r.status IN ('confirmed','announced')))))`,
 		peerID).Scan(&exists)
 	return exists == 1, dbErr(err, "has pending settlement")
 }
@@ -2810,15 +2829,17 @@ func ftsMatchQuery(query string) string {
 // outbound act) NOR gossip_cursor/last_seen/peer_credit, each of which has its own narrow path that
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
-func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about string, now time.Time) error {
+func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO kernels (public_key,nickname,about,first_seen,updated_at)
-		 VALUES (?,?,?,?,?)
+		`INSERT INTO kernels (public_key,nickname,about,rail_address,rail_proof,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
+		   rail_address=CASE WHEN excluded.rail_address != '' THEN excluded.rail_address ELSE kernels.rail_address END,
+		   rail_proof=CASE WHEN excluded.rail_proof != '' THEN excluded.rail_proof ELSE kernels.rail_proof END,
 		   updated_at=excluded.updated_at`,
-		publicKey, nickname, about, timeToStr(now), timeToStr(now),
+		publicKey, nickname, about, railAddress, railProof, timeToStr(now), timeToStr(now),
 	)
 	return dbErr(err, "upsert kernel")
 }
@@ -2948,9 +2969,9 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	var firstSeen, updatedAt string
 	var lastSeen, failedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,gossip_cursor,last_seen,last_contact_failed_at,peer_credit,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,rail_address,rail_proof,gossip_cursor,last_seen,last_contact_failed_at,peer_credit,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
-		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.GossipCursor,
+		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.RailAddress, &k.RailProof, &k.GossipCursor,
 			&lastSeen, &failedAt, &k.PeerCredit, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3260,7 +3281,7 @@ func firstErr(errs ...error) error {
 // conflict. Every other unique key is kernel-minted, so its collision is a broken invariant and
 // stays internal — unlisted keys fail closed. ledger.external_key never reaches the index (§12).
 var callerUnique = []string{
-	"accounts.handle", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
+	"accounts.handle", "accounts.rail_address", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
 	"connections.user_id", "grants.grantor_user_id",
 	"idempotency_records.idempotency_key",
 }

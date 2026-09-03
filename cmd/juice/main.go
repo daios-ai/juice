@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,6 +18,7 @@ import (
 	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/native"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
 	"github.com/spf13/cobra"
@@ -55,13 +55,15 @@ var enteredCommand bool
 
 // Global flags.
 var (
-	flagDB      string
-	flagConfig  string
 	flagJSON    bool
 	flagQuiet   bool
 	flagServer  string
 	flagVerbose bool
 )
+
+// dbPath is where this kernel keeps its ledger, $JUICE_HOME/kernel/juice.db. A kernel is its home
+// directory, so there is no override: initConfig fills this in for the server side alone.
+var dbPath string
 
 // globalCfg is populated from the config file before any command runs.
 var globalCfg ServerConfig
@@ -70,13 +72,10 @@ var globalCfg ServerConfig
 var resolvedConfigPath string
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagDB, "db", "", "SQLite database path (default $JUICE_HOME/kernel/juice.db)")
-	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "Config file path")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output JSON instead of human-readable text")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
-	cobra.OnInitialize(initConfig)
 }
 
 // juiceHome is the single root under which every juice-family binary keeps its state:
@@ -101,40 +100,29 @@ func juiceHome() string {
 // relocate as a unit while each binary owns its own namespace.
 func kernelHome() string { return filepath.Join(juiceHome(), "kernel") }
 
-// defaultDBPath is the per-user default database location, $JUICE_HOME/kernel/juice.db.
-// Its config (config.json) and tokens share this directory.
-func defaultDBPath() string { return filepath.Join(kernelHome(), "juice.db") }
-
 // cacheDir is the reserved purgeable subdirectory for regenerable data (indexes, compiled
 // artifacts, scratch). It is safe to delete; writers MkdirAll it on demand.
 func cacheDir() string { return filepath.Join(kernelHome(), "cache") }
 
-// initConfig loads the JSON config file. The DB path is the --db flag, else the per-user
-// default $JUICE_HOME/kernel/juice.db; a fixed default means `juice serve` attaches to the
-// same kernel — and the same signing key / federation identity — regardless of the working
-// directory, instead of silently booting a fresh identity from whatever folder it happens
-// to run in. The config path is --config, else config.json co-located with the DB.
-func initConfig() {
-	if flagDB == "" {
-		flagDB = defaultDBPath()
+// initConfig loads the server's configuration, $JUICE_HOME/kernel/config.json, beside the database
+// it describes. There is no path override: a kernel is its home directory, so `juice serve` attaches
+// to the same identity and signing key wherever it is launched, instead of minting a fresh identity
+// from whatever folder it happens to run in. Only openKernel calls it — no client command reads or
+// creates the kernel's own directory.
+func initConfig() error {
+	dbPath = filepath.Join(kernelHome(), "juice.db")
+	resolvedConfigPath = filepath.Join(kernelHome(), "config.json")
+	// The home holds the config (credentials key), the DB (signing key), and the rail key.
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		return kernel.ErrInvalidState.Wrapf("create %s: %v", kernelHome(), err)
 	}
-	path := flagConfig
-	if path == "" {
-		path = filepath.Join(filepath.Dir(flagDB), "config.json")
-	}
-	resolvedConfigPath = path
-	// The juice home holds the config (credentials key) and, alongside it, the DB
-	// (signing key) and tokens — create it 0700 so the default config can be written.
-	if dir := filepath.Dir(path); dir != "" {
-		_ = os.MkdirAll(dir, 0o700)
-	}
-	cfg, err := LoadOrCreateConfig(path)
+	cfg, err := LoadOrCreateConfig(resolvedConfigPath)
 	if err != nil {
-		renderError(kernel.ErrInvalidInput.Wrapf("config: %v", err))
-		os.Exit(exitCodeFor(kernel.ErrInvalidInput))
+		return kernel.ErrInvalidInput.Wrapf("config: %v", err)
 	}
 	applyEnvOverrides(&cfg)
 	globalCfg = cfg
+	return nil
 }
 
 func main() {
@@ -232,21 +220,21 @@ func kernelSecret(db *store.DB) string {
 	return stored
 }
 
-func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, error) {
-	if dir := filepath.Dir(flagDB); dir != "" {
-		_ = os.MkdirAll(dir, 0o700)
+func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, rail.World, error) {
+	if err := initConfig(); err != nil {
+		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 	// Reserve the purgeable cache subdir so the component layout exists for any writer.
 	_ = os.MkdirAll(cacheDir(), 0o700)
-	db, err := store.Open(flagDB)
+	db, err := store.Open(dbPath)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
+		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("open db: %w", err)
 	}
 
 	cfg, err := globalCfg.KernelConfig(kernelSecret(db))
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 
 	logger, _ := log.New(log.Config{
@@ -270,6 +258,14 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	}
 	chatter := kernel.Chatter(ollamaChatter)
 
+	// The world this kernel serves fixes its network, whose digest binds every signature it makes
+	// and the namespace it discovers on (D23).
+	world, err := rail.Load(globalCfg.World)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+	}
+	cfg.Network = world.Network()
+
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(kernel.Dependencies{
 		Store:    db,
@@ -291,11 +287,11 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	if globalCfg.CredentialsKey == "" {
 		raw := make([]byte, 32)
 		if _, err := rand.Read(raw); err != nil {
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("generate credentials key: %w", err)
+			return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("generate credentials key: %w", err)
 		}
 		globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
 		if err := writeConfig(resolvedConfigPath, globalCfg); err != nil {
-			return nil, nil, nil, nil, nil, nil, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
+			return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
 		}
 	}
 	if globalCfg.CredentialsKey != "" {
@@ -342,51 +338,8 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		fedAdapter.SetLocalPubKey(pub)
 	}
 
-	return k, db, logger, httpExec, fedAdapter, specs, nil
+	return k, db, logger, httpExec, fedAdapter, specs, world, nil
 }
-
-// tokenDir returns a directory namespaced by the canonical DB path so that tokens for
-// different kernels never collide, even in the same HOME. A token authenticates a user
-// against a specific kernel (verified by that kernel's JWT secret), so keying by the DB
-// path keeps it stable regardless of which server address the client talks to, and lets
-// the local admin path and the HTTP client share one token for the same --db.
-func tokenDir() string {
-	abs, _ := filepath.Abs(flagDB)
-	h := sha256.Sum256([]byte(abs))
-	return filepath.Join(kernelHome(), "tokens", fmt.Sprintf("%x", h[:6]))
-}
-
-func tokenPath() string        { return filepath.Join(tokenDir(), "token") }
-func refreshTokenPath() string { return filepath.Join(tokenDir(), "refresh_token") }
-
-func loadToken() (string, error) {
-	data, err := os.ReadFile(tokenPath())
-	if err != nil {
-		return "", kernel.ErrUnauthenticated.Wrap("not logged in; run: juice auth login")
-	}
-	return string(data), nil
-}
-
-func saveFile(path, content string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(content), 0o600)
-}
-
-func saveToken(tok string) error { return saveFile(tokenPath(), tok) }
-func removeToken() error         { return os.Remove(tokenPath()) }
-
-func loadRefreshToken() (string, error) {
-	data, err := os.ReadFile(refreshTokenPath())
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-func saveRefreshToken(tok string) error { return saveFile(refreshTokenPath(), tok) }
-func removeRefreshToken() error         { return os.Remove(refreshTokenPath()) }
 
 func decodeJSON(r io.Reader, v any) error {
 	return json.NewDecoder(r).Decode(v)

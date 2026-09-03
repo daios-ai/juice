@@ -30,6 +30,8 @@ func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 }
 
 func TestServerBaseURL(t *testing.T) {
+	// A profile file left by a real install must not decide what this test sees.
+	t.Setenv("JUICE_HOME", t.TempDir())
 	oldServer := flagServer
 	t.Cleanup(func() { flagServer = oldServer })
 
