@@ -1,0 +1,1237 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// The story is one economy, and it is the same economy on every rail.
+//
+// Every participant, action, price, trade, composition, refusal, attack and assertion below is
+// fixed here and is executed unchanged on play, anvil and Sepolia. The rail supplies only how
+// money enters, how a payment is made and becomes final, and what the run cost. That is what makes
+// the three reports comparable: a difference between them is a difference in the rail, because
+// nothing else differed.
+//
+// One quantity varies: how many times the trading rounds repeat, which the rail chooses because a
+// live testnet charges for each round in gas and in a quarter of an hour of finality. Every
+// distinct event still happens at least once everywhere, and the report states the count.
+
+// participants. Five kernels with deliberately unlike economics, so a trade crossing any pair is
+// priced differently and a mistake in the pricing rule cannot cancel itself out.
+var kernelPlan = []struct {
+	name                         string
+	handle                       string
+	feeBps, remoteBps, importBps int
+	exposureMax                  int64
+}{
+	// The cap must outlast the trading rounds. A pair that reaches it settles in the middle of
+	// trading, which on a chain is an unbudgeted payment and a quarter of an hour of finality; the
+	// point of accumulating debt is that hundreds of calls become one payment. The heaviest
+	// position here is k1 owing k3 about 189 credits a round, so twelve rounds reach roughly 2270.
+	// The low cap that makes the exposure engine visible is exercised in the Sybil act instead.
+	{"k1", "hub", 2000, 500, 500, 3000},
+	{"k2", "shop", 1000, 700, 300, 3000},
+	{"k3", "maker", 2500, 0, 1000, 3000},
+	{"k4", "buyer", 0, 500, 0, 3000},
+	{"k5", "late", 1500, 1000, 500, 3000},
+}
+
+// Users, and how money reaches them.
+//
+// It enters each kernel at one point and spreads from there by ordinary fee-free transfers between
+// local users. That is what an economy does, and it is also what a chain requires: a payout address
+// belongs to one account on a kernel, so two users on the same kernel cannot both pay in from the
+// same wallet — the first to register absorbs the second's money. Funding everyone independently
+// would need a wallet each, which on a rationed testnet is the difference between a gate that can
+// be run and one that cannot. The shape is the same on every rail.
+var userPlan = []struct {
+	handle   string
+	on       string
+	bringsIn int64 // paid in from outside the economy
+	receives int64 // transferred from whoever brought money into this kernel
+}{
+	{"ana", "k1", 18000, 0}, {"ben", "k1", 0, 6000},
+	{"cara", "k2", 9000, 0},
+	{"dan", "k3", 16000, 0}, {"eve", "k3", 0, 4000},
+	{"fay", "k4", 16000, 0}, {"gus", "k4", 0, 4000},
+	{"hal", "k5", 6000, 0},
+}
+
+// The paid trades that cross a kernel boundary. Each opens a debt from the buyer's kernel to the
+// seller's, and each of those debts is settled. This is the trade graph, and it is the same
+// everywhere.
+var crossKernelTrades = []struct{ kernel, user, action, seller string }{
+	{"k3", "dan", "cara@shop/quote", "k2"},
+	{"k1", "ana", "cara@shop/quote", "k2"},
+	{"k4", "fay", "cara@shop/quote", "k2"},
+	{"k2", "cara", "ana@hub/echo", "k1"},
+	{"k3", "eve", "ana@hub/echo", "k1"},
+	{"k4", "fay", "ana@hub/echo", "k1"},
+	{"k1", "ben", "dan@maker/bundle", "k3"},
+	{"k4", "gus", "dan@maker/bundle", "k3"},
+	{"k2", "cara", "dan@maker/bundle", "k3"},
+	{"k1", "ben", "dan@maker/chain", "k3"}, // a composite that itself buys across a boundary
+}
+
+// The trades the other acts make across a kernel boundary. They are declared here, beside the
+// trading rounds, because a payment they cause costs exactly as much as one the rounds cause and a
+// rail that was not told about them runs out of gas partway through.
+var otherCrossKernelTrades = []struct{ kernel, seller string }{
+	{"k1", "k5"}, // the late joiner sells to an established kernel
+	{"k5", "k2"}, // and buys from one
+	{"k6", "k2"}, // the two Sybil identities borrow from the shop
+	{"k7", "k2"},
+}
+
+// StoryShape is what the story will ask of the rail, declared before anything runs so a rail with
+// a budget can price it and refuse in advance rather than run dry halfway through.
+func StoryShape() Shape {
+	sellers := map[string]bool{}
+	for _, t := range crossKernelTrades {
+		sellers[t.seller] = true
+	}
+	// A settlement is one payment, and there is one for every ordered pair that ends in debt —
+	// from every act, not only the trading rounds. Pricing by the number of debtors instead would
+	// understate a chain rail's bill by the number of creditors each debtor owes.
+	pairs := map[string]bool{}
+	debtors := map[string]bool{}
+	for _, t := range crossKernelTrades {
+		pairs[t.kernel+"->"+t.seller] = true
+		debtors[t.kernel] = true
+	}
+	for _, t := range otherCrossKernelTrades {
+		pairs[t.kernel+"->"+t.seller] = true
+		debtors[t.kernel] = true
+	}
+	perDebtor := map[string]int{}
+	for p := range pairs {
+		perDebtor[p[:strings.Index(p, "->")]]++
+	}
+	// Only the users who bring money in from outside cost a chain rail anything; the rest are
+	// funded by a transfer inside the kernel, which the chain never sees.
+	payers := 0
+	for _, u := range userPlan {
+		if u.bringsIn > 0 {
+			payers++
+		}
+	}
+	// The attackers pay their own way, so each is a paying user too.
+	payers += len(sybilPlan)
+	return Shape{
+		Kernels:           len(kernelPlan),
+		PayingUsers:       payers,
+		SigningKernels:    len(debtors),
+		Settlements:       len(pairs),
+		PaymentsPerKernel: perDebtor,
+	}
+}
+
+// shortOfMoney is how the kernel says a caller cannot afford a call. It names the balance and the
+// price rather than using the word "insufficient", which is the better message and the one to
+// match.
+const shortOfMoney = `credits, call costs|insufficient|balance|funds`
+
+// sybilPlan is the attacker's identities. They are named here so the declared shape counts their
+// deposits and their debts: an attacker who cannot pay for a call is refused for want of money and
+// never reaches the exposure cap, which is the thing under test.
+var sybilPlan = []string{"k6", "k7"}
+
+// The attackers are kernels too, and the oracle must be able to predict what they were charged.
+const (
+	sybilFeeBps    = 1000
+	sybilRemoteBps = 500
+	sybilImportBps = 500
+)
+
+// sybilVictimCap is the low exposure limit the shop is put on for the attack. The economy itself
+// runs on a cap its trading cannot reach — a pair that settles mid-trade costs a payment and a
+// finality wait for nothing — so the engine is made visible here instead, on one kernel, for the
+// length of one act.
+const sybilVictimCap = 400
+
+// StoryVersion changes whenever the economy does, so two reports are never compared as if they
+// measured the same thing.
+const StoryVersion = "2"
+
+const (
+	schemaIn  = `{"type":"object","properties":{"msg":{"type":"string","description":"text to send"}}}`
+	schemaOut = `{"type":"object","properties":{"echo":{"type":"string","description":"the echoed text"}},"required":["echo"]}`
+)
+
+type story struct {
+	n      *Net
+	scale  int64
+	boot   string // the multiaddress newcomers bootstrap from
+	shape  Shape
+	opened []settlement // every settlement opened, for the report's evidence
+
+	recoverySeconds  float64 // restart of a killed provider to the first trade that worked again
+	burstCallsPerSec float64 // cross-kernel calls a second under a fixed concurrent load
+
+	// What the story put into the economy from outside, and what it advertised each action for.
+	// The oracle predicts from these; reading them back off the kernel would only prove the kernel
+	// agrees with itself.
+	awaiting []funding // payments submitted and not yet counted
+	deposits Deposits
+	prices   map[string]int64  // bare action reference -> advertised price in credits
+	owners   map[string]string // bare action reference -> the kernel that serves it
+}
+
+// funding is a payment submitted from outside the economy, and what it should come to.
+type funding struct {
+	kernel, user string
+	want         int64
+}
+
+// deposited records money entering the economy from outside, which is the only thing that changes
+// the total the network holds.
+func (s *story) deposited(kernel string, credits int64) {
+	if s.deposits.By == nil {
+		s.deposits.By = map[string]int64{}
+	}
+	s.deposits.By[kernel] += credits * s.scale
+	s.deposits.Total += credits * s.scale
+}
+
+// settlement is one payment the story asked for, with the peer rows on both sides as they stood
+// the moment before it was opened. The report checks the delta against the amount; no ledger key is
+// assumed, because play keys the credit by the settlement reference and a chain keys it by the
+// transaction hash.
+type settlement struct {
+	ID                string `json:"id"`
+	Debtor            string `json:"debtor"`
+	Creditor          string `json:"creditor"`
+	Amount            int64  `json:"amount"`
+	CreditorRowBefore int64  `json:"creditor_row_before"`
+	CreditorRowAfter  int64  `json:"creditor_row_after"`
+	Closed            bool   `json:"closed"`
+	WallMs            int64  `json:"wall_ms"`
+}
+
+// px converts a price in credits to the base units the kernel counts in. A chain counts in the
+// token's decimals; the manual rail counts in whole credits. Every price, cap and balance
+// comparison in the story goes through here, and the three command-line money verbs
+// (`user transfer`, `user withdraw`, `admin deposit`) are the exception: they take the amount as a
+// person writes it and scale it themselves.
+func (s *story) px(credits int64) string { return strconv.FormatInt(credits*s.scale, 10) }
+
+func Run(n *Net, rounds int) (*story, error) {
+	s := &story{n: n, scale: n.Rail.Scale(), shape: StoryShape(),
+		prices: map[string]int64{}, owners: map[string]string{}}
+
+	for _, act := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"the kernels come up", s.actKernels},
+		{"money enters", s.actMoney},
+		{"the catalogue", s.actCatalogue},
+		{"trading", func() error { return s.actTrading(rounds) }},
+		{"refusals", s.actRefusals},
+		{"composition and partial refunds", s.actComposition},
+		{"steps", s.actSteps},
+		{"value transfers", s.actValue},
+		{"delegated authorization", s.actDelegated},
+		{"ratings and evidence", s.actEvidence},
+		{"a fifth kernel joins", s.actLateJoiner},
+		{"a provider is killed mid-economy", s.actChurn},
+		{"attacks", s.actAttacks},
+		{"everything outstanding is settled", s.actSettleAll},
+	} {
+		n.Scenario(act.name)
+		fmt.Printf("== %s\n", act.name)
+		if err := act.fn(); err != nil {
+			return s, fmt.Errorf("%s: %w", act.name, err)
+		}
+	}
+	return s, nil
+}
+
+func (s *story) k(name string) *Kernel { return s.n.Kernels[name] }
+
+// opts is how every kernel in the story is configured: from its plan entry, with the exposure cap
+// as given. The kernel refuses to start unless 0 < settlement_trigger < exposure_max, and it
+// refuses by exiting — which a run discovers as a kernel that never came up, ninety seconds later,
+// with every later act broken — so the rule is applied here, once, where the figures are chosen.
+func (s *story) opts(name string, cap int64) bootOpts {
+	fee, remote, imp, handle := sybilFeeBps, sybilRemoteBps, sybilImportBps, name
+	for _, k := range kernelPlan {
+		if k.name == name {
+			fee, remote, imp, handle = k.feeBps, k.remoteBps, k.importBps, k.handle
+		}
+	}
+	trigger := int64(500)
+	if trigger >= cap {
+		trigger = cap - 1
+	}
+	if cap > 0 && !(trigger > 0 && trigger < cap) {
+		panic(fmt.Sprintf("kernel %s: exposure cap %d leaves no room for a settlement trigger", name, cap))
+	}
+	return bootOpts{Handle: handle, FeeBps: fee, RemoteBps: remote, ImportBps: imp,
+		ExposureMax: cap * s.scale, SettlementTrig: trigger * s.scale,
+		RetrySeconds: 2, Bootstrap: s.boot}
+}
+
+// join boots a kernel into the economy: gas for the payments it will make, and names exchanged
+// with every kernel already up. Petnames are the local operator's own labels and are never taken
+// from the network, so each side is told what to call the other — which is also what the squatting
+// attack tests later.
+func (s *story) join(name string, cap int64, handle string) (*Kernel, error) {
+	o := s.opts(name, cap)
+	if handle != "" {
+		o.Handle = handle
+	}
+	k, err := s.n.Boot(name, o)
+	if err != nil {
+		return nil, err
+	}
+	if s.boot == "" {
+		s.boot = k.FedAddr()
+	}
+	if err := s.n.Rail.GasUp(k, s.shape.PaymentsPerKernel[name]); err != nil {
+		return nil, err
+	}
+	for other, ok := range s.n.Kernels {
+		if other == name || ok.URL == "" {
+			continue
+		}
+		_, _ = ok.Run("sysop-"+other, "admin", "rename", "--", k.Key, handleOf(name))
+		_, _ = k.Run("sysop-"+name, "admin", "rename", "--", ok.Key, handleOf(other))
+	}
+	return k, nil
+}
+
+// fund submits money into the economy from outside and records that it did: deposits are the only
+// thing that changes the total the network holds, and the oracle predicts from this record. On a
+// chain the credit appears only once the payment is final, so the waiting is awaitFunds's.
+func (s *story) fund(kernel, user string, credits int64) error {
+	if err := s.n.Rail.Fund(s.k(kernel), user, credits); err != nil {
+		return err
+	}
+	s.deposited(kernel, credits)
+	s.awaiting = append(s.awaiting, funding{kernel, user, credits * s.scale})
+	return nil
+}
+
+// awaitFunds waits for every payment submitted since the last call to be counted. Waiting for each
+// in turn would cost a public chain's finality apiece — a quarter of an hour for each of seven
+// payers — where waiting for all of them together costs one.
+func (s *story) awaitFunds() error {
+	pending := s.awaiting
+	s.awaiting = nil
+	if len(pending) == 0 {
+		return nil
+	}
+	if !poll(30*time.Minute, 5*time.Second, func() bool {
+		for _, f := range pending {
+			if s.k(f.kernel).Balance(f.user) < f.want {
+				return false
+			}
+		}
+		return true
+	}) {
+		var short []string
+		for _, f := range pending {
+			if got := s.k(f.kernel).Balance(f.user); got < f.want {
+				short = append(short, fmt.Sprintf("%s on %s holds %d of %d", f.user, f.kernel, got, f.want))
+			}
+		}
+		return fmt.Errorf("payments were never credited: %s", strings.Join(short, "; "))
+	}
+	return nil
+}
+
+// publish puts an HTTP action in the catalogue and records its price and home for the oracle.
+func (s *story) publish(kernel, owner, name string, credits int64, visibility, route, desc string) {
+	k := s.k(kernel)
+	s.prices[owner+"/"+name] = credits
+	s.owners[owner+"/"+name] = kernel
+	_, _ = k.Run(owner, "action", "create", name, "--kind", "http", "--source", s.n.Backend+route,
+		"--description", desc, "--price", s.px(credits), "--input-schema", schemaIn, "--output-schema", schemaOut)
+	_, _ = k.Run(owner, "action", "enable", owner+"/"+name)
+	if visibility != "private" {
+		_, _ = k.Run(owner, "action", "update", owner+"/"+name, "--visibility", visibility)
+	}
+}
+
+// handleOf is the network name a kernel advertises.
+func handleOf(name string) string {
+	for _, k := range kernelPlan {
+		if k.name == name {
+			return k.handle
+		}
+	}
+	return name
+}
+
+// rates is what each kernel charges, which the oracle needs to predict a cross-kernel price.
+func storyRates() map[string]kernelRates {
+	out := map[string]kernelRates{}
+	for _, k := range kernelPlan {
+		out[k.name] = kernelRates{remoteBps: k.remoteBps, importBps: k.importBps}
+		out[k.handle] = kernelRates{remoteBps: k.remoteBps, importBps: k.importBps}
+	}
+	// The attackers buy too, and what they were charged is as much a price to check as anyone's.
+	for _, name := range append(append([]string{}, sybilPlan...), "k8") {
+		out[name] = kernelRates{remoteBps: sybilRemoteBps, importBps: sybilImportBps}
+	}
+	return out
+}
+
+// ---- the kernels come up ----------------------------------------------------
+
+func (s *story) actKernels() error {
+	for _, p := range kernelPlan[:4] { // the fifth joins later, into an economy already running
+		if _, err := s.join(p.name, p.exposureMax, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---- money enters -----------------------------------------------------------
+
+func (s *story) actMoney() error {
+	for _, u := range userPlan {
+		if u.on == "k5" {
+			continue // the fifth kernel joins later
+		}
+		s.k(u.on).MakeUser(u.handle)
+	}
+	// One payment into each kernel, from outside.
+	payer := map[string]string{}
+	for _, u := range userPlan {
+		if u.on == "k5" || u.bringsIn == 0 {
+			continue
+		}
+		payer[u.on] = u.handle
+		if err := s.fund(u.on, u.handle, u.bringsIn); err != nil {
+			return err
+		}
+	}
+	if err := s.awaitFunds(); err != nil {
+		return err
+	}
+	// Then it spreads, as it would. A transfer between local users carries no fee and needs no
+	// rail: the money is already inside the kernel.
+	//
+	// Note the units. `user transfer`, `user withdraw` and `admin deposit` take an amount as a
+	// person writes it and scale it by the world's decimals themselves, while every price and
+	// balance elsewhere in this story is in base units. Passing base units here funds nobody, and
+	// does so silently.
+	for _, u := range userPlan {
+		if u.on == "k5" || u.receives == 0 {
+			continue
+		}
+		src := payer[u.on]
+		if src == "" {
+			return fmt.Errorf("%s on %s is to receive money but nobody paid into that kernel", u.handle, u.on)
+		}
+		s.n.MustWork("money.spreads_by_local_transfer", s.k(u.on), src,
+			"user", "transfer", u.handle, strconv.FormatInt(u.receives, 10))
+		if got := s.k(u.on).Balance(u.handle); got < u.receives*s.scale {
+			return fmt.Errorf("%s on %s holds %d after a transfer of %d", u.handle, u.on, got, u.receives*s.scale)
+		}
+	}
+	// Money enters only against a named payment, and the same payment never moves money twice.
+	// Submitting one three times must credit it once, on every rail.
+	k1 := s.k("k1")
+	before := k1.Balance("ana")
+	_, _ = k1.Run("sysop-k1", "admin", "deposit", "ana", "100", "--ref", "netsim-replay")
+	afterFirst := k1.Balance("ana")
+	s.deposited("k1", (afterFirst-before)/s.scale)
+	for i := 0; i < 2; i++ {
+		_, _ = k1.Run("sysop-k1", "admin", "deposit", "ana", "100", "--ref", "netsim-replay")
+	}
+	// Whether the first submission credits anything is the rail's business: where the operator's
+	// record is the fact it credits, and where a chain is the fact it is refused until the chain
+	// has seen the payment. What no rail may do is credit the same reference twice.
+	s.n.Check("money.one_payment_credited_once", k1.Balance("ana") == afterFirst,
+		fmt.Sprintf("resubmitting one payment moved a further %d (%d after the first submission, "+
+			"%d after two more)", k1.Balance("ana")-afterFirst, afterFirst-before, k1.Balance("ana")-before))
+	return nil
+}
+
+// ---- the catalogue ----------------------------------------------------------
+
+func (s *story) actCatalogue() error {
+	s.publish("k1", "ana", "echo", 10, "public", "/echo", "Echo a message back to the caller")
+	s.publish("k1", "ana", "helper", 5, "private", "/echo", "A private helper, reachable only by its owner")
+	s.publish("k1", "ana", "local-only", 7, "local", "/echo", "Echo restricted to this kernel's own users")
+	s.publish("k1", "ben", "index", 3, "public", "/echo", "Ben's front door")
+	s.publish("k2", "cara", "quote", 25, "public", "/echo", "Return a price quote")
+	s.publish("k2", "cara", "premium", 200, "public", "/echo", "Premium analysis")
+	s.publish("k2", "cara", "flaky", 33, "public", "/flaky", "A service whose upstream fails intermittently")
+	s.publish("k2", "cara", "badout", 11, "public", "/badout", "A service that returns the wrong shape")
+	s.publish("k3", "dan", "bundle", 60, "public", "/echo", "A service others buy, priced above its cost")
+	s.publish("k4", "gus", "index", 0, "public", "/echo", "A free front door")
+
+	// The composites. dan/chain buys a service on another kernel, so its price must cover the
+	// imported quote — the remote price plus both operators' cuts. cara/pair buys two of cara's
+	// own actions in order: the first settles, the second returns the wrong shape and fails, which
+	// is the only way to observe a partial refund.
+	chain := filepath.Join(s.n.Root, "chain.wasm")
+	if err := writeComposite(chain, "ana@hub/echo"); err != nil {
+		return err
+	}
+	pair := filepath.Join(s.n.Root, "pair.wasm")
+	if err := writeComposite(pair, "cara/quote", "cara/badout"); err != nil {
+		return err
+	}
+	s.n.MustWork("catalogue.composite_across_kernels", s.k("k3"), "dan", "action", "create", "chain",
+		"--kind", "wasm", "--source", chain, "--price", s.px(120),
+		"--description", "A composite that buys a service on another kernel")
+	_, _ = s.k("k3").Run("dan", "action", "enable", "dan/chain")
+	// A composite nobody but its owner may call is a composite that never composes: the cross-
+	// kernel trade below buys this one, and so does another user on its own kernel.
+	_, _ = s.k("k3").Run("dan", "action", "update", "dan/chain", "--visibility", "public")
+	s.n.MustWork("catalogue.composite_partial", s.k("k2"), "cara", "action", "create", "pair",
+		"--kind", "wasm", "--source", pair, "--price", s.px(90),
+		"--description", "Buys a quote, then a service that returns the wrong shape")
+	_, _ = s.k("k2").Run("cara", "action", "enable", "cara/pair")
+	_, _ = s.k("k2").Run("cara", "action", "update", "cara/pair", "--visibility", "public")
+	return nil
+}
+
+// ---- trading ----------------------------------------------------------------
+
+// buy makes one purchase. A refusal for want of credit with the seller's kernel is not a failure:
+// it is the exposure engine doing its job, and the answer is to settle and try again.
+func (s *story) buy(kernel, user, action string) (ok bool, needsSettlement bool) {
+	out, err := s.k(kernel).Run(user, "--json", "run", action, `{"msg":"netsim"}`)
+	if err == nil && strings.Contains(out, "tx_id") {
+		return true, false
+	}
+	return false, strings.Contains(out, "credit with peer")
+}
+
+func (s *story) actTrading(rounds int) error {
+	local := []struct{ kernel, user, action string }{
+		{"k1", "ben", "ana/echo"}, {"k1", "ana", "ben/index"},
+		{"k2", "cara", "cara/quote"}, {"k3", "dan", "dan/bundle"},
+		{"k4", "gus", "gus/index"}, {"k1", "ana", "ana/local-only"},
+		{"k2", "cara", "cara/flaky"}, {"k2", "cara", "cara/badout"},
+	}
+	ok, refused, settled := 0, 0, 0
+	for r := 1; r <= rounds; r++ {
+		for _, t := range local {
+			if good, _ := s.buy(t.kernel, t.user, t.action); good {
+				ok++
+			} else {
+				refused++
+			}
+		}
+		for _, t := range crossKernelTrades {
+			good, needs := s.buy(t.kernel, t.user, t.action)
+			if needs {
+				if s.settle(t.kernel, t.seller) == nil {
+					settled++
+				}
+				good, _ = s.buy(t.kernel, t.user, t.action)
+			}
+			if good {
+				ok++
+			} else {
+				refused++
+			}
+		}
+		if r%5 == 0 || r == rounds {
+			fmt.Printf("  round %d/%d: %d bought, %d refused, %d settlements\n", r, rounds, ok, refused, settled)
+		}
+	}
+	fmt.Printf("  trading done: %d bought, %d refused, %d settlements\n", ok, refused, settled)
+	s.burst()
+	return nil
+}
+
+// burst is a fixed concurrent load, so the report can say what the network sustains rather than
+// only how long one call takes when nothing else is happening. The calls cross a kernel boundary:
+// a burst of local calls would measure one process talking to itself.
+func (s *story) burst() {
+	const callers, each = 8, 10
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok := 0
+	start := time.Now()
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				out, err := s.k("k4").Run("fay", "--json", "run", "cara@shop/quote", `{"msg":"burst"}`)
+				if err == nil && strings.Contains(out, "tx_id") {
+					mu.Lock()
+					ok++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start).Seconds()
+	if elapsed > 0 {
+		s.burstCallsPerSec = float64(ok) / elapsed
+	}
+	fmt.Printf("  burst: %d of %d cross-kernel calls in %.1fs (%.1f/s)\n",
+		ok, callers*each, elapsed, s.burstCallsPerSec)
+}
+
+// peerRow is what the creditor's books say the debtor's account holds. Negative means the debtor
+// owes; zero means nothing is outstanding between them.
+func (s *story) peerRow(creditor, debtor string) int64 {
+	out, _ := s.k(creditor).Run("sysop-"+creditor, "--json", "admin", "peers", "--all")
+	var rows []map[string]any
+	if json.Unmarshal([]byte(out), &rows) != nil {
+		return 0
+	}
+	for _, r := range rows {
+		if r["public_key"] == s.k(debtor).Key {
+			if f, ok := r["available"].(float64); ok {
+				return int64(f)
+			}
+		}
+	}
+	return 0
+}
+
+// open asks the debtor to pay the creditor and records the payment with the creditor's row as it
+// stood immediately before. It does not wait: waiting for each settlement in turn costs a
+// public chain's finality apiece, which for a whole economy is hours.
+func (s *story) open(debtor, creditor string) (*settlement, error) {
+	d, c := s.k(debtor), s.k(creditor)
+	before := s.peerRow(creditor, debtor)
+	out, _ := d.Run("sysop-"+debtor, "--json", "admin", "settle", c.Handle)
+	var m map[string]any
+	if json.Unmarshal([]byte(out), &m) != nil {
+		return nil, fmt.Errorf("no settlement was opened: %s", firstLine(out))
+	}
+	id, _ := m["settlement_id"].(string)
+	if id == "" {
+		return nil, fmt.Errorf("no settlement was opened: %s", firstLine(out))
+	}
+	amount := int64(0)
+	if f, ok := m["amount"].(float64); ok {
+		amount = int64(f)
+	}
+	st := &settlement{ID: id, Debtor: debtor, Creditor: creditor, Amount: amount, CreditorRowBefore: before}
+	if err := s.n.Rail.Pay(d, c, id, amount); err != nil {
+		return st, err
+	}
+	s.opened = append(s.opened, *st)
+	return st, nil
+}
+
+// await waits for one opened settlement to clear and records the creditor's row afterwards, which
+// is the evidence the report checks: the row must have moved by exactly the amount paid.
+func (s *story) await(st *settlement) error {
+	started := time.Now()
+	err := s.n.Rail.Await(s.k(st.Debtor), s.k(st.Creditor), st.ID, st.Amount,
+		func() int64 { return s.peerRow(st.Creditor, st.Debtor) })
+	st.CreditorRowAfter = s.peerRow(st.Creditor, st.Debtor)
+	st.Closed = err == nil
+	st.WallMs = time.Since(started).Milliseconds()
+	for i := range s.opened {
+		if s.opened[i].ID == st.ID {
+			s.opened[i] = *st
+		}
+	}
+	return err
+}
+
+// settleAll pays every debt in a set, opening all the payments before waiting for any: waiting for
+// each in turn costs a public chain's finality apiece.
+func (s *story) settleAll(pairs [][2]string) (done, failed int) {
+	var batch []*settlement
+	for _, p := range pairs {
+		if s.k(p[0]) == nil || s.k(p[1]) == nil || s.peerRow(p[1], p[0]) >= 0 {
+			continue
+		}
+		st, err := s.open(p[0], p[1])
+		if err != nil {
+			failed++
+			continue
+		}
+		batch = append(batch, st)
+	}
+	for _, st := range batch {
+		if s.await(st) == nil {
+			done++
+		} else {
+			failed++
+		}
+	}
+	return done, failed
+}
+
+// settle opens one payment and waits for it. Used where the story must trade again immediately
+// afterwards; the final pass opens every payment first and waits for them together.
+func (s *story) settle(debtor, creditor string) error {
+	st, err := s.open(debtor, creditor)
+	if err != nil {
+		return err
+	}
+	return s.await(st)
+}
+
+// ---- refusals ---------------------------------------------------------------
+
+func (s *story) actRefusals() error {
+	n, k1, k4 := s.n, s.k("k1"), s.k("k4")
+	n.MustRefuse("refuse.private_action", "not found|denied|permitted|private", k1, "ben", "run", "ana/helper", `{"msg":"x"}`)
+	n.MustRefuse("refuse.wrong_input_type", "schema|string|invalid|expected", k1, "ben", "run", "ana/echo", `{"msg":12345}`)
+	n.MustRefuse("refuse.unknown_action", "not found|no such|unknown", k1, "ben", "run", "ana/nosuch", `{}`)
+	// gus is funded, so the caller who cannot afford this must be one who genuinely cannot: a new
+	// account with nothing. Asserting a refusal that the balance does not actually force measures
+	// nothing.
+	k4.MakeUser("skint")
+	n.MustRefuse("refuse.beyond_balance", shortOfMoney, k4, "skint", "run", "cara@shop/premium", `{}`)
+
+	// A refusal must cost nothing. G6 puts the refusal before anything is locked, so the balance
+	// after a rejected call is the balance before it.
+	before := k1.Balance("ben")
+	_, _ = k1.Run("ben", "run", "ana/nosuch", `{}`)
+	n.Check("refuse.nothing_locked", k1.Balance("ben") == before,
+		fmt.Sprintf("a refused call moved the balance from %d to %d", before, k1.Balance("ben")))
+	return nil
+}
+
+// ---- composition and partial refunds ---------------------------------------
+
+func (s *story) actComposition() error {
+	// A composite that succeeds is charged its advertised price exactly, whatever it spent inside:
+	// the price the caller agreed to is the price, and a subtree cannot raise it.
+	// The buyer must not be the owner. An owner calling their own action pays the operator's fee
+	// and receives the rest back as its provider, so measuring the price on them would report a
+	// quarter of it and call the rule broken.
+	k3, k2 := s.k("k3"), s.k("k2")
+	before := k3.Balance("eve")
+	_, _ = k3.Run("eve", "--json", "run", "dan/bundle", `{"msg":"priced"}`)
+	charged := before - k3.Balance("eve")
+	s.n.Check("compose.charged_the_advertised_price", charged == 60*s.scale,
+		fmt.Sprintf("a call priced %d charged %d", 60*s.scale, charged))
+
+	// The partial refund. cara/pair buys a quote that settles and then a service that fails, so
+	// the composite fails with one descendant already paid. The caller must be refunded the price
+	// less exactly what that descendant consumed. The arithmetic is checked over every transaction
+	// tree in the report; running it here is what makes the case exist.
+	for i := 0; i < 3; i++ {
+		_, _ = k2.Run("cara", "--json", "run", "cara/pair", `{"msg":"partial"}`)
+	}
+	s.n.MustWork("compose.tree_readable", k2, "cara", "tx", "list", "--limit", "20")
+
+	// The composite is a generated WebAssembly module, registered and executed through the same
+	// binary an operator would use. Showing that it ran is not the same as showing it compiled: a
+	// module can be accepted at registration and fail to instantiate at the first call, which is
+	// exactly what a wrong constant offset did here.
+	var out string
+	ran := poll(30*time.Second, 3*time.Second, func() bool {
+		out, _ = k3.Run("eve", "--json", "run", "dan/chain", `{"msg":"composite"}`)
+		return strings.Contains(out, "tx_id")
+	})
+	s.n.Check("compose.wasm_executes_through_the_binary", ran,
+		"the generated composite never executed: "+firstLine(out))
+	var m map[string]any
+	_ = json.Unmarshal([]byte(out), &m)
+	trace, _ := m["trace_id"].(string)
+	var txs []map[string]any
+	_ = json.Unmarshal([]byte(k3.Get("eve", "/v1/transactions?limit=40")), &txs)
+	inner := 0
+	for _, t := range txs {
+		if str(t, "parent_trace_id") == trace {
+			inner++
+		}
+	}
+	s.n.Check("compose.wasm_bought_another_action", inner > 0,
+		"the composite ran but bought nothing, so no composition was measured")
+	return nil
+}
+
+// ---- steps ------------------------------------------------------------------
+
+func (s *story) actSteps() error {
+	// A step parks a call: the process waits, someone else supplies the result, the call resumes.
+	// It is a payment boundary that is not a network hop, and the rules about completing one twice
+	// or from the wrong party are what this exercises.
+	k1 := s.k("k1")
+	var ids []string
+	for i := 0; i < 4; i++ {
+		out, _ := k1.Run("ana", "--json", "run", "sys/message",
+			fmt.Sprintf(`{"to":"ben","message":"netsim step %d"}`, i))
+		var m struct {
+			Result struct {
+				StepID string `json:"step_id"`
+			} `json:"result"`
+		}
+		if json.Unmarshal([]byte(out), &m) == nil && m.Result.StepID != "" {
+			ids = append(ids, m.Result.StepID)
+		}
+	}
+	s.n.Check("step.parked_and_visible", len(ids) > 0, "no step was parked by sys/message")
+	if len(ids) == 0 {
+		return nil
+	}
+	s.n.MustWork("step.recipient_sees_it", k1, "ben", "step", "list")
+
+	// A step belongs to the party it was parked for, and anyone else completing it is taking the
+	// funds it holds. This is asked of a step that is still waiting: on one already completed the
+	// kernel refuses because it is finished, which proves a different rule.
+	s.n.MustRefuse("step.wrong_party_refused", "not found|denied|permitted|forbidden|only the step|required caller",
+		k1, "ana", "step", "complete", ids[0], `{"echo":"stolen"}`)
+
+	for _, id := range ids {
+		s.n.MustWork("step.completed", k1, "ben", "step", "complete", id, `{"echo":"received"}`)
+	}
+	// A step is a payment boundary: completing one twice must settle once, and the replay must be
+	// refused rather than pay again.
+	s.n.MustRefuse("step.replay_settles_once", "already|complete|settled|not waiting|not found",
+		k1, "ben", "step", "complete", ids[0], `{"echo":"again"}`)
+	return nil
+}
+
+// ---- value transfers --------------------------------------------------------
+
+func (s *story) actValue() error {
+	// sys/transfer moves value as the result of a call rather than as an operator's instruction.
+	k1, k4 := s.k("k1"), s.k("k4")
+	before := k1.Balance("ben")
+	moved := int64(0)
+	for i := 0; i < 5; i++ {
+		if s.n.MustWork("value.transferred", k1, "ana", "run", "sys/transfer",
+			fmt.Sprintf(`{"target":"ben","amount":%s}`, s.px(20))) {
+			moved += 20 * s.scale
+		}
+	}
+	got := k1.Balance("ben") - before
+	s.n.Check("value.recipient_credited", got == moved,
+		fmt.Sprintf("five transfers of %d moved %d, not %d", 20*s.scale, got, moved))
+	s.n.MustRefuse("value.overdraw_refused", shortOfMoney, k4, "gus",
+		"run", "sys/transfer", fmt.Sprintf(`{"target":"fay","amount":%s}`, s.px(999999)))
+	s.n.MustRefuse("value.unknown_target_refused", "not found|invalid|target|no such", k1, "ana",
+		"run", "sys/transfer", fmt.Sprintf(`{"target":"nobody-here","amount":%s}`, s.px(1)))
+	return nil
+}
+
+// ---- delegated authorization -----------------------------------------------
+
+func (s *story) actDelegated() error {
+	// Some actions act on the caller's own account elsewhere, and need the caller's credential
+	// rather than the provider's. No funds may lock before consent exists, and withdrawing consent
+	// takes effect at once.
+	k2 := s.k("k2")
+	auth := `{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}`
+	s.n.MustWork("auth.published", k2, "cara", "action", "create", "vault/read", "--kind", "http",
+		"--source", s.n.Backend+"/headers", "--price", s.px(15),
+		"--description", "Reads the caller's own upstream account", "--auth", auth)
+	_, _ = k2.Run("cara", "action", "enable", "cara/vault/read")
+
+	before := k2.Balance("cara")
+	s.n.MustRefuse("auth.refused_without_consent", "grant|connect|consent|authoriz",
+		k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
+	s.n.Check("auth.nothing_locked_before_consent", k2.Balance("cara") == before,
+		"the balance moved on a call refused for want of consent")
+	s.n.MustWork("auth.connected", k2, "cara", "user", "connect", "cara/vault", "--token", "netsim-delegated-token")
+	s.n.MustWork("auth.works_with_consent", k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
+	host := strings.TrimPrefix(s.n.Backend, "http://")
+	s.n.MustWork("auth.disconnected", k2, "cara", "user", "disconnect", "--account", "bearer:"+host)
+	s.n.MustRefuse("auth.refused_after_revoking", "grant|connect|consent|authoriz",
+		k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
+	return nil
+}
+
+// ---- ratings and evidence ---------------------------------------------------
+
+func (s *story) actEvidence() error {
+	// A rating is public evidence: a stranger deciding whether to buy must be able to read it, and
+	// must not learn who wrote it.
+	rate := func(kernel, user string) {
+		body := s.k(kernel).Get(user, "/v1/transactions?limit=40")
+		var txs []map[string]any
+		if json.Unmarshal([]byte(body), &txs) != nil {
+			return
+		}
+		done := 0
+		for _, t := range txs {
+			if t["status"] != "success" || t["rating"] != nil || done >= 8 {
+				continue
+			}
+			done++
+			value := "1"
+			if done%4 == 0 {
+				value = "0"
+			}
+			id, _ := t["id"].(string)
+			_, _ = s.k(kernel).Run(user, "tx", "rate", id, value, "--note", fmt.Sprintf("netsim run %d", done))
+		}
+	}
+	rate("k2", "cara")
+	rate("k1", "ana")
+	rate("k3", "dan")
+
+	s.n.MustWork("evidence.ratings_readable", s.k("k1"), "ana", "action", "ratings", "ana/echo")
+	s.n.MustWork("evidence.stats_readable", s.k("k1"), "ana", "action", "stats", "ana/echo")
+	for _, pair := range [][2]string{{"k1", "k2"}, {"k2", "k1"}, {"k3", "k1"}} {
+		s.n.MustWork("evidence.peer_inspectable", s.k(pair[0]), "sysop-"+pair[0],
+			"admin", "inspect", "--", s.k(pair[1]).Key)
+	}
+	// The privacy check is made on what actually crosses the wire, not on what the command line
+	// chose to print.
+	s.receiptsVerify()
+	s.write("ratings-projection.json", s.k("k1").Get("ana", "/v1/actions/ana%2Fecho/ratings"))
+	s.write("catalogue-anonymous.json", s.k("k1").Get("", "/v1/actions"))
+	return nil
+}
+
+func (s *story) write(name, body string) {
+	_ = writeFile(filepath.Join(s.n.Root, name), body)
+}
+
+// ---- the late joiner --------------------------------------------------------
+
+func (s *story) actLateJoiner() error {
+	p := kernelPlan[4]
+	k, err := s.join(p.name, p.exposureMax, "")
+	if err != nil {
+		return err
+	}
+	k.MakeUser("hal")
+	if err := s.fund("k5", "hal", 6000); err != nil {
+		return err
+	}
+	if err := s.awaitFunds(); err != nil {
+		return err
+	}
+	s.publish("k5", "hal", "service", 40, "public", "/echo", "A late provider's service")
+	// A newcomer must be found by the kernels already running, and must be able to buy from them.
+	found := poll(30*time.Second, 2*time.Second, func() bool {
+		good, _ := s.buy("k1", "ana", "hal@late/service")
+		return good
+	})
+	s.n.Check("late.discovered_and_bought_from", found,
+		"a kernel that joined a running economy was never reachable")
+	if good, needs := s.buy("k5", "hal", "cara@shop/quote"); needs {
+		_ = s.settle("k5", "k2")
+	} else if !good {
+		s.n.Check("late.can_buy", false, "the late joiner could not buy from an established kernel")
+	}
+	return nil
+}
+
+// ---- churn ------------------------------------------------------------------
+
+func (s *story) actChurn() error {
+	// A kernel is killed outright, with no chance to tidy up, while others are trading with it.
+	// What this can honestly observe is that nobody loses money and that trade resumes.
+	//
+	// It is NOT a mid-call crash. The provider is stopped before the call, so the caller's request
+	// was never dispatched. The hard case — the request received and the answer lost — needs the
+	// provider killed while it is executing, and is covered by flows/flows_federation.sh
+	// (a real process, killed during a slow call) and cmd/juice/fedsim_test.go (deterministically,
+	// with the response dropped). Claiming it here would be claiming a result this act cannot
+	// produce.
+	k2, k3 := s.k("k2"), s.k("k3")
+	before := k3.Balance("dan")
+	k2.Stop()
+
+	out, err := k3.Run("dan", "run", "cara@shop/quote", `{"msg":"gone"}`)
+	s.n.Check("churn.call_to_an_offline_provider_does_not_succeed", err != nil,
+		"a call to a kernel that had been killed reported success: "+firstLine(out))
+
+	// Funds parked on an unreachable peer are what an operator needs to see (§13), so they are
+	// read from the supervision view and reported with their age. Whether they should have been
+	// released is the protocol's business, not this act's: U35 lets an ambiguously dispatched call
+	// stay parked until proof arrives.
+	parked, age := s.parkedFunds(k3)
+	if parked > 0 {
+		fmt.Printf("    %d parked on an unreachable peer, oldest %s\n", parked, age)
+	}
+	s.n.Check("churn.parked_funds_are_visible_to_the_operator",
+		parked == 0 || age != "",
+		"funds are parked but the supervision view does not say since when")
+
+	restartedAt := time.Now()
+	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].exposureMax)); err != nil {
+		return err
+	}
+	back := poll(90*time.Second, 3*time.Second, func() bool {
+		good, needs := s.buy("k3", "dan", "cara@shop/quote")
+		if needs {
+			_ = s.settle("k3", "k2")
+			good, _ = s.buy("k3", "dan", "cara@shop/quote")
+		}
+		return good
+	})
+	s.recoverySeconds = time.Since(restartedAt).Seconds()
+	s.n.Check("churn.trade_resumes_after_a_restart", back,
+		"trade never resumed with a kernel that came back")
+	s.n.Check("churn.buyer_gained_nothing_from_the_outage", k3.Balance("dan") <= before,
+		fmt.Sprintf("a buyer's balance rose across a provider's death: %d then %d",
+			before, k3.Balance("dan")))
+	return nil
+}
+
+// parkedFunds is what a kernel is holding on calls still waiting for a signed receipt, and how long
+// the oldest has waited, from the operator's own supervision view (§13) — not from transaction
+// rows, because a call that is still parked has no settled transaction to read.
+func (s *story) parkedFunds(k *Kernel) (int64, string) {
+	procs, _ := pages(k, "sysop-"+k.Name, "/v1/processes")
+	_, funds, oldest := parkedIn(procs)
+	return funds, oldest
+}
+
+// ---- attacks ----------------------------------------------------------------
+
+func (s *story) actAttacks() error {
+	s.attackSybil()
+	s.attackFreeRider()
+	s.attackReachingPastARefusal()
+	s.attackSquatting()
+	// The fifth is replay, which is made in the act where money enters: one payment submitted
+	// three times must be credited once. It belongs there because that is where the payment is.
+	return nil
+}
+
+// An attacker who can mint identities cheaply tries to draw more unsecured credit than one
+// identity could, by spreading the borrowing over several. The answer is one global cap for all
+// peers together, so the total owed stays under it however many identities appear.
+func (s *story) attackSybil() {
+	fmt.Println("  the attacker mints identities and borrows against all of them")
+	fail := func(why string) { s.n.Check("attack.sybil_shares_one_cap", false, why) }
+	for _, name := range sybilPlan {
+		// Each attacker has its own account name (an actor's name is its client home) and pays its
+		// own way: an identity with no money is refused for want of funds and never reaches the
+		// cap, which is a different rule, tested elsewhere.
+		k, err := s.join(name, 3000, "")
+		if err != nil {
+			fail("the attacking kernel would not start: " + err.Error())
+			return
+		}
+		k.MakeUser("sybil-" + name)
+		if err := s.fund(name, "sybil-"+name, 1500); err != nil {
+			fail("could not fund the attacker: " + err.Error())
+			return
+		}
+	}
+	if err := s.awaitFunds(); err != nil {
+		fail(err.Error())
+		return
+	}
+	// The victim's books are cleared first — lowering the cap under debt the honest economy ran up
+	// starts the attack past the line — and it is then put on the low cap the exposure engine
+	// exists for. The economy itself runs on a cap its trading cannot reach, because a pair that
+	// settles mid-trade costs a payment and a finality wait for nothing.
+	s.settleAll([][2]string{{"k1", "k2"}, {"k3", "k2"}, {"k4", "k2"}, {"k5", "k2"}})
+	s.k("k2").Stop()
+	if _, err := s.n.Boot("k2", s.opts("k2", sybilVictimCap)); err != nil {
+		fail("the victim would not restart: " + err.Error())
+		return
+	}
+	defer s.restoreVictim()
+
+	// Both identities borrow, alongside an honest kernel, until the shop refuses someone. The cap
+	// governs the total owed by everyone, not any one row, and the refusal must be the exposure
+	// engine's — a refusal for want of the caller's own money would let an unfunded attack look
+	// like a defended one.
+	refused := false
+	for i := 0; i < 12; i++ {
+		for _, b := range []struct{ kernel, user string }{{"k6", "sybil-k6"}, {"k7", "sybil-k7"}, {"k3", "dan"}} {
+			out, err := s.k(b.kernel).Run(b.user, "--json", "run", "cara@shop/quote", `{"msg":"sybil"}`)
+			refused = refused || (err != nil && (strings.Contains(out, "credit with peer") || strings.Contains(out, "exposure")))
+		}
+	}
+	peers, _ := read[[]map[string]any](s.k("k2"), "sysop-k2", "admin", "peers", "--all")
+	var owed int64
+	for _, r := range peers {
+		if v := num(r, "available"); v < 0 {
+			owed -= v
+		}
+	}
+	s.n.Check("attack.sybil_reached_the_cap", refused,
+		"nobody was ever refused for want of credit, so the cap was never reached and the attack proves nothing")
+	s.n.Check("attack.sybil_shares_one_cap", owed <= sybilVictimCap*s.scale,
+		fmt.Sprintf("peers owe %d in total against one cap of %d", owed, sybilVictimCap*s.scale))
+}
+
+// restoreVictim puts the shop back on the economy's own cap, so the acts that follow trade under
+// the same terms as the acts before.
+func (s *story) restoreVictim() {
+	s.k("k2").Stop()
+	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].exposureMax)); err != nil {
+		s.n.Check("attack.sybil_victim_restored", false, err.Error())
+		return
+	}
+	// A restarted kernel listens on a new port, so its peers must find it again. Without this the
+	// next act's refusal is about a kernel that could not be reached, which is a different reason
+	// from the one under test.
+	if !poll(60*time.Second, 2*time.Second, func() bool {
+		good, _ := s.buy("k3", "dan", "cara@shop/quote")
+		return good
+	}) {
+		s.n.Check("attack.sybil_victim_restored", false, "the shop was never reachable again after the attack")
+	}
+}
+
+// A caller with nothing tries to have work done anyway. The refusal comes before anything is
+// locked or executed, so the balance is untouched and no transaction exists.
+func (s *story) attackFreeRider() {
+	fmt.Println("  a caller with no balance asks for paid work")
+	k1 := s.k("k1")
+	k1.MakeUser("pauper")
+	before := k1.Balance("pauper")
+	s.n.MustRefuse("attack.freerider_local", shortOfMoney,
+		k1, "pauper", "run", "ana/echo", `{"msg":"free"}`)
+	s.n.MustRefuse("attack.freerider_remote", shortOfMoney+"|credit",
+		k1, "pauper", "run", "cara@shop/quote", `{"msg":"free"}`)
+	s.n.Check("attack.freerider_locked_nothing", k1.Balance("pauper") == before,
+		"a caller with no balance had funds moved anyway")
+}
+
+// A receipt is the provider's signed statement that it did the work, and it must verify without
+// asking anyone. What this suite can honestly show is that the check exists and passes on genuine
+// receipts, over the same interface an operator uses.
+//
+// Forging one is deliberately NOT done here. Editing a stored receipt means writing to the
+// kernel's private database, which reaches past every interface this suite is supposed to drive
+// and binds it to a schema it has no business knowing. A forged receipt also has to be re-signed
+// to test anything beyond "a corrupted row is rejected", and signing requires the kernel's keys.
+// That test belongs where a peer's signature can be forged on the wire, and it is already there:
+// kernel/federation_test.go covers a receipt with the wrong action, the wrong argument hash, a
+// charge above the agreed price, a negative charge, and a reply hash that does not match.
+func (s *story) receiptsVerify() {
+	k1 := s.k("k1")
+	var txs []map[string]any
+	_ = json.Unmarshal([]byte(k1.Get("ben", "/v1/transactions?limit=40")), &txs)
+	id := ""
+	for _, t := range txs {
+		if t["status"] == "success" && t["remote_receipt_json"] != nil {
+			if v, ok := t["id"].(string); ok {
+				id = v
+				break
+			}
+		}
+	}
+	if id == "" {
+		s.n.Check("evidence.receipt_verifies", false, "no receipted cross-kernel transaction existed to verify")
+		return
+	}
+	// `tx verify` answers rather than fails: it prints the verdict and names each check, which is
+	// what an operator needs, so this reads the answer instead of the exit status.
+	out, _ := k1.Run("ben", "tx", "verify", id)
+	s.n.Check("evidence.receipt_verifies", strings.Contains(out, "valid: true"),
+		"a genuine receipt did not verify: "+firstLine(out))
+	for _, check := range []string{"receipt_hash", "signature"} {
+		s.n.Check("evidence.receipt_names_its_checks_"+check, strings.Contains(out, check),
+			"the verification did not name the "+check+" check, so an operator cannot see what held")
+	}
+}
+
+// Two attempts at the same thing: an action marked local is asked for from another kernel, and an
+// action on a kernel the attacker cannot reach is asked for through one that can. Access is not
+// transitive, and a kernel does not relay on request.
+func (s *story) attackReachingPastARefusal() {
+	fmt.Println("  the attacker asks for what was never exported")
+	k3, k1 := s.k("k3"), s.k("k1")
+	miss := "not found|not available|refused|denied|no such|unknown"
+	s.n.MustRefuse("attack.local_action_not_exported", miss, k3, "dan", "run", "ana@hub/local-only", `{"msg":"x"}`)
+	s.n.MustRefuse("attack.private_action_not_exported", miss, k3, "dan", "run", "ana@hub/helper", `{"msg":"x"}`)
+	s.n.MustRefuse("attack.no_relay_through_a_third_kernel", miss, k3, "dan", "run", "ana@shop/echo", `{"msg":"x"}`)
+	// Value may not name a beneficiary on another kernel: a transfer that crossed would let a
+	// caller move a stranger's balance from outside.
+	s.n.MustRefuse("attack.value_may_not_cross", "not found|local|invalid|target", k1, "ana",
+		"run", "sys/transfer", fmt.Sprintf(`{"target":"cara@shop","amount":%s}`, s.px(5)))
+}
+
+// A newcomer advertises a handle a victim already uses for someone else. A petname is the local
+// operator's own label and is never taken from the network, so the victim's name must still point
+// where it did, and must still buy from the same kernel.
+func (s *story) attackSquatting() {
+	fmt.Println("  a newcomer claims a name already in use")
+	if _, err := s.join("k8", 3000, "shop"); err != nil {
+		s.n.Check("attack.squatted_name_unmoved", false, "the squatting kernel would not start")
+		return
+	}
+	time.Sleep(5 * time.Second)
+	out, _ := s.k("k1").Run("sysop-k1", "--json", "admin", "peers", "--all")
+	var rows []map[string]any
+	_ = json.Unmarshal([]byte(out), &rows)
+	pointsAt := ""
+	for _, r := range rows {
+		if r["petname"] == "shop" {
+			pointsAt, _ = r["public_key"].(string)
+		}
+	}
+	s.n.Check("attack.squatted_name_unmoved", pointsAt == s.k("k2").Key,
+		"the victim's name for the shop moved to the squatter")
+	// The name is only worth defending if it still buys from the right kernel.
+	good, needs := s.buy("k3", "dan", "cara@shop/quote")
+	if needs {
+		_ = s.settle("k3", "k2")
+		good, _ = s.buy("k3", "dan", "cara@shop/quote")
+	}
+	s.n.Check("attack.squatted_name_still_buys", good,
+		"a purchase addressed to the squatted name no longer reached the original kernel")
+}
+
+// ---- settle everything ------------------------------------------------------
+
+func (s *story) actSettleAll() error {
+	names := []string{"k1", "k2", "k3", "k4", "k5"}
+	names = append(names, sybilPlan...)
+
+	// Open every payment first, then wait for them together. Waiting for each in turn costs a
+	// public chain's finality apiece — a quarter of an hour on Arbitrum Sepolia — which for a
+	// dozen positions is hours. Submitted together they finalize together.
+	//
+	// The pass repeats because paying one debt is itself activity, and a retry landing during the
+	// pass can open a position the pass has already looked at. It is bounded, so a debt that will
+	// not clear is reported rather than looped over.
+	done, failed := 0, 0
+	for pass := 1; pass <= 3; pass++ {
+		var pairs [][2]string
+		for _, d := range names {
+			for _, c := range names {
+				if d != c {
+					pairs = append(pairs, [2]string{d, c})
+				}
+			}
+		}
+		d, f := s.settleAll(pairs)
+		done, failed = done+d, failed+f
+		if d == 0 {
+			break
+		}
+		fmt.Printf("  pass %d: %d positions settled\n", pass, d)
+	}
+	fmt.Printf("  %d positions settled, %d unresolved\n", done, failed)
+
+	// A creditor may still hold announcements it has not recorded. Recording them is what lets the
+	// two sides' books be compared at all.
+	for _, c := range names {
+		if s.k(c) == nil {
+			continue
+		}
+		out, _ := s.k(c).Run("sysop-"+c, "--json", "admin", "deposit")
+		var rows []map[string]any
+		if json.Unmarshal([]byte(out), &rows) != nil {
+			continue
+		}
+		for _, r := range rows {
+			id, _ := r["id"].(string)
+			party, _ := r["party_handle"].(string)
+			amount := int64(0)
+			if f, ok := r["amount"].(float64); ok {
+				amount = int64(f)
+			}
+			if id != "" {
+				_, _ = s.k(c).Run("sysop-"+c, "admin", "deposit", "--ref", id,
+					"--", party, strconv.FormatInt(amount, 10))
+			}
+		}
+	}
+	return nil
+}

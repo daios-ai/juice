@@ -14,6 +14,11 @@
 # Opt-in suites (excluded from the default run; each needs a heavy external toolchain):
 #   JUICE_TINYGO_FLOWS=1 ... — @sys/tinygo/compile (real TinyGo toolchain on PATH)
 #   JUICE_RAIL_FLOWS=1 ...   — the rail against a local chain (Foundry + juice-rail's mocks)
+#   JUICE_SEPOLIA_FLOWS=1 ...— the rail against live Arbitrum Sepolia; needs JUICE_SEPOLIA_RPC and
+#                              JUICE_SEPOLIA_KEY_FILE (mode 600). Takes ~20 minutes: it waits out
+#                              real L1 finality, which is the property it exists to test.
+#   JUICE_NETWORK_FLOWS=1 ...— the real-NAT federation gate; needs a second host behind a different
+#                              NAT (see flows_network.sh).
 #
 # Via the Go suite:  go test -tags integration ./cmd/juice/ -run TestFlowsIntegration
 #
@@ -41,9 +46,15 @@ if [ "${JUICE_NETWORK_FLOWS:-0}" = "1" ]; then
 fi
 
 # Opt-in: the rail's local-chain release gate (Foundry on PATH; juice-rail's compiled mocks).
+if [ "${JUICE_SEPOLIA_FLOWS:-0}" = "1" ]; then
+    echo "=== live-testnet rail gate ONLY (JUICE_SEPOLIA_FLOWS=1) ==="
+    run_flows flow_rail_sepolia
+    exit $?
+fi
+
 if [ "${JUICE_RAIL_FLOWS:-0}" = "1" ]; then
     echo "=== rail local-chain gate ONLY (JUICE_RAIL_FLOWS=1) ==="
-    run_flows flow_rail_chain flow_rail_chain_settlement
+    run_flows flow_rail_chain flow_rail_chain_settlement flow_rail_chain_refill_and_halt
     exit $?
 fi
 
@@ -71,7 +82,7 @@ run_flows \
     flow_federation_import_execute flow_federation_changed_reimport flow_fed_rename \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
-    flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_peer_sync flow_fed_inspect_read_only \
+    flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_provider_crash_recovery flow_fed_peer_sync flow_fed_inspect_read_only \
     flow_fed_step_complete flow_settlement flow_transfer \
-    flow_transaction_access flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
+    flow_transaction_access flow_list_projections flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

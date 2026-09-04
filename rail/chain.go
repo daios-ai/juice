@@ -38,7 +38,7 @@ type lib interface {
 	ScanDeposits(ctx context.Context) ([]jrail.Deposit, error)
 	Deposits() ([]jrail.Deposit, error)
 	DepositsScannedTo() (uint64, bool, error)
-	FinalizedBalances(ctx context.Context) (*big.Int, *big.Int, uint64, error)
+	SettledBalances(ctx context.Context) (*big.Int, *big.Int, uint64, error)
 	// The three below are how a purchase the ledger never recorded is found again: unresolved ones
 	// the rail still holds, and, once resolved, the nonce each intent owns.
 	Pending() ([]jrail.Intent, error)
@@ -491,7 +491,7 @@ func toDeposit(d jrail.Deposit) (kernel.RailDeposit, error) {
 
 // FinalizedBalances is the audit's cut: what is held at a block that can no longer change.
 func (c *Chain) FinalizedBalances(ctx context.Context) (int64, string, uint64, bool, error) {
-	token, gas, block, err := c.rail.FinalizedBalances(ctx)
+	token, gas, block, err := c.rail.SettledBalances(ctx)
 	if err != nil {
 		return 0, "", 0, false, err
 	}

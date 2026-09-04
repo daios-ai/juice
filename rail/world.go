@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strconv"
 	"strings"
 
 	jrail "github.com/daios-ai/juice-rail/go/rail"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -176,9 +178,16 @@ func (w World) Domain() (jrail.Domain, error) {
 	if err != nil {
 		return jrail.Domain{}, err
 	}
-	finality := w.Finality
-	if finality == "" {
-		finality = "finalized"
+	// The settlement tag is the world's choice: latest, safe or finalized. Below true finality a
+	// settled fact is the sequencer's word, and the kernel prices that risk through the remote
+	// premium; the rail does not. Absent, the strictest applies.
+	tag := w.Finality
+	if tag == "" {
+		tag = "finalized"
+	}
+	var finality rpc.BlockNumber
+	if err := finality.UnmarshalJSON([]byte(strconv.Quote(tag))); err != nil {
+		return jrail.Domain{}, fmt.Errorf("world %q: finality %q: %w", w.Name, tag, err)
 	}
 	d := jrail.Domain{
 		Name: w.Name, ChainID: new(big.Int).SetUint64(w.ChainID), Token: token,

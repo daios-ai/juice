@@ -189,3 +189,173 @@ flow_rail_chain_settlement() {
     assert_jnum "rail_chain_settlement.creditor_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
     assert_json "rail_chain_settlement.nothing_left" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
 }
+
+# Fuel, and what happens when it cannot be bought. A kernel pays for its own gas out of `sys`
+# earnings (D23 refill), and every outgoing money verb depends on that succeeding. This drives the
+# three states the drive of 2026-09-03 never reached on any rail: a refill that works, a purchase
+# that cannot be made, and the halt it causes.
+#
+# §13: "while any row is `blocked`, outgoing rail work refuses ErrRailStopped while deposits, paid
+# work, and reads continue, and the local fees that accrue are what clear it."
+flow_rail_chain_refill_and_halt() {
+    echo "=== FLOW rail_chain_refill_and_halt ==="
+    local dir db hs ha akey
+    dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    akey=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+
+    _chain_world "$dir" rail_refill || return
+
+    # A kernel buys its own fuel from the venue named in its world file (D23 refill). Point the
+    # router at the token, which has no swap entry point, and that purchase can never be priced.
+    python3 - "$CHAIN_WORLD" "$CHAIN_TOKEN" <<'PYEOF'
+import json, sys
+w = json.load(open(sys.argv[1]))
+w["venue"]["router"] = sys.argv[2]
+w["venue"]["quoter"] = sys.argv[2]
+json.dump(w, open(sys.argv[1], "w"))
+PYEOF
+
+    make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+
+    # §13: "Money verbs also refuse until the full domain check — chain, token, decimals, venue —
+    # has passed, and the worker does nothing at all before then: an unverified token misstates
+    # every amount." A kernel that cannot price its own fuel is in exactly that state, and the
+    # refusal must say which term failed rather than fail obscurely.
+    local out
+    out=$(j "$db" "$ha" user withdraw 1 2>&1)
+    echo "  money verb says: $(head -c 140 <<< "$out")"
+    assert_contains "rail_refill.refusal_names_the_venue" "venue" "$out"
+    assert_contains "rail_refill.refusal_says_not_ready" "not ready" "$out"
+
+    # Nothing is half-done: no withdrawal row is created for a payment the rail never accepted.
+    assert_eq "rail_refill.no_orphan_row" 0 "$(list_len "$(jj "$db" "$ha" user withdraw)")"
+
+    # Reads keep working while money is refused — an operator must be able to see why.
+    assert_nonempty "rail_refill.reads_continue"    "$(jj "$db" "$ha" user me)"
+    assert_nonempty "rail_refill.identity_readable" "$(jj "$db" "$hs" admin identity)"
+    assert_eq "rail_refill.books_still_balance" 0 \
+        "$(pathf "$(jj "$db" "$hs" admin identity)" solvency.gap)"
+
+    # The same kernel, over a working venue, is immediately able to move money: the refusal is the
+    # domain check and nothing else. This is the control that makes the assertions above mean
+    # something rather than just observing a broken kernel.
+    local dir2 db2 hs2 ha2 vault2
+    dir2=$(new_dir); db2="$dir2/kernel/juice.db"; hs2=$(home "$dir2" sys2); ha2=$(home "$dir2" alice2)
+    _chain_world "$dir2" rail_refill_ok || return
+    make_admin "$db2" "$hs2" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot_ok" "server did not start"; return; }
+    make_user "$db2" "$hs2" "$ha2" alice2
+    vault2=$(vault_of "$db2")
+    _chain_pay_in "$db2" "$ha2" "$akey" 20000000 >/dev/null
+    anvil_send "$ANVIL_KEY" "$vault2" --value 1ether
+    assert_jnum "rail_refill.working_venue_credits" "$(jj "$db2" "$ha2" user me)" available 20000000
+    j "$db2" "$ha2" user withdraw 2 >/dev/null 2>&1
+    local i status=""
+    for i in $(seq 1 40); do
+        anvil_mine 2
+        status=$(python3 -c "
+import sys, json
+rows = json.loads(sys.argv[1]); print(rows[0]['status'] if rows else '-')" "$(jj "$db2" "$ha2" user withdraw)")
+        [ "$status" = confirmed ] && break
+        sleep 0.5
+    done
+    assert_eq "rail_refill.working_venue_pays_out" confirmed "$status"
+}
+
+# ---------------------------------------------------------------------------
+# The live testnet
+# ---------------------------------------------------------------------------
+# Everything above runs against a chain the test controls: blocks arrive when it says so, finality
+# is one `anvil_mine` away, gas is free and the venue always answers. None of that is true of a real
+# chain, and the properties that only appear there — a deposit invisible for a quarter of an hour,
+# a settlement round trip bounded below by one finality window, an RPC that can simply fail — are
+# the ones an operator actually lives with.
+#
+# Opt in with JUICE_SEPOLIA_FLOWS=1. It needs:
+#   JUICE_SEPOLIA_RPC       an Arbitrum Sepolia endpoint
+#   JUICE_SEPOLIA_KEY_FILE  a file, mode 0600, holding one funded private key
+# The key is read from where it lives and never copied: a test that writes a credential somewhere
+# new has created a second place for it to leak from.
+flow_rail_sepolia() {
+    echo "=== FLOW rail_sepolia ==="
+    local rpc keyfile key world dir db hs ha
+    rpc=${JUICE_SEPOLIA_RPC:-}
+    keyfile=${JUICE_SEPOLIA_KEY_FILE:-}
+    [ -n "$rpc" ] || { fail "sepolia.rpc" "set JUICE_SEPOLIA_RPC"; return; }
+    [ -n "$keyfile" ] && [ -f "$keyfile" ] || { fail "sepolia.key" "set JUICE_SEPOLIA_KEY_FILE to a readable file"; return; }
+    if [ "$(stat -c '%a' "$keyfile")" != "600" ]; then
+        fail "sepolia.key_mode" "$keyfile must be mode 600 (it holds a funded key)"; return
+    fi
+    key=$(tr -d '[:space:]' < "$keyfile")
+
+    dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+
+    # The shipped `test` world names Arbitrum Sepolia's mock USDT0. Its fromBlock is where the file
+    # was written; move it near the head so the scanner does not replay millions of blocks. That is
+    # an operational field: the network digest is over {name, chainId, token} alone, so the kernel
+    # is on the same network either way.
+    local finalized
+    finalized=$(cast block finalized --rpc-url "$rpc" -f number 2>/dev/null)
+    [ -n "$finalized" ] || { fail "sepolia.reachable" "no answer from $rpc"; return; }
+    world="$dir/world.json"
+    python3 - "$world" "$finalized" <<'PYEOF'
+import json, sys
+w = json.load(open("rail/worlds/test.json"))
+w["fromBlock"] = int(sys.argv[2]) - 200
+json.dump(w, open(sys.argv[1], "w"), indent=2)
+PYEOF
+    local token; token=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['token'])" "$world")
+    echo "  network: test (Arbitrum Sepolia), token $token, finalized head $finalized"
+
+    make_admin "$db" "$hs" world="$world" rail_rpc="$rpc" \
+        || { fail "sepolia.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+
+    local vault; vault=$(vault_of "$db")
+    assert_contains "sepolia.kernel_serves_an_address" "0x" "$vault"
+
+    # A throwaway wallet, funded from the operator's key, registers itself and pays in. The wallet
+    # exists only for this run; its key is never written anywhere.
+    local wkey waddr kkey uid msg sig
+    wkey=$(cast wallet new --json | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['private_key'])")
+    waddr=$(cast wallet address --private-key "$wkey")
+    cast send --private-key "$key" --rpc-url "$rpc" "$waddr" --value 0.0004ether >/dev/null 2>&1
+    cast send --private-key "$key" --rpc-url "$rpc" "$token" "mint(address,uint256)" "$waddr" 2000000 >/dev/null 2>&1
+
+    kkey=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
+    uid=$(strfield "$(jj "$db" "$ha" user me)" id)
+    printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
+    sig=$(cast wallet sign --private-key "$wkey" "$msg")
+    j "$db" "$ha" user address "$waddr" --signature "$sig" >/dev/null 2>&1
+    assert_eq "sepolia.address_registered" "${waddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" rail_address)"
+
+    # Pay in, and wait out L1 finality. This is the assertion: the kernel credits nothing until the
+    # payment is final, however long that takes.
+    local txh block
+    txh=$(cast send --private-key "$wkey" --rpc-url "$rpc" "$token" "transfer(address,uint256)" "$vault" 1500000 --json \
+        | python3 -c "import json,sys;print(json.load(sys.stdin)['transactionHash'])")
+    block=$(cast tx "$txh" --rpc-url "$rpc" blockNumber 2>/dev/null)
+    echo "  deposit $txh in block $block; waiting for finality"
+
+    local started deadline credited=0 fin
+    started=$(date +%s); deadline=$((started + 2400))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        credited=$(numfield "$(jj "$db" "$ha" user me)" available)
+        [ "$credited" -gt 0 ] && break
+        fin=$(cast block finalized --rpc-url "$rpc" -f number 2>/dev/null)
+        echo "    $(( ($(date +%s) - started) / 60 ))m: finalized=$fin needs=$block"
+        sleep 60
+    done
+    local waited=$(( $(date +%s) - started ))
+    echo "  credited after ${waited}s"
+    assert_eq "sepolia.deposit_credited" 1500000 "$credited"
+    assert_eq "sepolia.credit_waited_for_finality" yes "$([ "$waited" -gt 60 ] && echo yes || echo no)"
+
+    # The books agree with the chain, read independently.
+    local ident onchain
+    ident=$(jj "$db" "$hs" admin identity)
+    onchain=$(cast call "$token" 'balanceOf(address)(uint256)' "$vault" --rpc-url "$rpc" | awk '{print $1}')
+    assert_eq "sepolia.books_balance" 0 "$(pathf "$ident" solvency.gap)"
+    assert_eq "sepolia.vault_matches_the_chain" "$onchain" "$(pathf "$ident" solvency.vault)"
+    echo "  gas left on the operator key: $(cast balance "$(cast wallet address --private-key "$key")" --rpc-url "$rpc" --ether)"
+}

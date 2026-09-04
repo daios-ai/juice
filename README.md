@@ -287,3 +287,43 @@ log/         Structured logging
 - [API.md](API.md) — the full HTTP/CLI reference.
 - [docs/oauth.md](docs/oauth.md) — wrapping APIs that need per-user consent.
 - [flows/](flows/) — runnable end-to-end shell flows (`flows_test.sh` drives them).
+
+## Testing
+
+Three cadences, by what each costs and what it answers.
+
+| | command | when |
+|---|---|---|
+| Unit, including the in-process federation simulator | `go test ./...` | every change |
+| End-to-end flows against the real binary | `JUICE=./juice bash flows/flows_test.sh` | before merging |
+| Network simulation: a five-kernel economy, with a report | `make netsim` (or `go run ./netsim`) | now and then, and after anything touching federation or money |
+
+The first two are gates: they fail a change. `make netsim` drives a whole economy across five
+kernels and writes what happened to `netsim-runs/<rail>-<timestamp>/`: every command and its output
+in `log.jsonl`, a full snapshot of each kernel in `checkpoints/`, and `report.md`. The report checks
+money in against money held, every call's charge against its advertised terms, every payment against
+the debt it moved, and reports latency, throughput and recovery. It exits non-zero when a check
+fails. **[docs/network-simulation.md](docs/network-simulation.md)** describes the economy it builds,
+what each measurement proves, and what it does not claim.
+`RAIL=anvil` runs the same economy against a local chain (needs Foundry) and `RAIL=sepolia` against
+the live testnet (needs `JUICE_SEPOLIA_RPC` and `JUICE_SEPOLIA_KEY_FILE`, mode 600); on both, money
+is real token transfers, credited at the world's settlement tag: `latest` on the shipped test world,
+so a credit lands in seconds; `finalized` waits for Ethereum.
+
+It is one economy on all three. The participants, actions, prices, trades, compositions, attacks
+and assertions are fixed in `netsim/story.go` and run unchanged everywhere; a rail supplies only
+how money enters, how a payment is made and becomes final, and what the run cost. A test fails if
+the story so much as names a rail. The one thing a rail chooses is how often the trading rounds
+repeat, because a live testnet charges for each round in gas and in a quarter of an hour of
+finality; every distinct event still happens at least once, and the report says which count it ran.
+Before spending anything, a rail prices what the story will ask of it and refuses if it does not
+fit, rather than running a cheaper economy under the same name.
+
+A run directory is git-ignored, and **it is not safe to hand to anyone**. Alongside the logs — which
+are redacted as they are written — it contains each kernel's whole home: its database, its signing
+key, its rail key and its issued tokens. Read it in place; publish `report.md` and `metrics.json`
+if you need to share something, and delete the directory when you are done with it.
+
+Two release gates are opt-in and need more than a laptop: `JUICE_RAIL_FLOWS=1` for the local-chain
+rail gate, and `JUICE_NETWORK_FLOWS=1` for the real-NAT federation gate, which needs a second host
+behind a different NAT.

@@ -43,3 +43,6 @@ Thumbs.db
 # Test output and coverage
 *.out
 coverage.html
+
+# Network simulation run output (logs, metrics, kernel homes)
+/netsim-runs/

@@ -8,7 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/record"
 )
 
@@ -334,5 +338,125 @@ func TestTransportOffersRelay(t *testing.T) {
 	tr := newTestTransport(t, &fakeHandlers{}, nil)
 	if tr.relay == nil {
 		t.Error("expected the transport to run a circuit-relay service")
+	}
+}
+
+// ---- D12 inbound limits ----
+//
+// §13 names four transport-level bounds: per-source-address where visible, per-peer stream and byte
+// budgets, a global cap, and stricter treatment of relayed traffic — "per-key limits alone are
+// Sybil-insufficient". The code states that resource limits are libp2p defaults (transport.go:223),
+// so these tests measure what those defaults actually give. A failure here is a production gap, not
+// a broken test.
+
+// TestOversizedFrameIsRefusedBeforeAllocation is the memory-exhaustion case: a hostile peer
+// declares a huge frame so the reader allocates it. The length is checked against maxFrameBytes
+// before the buffer is made, so a declared 1 GiB costs nothing, and an honest call afterwards must
+// still be served — the refusal may not poison the host.
+func TestOversizedFrameIsRefusedBeforeAllocation(t *testing.T) {
+	srv := &fakeHandlers{callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`)}
+	a := newTestTransport(t, srv, nil)
+	b := newTestTransport(t, &fakeHandlers{}, []string{a.ListenAddrs()[0]})
+
+	pid, err := b.resolve(context.Background(), a.PublicKey())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+	// A header claiming 1 GiB, followed by nothing. If the reader sized a buffer from the header
+	// before checking it, this would allocate a gigabyte per attempt.
+	for i := 0; i < 20; i++ {
+		s, err := b.host.NewStream(context.Background(), pid, protocol.ID(ProtocolCall))
+		if err != nil {
+			t.Fatalf("open stream %d: %v", i, err)
+		}
+		_, _ = s.Write([]byte{0x40, 0x00, 0x00, 0x00}) // 1 GiB
+		_ = s.CloseWrite()
+		_ = s.Close()
+	}
+
+	// The honest path still works.
+	resp, err := b.Call(context.Background(), a.PublicKey(), CallRequest{Action: "a", Counterparty: b.PublicKey()})
+	if err != nil {
+		t.Fatalf("honest call after oversized frames: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("honest call status %d, want 200", resp.Status)
+	}
+	if leaked := runtime.NumGoroutine() - before; leaked > 40 {
+		t.Errorf("goroutines grew by %d across 20 refused frames; the reader is not releasing them", leaked)
+	}
+}
+
+// TestStreamFloodFromOnePeerLeavesAnHonestPeerServed is the per-peer budget and the global cap in
+// the only form loopback can show: one identity opening many streams at once must not starve a
+// second identity. §13 asks for explicit per-peer stream and byte budgets; if this passes only
+// because libp2p's defaults are generous, that is worth knowing, so the flood is large.
+func TestStreamFloodFromOnePeerLeavesAnHonestPeerServed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("flood test opens hundreds of streams")
+	}
+	srv := &fakeHandlers{callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`)}
+	victim := newTestTransport(t, srv, nil)
+	flooder := newTestTransport(t, &fakeHandlers{}, []string{victim.ListenAddrs()[0]})
+	honest := newTestTransport(t, &fakeHandlers{}, []string{victim.ListenAddrs()[0]})
+
+	pid, err := flooder.resolve(context.Background(), victim.PublicKey())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	before := runtime.NumGoroutine()
+	var wg sync.WaitGroup
+	const streams = 300
+	opened, refused := int64(0), int64(0)
+	for i := 0; i < streams; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s, err := flooder.host.NewStream(ctx, pid, protocol.ID(ProtocolCall))
+			if err != nil {
+				atomic.AddInt64(&refused, 1)
+				return
+			}
+			atomic.AddInt64(&opened, 1)
+			// Hold the stream open without completing a frame: the shape that ties up a reader.
+			_, _ = s.Write([]byte{0x00, 0x00, 0x10, 0x00})
+			time.Sleep(300 * time.Millisecond)
+			_ = s.Close()
+		}()
+	}
+
+	// While the flood is in flight, an unrelated peer must still be served promptly.
+	time.Sleep(150 * time.Millisecond)
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := honest.Call(ctx, victim.PublicKey(), CallRequest{Action: "a", Counterparty: honest.PublicKey()})
+	elapsed := time.Since(start)
+	wg.Wait()
+
+	t.Logf("flood: %d streams opened, %d refused; honest call took %v", opened, refused, elapsed)
+
+	// §13 requires a per-peer stream budget. If every one of 300 simultaneous streams from a single
+	// identity is accepted, no such budget is being enforced and the only thing standing between a
+	// kernel and one hostile peer is the honesty of that peer. A zero here is a production gap.
+	if refused == 0 {
+		t.Errorf("all %d streams from one peer were accepted: no per-peer stream budget is enforced "+
+			"(§13 D12 requires per-peer stream and byte budgets, not libp2p defaults alone)", streams)
+	}
+	if err != nil {
+		t.Errorf("an honest peer was not served during a %d-stream flood: %v", streams, err)
+	} else if resp.Status != 200 {
+		t.Errorf("honest call status %d during flood, want 200", resp.Status)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("honest call took %v during the flood; a per-peer budget should keep it prompt", elapsed)
+	}
+	if leaked := runtime.NumGoroutine() - before; leaked > streams {
+		t.Errorf("goroutines grew by %d after a %d-stream flood; readers are not being reclaimed", leaked, streams)
 	}
 }

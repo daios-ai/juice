@@ -732,3 +732,84 @@ flow_transfer() {
         j "$FED_DBL" "$ahome" run sys/transfer "{\"target\":\"bob@$rkey\",\"amount\":10}"
     assert_eq "transfer.qualified_target_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
 }
+
+# The provider dies in the middle of serving a call, then comes back. This is the one crash that
+# costs a buyer money, and the only place a real process death can be tested: the in-process
+# simulator (cmd/juice/fedsim_test.go) recovers state over a live store, while this kills a real
+# `juice serve`, closes its SQLite, and starts a new process over the same home.
+#
+# §5 G4: "work possibly executing remotely is never presumed dead — it is re-driven under its
+# original identity until signed evidence settles it." The buyer's funds must therefore neither be
+# refunded while the outcome is unknown, nor stay locked once the provider is back and holds a
+# receipt.
+flow_fed_provider_crash_recovery() {
+    echo "=== FLOW fed_provider_crash_recovery ==="
+    local dir; dir=$(new_dir)
+    # The provider must extend credit, or the call is refused before it can be interrupted. The
+    # buyer retries on a one-second interval: the default is 60s with exponential backoff, which
+    # would make the result depend on how long this flow happened to wait rather than on whether
+    # the call can settle at all.
+    FED_RCFG=(exposure_max=1000 settlement_trigger=500)
+    FED_LCFG=(remote_retry_interval_seconds=1)
+    _fed_setup "$dir" || { fail "fed_crash.setup" "setup failed"; return; }
+
+    # A buyer on L with money, and a priced action on R that takes long enough to be interrupted.
+    local ha; ha=$(home "$dir" buyer)
+    make_user "$FED_DBL" "$FED_HL" "$ha" buyer
+    deposit "$FED_DBL" "$FED_HL" buyer 1000
+
+    local sport; sport=$(backend_port)
+    start_slow_backend "$sport" 8
+    publish "$FED_DBR" "$FED_HR" slow --kind http --source "http://127.0.0.1:${sport}/slow" \
+        --description "a service slow enough to interrupt" --price 20 >/dev/null 2>&1
+
+    # Warm the proxy so the crash lands on the call rather than on the resolve.
+    j "$FED_DBL" "$ha" run sys@kernel-r/slow '{}' >/dev/null 2>&1
+    local before; before=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
+
+    # Call again and kill the provider while it is still upstream.
+    ( j "$FED_DBL" "$ha" run sys@kernel-r/slow '{}' >"$dir/crash_call.out" 2>&1 ) &
+    local caller_pid=$!
+    sleep 3
+    stop_server "$FED_DBR"
+    wait "$caller_pid" 2>/dev/null
+
+    # The outcome is unknown, so the allocation stays reserved: not refunded, not spent.
+    local proc_line
+    proc_line=$(j "$FED_DBL" "$ha" process list --limit 5 | grep -c "awaiting-receipt" || true)
+    assert_eq "fed_crash.call_is_parked" yes "$([ "$proc_line" -ge 1 ] && echo yes || echo no)"
+
+    # The provider returns and recovers its own interrupted work.
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 \
+        remote_retry_interval_seconds=1 "${FED_RCFG[@]}" \
+        || { fail "fed_crash.restart" "provider did not restart"; return; }
+    await_login "$FED_DBR" "$FED_HR" || { fail "fed_crash.provider_up" "not serving after restart"; return; }
+
+    # The buyer re-drives the parked call. It must end: settled from the provider's signed evidence,
+    # with the allocation released either way.
+    local i settled=no
+    for i in $(seq 1 20); do
+        if [ "$(j "$FED_DBL" "$ha" process list --limit 5 | grep -c "awaiting-receipt" || true)" -eq 0 ]; then
+            settled=yes; break
+        fi
+        sleep 1
+    done
+    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.settles_after_provider_returns" yes "$settled"
+
+    # The outcome must be exact, not merely bounded. mp=20, the provider's markup and the buyer's
+    # import fee are both 5% by default, so the all-in price is 20 → 21 → 23. A call that ran is
+    # charged that; a call that did not is refunded whole. Nothing in between, nothing left locked,
+    # and exactly one transaction for the attempt.
+    local after locked ntx
+    after=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
+    locked=$(numfield "$(jj "$FED_DBL" "$ha" user me)" locked)
+    ntx=$(python3 -c "
+import sys, json
+rows = json.loads(sys.argv[1])
+print(sum(1 for t in rows if (t.get('action_name') or '').endswith('slow')))" "$(jj "$FED_DBL" "$ha" tx list --limit 50)")
+
+    assert_eq "fed_crash.settled_exactly" yes \
+        "$([ "$after" -eq "$before" ] || [ "$after" -eq "$((before - 23))" ] && echo yes || echo no)"
+    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.nothing_left_locked" 0 "$locked"
+    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.one_transaction_per_attempt" 2 "$ntx"
+}

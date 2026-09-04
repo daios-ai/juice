@@ -9,6 +9,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -970,6 +971,69 @@ func TestBeginRunGlobalExposure(t *testing.T) {
 	peerD := newPeer(t, db, "peerD", "keyD", 50, 0, now)
 	if err := run(peerD, 50, 0); err != nil {
 		t.Fatalf("prepaid peer should run regardless of X: %v", err)
+	}
+}
+
+// TestBeginRunGlobalExposureIsAtomicUnderConcurrency is the concurrency half of the cap. The test
+// above proves the rule sequentially; this proves the rule survives simultaneity, which is the only
+// way the cap can be breached in production: several peers admitted at once, each reading a gross
+// receivable that was true a microsecond ago.
+//
+// It belongs here rather than in a network test because the guarantee lives at this boundary — the
+// check and the wallet move are one store call (§13 "atomic with the wallet move"). Holding a
+// transport response cannot order two admissions; releasing N goroutines onto BeginRun can.
+func TestBeginRunGlobalExposureIsAtomicUnderConcurrency(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Ten peers, each attempting a draw of 30 at the same instant, against a cap of 100. At most
+	// three can be admitted; which three is not determined and does not matter.
+	const (
+		X          = int64(100)
+		price      = int64(30)
+		contenders = 10
+	)
+	peers := make([]*kernel.Account, contenders)
+	for i := range peers {
+		peers[i] = newPeer(t, db, fmt.Sprintf("racer%d", i), fmt.Sprintf("racerkey%d", i), 0, 0, now)
+	}
+
+	var start sync.WaitGroup
+	var done sync.WaitGroup
+	start.Add(1)
+	admitted := make([]bool, contenders)
+	for i := range peers {
+		done.Add(1)
+		go func(i int) {
+			defer done.Done()
+			start.Wait() // one barrier, so every attempt reads the same starting gross
+			p := newProcess(peers[i].ID)
+			tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: now}
+			admitted[i] = db.BeginRun(ctx, p, tr, peers[i].ID, price, 0, X) == nil
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+
+	n := 0
+	for _, ok := range admitted {
+		if ok {
+			n++
+		}
+	}
+	if want := int(X / price); n != want {
+		t.Errorf("admitted %d concurrent draws of %d against a cap of %d; want %d", n, price, X, want)
+	}
+
+	// The invariant that actually matters: whatever the interleaving, the books never show more
+	// unsecured credit outstanding than the cap allows.
+	gross, err := db.GrossReceivables(ctx)
+	if err != nil {
+		t.Fatalf("gross receivables: %v", err)
+	}
+	if gross > X {
+		t.Errorf("gross receivables %d exceeded the cap %d after concurrent admission", gross, X)
 	}
 }
 

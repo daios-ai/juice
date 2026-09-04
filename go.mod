@@ -3,7 +3,7 @@ module github.com/daios-ai/juice
 go 1.25.7
 
 require (
-	github.com/daios-ai/juice-rail v0.3.5
+	github.com/daios-ai/juice-rail v0.4.0
 	github.com/ethereum/go-ethereum v1.17.5
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/golang-jwt/jwt/v5 v5.3.1

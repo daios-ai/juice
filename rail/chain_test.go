@@ -84,7 +84,7 @@ func (f *fakeLib) Intent(jrail.ID) (jrail.Intent, bool, error)           { retur
 func (f *fakeLib) ScanDeposits(context.Context) ([]jrail.Deposit, error) { return nil, nil }
 func (f *fakeLib) Deposits() ([]jrail.Deposit, error)                    { return f.deposits, nil }
 func (f *fakeLib) DepositsScannedTo() (uint64, bool, error)              { return 7, true, nil }
-func (f *fakeLib) FinalizedBalances(context.Context) (*big.Int, *big.Int, uint64, error) {
+func (f *fakeLib) SettledBalances(context.Context) (*big.Int, *big.Int, uint64, error) {
 	return big.NewInt(500), big.NewInt(1), 9, nil
 }
 func (f *fakeLib) Pending() ([]jrail.Intent, error)      { return f.pending, nil }

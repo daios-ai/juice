@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/daios-ai/juice/rail"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // playDigest is the network every kernel joins by default. It is pinned because it rides inside
@@ -135,5 +136,44 @@ func TestLoadRejectsBadWorlds(t *testing.T) {
 		if _, err := rail.Load(p); err == nil {
 			t.Fatalf("%s: expected rejection", name)
 		}
+	}
+}
+
+// The settlement tag is the world's choice. Below true finality a settled fact is the sequencer's
+// word and the kernel prices that risk through the remote premium, so a world may say `latest`,
+// `safe` or `finalized`; anything else is refused, and an absent tag is the strictest.
+func TestFinalityIsTheWorldsChoice(t *testing.T) {
+	base, err := rail.Load("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tag  string
+		want rpc.BlockNumber
+	}{{"latest", rpc.LatestBlockNumber}, {"safe", rpc.SafeBlockNumber},
+		{"finalized", rpc.FinalizedBlockNumber}, {"", rpc.FinalizedBlockNumber}} {
+		w := base
+		w.Finality = tc.tag
+		d, err := w.Domain()
+		if err != nil {
+			t.Fatalf("finality %q: %v", tc.tag, err)
+		}
+		if d.Finality != tc.want {
+			t.Errorf("finality %q: domain has %s, want %s", tc.tag, d.Finality, tc.want)
+		}
+	}
+	w := base
+	w.Finality = "soon"
+	if _, err := w.Domain(); err == nil {
+		t.Error("an unknown settlement tag was accepted; the rail would credit on nothing")
+	}
+	// The shipped test world credits at Arbitrum's own confirmation, which is the speed it was
+	// chosen for. The real world stays at finalized until the operator decides otherwise.
+	if base.Finality != "latest" {
+		t.Errorf("the shipped test world settles at %q, want latest", base.Finality)
+	}
+	real, _ := rail.Load("real")
+	if real.Finality != "finalized" {
+		t.Errorf("the shipped real world settles at %q; changing it is an operator decision", real.Finality)
 	}
 }

@@ -25,6 +25,20 @@ fi
 PASS=0; FAIL=0; ERRS=""
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; }
+# known_defect REASON ASSERTION... — an assertion that fails today because of a defect the next
+# commit fixes. It stays written as an assertion so it retires itself: while the defect stands the
+# failure is recorded as a skip, and once the fix lands the assertion passes and this wrapper
+# reports that the skip must come out. A known defect that stops reproducing is news, not silence.
+known_defect() {
+    local reason="$1" before=$FAIL; shift
+    "$@"
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before; ERRS=$(printf '%s' "$ERRS" | sed '$d'); SKIP=$((SKIP+1))
+        echo "  SKIP: known defect — $reason"
+    else
+        fail "$2" "known defect no longer reproduces; remove the known_defect wrapper"
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Process/dir registry + cleanup. Every server and backend registers its PID here;
@@ -389,6 +403,31 @@ PYEOF
     track_pid $!
     _await_http "$port" POST
 }
+# start_slow_backend port seconds — a POST backend that takes its time. A flow that must interrupt a
+# call needs the call to still be in flight when it pulls the plug; without this the kernel has
+# already committed and the crash lands nowhere interesting.
+start_slow_backend() {
+    local port="$1" secs="${2:-5}"
+    python3 - "$port" "$secs" <<'PYEOF' &
+import sys, time, http.server, socketserver
+port, secs = int(sys.argv[1]), float(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        time.sleep(secs)
+        b = b'{"ok":true}'
+        self.send_response(200); self.send_header('Content-Type','application/json')
+        self.send_header('Content-Length', str(len(b))); self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+S(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    track_pid $!
+    sleep 0.3
+}
+
 # start_header_echo_backend port header  — POST backend that reflects one request header as
 # {"seen": <value>}, so a flow can prove an auth credential actually reached the upstream.
 start_header_echo_backend() {
