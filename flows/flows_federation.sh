@@ -779,9 +779,11 @@ flow_fed_provider_crash_recovery() {
     proc_line=$(j "$FED_DBL" "$ha" process list --limit 5 | grep -c "awaiting-receipt" || true)
     assert_eq "fed_crash.call_is_parked" yes "$([ "$proc_line" -ge 1 ] && echo yes || echo no)"
 
-    # The provider returns and recovers its own interrupted work.
+    # The provider returns at the address its peer knows it by — a restart keeps the configured
+    # listen address, as a deployed kernel's does — and recovers its own interrupted work.
+    local port="${FED_BOOT#*/tcp/}"; port="${port%%/*}"
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 \
-        remote_retry_interval_seconds=1 "${FED_RCFG[@]}" \
+        remote_retry_interval_seconds=1 fed_listen_addrs="/ip4/127.0.0.1/tcp/$port" "${FED_RCFG[@]}" \
         || { fail "fed_crash.restart" "provider did not restart"; return; }
     await_login "$FED_DBR" "$FED_HR" || { fail "fed_crash.provider_up" "not serving after restart"; return; }
 
@@ -794,7 +796,7 @@ flow_fed_provider_crash_recovery() {
         fi
         sleep 1
     done
-    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.settles_after_provider_returns" yes "$settled"
+    assert_eq "fed_crash.settles_after_provider_returns" yes "$settled"
 
     # The outcome must be exact, not merely bounded. mp=20, the provider's markup and the buyer's
     # import fee are both 5% by default, so the all-in price is 20 → 21 → 23. A call that ran is
@@ -810,6 +812,6 @@ print(sum(1 for t in rows if (t.get('action_name') or '').endswith('slow')))" "$
 
     assert_eq "fed_crash.settled_exactly" yes \
         "$([ "$after" -eq "$before" ] || [ "$after" -eq "$((before - 23))" ] && echo yes || echo no)"
-    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.nothing_left_locked" 0 "$locked"
-    known_defect "stranded funds after a provider crash" assert_eq "fed_crash.one_transaction_per_attempt" 2 "$ntx"
+    assert_eq "fed_crash.nothing_left_locked" 0 "$locked"
+    assert_eq "fed_crash.one_transaction_per_attempt" 2 "$ntx"
 }

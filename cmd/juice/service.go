@@ -60,6 +60,31 @@ type txView struct {
 	TargetHandle string `json:"target_handle"`
 }
 
+// txSummary is the list shape of a transaction. A call's arguments and result are read by id;
+// paging them would make a list of fifty calls carry fifty payloads.
+type txSummary struct {
+	txView                    // by value: encoding/json will not allocate an embedded pointer to an unexported type on decode, and the CLI decodes these rows
+	ArgsJSON  json.RawMessage `json:"args,omitempty"`
+	ReplyJSON json.RawMessage `json:"result,omitempty"`
+}
+
+// actionSummary is the list shape of an action. What a detail read carries beyond it — the authored
+// source and the compiled artifact — is fetched by id, never paged (API.md: a wasm action's detail
+// read still carries its source).
+type actionSummary struct {
+	actionResp
+	Source       string `json:"source,omitempty"`
+	WasmArtifact string `json:"wasm_artifact,omitempty"`
+}
+
+func summaries(resps []actionResp) []actionSummary {
+	out := make([]actionSummary, len(resps))
+	for i, r := range resps {
+		out[i] = actionSummary{actionResp: r}
+	}
+	return out
+}
+
 // actionResp wraps an action with the computed @owner/name reference field and,
 // for kind=http, a decomposed view of the request shape so manual and
 // OpenAPI-imported actions read identically and round-trip with create/update.
@@ -610,22 +635,22 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 // kernel's own resolver, so a reference means here exactly what it means when called, then read
 // back through the ordinary per-row gate. A miss is an empty list rather than an error, matching
 // every other filter on this endpoint.
-func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref string) ([]actionResp, error) {
+func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref string) ([]actionSummary, error) {
 	a, err := k.ResolveAction(ctx, ref)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) {
-			return []actionResp{}, nil
+			return []actionSummary{}, nil
 		}
 		return nil, err
 	}
 	a, err = k.ReadActionForSubject(ctx, callerID, a.ID)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) || errors.Is(err, kernel.ErrUnauthorized) {
-			return []actionResp{}, nil
+			return []actionSummary{}, nil
 		}
 		return nil, err
 	}
-	return []actionResp{enrichAction(k, a, newAccountCache(k, ctx))}, nil
+	return summaries([]actionResp{enrichAction(k, a, newAccountCache(k, ctx))}), nil
 }
 
 // enrichActions projects the rows one mutation touched, in the order they were written.
@@ -667,7 +692,7 @@ func deleteActions(k *kernel.Kernel, ctx context.Context, callerID, target strin
 // Authenticated (no owner filter): active public+local actions union caller's own active actions, deduplicated.
 // Authenticated with owner filter resolving to caller: all their actions regardless of active/visibility.
 // Source and ArtifactHash are stripped from all results.
-func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionResp, error) {
+func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionSummary, error) {
 	// The superuser sees every owner's rows (supervision is scope on the normal endpoint, §14);
 	// everyone else starts from the public+active set and unions their own below. Inactive rows are
 	// dropped at the end unless includeInactive (the `all` param / `--all`) is set — so the default
@@ -694,7 +719,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 			if _, acct, kerr := k.ResolveKernelKey(ctx, ownerHandle); kerr == nil && acct != nil {
 				u = acct
 			} else {
-				return []actionResp{}, nil
+				return []actionSummary{}, nil
 			}
 		}
 		if !superuser && callerID != "" && callerID == u.ID {
@@ -764,7 +789,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	if resps == nil {
 		resps = []actionResp{}
 	}
-	return resps, nil
+	return summaries(resps), nil
 }
 
 // ---- Process operations ----
@@ -870,15 +895,15 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 
 // ---- Transaction operations ----
 
-func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txView, error) {
+func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txSummary, error) {
 	txs, err := k.ListTransactions(ctx, callerID, f)
 	if err != nil {
 		return nil, err
 	}
 	uc := newAccountCache(k, ctx)
-	views := make([]*txView, len(txs))
+	views := make([]*txSummary, len(txs))
 	for i, tv := range txs {
-		views[i] = enrichTx(tv, uc)
+		views[i] = &txSummary{txView: *enrichTx(tv, uc)}
 	}
 	return views, nil
 }

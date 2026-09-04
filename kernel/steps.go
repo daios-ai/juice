@@ -115,6 +115,13 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	ktx := newTraceFailureTx(trace, process, action, trace.Available+trace.Locked, time.Now().UTC())
 	ktx.Reason = reason
 	ktx.ReplyJSON = json.RawMessage("null")
+	// An inbound cross-kernel call is settled by a receipt the caller verifies against the
+	// arguments it sent (P5). The crashed process lost them; the record it served kept them.
+	if trace.IdempotencyRecordID != nil {
+		if rec, err := k.store.ReadIdempotencyRecordByID(ctx, *trace.IdempotencyRecordID); err == nil && rec.ArgsJSON != "" {
+			ktx.ArgsJSON = json.RawMessage(rec.ArgsJSON)
+		}
+	}
 
 	recoverErr := ErrInternal.Wrap(reason)
 	req := callRequest{StepID: stepID}

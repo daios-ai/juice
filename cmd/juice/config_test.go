@@ -263,3 +263,25 @@ func TestAESGCMBox(t *testing.T) {
 		t.Error("expected error for wrong key size")
 	}
 }
+
+// The peer transport binds OS-assigned ports unless the operator pins one. A pinned address is what
+// lets peers find a kernel at the same place after it restarts; absent, nothing changes.
+func TestFedListenAddrsIsReadFromConfig(t *testing.T) {
+	if got := DefaultServerConfig().FedListenAddrs; len(got) != 0 {
+		t.Fatalf("default pins %v; the default must be OS-assigned ports", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	want := DefaultServerConfig()
+	want.FedListenAddrs = []string{"/ip4/127.0.0.1/tcp/31313"}
+	b, _ := json.MarshalIndent(want, "", "  ")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadOrCreateConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.FedListenAddrs) != 1 || cfg.FedListenAddrs[0] != "/ip4/127.0.0.1/tcp/31313" {
+		t.Errorf("fed_listen_addrs read back as %v", cfg.FedListenAddrs)
+	}
+}

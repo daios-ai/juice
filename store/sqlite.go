@@ -3452,9 +3452,9 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 
 func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)
-		 VALUES (?,?,?,NULL,'pending','',?,?)`,
-		r.ID, r.IdempotencyKey, r.CounterpartyUserID,
+		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,created_at,expires_at)
+		 VALUES (?,?,?,NULL,'pending',?,'',?,?)`,
+		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ArgsJSON,
 		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
 	)
 	return dbErr(err, "insert pending idempotency record")
@@ -3508,15 +3508,24 @@ func (s *DB) ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
+	return s.readIdempotencyRecord(ctx,
+		`idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`, key, counterpartyUserID)
+}
+
+// ReadIdempotencyRecordByID reads a record whatever its age: recovery settles what it finds, and a
+// record older than its expiry still names an inbound call whose caller may be waiting.
+func (s *DB) ReadIdempotencyRecordByID(ctx context.Context, id string) (*kernel.IdempotencyRecord, error) {
+	return s.readIdempotencyRecord(ctx, `id=?`, id)
+}
+
+func (s *DB) readIdempotencyRecord(ctx context.Context, where string, args ...any) (*kernel.IdempotencyRecord, error) {
 	var r kernel.IdempotencyRecord
 	var receiptID *string
 	var createdAt, expiresAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,receipt_json,created_at,expires_at
-		 FROM idempotency_records
-		 WHERE idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`,
-		key, counterpartyUserID,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
+		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,receipt_json,created_at,expires_at
+		 FROM idempotency_records WHERE `+where, args...,
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ArgsJSON, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
 	}

@@ -244,12 +244,13 @@ const maxPeerStepPage = 200
 // the two callers build their own replies from `existing`, because a completed step replay and a
 // completed call replay carry different shapes. Only a uniqueness collision counts as "seen": any
 // other store failure is a fault, and answering it as a replay would silently mis-serve the peer.
-func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID string) (rec, existing *kernel.IdempotencyRecord, err error) {
+func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID, argsJSON string) (rec, existing *kernel.IdempotencyRecord, err error) {
 	now := time.Now().UTC()
 	rec = &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     key,
 		CounterpartyUserID: counterpartyID,
+		ArgsJSON:           argsJSON,
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(24 * time.Hour),
 	}
@@ -362,7 +363,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step and input")
 	}
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID)
+	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID, string(rawInput))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -531,7 +532,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// Only a genuinely absent/unverifiable action stays a plain error (its ID can't match the
 	// caller's stored RemoteActionID, so a receipt there would just re-pin the caller).
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, counterparty.ID)
+	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, counterparty.ID, string(rawBody))
 	if err != nil {
 		return 0, nil, err
 	}

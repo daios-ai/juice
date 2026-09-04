@@ -1570,6 +1570,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
 		BootstrapPeers:    globalCfg.BootstrapPeers,
+		ListenAddrs:       globalCfg.FedListenAddrs,
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,
 		Namespace:         kernel.DiscoveryNamespace(k.Network()),

@@ -854,11 +854,6 @@ func TestSimNeverDispatchedRefundsImmediately(t *testing.T) {
 // record — it is already inserted before execution — so a recovered receipt can be verified;
 // that is a production change and needs separate authorization.
 func TestSimProviderCrashMidCallSettlesOnRetry(t *testing.T) {
-	// Known defect, fixed in the next commit: after a provider crashes mid-call and recovers, the
-	// caller's retry never settles and its funds stay locked (recovery signs a receipt over an empty
-	// argument hash, which the caller rightly rejects). The test stays as written; only the skip
-	// comes out when the fix lands.
-	t.Skip("known defect: stranded funds after a provider crash; fix scheduled for the next commit")
 	net := newSimNet(t)
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())

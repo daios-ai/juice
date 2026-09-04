@@ -25,20 +25,6 @@ fi
 PASS=0; FAIL=0; ERRS=""
 ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; }
-# known_defect REASON ASSERTION... — an assertion that fails today because of a defect the next
-# commit fixes. It stays written as an assertion so it retires itself: while the defect stands the
-# failure is recorded as a skip, and once the fix lands the assertion passes and this wrapper
-# reports that the skip must come out. A known defect that stops reproducing is news, not silence.
-known_defect() {
-    local reason="$1" before=$FAIL; shift
-    "$@"
-    if [ "$FAIL" -gt "$before" ]; then
-        FAIL=$before; ERRS=$(printf '%s' "$ERRS" | sed '$d'); SKIP=$((SKIP+1))
-        echo "  SKIP: known defect — $reason"
-    else
-        fail "$2" "known defect no longer reproduces; remove the known_defect wrapper"
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # Process/dir registry + cleanup. Every server and backend registers its PID here;
@@ -83,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500 world="play" rail_rpc=""
+    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -98,9 +84,11 @@ write_config() {
         import_bps=*)                    import_bps=${a#*=} ;;
         world=*)                         world=${a#*=} ;;
         rail_rpc=*)                      rail_rpc=${a#*=} ;;
+        fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
     esac; done
-    local bp_json="[]"
+    local bp_json="[]" fl_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
+    [ -n "$fed_listen_addrs" ] && fl_json="[\"$fed_listen_addrs\"]"
     cat > "$(dirname "$db")/config.json" <<EOF
 {
   "script_timeout_ms": $script_timeout_ms,
@@ -118,6 +106,7 @@ write_config() {
   "rail_rpc": "$rail_rpc",
   "kernel_handle": "$kernel_handle",
   "bootstrap_peers": $bp_json,
+  "fed_listen_addrs": $fl_json,
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
   "discovery_interval_seconds": $discovery_interval_seconds
 }

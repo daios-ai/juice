@@ -320,6 +320,8 @@ type Store interface {
 
 	// ReadIdempotencyRecord returns an unexpired record matching key + counterparty, or ErrNotFound.
 	ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error)
+	// ReadIdempotencyRecordByID reads a record by id regardless of expiry, for recovery.
+	ReadIdempotencyRecordByID(ctx context.Context, id string) (*IdempotencyRecord, error)
 	// InsertPendingIdempotencyRecord inserts a record with status="pending". Returns a unique-constraint
 	// error (not ErrNotFound) if a record for the same key+counterparty already exists.
 	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error

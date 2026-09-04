@@ -53,8 +53,8 @@ flow_transaction_access() {
     assert_not_contains "tx_access.show_hides_ids"  "owner_user_id" "$one_tx"
 
     list_keys=$(python3 -c "import sys,json; print(' '.join(sorted(json.loads(sys.argv[1])[0].keys())))" "$alice_txs" 2>/dev/null)
-    known_defect "tx list carries user ids, not handles" assert_contains     "tx_access.list_renders_handles" "owner_handle"  "$list_keys"
-    known_defect "tx list carries user ids, not handles" assert_not_contains "tx_access.list_hides_ids"       "owner_user_id" "$list_keys"
+    assert_contains     "tx_access.list_renders_handles" "owner_handle"  "$list_keys"
+    assert_not_contains "tx_access.list_hides_ids"       "owner_user_id" "$list_keys"
 }
 
 # A list is a summary (§14: "Detail views expose the full HTTP shape; lists summarize"), and R6 caps
@@ -83,10 +83,10 @@ flow_list_projections() {
     local anon
     anon=$(curl -s "$(url "$db")/v1/actions")
     assert_contains     "listproj.anon_sees_the_action" "wasm-big"      "$anon"
-    known_defect "list projections carry wasm_artifact" assert_not_contains "listproj.anon_gets_no_artifact" "wasm_artifact" "$anon"
+    assert_not_contains "listproj.anon_gets_no_artifact" "wasm_artifact" "$anon"
 
     # The owner's own list is a summary too: the artifact belongs to the detail read.
-    known_defect "list projections carry wasm_artifact" assert_not_contains "listproj.owner_list_is_a_summary" "wasm_artifact" "$(jj "$db" "$ha" action list --all)"
+    assert_not_contains "listproj.owner_list_is_a_summary" "wasm_artifact" "$(jj "$db" "$ha" action list --all)"
 
     # A transaction list must not carry whole request and reply bodies. Drive a call whose reply is
     # large, then require the list to stay small while the detail read still has everything.
@@ -101,7 +101,7 @@ flow_list_projections() {
     local list_bytes
     list_bytes=$(jj "$db" "$ha" tx list --limit 50 | wc -c)
     echo "  tx list --limit 50 over 5 large replies: ${list_bytes} bytes"
-    known_defect "tx list is not a summary" assert_eq "listproj.tx_list_is_a_summary" yes "$([ "$list_bytes" -lt 20000 ] && echo yes || echo no)"
+    assert_eq "listproj.tx_list_is_a_summary" yes "$([ "$list_bytes" -lt 20000 ] && echo yes || echo no)"
 
     # And the default command must simply work: a user listing their own transactions cannot be
     # asked to guess a smaller --limit.

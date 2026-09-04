@@ -734,7 +734,7 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	}
 	// Left inactive (never enabled).
 
-	has := func(resps []actionResp) bool {
+	has := func(resps []actionSummary) bool {
 		for _, r := range resps {
 			if r.ID == a.ID {
 				return true
@@ -834,5 +834,61 @@ func TestResolveMixedRefusesTombstones(t *testing.T) {
 	}
 	if _, _, err := resolveMixed(k, ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
+	}
+}
+
+// A list is a summary. What a detail read carries beyond it — an action's authored source and
+// compiled artifact, a call's arguments and result — is fetched by id, never paged: a page of
+// fifty wasm actions would otherwise carry fifty compiled modules. The projections are checked on
+// what they serialize, which is what a client sees.
+func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
+	a := actionResp{Action: &kernel.Action{ID: "w", Name: "calc", Kind: kernel.KindWasm,
+		Source: "package main", WasmArtifact: "AGFzbQ"}}
+	detail, _ := json.Marshal(a)
+	list, _ := json.Marshal(actionSummary{actionResp: a})
+	for _, key := range []string{`"source"`, `"wasm_artifact"`} {
+		if !strings.Contains(string(detail), key) {
+			t.Errorf("a detail read lost %s", key)
+		}
+		if strings.Contains(string(list), key) {
+			t.Errorf("a list row carries %s", key)
+		}
+	}
+	if !strings.Contains(string(list), `"name":"calc"`) {
+		t.Error("the list row lost the fields it should keep")
+	}
+
+	tv := &txView{TransactionView: &kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t",
+		ArgsJSON: json.RawMessage(`{"big":1}`), ReplyJSON: json.RawMessage(`{"big":2}`),
+		RemoteReceiptJSON: `{"charge":1}`}}, OwnerHandle: "bob"}
+	txDetail, _ := json.Marshal(tv)
+	txList, _ := json.Marshal(txSummary{txView: *tv})
+	for _, key := range []string{`"args"`, `"result"`} {
+		if !strings.Contains(string(txDetail), key) {
+			t.Errorf("a transaction detail read lost %s", key)
+		}
+		if strings.Contains(string(txList), key) {
+			t.Errorf("a transaction list row carries %s", key)
+		}
+	}
+	// The receipt is evidence, not payload, and stays on the row; the handle stays, the id does not.
+	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner_handle":"bob"`) {
+		t.Error("the transaction list row lost its receipt or its handle")
+	}
+	if strings.Contains(string(txList), `"owner_user_id"`) {
+		t.Error("the transaction list row carries a raw user id")
+	}
+	// The CLI decodes these rows and relays them; a shape it cannot decode prints nothing, which is
+	// how `tx list` came to show an empty list for a kernel with transactions.
+	var back []*txSummary
+	if err := json.Unmarshal([]byte("["+string(txList)+"]"), &back); err != nil {
+		t.Fatalf("the CLI cannot decode a list row: %v", err)
+	}
+	if len(back) != 1 || back[0].ID != "t" || back[0].OwnerHandle != "bob" {
+		t.Errorf("the row did not survive the CLI round-trip: %+v", back)
+	}
+	var actions []actionSummary
+	if err := json.Unmarshal([]byte("["+string(list)+"]"), &actions); err != nil || len(actions) != 1 || actions[0].Name != "calc" {
+		t.Errorf("the CLI cannot decode an action list row: %v %+v", err, actions)
 	}
 }

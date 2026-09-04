@@ -4812,3 +4812,30 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 		t.Errorf("vault after conversion = %d, want -20 (100 received, 120 paid)", pos.Vault)
 	}
 }
+
+// An inbound call's arguments live on its idempotency record, so that a provider killed mid-call
+// can settle the trace at restart over the arguments it was given. The record must be readable by
+// id whatever its age: recovery settles what it finds, and a caller may still be waiting.
+func TestIdempotencyRecordKeepsItsArgsAndIsReadableByIDAfterExpiry(t *testing.T) {
+	s := openTestDB(t)
+	ctx := context.Background()
+	peer := newUser("peer-args", 0)
+	if err := s.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	rec := &kernel.IdempotencyRecord{ID: "rec-args", IdempotencyKey: "k1", CounterpartyUserID: peer.ID,
+		ArgsJSON: `{"msg":"kept"}`, CreatedAt: time.Now().Add(-48 * time.Hour), ExpiresAt: time.Now().Add(-24 * time.Hour)}
+	if err := s.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadIdempotencyRecord(ctx, "k1", peer.ID); err == nil {
+		t.Fatal("an expired record must not serve a replay by key")
+	}
+	got, err := s.ReadIdempotencyRecordByID(ctx, "rec-args")
+	if err != nil {
+		t.Fatalf("recovery could not read the record by id: %v", err)
+	}
+	if got.ArgsJSON != `{"msg":"kept"}` || got.Status != "pending" {
+		t.Errorf("record read back as args=%q status=%q", got.ArgsJSON, got.Status)
+	}
+}

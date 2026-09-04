@@ -491,6 +491,7 @@ type IdempotencyRecord struct {
 	CounterpartyUserID string
 	ReceiptID          *string
 	Status             string // "pending" | "complete"
+	ArgsJSON           string // the request's exact argument bytes, so recovery can sign over them
 	ResultJSON         string // JSON-encoded result, set on completion
 	ReceiptJSON        string // JSON of the receipt, stored for idempotent replay
 	CreatedAt          time.Time

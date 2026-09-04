@@ -3688,3 +3688,58 @@ func TestStaleExactProxyReResolvesBeforeIndex(t *testing.T) {
 		t.Errorf("must re-resolve the exact reference: got %v", fake.resolvedRefs)
 	}
 }
+
+// A provider killed mid-call settles the orphaned trace at restart and answers the caller's retry
+// with the receipt. The caller verifies that receipt against the arguments it sent (P5), so the
+// receipt must hash the real arguments — which the crashed process lost and the inbound record kept.
+// Before the fix the receipt hashed "" and the caller stayed parked until the pending-call bound.
+func TestRecoveryReceiptHashesTheArgumentsTheRecordKept(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}})
+	owner := setupUser(t, st, "rec-owner", 0)
+	peer := setupUser(t, st, "rec-peer", 500)
+	action := setupLocalAction(t, st, owner.ID, "rec-act", 0)
+
+	args := `{"msg":"kept"}`
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "rec-key", CounterpartyUserID: peer.ID, ArgsJSON: args,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: peer.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{
+		ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
+		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC(),
+	}
+	if err := st.BeginRun(ctx, p, tr, peer.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+
+	got, err := st.ReadIdempotencyRecordByID(ctx, rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		ArgsHash string `json:"args_hash"`
+		Status   string `json:"status"`
+		Charge   int64  `json:"charge"`
+	}
+	if err := json.Unmarshal([]byte(got.ReceiptJSON), &receipt); err != nil {
+		t.Fatalf("the record holds no receipt after recovery: %v", err)
+	}
+	// JCS of a one-key object without whitespace is the bytes themselves.
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte(args)))
+	if receipt.ArgsHash != want {
+		t.Errorf("recovery receipt args_hash = %s, want the hash of the arguments the caller sent (%s); "+
+			"the caller rejects the mismatch and stays parked", receipt.ArgsHash, want)
+	}
+	if receipt.Status != "failure" || receipt.Charge != 0 {
+		t.Errorf("recovery receipt status=%s charge=%d, want an interrupted failure charging nothing", receipt.Status, receipt.Charge)
+	}
+}

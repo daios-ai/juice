@@ -1241,7 +1241,9 @@ func txListCmd() *cobra.Command {
 				q.Set("process_id", processID)
 			}
 			setLimitOffset(q, limit, offset)
-			var txs []*kernel.TransactionView
+			// Decoded into the server's own view so --json relays it faithfully: the kernel type
+			// has no handle fields, and re-encoding through it would resurrect the raw user ids.
+			var txs []*txSummary
 			if err := apiCall(context.Background(), "GET", "/v1/transactions?"+q.Encode(), nil, &txs); err != nil {
 				return err
 			}
