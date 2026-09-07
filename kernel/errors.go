@@ -133,7 +133,7 @@ var (
 	// peer (§13 never-dispatched); the call is settled locally with a full refund. 502 (bad
 	// gateway), distinct from ErrTimeout's 504 (parked, awaiting a receipt). Meta["peer"] names it.
 	ErrPeerUnreachable = &KernelError{Code: "peer_unreachable", HTTP: 502}
-	// ErrPeerUnfunded: this kernel's prepaid credit on the peer is exhausted (§13); the peer
+	// ErrPeerUnfunded: the peer will not serve this kernel on credit (P10); the peer
 	// signed a zero-charge rejection. An operator condition (out-of-band payment + admin deposit),
 	// never the caller's own balance — hence a distinct code carrying Meta["peer"], HTTP 402.
 	ErrPeerUnfunded = &KernelError{Code: "peer_unfunded", HTTP: 402}

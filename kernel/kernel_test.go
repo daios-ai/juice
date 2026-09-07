@@ -78,12 +78,24 @@ func testConfig() kernel.Config {
 	return cfg
 }
 
+// testEconomy is the money policy every test kernel starts from; a test with another policy edits
+// the copy and passes it in deps. The lottery is off, so every obligation is paid exactly and the
+// arithmetic a test asserts is the one it wrote — a test about the draw turns it on deliberately.
+func testEconomy() kernel.Economy {
+	econ := kernel.DefaultEconomy()
+	econ.CreditLimit, econ.LotteryMax = 1000, 1_000_000
+	return econ
+}
+
 // newKernel builds a kernel from cfg and the adapters in deps. What every test wires the same way —
 // the logger, a double that also speaks federation, the manual rail (every world runs the same
 // money rules, and play's finalized facts are the operator's own records, D23) — is wired here, so
 // a new kernel dependency is added once rather than at each construction site.
 func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	deps.Config = cfg
+	if deps.Economy == (kernel.Economy{}) {
+		deps.Economy = testEconomy()
+	}
 	if deps.Logger == nil {
 		deps.Logger = log.Default()
 	}
@@ -235,10 +247,21 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		CreatedAt:     time.Now().UTC(),
 	}
 	// Mirror beginRun: a remote-proxy root trace carries its dispatch key, which the settlement path
-	// compares against a receipt's tx_id to tell a signed rejection from an execution (§6 P4).
+	// compares against a receipt's tx_id to tell a signed rejection from an execution (§6 P4), and
+	// the record that froze every pricing input for it, which settlement reads and nothing else does.
 	if action.Kind == kernel.KindRemoteProxy {
 		key := uuid.New().String()
 		tr.IdempotencyKey = &key
+		econ := testEconomy()
+		mp := action.Price
+		if action.BasePrice != nil {
+			mp = *action.BasePrice
+		}
+		var rbps int64
+		if action.RemoteBPS != nil {
+			rbps = *action.RemoteBPS
+		}
+		tr.DispatchJSON = kernel.DispatchRecordForTest(mp, action.Price, rbps, econ.ImportBPS, econ.Lottery, "")
 	}
 	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
@@ -2198,6 +2221,9 @@ type fakeFederationHTTP struct {
 	resolveUserID   string
 	resolveHandle   string
 	resolveErr      error
+	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
+	resolveRailAddress string
+	resolveRailProof   string
 	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt whose
 	// tx_id is the caller's idempotency_key — exactly how a real serving kernel refuses a call (§13), so
 	// a test can drive an ACTUAL rejection settlement.
@@ -2211,9 +2237,16 @@ type fakeFederationHTTP struct {
 	// root request has an empty name, so it reads as "owner/" (§13).
 	resolvedRefs []string
 	// sentAction / sentIdempotencyKey record what the kernel actually put on the wire (§13: the
-	// peer's stable action id, under the key parked with the dispatch).
+	// peer's stable action id, under the key parked with the dispatch); sentCommitment and
+	// sentLottery record the draw it committed to (P10).
 	sentAction         string
 	sentIdempotencyKey string
+	sentCommitment     string
+	sentLottery        int64
+	// revealed is every draw the kernel announced to a seller, and revealErr makes that announcement
+	// fail so a test can watch the worker resend it.
+	revealed  []kernel.RevealPayload
+	revealErr error
 	// Outbound step protocol (§13): the canned list/complete replies, and what the kernel sent.
 	stepListBody      string
 	stepBody          string
@@ -2223,12 +2256,18 @@ type fakeFederationHTTP struct {
 	stepForUserID     string
 }
 
-func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ActionManifest, error) {
+func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ResolvedAction, error) {
 	f.resolvedRefs = append(f.resolvedRefs, owner+"/"+name)
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}
-	return f.resolveManifest, nil
+	if f.resolveManifest == nil {
+		return nil, nil
+	}
+	// A world without payment addresses carries none, which is what the manual rail these tests run
+	// on reports; a test about paying a peer supplies one.
+	return &kernel.ResolvedAction{Manifest: f.resolveManifest,
+		RailAddress: f.resolveRailAddress, RailProof: f.resolveRailProof}, nil
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (string, string, error) {
@@ -2238,9 +2277,14 @@ func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (
 	return f.resolveUserID, f.resolveHandle, nil
 }
 
-// Settle completes kernel.FederationClient; residual settlement has its own dedicated fakes.
-func (f *fakeFederationHTTP) Settle(_ context.Context, _, _, _, _, _ string, _ int64, _, _ string, _ []byte) (int, []byte, error) {
-	return 0, nil, kernel.ErrPeerUnreachable.Wrap("settle not used in these tests")
+// revealed records every draw this double was asked to announce, so a test can assert what the
+// buyer told the seller without a transport.
+func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.RevealPayload, _ string) error {
+	if f.revealErr != nil {
+		return f.revealErr
+	}
+	f.revealed = append(f.revealed, p)
+	return nil
 }
 
 // stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
@@ -2272,8 +2316,9 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey string, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey, commitment string, lottery int64, _ map[string]any) (kernel.FederationResult, error) {
 	f.sentAction, f.sentIdempotencyKey = actionID, idempotencyKey
+	f.sentCommitment, f.sentLottery = commitment, lottery
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
@@ -2320,9 +2365,13 @@ func jcsHashForTest(t *testing.T, jsonStr string) string {
 }
 
 // signReceiptForTest signs a Receipt using the same method as the kernel's signReceipt:
-// Ed25519 over CanonicalJSON of the receipt with Signature cleared.
+// Ed25519 over CanonicalJSON of the receipt with Signature cleared. A receipt carrying an
+// obligation gets the seller's half of the draw, since without one it is not settleable (P10).
 func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
 	t.Helper()
+	if r.Charge+r.Premium > 0 && r.Nonce == "" {
+		r.Nonce = "0011223344556677889900aabbccddeeff00112233445566778899aabbccddee"
+	}
 	payload, err := testNet.ReceiptSigningBytes(r)
 	if err != nil {
 		t.Fatal(err)
@@ -2561,7 +2610,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "")
+	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}
@@ -2608,7 +2657,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "")
+	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
 	}

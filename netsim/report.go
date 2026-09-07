@@ -25,6 +25,9 @@ type Snapshot struct {
 	Txs       []map[string]any `json:"txs"`
 	Steps     []map[string]any `json:"steps"`
 	Processes []map[string]any `json:"processes"`
+	// Owed is what this kernel is still waiting to be paid for, each obligation naming the buyer.
+	// It is the seller's own record, which is the only side an obligation is kept on.
+	Owed []map[string]any `json:"owed"`
 }
 
 // collect reads every kernel, and fails closed. A snapshot that could not be read is not an empty
@@ -63,6 +66,13 @@ func collect(n *Net) (map[string]Snapshot, []string) {
 		}
 		if s.Processes, err = pages(k, "sysop-"+name, "/v1/processes"); err != nil {
 			bad("the processes", err)
+		}
+		if awaiting, aerr := read[struct {
+			Owed []map[string]any `json:"owed"`
+		}](k, op, "admin", "deposit"); aerr != nil {
+			bad("what it is still owed", aerr)
+		} else {
+			s.Owed = awaiting.Owed
 		}
 		out[name] = s
 	}
@@ -189,17 +199,21 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 		table(w, []string{"kernel", "action", "status", "paid", "kept", "spent on children"}, rows...)
 	}
 
-	// ---- bilateral consistency. A debt is one row on the serving side, so the test is not that
-	// two rows are opposites: it is that no pair each believe the other owes them.
+	// ---- bilateral consistency. An obligation is one row on the serving side, so the test is what
+	// each kernel says it is still owed — and that no peer row holds money at all, since under this
+	// economy a peer account is identity and never a wallet.
 	contradictions, outstanding := positions(snaps, n.Kernels)
 	w("## Positions between kernels")
 	w("")
 	if len(outstanding) == 0 {
-		w("Every debt between kernels was settled and cleared.")
+		w("Every obligation between kernels was settled and paid for.")
 	} else {
 		for _, o := range outstanding {
 			w("- %s", o)
 		}
+	}
+	for _, c := range contradictions {
+		n.Product("positions", c)
 	}
 	w("")
 	r.Metrics["unsettled_positions"] = len(outstanding)
@@ -349,7 +363,7 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 	table(w, []string{"property", "checked", "violations"},
 		row("money entering equals money held", fmt.Sprintf("%d deposited, %d held", deposited, held), len(conservationBreak)),
 		row("every call charged its advertised terms", fmt.Sprintf("%d transactions", checked), len(priceBreaks)),
-		row("every payment moved the debt by its amount", fmt.Sprintf("%d settlements", len(st.opened)), len(settlementBreaks)))
+		row("every obligation was settled by a payment of what was owed", fmt.Sprintf("%d obligations", len(st.opened)), len(settlementBreaks)))
 	for _, line := range perKernel {
 		w("- %s", line)
 	}
@@ -531,30 +545,28 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 	return breaches, partials, composed, checked
 }
 
-// positions reads the debts between every pair of kernels, in both directions. A debt is one row on
-// the serving side, so it can be recorded on either kernel; looking at only one of them hides every
-// debt owed by whichever name happens to sort first. Two kernels each recording the other as owing
-// is a contradiction, and is reported as one.
+// positions reads what every pair of kernels still owes each other, in both directions. An
+// obligation is one row on the serving side, so it can be recorded on either kernel; looking at only
+// one of them hides every debt owed by whichever name happens to sort first. A peer row that holds
+// money at all is a contradiction under this economy — a peer account is identity, never a wallet —
+// and is reported as one.
 func positions(snaps map[string]Snapshot, kernels map[string]*Kernel) (contradictions, outstanding []string) {
 	for a, sa := range snaps {
-		for b, sb := range snaps {
-			if a >= b {
+		for b := range snaps {
+			if a == b {
 				continue
 			}
-			ab, ba := peerBalance(sa, kernels[b]), peerBalance(sb, kernels[a])
-			if ab < 0 && ba < 0 {
+			if bal := peerBalance(sa, kernels[b]); bal != 0 {
 				contradictions = append(contradictions,
-					fmt.Sprintf("%s and %s each record the other as owing them (%d and %d)", a, b, ab, ba))
+					fmt.Sprintf("%s's row for %s holds %d; a peer account is never a wallet", a, b, bal))
 			}
-			if ab < 0 {
-				outstanding = append(outstanding, fmt.Sprintf("%s still owes %s %d", b, a, -ab))
-			}
-			if ba < 0 {
-				outstanding = append(outstanding, fmt.Sprintf("%s still owes %s %d", a, b, -ba))
+			if n := owedBy(sa, kernels[b]); n > 0 {
+				outstanding = append(outstanding, fmt.Sprintf("%s still owes %s for %d calls", b, a, n))
 			}
 		}
 	}
 	sort.Strings(outstanding)
+	sort.Strings(contradictions)
 	return contradictions, outstanding
 }
 
@@ -593,6 +605,22 @@ func table(w func(string, ...any), header []string, rows ...[]string) {
 	w("")
 }
 
+// owedBy is how many obligations one buyer owes this kernel and has not paid for, from the kernel's
+// own record of what it is waiting to be paid.
+func owedBy(s Snapshot, of *Kernel) int {
+	if of == nil {
+		return 0
+	}
+	n := 0
+	for _, r := range s.Owed {
+		if peer := str(r, "peer"); peer == of.Handle || peer == of.Key || strings.HasSuffix(peer, of.Key[:8]) {
+			n++
+		}
+	}
+	return n
+}
+
+// peerBalance is what a peer's row holds here, which under this economy is always nothing.
 func peerBalance(s Snapshot, of *Kernel) int64 {
 	if of == nil {
 		return 0
@@ -770,22 +798,22 @@ func receiptDraw(t map[string]any) (charge, premium int64, ok bool) {
 	return num(r, "charge"), num(r, "premium"), true
 }
 
-// settlementFidelity checks that each payment moved the debt by exactly its own amount. The
-// evidence is the creditor's peer row on either side of the settlement, captured by the story: no
-// ledger key is assumed, because the manual rail keys the credit by the settlement reference while
-// a chain keys it by the transaction hash.
+// settlementFidelity checks each obligation the story saw settled: it closed, and the payment that
+// closed it was not short. A draw pays either exactly what is owed or the whole face value, which is
+// larger — never less, since a seller settled for less than it delivered is a seller robbed by the
+// mechanism meant to pay it.
 func settlementFidelity(opened []settlement) []string {
 	var breaks []string
 	for _, st := range opened {
 		if !st.Closed {
 			breaks = append(breaks, fmt.Sprintf(
-				"the payment of %d from %s to %s never closed", st.Amount, st.Debtor, st.Creditor))
+				"the obligation of %d from %s to %s never closed", st.Obligation, st.Debtor, st.Creditor))
 			continue
 		}
-		if moved := st.CreditorRowAfter - st.CreditorRowBefore; moved != st.Amount {
+		if st.Amount < st.Obligation {
 			breaks = append(breaks, fmt.Sprintf(
-				"a payment of %d from %s to %s moved the debt by %d",
-				st.Amount, st.Debtor, st.Creditor, moved))
+				"an obligation of %d from %s to %s was settled by a payment of only %d",
+				st.Obligation, st.Debtor, st.Creditor, st.Amount))
 		}
 	}
 	return breaks

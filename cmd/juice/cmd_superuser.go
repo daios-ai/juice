@@ -48,7 +48,6 @@ func init() {
 		adminUnsuspendCmd(),
 		adminRenameCmd(),
 		adminDepositCmd(),
-		adminSettleCmd(),
 		peerListCmd(),
 		peerInspectCmd(),
 		identityCmd(),
@@ -86,7 +85,6 @@ func identityCmd() *cobra.Command {
 				} `json:"sys"`
 				Solvency struct {
 					Liabilities int64 `json:"liabilities"`
-					Receivables int64 `json:"receivables"`
 					Vault       int64 `json:"vault"`
 					Gap         int64 `json:"gap"`
 				} `json:"solvency"`
@@ -99,11 +97,12 @@ func identityCmd() *cobra.Command {
 					Reason string `json:"reason"`
 					Since  string `json:"since"`
 				} `json:"stop"`
-				ExposureMax       int64 `json:"exposure_max"`
-				SettlementTrigger int64 `json:"settlement_trigger"`
-				SettlementQuantum int64 `json:"settlement_quantum"`
-				GrossReceivables  int64 `json:"gross_receivables"`
-				SettlementDue     bool  `json:"settlement_due"`
+				Lottery     int64 `json:"lottery"`
+				CreditLimit int64 `json:"credit_limit"`
+				Exposure    int64 `json:"exposure"`
+				FeeBPS      int64 `json:"fee_bps"`
+				RemoteBPS   int64 `json:"remote_bps"`
+				ImportBPS   int64 `json:"import_bps"`
 			}
 			ctx := context.Background()
 			if err := apiCall(ctx, "GET", "/control/identity", nil, &out); err != nil {
@@ -132,9 +131,10 @@ func identityCmd() *cobra.Command {
 			// versus money merely passing through (owed out, unattributed, or locked for rail fees).
 			fmt.Printf("Operator:   earned=%d paying-out=%d unattributed=%d fee-locks=%d\n",
 				out.Sys.Earnings, out.Sys.PendingPayouts, out.Sys.HeldDeposits, out.Sys.RefillLocks)
-			// The books add up when what users hold, minus what peers owe us, equals what came in.
-			fmt.Printf("Solvency:   user-credits=%d owed-by-peers=%d money-in=%d difference=%d\n",
-				out.Solvency.Liabilities, out.Solvency.Receivables, out.Solvency.Vault, out.Solvency.Gap)
+			// The books add up when what users hold equals what came in: the ledger is backed by cash
+			// alone, so there is nothing else in the identity.
+			fmt.Printf("Solvency:   user-credits=%d money-in=%d difference=%d\n",
+				out.Solvency.Liabilities, out.Solvency.Vault, out.Solvency.Gap)
 			if out.Solvency.Gap != 0 {
 				fmt.Printf("ALARM: the books do not add up — off by %d\n", out.Solvency.Gap)
 			}
@@ -145,14 +145,14 @@ func identityCmd() *cobra.Command {
 			if out.Stop != nil {
 				fmt.Printf("ALARM: outgoing payments are halted since %s: %s\n", out.Stop.Since, out.Stop.Reason)
 			}
-			// Global exposure policy and current standing (§13), in operator words: how much
-			// unsecured credit this kernel extends serving peers, how much peers owe right now,
-			// and the two settlement thresholds from config.
-			fmt.Printf("Credit:     serving-cap=%d owed-by-peers=%d settle-signal-at=%d small-debt-threshold=%d\n",
-				out.ExposureMax, out.GrossReceivables, out.SettlementTrigger, out.SettlementQuantum)
-			if out.SettlementDue {
-				fmt.Println("Settlement: DUE (peers owe at least the settle signal)")
+			// What this kernel is owed for work already delivered, and the ceiling it will carry.
+			fmt.Printf("Credit:     owed-to-us=%d limit=%d\n", out.Exposure, out.CreditLimit)
+			if out.Exposure > out.CreditLimit {
+				fmt.Println("ALARM: more work has been delivered on credit than the limit allows")
 			}
+			// The money rules this kernel serves under. A ticket of 0 pays every obligation exactly.
+			fmt.Printf("Rates:      fee=%d bps serving=%d bps import=%d bps ticket=%d\n",
+				out.FeeBPS, out.RemoteBPS, out.ImportBPS, out.Lottery)
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
 				for _, a := range out.Addrs {
@@ -270,13 +270,15 @@ func adminDepositCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "deposit [TARGET [AMOUNT]]",
 		Short: "Credit an account or kernel for a payment received, or list payments awaiting it",
-		Long: "Credit an account or kernel for a payment received from outside.\n\n" + targetHelp + "\n\n" +
+		Long: "Credit an account for a payment received from outside, or record the payment that\n" +
+			"closes what a peer owes. A peer account holds no money of its own, so a peer can only be\n" +
+			"named in that last form, and the money goes to the provider it is owed to.\n\n" + targetHelp + "\n\n" +
 			"With no arguments, lists the money waiting to be recorded: payments whose sender nobody\n" +
 			"has registered, and settlements a peer says it has paid.\n\n" +
 			"Three forms:\n" +
 			"  admin deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
 			"  admin deposit USER --ref TXHASH        assign a received payment to its sender\n" +
-			"  admin deposit PEER [AMOUNT] --ref ID   record a peer's settlement payment\n\n" +
+			"  admin deposit PEER [AMOUNT] --ref ID   record the payment closing what a peer owes\n\n" +
 			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
 			"transaction that carried it where it has. Repeating the same fact never moves money\n" +
 			"twice, and the same fact with a different amount is refused.",
@@ -303,37 +305,6 @@ func adminDepositCmd() *cobra.Command {
 	return cmd
 }
 
-func adminSettleCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "settle PEER",
-		Short: "Settle what this kernel owes a peer kernel",
-		Long: "Settle this kernel's debt to a peer. PEER is the peer's local name (petname) or its\n" +
-			"public key — both are shown by `admin peers`.\n\n" +
-			"This kernel pays the peer on the rail and announces the payment; the peer closes its own\n" +
-			"books when the money arrives. A debt of at least `settlement_quantum` (config) is paid\n" +
-			"exactly. A smaller one is settled by a fair draw with the peer: usually the debt is\n" +
-			"cancelled and nothing is paid, and occasionally the full `settlement_quantum` is paid\n" +
-			"instead. Over many settlements the two average out, so debts too small to pay\n" +
-			"economically still settle fairly.",
-		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			ctx := context.Background()
-			// This moves real money on the rail, so a human at a terminal is asked first; an agent
-			// with no terminal is taken at its word.
-			if interactiveTTY() {
-				network := "this kernel's"
-				if h, err := probeHealth(ctx, serverBaseURL()); err == nil {
-					network = h.Network
-				}
-				if !promptYesNo(fmt.Sprintf("Pay %s what this kernel owes it, on the %s network?", args[0], network)) {
-					return nil
-				}
-			}
-			return apiEmitCtx(ctx, "POST", "/control/peers/settle", map[string]any{"handle": args[0]})
-		},
-	}
-}
-
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect KEY|PETNAME",
@@ -357,9 +328,7 @@ func peerInspectCmd() *cobra.Command {
 				} `json:"actions"`
 				Evidence []kernel.SubjectEvidenceRow `json:"evidence"`
 				Account  *struct {
-					Available int64 `json:"available"`
-					Locked    int64 `json:"locked"`
-					Suspended bool  `json:"suspended"`
+					Suspended bool `json:"suspended"`
 				} `json:"account"`
 				Reachability struct {
 					Path      string `json:"path"`
@@ -410,7 +379,7 @@ func peerInspectCmd() *cobra.Command {
 				if out.Account.Suspended {
 					susp = " [suspended]"
 				}
-				fmt.Printf("Account:      available=%d locked=%d%s\n", out.Account.Available, out.Account.Locked, susp)
+				fmt.Printf("Traded here:  yes%s\n", susp)
 			}
 			if out.Source == "none" {
 				fmt.Println("This peer is offline and not known locally (no cached data).")
@@ -534,26 +503,22 @@ func peerListCmd() *cobra.Command {
 			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
 			// calls itself and never resolves (§13). The public key always resolves, so an
 			// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
-			fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10s  %s\n",
-				"PETNAME", "NICKNAME", "ACCOUNT", "BALANCE", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
+			fmt.Printf("%-16s %-16s %8s %10s %12s %10s  %s\n",
+				"PETNAME", "NICKNAME", "TRADED", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
 			for _, p := range peers {
 				flags := ""
-				if p.SettlementDue {
-					flags += " [settle_due]"
-				}
 				if p.SuspendedAt != nil {
 					flags += " [suspended]"
 				}
-				petname, account, balance := "—", "—", "—"
+				petname, traded := "—", "—"
 				if p.Petname != "" {
 					petname = p.Petname
 				}
 				if p.HasAccount {
-					account = "yes"
-					balance = fmt.Sprintf("%d", p.Available)
+					traded = "yes"
 				}
-				fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10d  %s%s\n",
-					petname, p.Nickname, account, balance, lastSeenStr(p.LastSeen),
+				fmt.Printf("%-16s %-16s %8s %10s %12s %10d  %s%s\n",
+					petname, p.Nickname, traded, lastSeenStr(p.LastSeen),
 					lastSeenStr(p.LastContactFailedAt), p.Actions, p.PublicKey, flags)
 			}
 			return nil

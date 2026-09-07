@@ -75,7 +75,7 @@ type simVerb string
 const (
 	verbCall    simVerb = "call"
 	verbResolve simVerb = "resolve"
-	verbSettle  simVerb = "settle"
+	verbReveal  simVerb = "reveal"
 	verbStep    simVerb = "step"
 )
 
@@ -290,9 +290,9 @@ func (p *simPort) Resolve(ctx context.Context, peerKey string, req fed.ResolveRe
 	})
 }
 
-func (p *simPort) Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error) {
-	return p.deliver(ctx, peerKey, verbSettle, func(h *fedHandlers) fed.Response {
-		return h.OnSettle(ctx, p.self, req)
+func (p *simPort) Reveal(ctx context.Context, peerKey string, req fed.RevealRequest) (fed.RevealResponse, error) {
+	return p.deliver(ctx, peerKey, verbReveal, func(h *fedHandlers) fed.Response {
+		return h.OnReveal(ctx, p.self, req)
 	})
 }
 
@@ -425,13 +425,16 @@ type simConfig struct {
 	FeeBPS        int64
 	RemoteBPS     int64
 	ImportBPS     int64
-	ExposureMax   int64
+	CreditLimit   int64
+	Lottery       int64
 	PendingMaxAge time.Duration
 	PeerRetention time.Duration
 }
 
+// The default simulated economy pays every obligation exactly (no lottery), so a test asserting an
+// amount gets the one it wrote; a test about the draw turns the lottery on deliberately.
 func defaultSimConfig() simConfig {
-	return simConfig{FeeBPS: 1000, RemoteBPS: 500, ImportBPS: 500, ExposureMax: 100000}
+	return simConfig{FeeBPS: 1000, RemoteBPS: 500, ImportBPS: 500, CreditLimit: 100000}
 }
 
 // addNode builds one kernel: real store, real first boot, real signing key, real inbound handlers,
@@ -446,10 +449,10 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 
 	cfg := testConfig("sim-" + name)
 	cfg.AllowLocalSources = true
-	cfg.FeeBPS = sc.FeeBPS
-	cfg.RemoteBPS = sc.RemoteBPS
-	cfg.ImportBPS = sc.ImportBPS
-	cfg.ExposureMax = sc.ExposureMax
+	econ := testEconomy()
+	econ.FeeBPS, econ.RemoteBPS, econ.ImportBPS = sc.FeeBPS, sc.RemoteBPS, sc.ImportBPS
+	econ.CreditLimit = sc.CreditLimit
+	econ.Lottery = sc.Lottery // the ceiling stays the shared one every simulated node runs under
 	if sc.PendingMaxAge > 0 {
 		cfg.RemotePendingMaxAge = sc.PendingMaxAge
 	}
@@ -465,7 +468,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 		t.Fatalf("%s: secret box: %v", name, err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := newKernel(cfg, kernel.Dependencies{Store: base, HTTP: httpExec})
+	k := newKernel(cfg, kernel.Dependencies{Store: base, HTTP: httpExec, Economy: econ})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatalf("%s: first boot: %v", name, err)
@@ -474,7 +477,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	_ = err
 	pub := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 
-	adapter := newFedAdapter(pub, k.SignFederation)
+	adapter := newFedAdapter(pub, k.SignFederation, nil)
 	adapter.SetTransport(&simPort{net: n, self: pub})
 	k.SetFederation(adapter)
 
@@ -522,7 +525,7 @@ func (s *simNode) restart(t *testing.T) {
 	k.SetSecretBox(box)
 	k.SetSigningKey(s.priv, s.issuerID)
 
-	adapter := newFedAdapter(s.key, k.SignFederation)
+	adapter := newFedAdapter(s.key, k.SignFederation, nil)
 	adapter.SetTransport(&simPort{net: s.net, self: s.key})
 	k.SetFederation(adapter)
 
@@ -537,6 +540,11 @@ func (s *simNode) restart(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Node conveniences
 // ---------------------------------------------------------------------------
+
+// sellerCapital is what a provider holds to serve foreigners. A foreign call is funded by the
+// seller, not by the buyer's row (P10), so a provider needs its own price available while the call
+// runs; it comes back at settlement, and the ticket brings what the buyer owes.
+const sellerCapital = 100000
 
 // user creates a funded local user.
 func (s *simNode) user(t *testing.T, handle string, funds int64) *kernel.Account {
@@ -600,13 +608,32 @@ func (s *simNode) balance(t *testing.T, userID string) int64 {
 
 // peerRow returns what this kernel's books say the named peer's account holds: negative means the
 // peer owes this kernel (§13 bilateral position).
-func (s *simNode) peerRow(t *testing.T, peerKey string) int64 {
+// peerBalance is what a peer's account holds here, which under the ticket economy is always
+// nothing: a peer row is identity and attribution, never a wallet (P10).
+func (s *simNode) peerBalance(t *testing.T, peerKey string) int64 {
 	t.Helper()
 	acct, err := s.db.ReadAccountByKernelKey(context.Background(), peerKey)
 	if err != nil || acct == nil {
 		return 0
 	}
 	return acct.Available
+}
+
+// owedBy is the obligation this kernel holds against one peer, or nil when it holds none.
+func (s *simNode) owedBy(t *testing.T, peerKey string) *kernel.Owed {
+	t.Helper()
+	ctx := context.Background()
+	acct, err := s.db.ReadAccountByKernelKey(ctx, peerKey)
+	if err != nil || acct == nil {
+		return nil
+	}
+	var id string
+	if err := s.db.QueryRowForTest(ctx,
+		`SELECT idempotency_key FROM idempotency_records WHERE counterparty_user_id=? LIMIT 1`, acct.ID, &id); err != nil || id == "" {
+		return nil
+	}
+	r, _ := s.db.ReadOwed(ctx, id, acct.ID)
+	return r
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +699,7 @@ func TestSimCrossKernelPriceIsExact(t *testing.T) {
 	seller := net.addNode("seller", sellCfg)
 	buyer := net.addNode("buyer", buyCfg)
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	act := seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 
@@ -686,13 +713,19 @@ func TestSimCrossKernelPriceIsExact(t *testing.T) {
 		net.dump()
 		t.Errorf("buyer paid %d, want the all-in price 30 (1000 → 970), got balance %d", 1000-got, got)
 	}
-	// The seller's books show what the buyer's kernel owes: charge 25 + premium 2.
-	if got := seller.peerRow(t, buyer.key); got != -27 {
-		t.Errorf("seller's row for the buyer = %d, want -27 (charge 25 + premium 2)", got)
+	// The seller's books show one obligation the buyer owes: charge 25 + premium 2. It is a ticket,
+	// not a balance — a peer row holds no money (P10).
+	tk := seller.owedBy(t, buyer.key)
+	if tk == nil || tk.Obligation != 27 {
+		t.Fatalf("seller's obligation for the buyer = %+v, want 27 (charge 25 + premium 2)", tk)
 	}
-	// The provider keeps the net of its own fee: taxable 25, fee ceil(25·10%) = 3, net 22.
-	if got := seller.balance(t, cara.ID); got != 22 {
-		t.Errorf("provider net = %d, want 22", got)
+	if got := seller.peerBalance(t, buyer.key); got != 0 {
+		t.Errorf("a peer row must hold no money, got %d", got)
+	}
+	// The provider funded its own work and got it back less its own fee: taxable 25, fee
+	// ceil(25·10%) = 3, net 22. What the buyer owes arrives later, when the ticket settles.
+	if got := seller.balance(t, cara.ID); got != sellerCapital-3 {
+		t.Errorf("provider balance = %d, want %d (its own fee of 3 paid)", got, sellerCapital-3)
 	}
 	if n := seller.txCount(t, act.ID); n != 1 {
 		t.Errorf("seller recorded %d transactions for one call, want exactly 1", n)
@@ -711,7 +744,7 @@ func TestSimLostResponseParksThenSettlesOnce(t *testing.T) {
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	act := seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -776,7 +809,7 @@ func TestSimNeverDispatchedRefundsImmediately(t *testing.T) {
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -858,7 +891,7 @@ func TestSimProviderCrashMidCallSettlesOnRetry(t *testing.T) {
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -943,7 +976,7 @@ func TestSimCommitLandsAcknowledgementLostSettlesOnRetry(t *testing.T) {
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	act := seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -1006,7 +1039,7 @@ func TestSimPendingCallExpiresIntoRefund(t *testing.T) {
 	buyCfg.PendingMaxAge = time.Nanosecond
 	buyer := net.addNode("buyer", buyCfg)
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -1048,10 +1081,10 @@ func TestSimSybilIdentitiesShareOneCap(t *testing.T) {
 	net := newSimNet(t)
 	sellCfg := defaultSimConfig()
 	sellCfg.RemoteBPS = 0     // keep the arithmetic plain: the obligation is exactly the price
-	sellCfg.ExposureMax = 250 // room for two calls of 100, never a third
+	sellCfg.CreditLimit = 250 // room for two calls of 100, never a third
 	seller := net.addNode("seller", sellCfg)
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	seller.publish(t, cara, "big", 100)
 
 	admitted := 0
@@ -1070,13 +1103,14 @@ func TestSimSybilIdentitiesShareOneCap(t *testing.T) {
 		t.Errorf("%d of 3 identities were admitted; a 250 cap funds exactly 2 calls of 100, "+
 			"and minting identities must not raise that", admitted)
 	}
-	g, err := seller.k.GrossReceivables(context.Background())
+	sysSeller, _ := seller.k.ReadUserByHandle(context.Background(), "sys")
+	e, err := seller.k.Exposure(context.Background(), sysSeller.ID)
 	if err != nil {
-		t.Fatalf("gross receivables: %v", err)
+		t.Fatalf("exposure: %v", err)
 	}
-	if g > 250 {
+	if e > 250 {
 		net.dump()
-		t.Errorf("gross receivables %d exceeded the cap of 250", g)
+		t.Errorf("exposure %d exceeded the limit of 250", e)
 	}
 }
 
@@ -1093,7 +1127,7 @@ func TestSimDuplicateDeliveryExecutesOnce(t *testing.T) {
 	seller := net.addNode("seller", defaultSimConfig())
 	buyer := net.addNode("buyer", defaultSimConfig())
 
-	cara := seller.user(t, "cara", 0)
+	cara := seller.user(t, "cara", sellerCapital)
 	act := seller.publish(t, cara, "quote", 25)
 	dan := buyer.user(t, "dan", 1000)
 	ref := remoteRef(seller, "cara", "quote")
@@ -1141,7 +1175,7 @@ func TestSimStoreFaultOnFailureCommitLeavesNoMoneyBehind(t *testing.T) {
 			seller := net.addNode("seller", defaultSimConfig())
 			buyer := net.addNode("buyer", defaultSimConfig())
 
-			cara := seller.user(t, "cara", 0)
+			cara := seller.user(t, "cara", sellerCapital)
 			// An action whose upstream is not there: every call to it fails, so the failure-commit
 			// path is the one under test rather than an incidental branch.
 			ctx := context.Background()
@@ -1202,5 +1236,137 @@ func TestSimStoreFaultOnFailureCommitLeavesNoMoneyBehind(t *testing.T) {
 					"and a failure charges at most what settled beneath it", before-after)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: the lottery settles a cross-kernel obligation
+// ---------------------------------------------------------------------------
+
+// TestSimTicketSettlesEitherWay drives a real cross-kernel call under a lottery large enough that
+// the draw genuinely applies, and checks the money on both sides for whichever way it falls.
+//
+// The invariants are the same either way. The buyer is charged the advertised price from its budget
+// no matter what, because the obligation is a separate channel: it comes back to the caller, whose
+// own stake then carries the draw. A losing draw leaves the caller exactly the obligation better off
+// than the price alone; a winning one takes the face value from it. The seller learns the outcome
+// from the reveal and never has to trust the buyer's word for it, because it recomputes the draw.
+func TestSimTicketSettlesEitherWay(t *testing.T) {
+	net := newSimNet(t)
+
+	sellCfg := defaultSimConfig()
+	sellCfg.FeeBPS, sellCfg.RemoteBPS = 1000, 700
+	buyCfg := defaultSimConfig()
+	buyCfg.ImportBPS = 1000
+	buyCfg.Lottery = 1000 // far above the obligation, so the draw is real
+
+	seller := net.addNode("seller", sellCfg)
+	buyer := net.addNode("buyer", buyCfg)
+
+	cara := seller.user(t, "cara", sellerCapital)
+	seller.publish(t, cara, "quote", 25)
+	dan := buyer.user(t, "dan", 5000)
+
+	if _, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote")); err != nil {
+		net.dump()
+		t.Fatalf("run: %v", err)
+	}
+
+	// mp 25 → sr = 27 → q = 30. The obligation is 27; the stake is the whole face value, 1000.
+	const q, obligation, face = int64(30), int64(27), int64(1000)
+
+	sold := seller.owedBy(t, buyer.key)
+	if sold == nil || sold.Obligation != obligation {
+		net.dump()
+		t.Fatalf("seller's obligation = %+v, want %d", sold, obligation)
+	}
+	if _, lottery, _ := kernel.ServingTerms(&sold.Terms); lottery != face {
+		t.Errorf("the obligation was agreed under a face value of %d, want %d", lottery, face)
+	}
+
+	// The buyer keeps no obligation of its own: what it paid is the payment row, and what it drew is
+	// re-derivable from the trace and the receipt. That the two kernels agree is exactly the check
+	// that the money moved matches what the seller says was decided.
+	paid := buyer.paidFor(t, sold.ID)
+	balance := buyer.balance(t, dan.ID)
+	switch {
+	case paid == 0:
+		// Nothing is owed: the price was charged and the obligation returned, so the caller is out
+		// only the import fee, which its own kernel keeps.
+		if want := 5000 - q + obligation; balance != want {
+			t.Errorf("after a losing draw the caller has %d, want %d", balance, want)
+		}
+	case paid == face:
+		if want := 5000 - q + obligation - face; balance != want {
+			t.Errorf("after a winning draw the caller has %d, want %d", balance, want)
+		}
+	default:
+		t.Fatalf("the buyer paid %d, which is neither nothing nor the face value of %d", paid, face)
+	}
+
+	// Whatever the draw, a peer row holds no money at all.
+	if got := seller.peerBalance(t, buyer.key); got != 0 {
+		t.Errorf("the seller's row for the buyer holds %d, want 0", got)
+	}
+	if got := buyer.peerBalance(t, seller.key); got != 0 {
+		t.Errorf("the buyer's row for the seller holds %d, want 0", got)
+	}
+}
+
+// paidFor is what this kernel actually sent for one obligation, read from the payment row the
+// settlement created. Nothing means the draw lost and no payment was ever made.
+func (s *simNode) paidFor(t *testing.T, id string) int64 {
+	t.Helper()
+	row, err := s.db.ReadRailTransfer(context.Background(), id)
+	if err != nil || row == nil {
+		return 0
+	}
+	return row.Amount
+}
+
+// A peer account is identity, attribution and moderation state — never a wallet. The old economy
+// let it hold a balance, and the migration drops that; nothing in the new one may put money back.
+// This drives a real cross-kernel call in both directions and checks the rows stay at zero
+// throughout, which is the invariant that replaced the schema constraint.
+func TestSimPeerRowsNeverHoldMoney(t *testing.T) {
+	net := newSimNet(t)
+
+	cfg := defaultSimConfig()
+	cfg.Lottery = 1000
+	a := net.addNode("a", cfg)
+	b := net.addNode("b", cfg)
+
+	alice := a.user(t, "alice", sellerCapital)
+	a.publish(t, alice, "quote", 25)
+	bob := b.user(t, "bob", sellerCapital)
+	b.publish(t, bob, "advice", 40)
+
+	// Each buys from the other, so both kernels are seller and buyer at once.
+	if _, err := b.run(t, bob.ID, remoteRef(a, "alice", "quote")); err != nil {
+		net.dump()
+		t.Fatalf("b buys from a: %v", err)
+	}
+	if _, err := a.run(t, alice.ID, remoteRef(b, "bob", "advice")); err != nil {
+		net.dump()
+		t.Fatalf("a buys from b: %v", err)
+	}
+
+	for _, c := range []struct {
+		node *simNode
+		peer string
+	}{{a, b.key}, {b, a.key}} {
+		acct, err := c.node.db.ReadAccountByKernelKey(context.Background(), c.peer)
+		if err != nil || acct == nil {
+			t.Fatalf("%s has no account for its counterparty: %v", c.node.name, err)
+		}
+		if acct.Available != 0 || acct.Locked != 0 {
+			net.dump()
+			t.Errorf("%s's row for its peer holds %d available and %d locked, want 0/0",
+				c.node.name, acct.Available, acct.Locked)
+		}
+		// The row is still there and still names the kernel: what it stops being is a wallet.
+		if acct.KernelPublicKey != c.peer {
+			t.Errorf("%s's peer row lost its identity", c.node.name)
+		}
 	}
 }

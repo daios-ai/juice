@@ -214,7 +214,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
 	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	sig, err := testNet.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash)
+	sig, err := testNet.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 // missing counterparty or a tampered body) and wraps the result as an *http.Response.
 func fedCallRaw(t *testing.T, k *kernel.Kernel, cp, ts, idempKey, action, sig string, body []byte) *http.Response {
 	t.Helper()
-	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, "", ts, idempKey, action, sig, body)
+	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, "", ts, idempKey, action, sig, kernel.BuyerTerms{}, body)
 	if callErr != nil {
 		status = kernel.HTTPStatusFromCode(kernel.KernelErrorCode(callErr))
 		respBody = map[string]any{"error": callErr.Error()}
@@ -1609,7 +1609,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 	// A cached proxy row is never re-served, even when named by its id.
 	m := kernel.ActionManifest{
 		ActionID: "remote-act", OwnerHandle: "far", Name: "far-act", Kind: kernel.KindHTTP,
-		Price: 0, RemoteBPS: kernel.DefaultConfig().RemoteBPS, Description: "far",
+		Price: 0, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "far",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-far", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
@@ -2451,8 +2451,8 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	argsHash := sha256HexBytes(body)
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
-	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
-	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, body)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash, "", 0)
+	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, kernel.BuyerTerms{}, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
 	}
@@ -2498,7 +2498,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash, "", 0)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -2775,12 +2775,10 @@ func TestDiscoverOnce(t *testing.T) {
 }
 
 // discoverOnce runs peer sync with no seeds at all (empty bootstrap_peers and no known kernels, §13):
-// it still pulls gossip from each known peer and records the contact plus the reported
-// counterparty_balance. A kernel that answered is a contact whether or not it is a counterparty —
-// the balance rides the reply and is nil for a non-counterparty (§13), so no roster check gates it.
+// it still pulls gossip from each known peer and records that it was reached. A kernel that answered
+// is a contact whether or not it has ever traded here.
 func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
-	bal := int64(42)
-	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
+	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F"})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
 	peers := func(context.Context) []string { return []string{"F"} }
 	var contacts []contactCall
@@ -2790,9 +2788,8 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	if len(contacts) != 1 {
 		t.Fatalf("recorded %d contacts, want 1", len(contacts))
 	}
-	c := contacts[0]
-	if c.key != "F" || c.outcome != contactReached || c.credit == nil || *c.credit != 42 {
-		t.Errorf("contact = (%q, outcome=%v, credit=%v), want (F, reached, 42)", c.key, c.outcome, c.credit)
+	if c := contacts[0]; c.key != "F" || c.outcome != contactReached {
+		t.Errorf("contact = (%q, outcome=%v), want (F, reached)", c.key, c.outcome)
 	}
 }
 
@@ -2800,16 +2797,15 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 type contactCall struct {
 	key     string
 	outcome contactOutcome
-	credit  *int64
 }
 
 func recordInto(out *[]contactCall) contactRecorder {
-	return func(_ context.Context, key string, outcome contactOutcome, credit *int64) {
-		*out = append(*out, contactCall{key, outcome, credit})
+	return func(_ context.Context, key string, outcome contactOutcome) {
+		*out = append(*out, contactCall{key, outcome})
 	}
 }
 
-func noContact(context.Context, string, contactOutcome, *int64) {}
+func noContact(context.Context, string, contactOutcome) {}
 
 // A dial that never got an answer is the observation that proves a peer unreachable, so the pass
 // records it; every later stage means the peer DID answer and leaves reachability alone (§13).
@@ -2861,15 +2857,15 @@ func TestContactRecorderPersistsOnlyProof(t *testing.T) {
 		ok  bool
 	}
 	var writes []write
-	rec := newContactRecorder(func(_ context.Context, key string, ok bool, _ *int64) error {
+	rec := newContactRecorder(func(_ context.Context, key string, ok bool) error {
 		writes = append(writes, write{key, ok})
 		return nil
 	})
 	ctx := context.Background()
-	rec(ctx, "A", contactReached, nil)
-	rec(ctx, "B", contactUndispatched, nil)
-	rec(ctx, "C", contactUnknown, nil) // proves nothing
-	rec(ctx, "", contactReached, nil)  // no peer to date
+	rec(ctx, "A", contactReached)
+	rec(ctx, "B", contactUndispatched)
+	rec(ctx, "C", contactUnknown) // proves nothing
+	rec(ctx, "", contactReached)  // no peer to date
 
 	if len(writes) != 2 {
 		t.Fatalf("wrote %v, want only the two proven outcomes", writes)
@@ -2883,13 +2879,13 @@ func TestContactRecorderPersistsOnlyProof(t *testing.T) {
 // unreachable arrives with its context already dead.
 func TestContactRecorderSurvivesCancelledContext(t *testing.T) {
 	var got bool
-	rec := newContactRecorder(func(ctx context.Context, _ string, _ bool, _ *int64) error {
+	rec := newContactRecorder(func(ctx context.Context, _ string, _ bool) error {
 		got = ctx.Err() == nil
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	rec(ctx, "A", contactUndispatched, nil)
+	rec(ctx, "A", contactUndispatched)
 	if !got {
 		t.Error("the contact write inherited the cancellation that produced it")
 	}

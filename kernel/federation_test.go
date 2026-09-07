@@ -694,7 +694,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 	}
 	m := kernel.ActionManifest{
 		ActionID: remoteActionID, OwnerHandle: "settle-peer", Name: "settleact",
-		Kind: kernel.KindHTTP, Price: proxyPrice, RemoteBPS: kernel.DefaultConfig().RemoteBPS, Description: "s",
+		Kind: kernel.KindHTTP, Price: proxyPrice, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "s",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
@@ -812,7 +812,7 @@ func TestRetryPendingRemoteTraceSettlesWhenPeerReturns(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	bps := kernel.DefaultConfig().RemoteBPS
+	bps := kernel.DefaultEconomy().RemoteBPS
 
 	// Empty receiptJSON → the peer is "offline": ExecuteFederation returns no receipt → pending.
 	fake := &fakeFederationHTTP{}
@@ -913,7 +913,7 @@ func TestPendingRemoteTracesAndRetryWrappers(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	bps := kernel.DefaultConfig().RemoteBPS
+	bps := kernel.DefaultEconomy().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // offline: no receipt → pending
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
@@ -1181,7 +1181,7 @@ func TestSettleRemoteCallQuarantinesInvalidReceipt(t *testing.T) {
 			k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "q-action", 1000)
 			_, tr := beginTestRun(t, st, caller.ID, a)
 			// mp is the remote manifest price; a.Price (= q) funds the caller and is fully refunded.
-			mp := a.Price * 10000 / (10000 + kernel.DefaultConfig().RemoteBPS)
+			mp := a.Price * 10000 / (10000 + kernel.DefaultEconomy().RemoteBPS)
 
 			replyHash := jcsHashForTest(t, `{}`)
 			if tc.reply != "" {
@@ -1233,8 +1233,8 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	fake := &fakeFederationHTTP{}
-	bps := kernel.DefaultConfig().RemoteBPS
-	ibps := kernel.DefaultConfig().ImportBPS
+	bps := kernel.DefaultEconomy().RemoteBPS
+	ibps := kernel.DefaultEconomy().ImportBPS
 	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "valid-action", 1000)
 	_, tr := beginTestRun(t, st, caller.ID, a)
 	mp := *a.BasePrice
@@ -1291,7 +1291,7 @@ func TestSettleRemoteCallRejectsRefreshProxyOnSuccess(t *testing.T) {
 	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "rp-inv-action", 1000)
 	_, tr := beginTestRun(t, st, caller.ID, a)
 	mp := *a.BasePrice
-	premium := (mp*kernel.DefaultConfig().RemoteBPS + 9999) / 10000
+	premium := (mp*kernel.DefaultEconomy().RemoteBPS + 9999) / 10000
 
 	now := time.Now().UTC()
 	r := &kernel.Receipt{
@@ -2295,7 +2295,7 @@ func TestRetryNeverFailsFastOnNotDispatched(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	bps := kernel.DefaultConfig().RemoteBPS
+	bps := kernel.DefaultEconomy().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // first dispatch: offline (no receipt) → parked pending
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
@@ -2414,51 +2414,8 @@ func TestSettleRemoteFailureClassification(t *testing.T) {
 	}
 }
 
-// TestGetGossipCounterpartyBalance: gossip reports the requester's credit here only for a known,
-// non-suspended key; nil for strangers, suspended keys, and anonymous pulls (§13 peer sync).
-func TestGetGossipCounterpartyBalance(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-	k := newTestKernel(st)
-	setupSys(t, k, st)
-
-	sys, _ := st.ReadUserByHandle(context.Background(), "sys")
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	friendKey := base64.RawURLEncoding.EncodeToString(pub)
-	friend, err := k.EnsureKernelAccount(ctx, friendKey)
-	if err != nil {
-		t.Fatalf("EnsureKernelAccount: %v", err)
-	}
-	if _, err := k.Deposit(ctx, sys.ID, friend.ID, 777, "", newRef()); err != nil {
-		t.Fatalf("Deposit: %v", err)
-	}
-
-	g, err := k.GetGossip(ctx, friendKey, "")
-	if err != nil {
-		t.Fatalf("GetGossip: %v", err)
-	}
-	if g.CounterpartyBalance == nil || *g.CounterpartyBalance != 777 {
-		t.Errorf("friend: expected counterparty_balance 777, got %v", g.CounterpartyBalance)
-	}
-
-	// Anonymous, stranger, and suspended all omit the field.
-	if g, _ := k.GetGossip(ctx, "", ""); g.CounterpartyBalance != nil {
-		t.Error("anonymous pull must not carry counterparty_balance")
-	}
-	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if g, _ := k.GetGossip(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), ""); g.CounterpartyBalance != nil {
-		t.Error("stranger must not carry counterparty_balance")
-	}
-	if err := k.SuspendUser(ctx, sys.ID, friend.ID); err != nil {
-		t.Fatalf("SuspendUser: %v", err)
-	}
-	if g, _ := k.GetGossip(ctx, friendKey, ""); g.CounterpartyBalance != nil {
-		t.Error("suspended peer must not carry counterparty_balance")
-	}
-}
-
-// TestRecordKernelContact: a successful contact persists last_seen and the reported credit, a failed
-// one lands on its own column, and unknown or suspended keys are no-ops (§13 contact cache).
+// TestRecordKernelContact: a successful contact persists last_seen, a failed one lands on its own
+// column, and unknown keys are no-ops (§13 contact cache).
 func TestRecordKernelContact(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -2472,29 +2429,16 @@ func TestRecordKernelContact(t *testing.T) {
 		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 
-	credit := int64(555)
-	if err := k.RecordKernelContact(ctx, key, true, &credit); err != nil {
+	if err := k.RecordKernelContact(ctx, key, true); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	got, _ := st.ReadKernel(ctx, key)
 	if got.LastSeen == nil {
 		t.Error("expected last_seen set after a successful contact")
 	}
-	if got.PeerCredit == nil || *got.PeerCredit != 555 {
-		t.Errorf("expected peer_credit 555, got %v", got.PeerCredit)
-	}
-
-	// A nil credit advances last_seen but keeps the prior credit (COALESCE).
-	if err := k.RecordKernelContact(ctx, key, true, nil); err != nil {
-		t.Fatalf("RecordKernelContact nil: %v", err)
-	}
-	got, _ = st.ReadKernel(ctx, key)
-	if got.PeerCredit == nil || *got.PeerCredit != 555 {
-		t.Errorf("nil credit must keep prior 555, got %v", got.PeerCredit)
-	}
 
 	// A failure records separately, leaving the success in place for a reader to compare against.
-	if err := k.RecordKernelContact(ctx, key, false, nil); err != nil {
+	if err := k.RecordKernelContact(ctx, key, false); err != nil {
 		t.Fatalf("RecordKernelContact failure: %v", err)
 	}
 	got, _ = st.ReadKernel(ctx, key)
@@ -2512,7 +2456,7 @@ func TestRecordKernelContact(t *testing.T) {
 		t.Fatalf("SuspendUser: %v", err)
 	}
 	before, _ := st.ReadKernel(ctx, key)
-	if err := k.RecordKernelContact(ctx, key, true, nil); err != nil {
+	if err := k.RecordKernelContact(ctx, key, true); err != nil {
 		t.Fatalf("suspended contact: %v", err)
 	}
 	after, _ := st.ReadKernel(ctx, key)
@@ -2522,7 +2466,7 @@ func TestRecordKernelContact(t *testing.T) {
 
 	// Unknown key is a no-op (no error).
 	strangerPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	if err := k.RecordKernelContact(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), true, &credit); err != nil {
+	if err := k.RecordKernelContact(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), true); err != nil {
 		t.Errorf("unknown key should be a no-op, got %v", err)
 	}
 }
@@ -2536,7 +2480,7 @@ func TestParkedDispatchCompletesInboundIdempotencyRecordOnRetry(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	bps := kernel.DefaultConfig().RemoteBPS
+	bps := kernel.DefaultEconomy().RemoteBPS
 
 	fake := &fakeFederationHTTP{} // no receipt yet → the dispatch parks
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
@@ -2554,7 +2498,7 @@ func TestParkedDispatchCompletesInboundIdempotencyRecordOnRetry(t *testing.T) {
 	}
 
 	// Run it as that peer's call: the remote is offline, so the dispatch parks.
-	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout (parked), got %v", err)
 	}
 	got, err := st.ReadIdempotencyRecord(ctx, "inbound-key", caller.ID)
@@ -2610,7 +2554,7 @@ func TestEndProcessCompletesInboundIdempotencyRecordOfAParkedDispatch(t *testing
 	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID); !errors.Is(err, kernel.ErrTimeout) {
+	if _, err := k.RunFederated(ctx, caller.ID, a.OwnerUserID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{}); !errors.Is(err, kernel.ErrTimeout) {
 		t.Fatalf("expected ErrTimeout (parked), got %v", err)
 	}
 
@@ -3193,8 +3137,9 @@ func TestProxyRepricesOnImportBPSChange(t *testing.T) {
 
 	kernelAt := func(importBPS int64) *kernel.Kernel {
 		cfg := testConfig()
-		cfg.ImportBPS = importBPS
-		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}})
+		econ := testEconomy()
+		econ.ImportBPS = importBPS
+		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Economy: econ})
 	}
 	ctx := context.Background()
 
@@ -3325,8 +3270,9 @@ func TestSettlementUsesDispatchedRate(t *testing.T) {
 
 	// The operator now quadruples the import fee. The catalog reprices; this in-flight call must not.
 	cfg := testConfig()
-	cfg.ImportBPS = 2000
-	repriced := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake})
+	econ := testEconomy()
+	econ.ImportBPS = 2000
+	repriced := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake, Economy: econ})
 	if got, _ := repriced.ReadAction(ctx, a.ID); got.Price != 1260 { // 1050 + ceil(1050*2000/10000)
 		t.Fatalf("catalog price after the change = %d, want 1260", got.Price)
 	}
@@ -3370,8 +3316,9 @@ func TestEveryReadPathReprices(t *testing.T) {
 
 	at := func(importBPS int64) *kernel.Kernel {
 		cfg := testConfig()
-		cfg.ImportBPS = importBPS
-		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Embedder: &fakeEmbedder{}})
+		econ := testEconomy()
+		econ.ImportBPS = importBPS
+		return newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{resolveManifest: &m}, Embedder: &fakeEmbedder{}, Economy: econ})
 	}
 	a, err := at(500).ResolveAction(ctx, "bob@"+pubB64+"/greet")
 	if err != nil {
@@ -3741,5 +3688,61 @@ func TestRecoveryReceiptHashesTheArgumentsTheRecordKept(t *testing.T) {
 	}
 	if receipt.Status != "failure" || receipt.Charge != 0 {
 		t.Errorf("recovery receipt status=%s charge=%d, want an interrupted failure charging nothing", receipt.Status, receipt.Charge)
+	}
+}
+
+// A buyer owes the moment it calls, so it must know how to pay before it does. On a world where
+// money moves to an address, a peer that has not proved one cannot be paid at all, and a call that
+// took on the debt anyway would leave the seller owed with no way to collect — so it is refused
+// before anything is locked. A free call owes nothing and is unaffected, which is what keeps a cold
+// resolve working before any address is known.
+func TestAPaidCallIsRefusedWhenThePeerCannotBePaid(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+
+	fake := &fakeFederationHTTP{}
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake, Federation: fake})
+	// A rail with addresses: this kernel is paid at one, so it expects its peers to be too.
+	fr := newFakeRail()
+	k.SetRail(fr)
+	setupSys(t, k, st)
+	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
+		t.Fatal(err)
+	}
+	caller := setupUser(t, st, "buyer", 100000)
+
+	priced := &kernel.ActionManifest{
+		ActionID: "remote-priced", OwnerID: "seller-1", OwnerHandle: "sam", Name: "advice",
+		Description: "advice", Price: 100, RemoteBPS: 500, Kind: kernel.KindHTTP,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
+		Stats:     kernel.DefaultStats("remote-priced"),
+	}
+	priced.Signature, _ = testNet.SignManifest(priv, priced)
+	fake.resolveManifest = priced
+
+	// The peer proves no address, so the paid action resolves but cannot be called.
+	ref := "sam@" + peerKey + "/advice"
+	if _, err := k.ResolveAction(ctx, ref); err != nil {
+		t.Fatalf("a paid action must still resolve: %v", err)
+	}
+	before, _ := balanceOf(t, st, caller.ID)
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: ref, Args: map[string]any{}})
+	if !errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Fatalf("calling an unpayable peer = %v, want ErrPeerUnreachable", err)
+	}
+	if after, _ := balanceOf(t, st, caller.ID); after != before {
+		t.Errorf("a refused call moved %d", before-after)
+	}
+
+	// Once the peer proves where it is paid, the same call is fundable again. The refusal was about
+	// the obligation, never about the action.
+	if err := st.UpsertKernel(ctx, peerKey, "", "", "0xseller", "proof", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: ref, Args: map[string]any{}}); errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Errorf("a peer that has proved its address must be callable: %v", err)
 	}
 }

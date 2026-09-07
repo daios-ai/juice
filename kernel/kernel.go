@@ -21,14 +21,8 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// Config holds kernel-level configuration.
+// Config holds kernel-level configuration. Every money rule lives in Economy instead (P10).
 type Config struct {
-	FeeBPS            int64         // basis points, e.g. 2000 = 20%
-	RemoteBPS         int64         // basis points serving markup (execution tax + risk premium) on inbound remote calls, default 500
-	ImportBPS         int64         // basis points origin import fee on outbound remote calls, retained locally, default 500
-	ExposureMax       int64         // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
-	SettlementTrigger int64         // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
-	SettlementQuantum int64         // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
 	FeeRecipientID    string        // user ID that receives fees
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
@@ -57,21 +51,10 @@ type Config struct {
 // DefaultConfig returns safe local defaults.
 func DefaultConfig() Config {
 	return Config{
-		FeeBPS:        2000,
-		RemoteBPS:     500,
-		ImportBPS:     500,
 		TokenTTL:      15 * time.Minute,
 		ScriptTimeout: 10 * time.Second,
 		ScriptMemory:  64 * 1024 * 1024, // 64 MiB
 	}
-}
-
-// ceilDiv returns ceil(a/b) using integer arithmetic.
-func ceilDiv(a, b int64) int64 {
-	if b == 0 {
-		return 0
-	}
-	return (a + b - 1) / b
 }
 
 // AllowsLocalSources reports whether the kernel is configured to permit private/LAN/reserved source
@@ -91,6 +74,7 @@ type Kernel struct {
 	fedClient      FederationClient
 	llm            Embedder
 	cfg            Config
+	econ           Economy
 	log            *log.Logger
 	nativeHandlers map[string]NativeFunc
 	valueFuncs     map[string]ValueFunc
@@ -207,9 +191,10 @@ type Dependencies struct {
 	Store      Store
 	Scripts    ScriptExecutor   // WASM execution
 	HTTP       HTTPExecutor     // kind=http action dispatch
-	Federation FederationClient // outbound federation: call, settle, resolve (§13)
+	Federation FederationClient // outbound federation: call, reveal, resolve (§13)
 	Embedder   Embedder         // semantic leg of lookup (§9)
 	Config     Config
+	Economy    Economy // every money rule, as one immutable value (P10)
 	Logger     *log.Logger
 }
 
@@ -220,10 +205,11 @@ func New(deps Dependencies) *Kernel {
 		logger = log.Default()
 	}
 	// Every action the kernel reads carries its derived local price, because the derivation lives on
-	// the store handle rather than at each of the ~40 read sites (see pricing.go).
+	// the store handle rather than at each of the ~40 read sites (pricedStore).
 	cfg := deps.Config
 	return &Kernel{
-		store:          &pricedStore{Store: deps.Store, importBPS: cfg.ImportBPS},
+		store:          &pricedStore{Store: deps.Store, econ: deps.Economy},
+		econ:           deps.Economy,
 		scripts:        deps.Scripts,
 		http:           deps.HTTP,
 		fedClient:      deps.Federation,
@@ -1251,7 +1237,7 @@ func (k *Kernel) requireSuperuser(ctx context.Context, operatorID string) error 
 // fee_bps > 0 requires a non-empty fee_recipient_id that resolves to a known user.
 // Call after bootstrap to reject misconfiguration before serving requests.
 func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
-	if k.cfg.FeeBPS == 0 {
+	if k.econ.FeeBPS == 0 {
 		return nil
 	}
 	if k.cfg.FeeRecipientID == "" {
@@ -1731,7 +1717,7 @@ func (k *Kernel) initStats(ctx context.Context, a *Action) error {
 // overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
 // Natives are the platform stdlib, present identically on every kernel, so they are local and never
 // public (§9): serving them across federation would give away scarce local resources — model, bandwidth,
-// compiler, a write into a local user's step list — at a price a peer's exposure cap cannot bound (a
+// compiler, a write into a local user's step list — at a price this kernel's credit limit cannot bound (a
 // price-0 call adds no exposure, §13), and would put a duplicate of every native in every peer's
 // discovery cache. Local visibility keeps the whole stdlib callable by this kernel's own users (§4).
 func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
@@ -2334,7 +2320,7 @@ func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string) (*CallReply, error) {
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms) (*CallReply, error) {
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
@@ -2359,37 +2345,58 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	if eff != nil {
 		value, valueTo = eff.Amount, eff.Dest
 	}
-	// Global-exposure admission (§13). `lockPrice` funds the process (spendable, taxed at settlement) and
-	// is action.Price for every kind (already the two-step gross for a remote proxy). `premiumReserve` is
-	// the EXECUTION serving markup only, parked beyond it and released at settlement. The transfer value is
-	// funded separately from C's own row inside store.BeginRun (an atomic second lock on t.CallerUserID),
-	// so value never flows through the execution economics — and never through exposure either, since a
-	// peer can fund no transfer (§13). A peer caller (C == P inbound) reserves W = price + premiumReserve
-	// against the exposure cap X; an ordinary caller prepays it plus the value.
+	// A foreign call is served on this kernel's own credit, not the peer's: the seller funds the
+	// execution from its own balance and is repaid when the buyer's ticket settles on the rail (P10).
+	// So the process owner P is the action owner for a foreign call, and the caller C — the peer —
+	// funds nothing at all. What admission reserves against the credit limit is the most the call can
+	// owe, markup included; the commit corrects that to what it actually charged. Reserving the bare
+	// price instead would let every admitted call carry its markup past the limit.
 	lockPrice := action.Price
-	var premiumReserve, premiumBPS int64
+	owner := caller
+	var limit, reserve int64
+	var servingTerms *string
 	if caller.IsPeer() {
-		premiumBPS = k.cfg.RemoteBPS
-		premiumReserve = ceilDiv(action.Price*premiumBPS, 10000)
-		// A peer with a paid probabilistic outcome still awaiting its rail record must finalize it
-		// before drawing new credit (§13). Fully-prepaid calls (available ≥ W) add no obligation and
-		// are unaffected; only credit-drawing calls are gated.
-		if w := lockPrice + premiumReserve; w > caller.Available {
-			if pending, err := k.store.HasPendingSettlement(ctx, caller.ID); err != nil {
-				return nil, err
-			} else if pending {
-				return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
+		seller, serr := k.store.ReadUser(ctx, action.OwnerUserID)
+		if serr != nil {
+			return nil, serr
+		}
+		dmax, rerr := k.econ.ServingPrice(lockPrice, k.econ.RemoteBPS)
+		if rerr != nil {
+			return nil, rerr
+		}
+		// Where a winning ticket will be paid from is proven now and frozen with the call: on a
+		// world with addresses a priced call from a buyer that proves none could never be paid, and
+		// a payer learned only later could be mistaken for somebody else's in the meantime (P10).
+		var payer string
+		if buyer.RailAddress != "" {
+			var perr error
+			if payer, perr = k.verifyRailIdentity(caller.KernelPublicKey, buyer.RailAddress, buyer.RailProof); perr != nil {
+				return nil, ErrUnauthorized.Wrap("the caller's paying address is not proven")
 			}
 		}
-	} else {
-		if caller.Available < lockPrice+value {
-			return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+value)
+		if dmax > 0 && payer == "" && k.rail != nil && k.rail.Address() != "" {
+			return nil, ErrInvalidInput.Wrap("a paid call must say where it will be paid from on this world")
 		}
+		buyer.RailAddress = payer
+		owner, limit, reserve = seller, k.econ.CreditLimit, dmax
+		// A call that can owe nothing has no draw to hold a nonce for and freezes no terms (P4).
+		if dmax > 0 {
+			nonce, nerr := newSecret()
+			if nerr != nil {
+				return nil, nerr
+			}
+			servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment)
+		}
+		if seller.Available < lockPrice {
+			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
+		}
+	} else if caller.Available < lockPrice+value {
+		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+value)
 	}
 	now := time.Now().UTC()
 	p := &Process{
 		ID:          uuid.New().String(),
-		OwnerUserID: caller.ID,
+		OwnerUserID: owner.ID,
 		Status:      ProcessOpen,
 		CreatedAt:   now,
 	}
@@ -2399,11 +2406,6 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
 		CallerUserID:  caller.ID,
-		// Snapshot the serving markup on the root trace so every settlement path (commit, failure,
-		// recovery, forced closure) levies the receipt premium and releases the parked reserve
-		// config-independently (§13). Both 0 for a local caller.
-		PremiumBPS:    premiumBPS,
-		PremiumParked: premiumReserve,
 		CreatedAt:     now,
 	}
 	// Snapshot the TransferEffect on the trace so every settlement path releases the locked value
@@ -2419,11 +2421,17 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		t.IdempotencyRecordID = &idempotencyRecordID
 	}
 	if action.Kind == KindRemoteProxy {
-		key := uuid.New().String()
-		t.IdempotencyKey = &key
-		t.DispatchJSON = marshalDispatch(args, "", actionBasePrice(action), lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
+		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS); err != nil {
+			return nil, err
+		}
 	}
-	if err := k.store.BeginRun(ctx, p, t, caller.ID, lockPrice, premiumReserve, k.cfg.ExposureMax); err != nil {
+	// The terms this call is sold at ride on the trace, written by the same transaction that reserves
+	// the exposure for it — so a crash between admission and settlement leaves the debt, the exposure
+	// and the receipt's own arithmetic all recoverable from the one record (P10, D19).
+	if servingTerms != nil {
+		t.DispatchJSON, t.OwedRailAddress = servingTerms, buyer.RailAddress
+	}
+	if err := k.store.BeginRun(ctx, p, t, owner.ID, lockPrice, reserve, limit); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
 			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
 		}
@@ -2431,8 +2439,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	}
 	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
-	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The serving-markup rate
-	// rides on the trace (loaded by Call), so no request field is needed.
+	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The terms this call is
+	// sold at ride on the trace, which every settlement path already loads.
 	reply, err := k.call(ctx, callRequest{
 		CallerID:            caller.ID,
 		Action:              action,
@@ -2456,13 +2464,13 @@ func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash)
+	return k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash, BuyerTerms{})
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
 // Used by the federation handler to atomically settle the idempotency record. It stays a
 // separate entry point so federation-only authority is not representable in RunRequest.
-func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, idempotencyRecordID string) (*CallReply, error) {
+func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, idempotencyRecordID string, buyer BuyerTerms) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -2471,7 +2479,7 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actio
 	if err != nil || action == nil {
 		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
 	}
-	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "") // a peer pins the manifest via expected_contract_hash (§8), not a local quote
+	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "", buyer) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
@@ -2657,6 +2665,11 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 	v := &TransactionView{Transaction: tx}
 	if r, err := k.store.ReadRatingByTxID(ctx, tx.ID); err == nil && r != nil {
 		v.Rating = &EmbeddedRating{Value: r.Rating, Note: r.Note}
+	}
+	// A cross-kernel call names the obligation that settles it — the call's own idempotency key,
+	// which both kernels know it by — so an operator can name the payment that closes it (P10).
+	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil && tr.IdempotencyKey != nil {
+		v.TicketID = *tr.IdempotencyKey
 	}
 	return v
 }
@@ -2927,7 +2940,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			// Indicative all-in price: the peer's signed serving price plus this kernel's current
 			// import fee (§13), so local policy reprices the catalog with no re-pull. Resolve
 			// re-quotes authoritatively before any money moves.
-			price, perr := markedUpPrice(doc.ServingPrice, k.cfg.ImportBPS)
+			price, perr := k.econ.LocalPrice(doc.ServingPrice)
 			if perr != nil {
 				continue
 			}
@@ -3202,7 +3215,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, valueTo string) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, valueTo, nonce string) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -3230,6 +3243,7 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, val
 		Fee:          tx.Fee,
 		Charge:       charge,
 		Premium:      premium,
+		Nonce:        nonce,
 		Value:        value,
 		ValueTo:      valueTo,
 		Reason:       tx.Reason,

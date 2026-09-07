@@ -228,7 +228,7 @@ func TestFlow_SignupDepositRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedNet := price * (10000 - kernel.DefaultConfig().FeeBPS) / 10000
+	expectedNet := price * (10000 - kernel.DefaultEconomy().FeeBPS) / 10000
 	if providerUser.Available != expectedNet {
 		t.Errorf("provider net: got %d, want %d", providerUser.Available, expectedNet)
 	}
@@ -1295,7 +1295,7 @@ func newFedKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB, ed
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
 	k := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
 	// The outbound federation adapter signs as this kernel, so signed calls to peer kernels work.
-	k.SetFederation(newFedAdapter("", k.SignFederation))
+	k.SetFederation(newFedAdapter("", k.SignFederation, nil))
 
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
@@ -2071,9 +2071,10 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 
 		cfg := testConfig(fmt.Sprintf("duty-secret-%d", importBPS))
 		cfg.AllowLocalSources = true
-		cfg.RemoteBPS = importBPS
+		econ := testEconomy()
+		econ.RemoteBPS = importBPS
 		httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true}
-		kB := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
+		kB := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec, Economy: econ})
 
 		if err := kB.FirstBoot(ctx, "sys-pass", ""); err != nil {
 			t.Fatal(err)
@@ -2083,7 +2084,7 @@ func TestFlow_ImportDutyAdjustment(t *testing.T) {
 		privBBytes, _ := base64.RawURLEncoding.DecodeString(privB64)
 		privB := ed25519.PrivateKey(privBBytes)
 		kB.SetSigningKey(privB, sysB.ID)
-		kB.SetFederation(newFedAdapter("", kB.SignFederation))
+		kB.SetFederation(newFedAdapter("", kB.SignFederation, nil))
 
 		peerAOnB, err := kB.EnsureKernelAccount(ctx, pubAB64)
 		if err != nil {

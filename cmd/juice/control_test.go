@@ -85,9 +85,11 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	}
 }
 
-// TestAdminDepositByKey: a peer is funded by its base64url public key (the global name it was
-// friended with), not just its local @handle — the out-of-band settlement path.
-func TestAdminDepositByKey(t *testing.T) {
+// TestAdminDepositToAPeerIsRefused: a peer account is identity, never a wallet (P10, D14). The only
+// money that may reach one is the payment closing an obligation it owes, and that money is credited
+// to the seller. Naming the peer itself must be refused rather than preloading a balance no path
+// would ever spend — the last way the retired peer-wallet economy could still be reached.
+func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	suTok := bootSuperuser(t, env)
@@ -99,18 +101,19 @@ func TestAdminDepositByKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Address the peer by key, not by @handle.
+	// Addressed by key or by petname, and with or without an amount, it is the same refusal.
 	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
 		map[string]any{"handle": keyB64, "amount": 300, "ref": "test-payment"})
-	if status != http.StatusOK {
-		t.Fatalf("deposit-by-key status %d: %s", status, body)
+	if status == http.StatusOK {
+		t.Fatalf("a bare deposit to a peer was accepted: %s", body)
 	}
 	u, err := env.k.ReadUser(ctx, peer.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Available != 300 {
-		t.Errorf("peer balance after deposit-by-key: got %d, want 300", u.Available)
+	if u.Available != 0 || u.Locked != 0 {
+		t.Errorf("peer row after the refusal: %d/%d, want 0/0 — a peer account holds no money on any path",
+			u.Available, u.Locked)
 	}
 }
 

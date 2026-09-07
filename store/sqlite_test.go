@@ -9,7 +9,6 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -921,245 +920,6 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	}
 }
 
-// TestBeginRunGlobalExposure exercises the §13 admission guard: ordinary accounts stay prepaid, a
-// peer may draw negative only within the GLOBAL cap X, and — critically — a second peer identity
-// cannot use exposure the first already consumed (Sybil-proof: one X across all peers).
-func TestBeginRunGlobalExposure(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	const X = 100
-	now := time.Now().UTC()
-	run := func(u *kernel.Account, price, exposureMax int64) error {
-		p := newProcess(u.ID)
-		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: now}
-		return db.BeginRun(ctx, p, tr, u.ID, price, 0, exposureMax)
-	}
-
-	// Ordinary account with no balance cannot run a priced action (prepaid-only), regardless of X.
-	local := newUser("local", 0)
-	_ = db.CreateUser(ctx, local)
-	if err := run(local, 1, X); err == nil {
-		t.Error("ordinary account with no balance ran a priced action")
-	}
-
-	// A peer may draw negative up to the global cap X.
-	peerA := newPeer(t, db, "peerA", "keyA", 0, 0, now)
-	if err := run(peerA, 60, X); err != nil {
-		t.Fatalf("peer within X should run: %v", err)
-	}
-	if u, _ := db.ReadUser(ctx, peerA.ID); u.Available != -60 {
-		t.Errorf("peerA available: got %d, want -60", u.Available)
-	}
-
-	// Sybil: a second peer identity cannot use the exposure the first consumed. Global gross is 60;
-	// a 60 draw would push it to 120 > X=100, so it is refused — proving X is not per-peer.
-	peerB := newPeer(t, db, "peerB", "keyB", 0, 0, now)
-	if err := run(peerB, 60, X); err == nil {
-		t.Error("second peer identity jointly exceeded the global cap X (Sybil)")
-	}
-	// A draw that keeps global gross ≤ X is admitted (60 + 40 = 100).
-	if err := run(peerB, 40, X); err != nil {
-		t.Fatalf("second peer within remaining headroom should run: %v", err)
-	}
-
-	// X=0 ⇒ prepaid-only: a peer with no balance cannot draw negative.
-	peerC := newPeer(t, db, "peerC", "keyC", 0, 0, now)
-	if err := run(peerC, 1, 0); err == nil {
-		t.Error("X=0 should forbid any peer credit draw")
-	}
-	// A prepaid peer is immune to X: with balance ≥ price it always runs.
-	peerD := newPeer(t, db, "peerD", "keyD", 50, 0, now)
-	if err := run(peerD, 50, 0); err != nil {
-		t.Fatalf("prepaid peer should run regardless of X: %v", err)
-	}
-}
-
-// TestBeginRunGlobalExposureIsAtomicUnderConcurrency is the concurrency half of the cap. The test
-// above proves the rule sequentially; this proves the rule survives simultaneity, which is the only
-// way the cap can be breached in production: several peers admitted at once, each reading a gross
-// receivable that was true a microsecond ago.
-//
-// It belongs here rather than in a network test because the guarantee lives at this boundary — the
-// check and the wallet move are one store call (§13 "atomic with the wallet move"). Holding a
-// transport response cannot order two admissions; releasing N goroutines onto BeginRun can.
-func TestBeginRunGlobalExposureIsAtomicUnderConcurrency(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// Ten peers, each attempting a draw of 30 at the same instant, against a cap of 100. At most
-	// three can be admitted; which three is not determined and does not matter.
-	const (
-		X          = int64(100)
-		price      = int64(30)
-		contenders = 10
-	)
-	peers := make([]*kernel.Account, contenders)
-	for i := range peers {
-		peers[i] = newPeer(t, db, fmt.Sprintf("racer%d", i), fmt.Sprintf("racerkey%d", i), 0, 0, now)
-	}
-
-	var start sync.WaitGroup
-	var done sync.WaitGroup
-	start.Add(1)
-	admitted := make([]bool, contenders)
-	for i := range peers {
-		done.Add(1)
-		go func(i int) {
-			defer done.Done()
-			start.Wait() // one barrier, so every attempt reads the same starting gross
-			p := newProcess(peers[i].ID)
-			tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: now}
-			admitted[i] = db.BeginRun(ctx, p, tr, peers[i].ID, price, 0, X) == nil
-		}(i)
-	}
-	start.Done()
-	done.Wait()
-
-	n := 0
-	for _, ok := range admitted {
-		if ok {
-			n++
-		}
-	}
-	if want := int(X / price); n != want {
-		t.Errorf("admitted %d concurrent draws of %d against a cap of %d; want %d", n, price, X, want)
-	}
-
-	// The invariant that actually matters: whatever the interleaving, the books never show more
-	// unsecured credit outstanding than the cap allows.
-	gross, err := db.GrossReceivables(ctx)
-	if err != nil {
-		t.Fatalf("gross receivables: %v", err)
-	}
-	if gross > X {
-		t.Errorf("gross receivables %d exceeded the cap %d after concurrent admission", gross, X)
-	}
-}
-
-// TestCommitSettlement verifies the §13 rail-anchored residual-settlement store ops: a pay outcome
-// moves no balance (the debt stays, pending), a clear outcome extinguishes it, the cash finalization
-// is the only non-conservative move, insufficient debtor reserve rolls back with no partial writes,
-// and every path is idempotent.
-func TestCommitSettlement(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	sys := newUser("sys", 100) // operator reserve (accumulated fees) absorbs write-off variance
-	if err := db.CreateUser(ctx, sys); err != nil {
-		t.Fatal(err)
-	}
-	const d, Q = int64(3), int64(10)
-
-	// (6) Clear outcome (creditor: peer owes us d): clear +d on the row, sys absorbs −d, no cash.
-	pc := newPeer(t, db, "peerClear", "pkClear", -d, 0, now)
-	sys0, _ := db.ReadUser(ctx, sys.ID)
-	if _, err := db.CommitSettlement(ctx, "sid-clear", pc.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
-		t.Fatal(err)
-	}
-	if u, _ := db.ReadUser(ctx, pc.ID); u.Available != 0 {
-		t.Errorf("clear: peer row got %d, want 0", u.Available)
-	}
-	if u, _ := db.ReadUser(ctx, sys.ID); u.Available != sys0.Available-d {
-		t.Errorf("clear: sys delta got %d, want %d", u.Available-sys0.Available, -d)
-	}
-
-	// (1) Pay outcome: NO balance change — the debt stays, and G is unchanged. Record stored (replay).
-	pp := newPeer(t, db, "peerPay", "pkPay", -d, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
-		t.Fatal(err)
-	}
-	if u, _ := db.ReadUser(ctx, pp.ID); u.Available != -d {
-		t.Errorf("pay: peer row moved to %d, want unchanged %d", u.Available, -d)
-	}
-	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); !pending {
-		t.Error("pay: expected HasPendingSettlement true")
-	}
-	// (5) Replay returns the first record with no second application (anti-grinding).
-	if stored, _ := db.CommitSettlement(ctx, "sid-pay", pp.ID, sys.ID, 0, 0, d, `{"outcome":"clear"}`); stored != `{"outcome":"pay"}` {
-		t.Errorf("pay replay: got %q, want the stored pay record", stored)
-	}
-
-	// (3) The rail closes it: the debt stays on the books until a transfer row for that settlement
-	// reaches a final state, which is the only thing that can end a paid outcome now.
-	if err := db.CreateRailTransfer(ctx, &kernel.RailTransfer{
-		ID: "sid-pay", Kind: kernel.RailKindClaim, Party: pp.ID, Amount: Q, Credit: d,
-		Status: kernel.RailStatusAnnounced, CreatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); !pending {
-		t.Error("a settlement whose payment has not arrived is still pending")
-	}
-	if err := db.MarkRailTransfer(ctx, "sid-pay", kernel.RailStatusCredited); err != nil {
-		t.Fatal(err)
-	}
-	if pending, _ := db.HasPendingSettlement(ctx, pp.ID); pending {
-		t.Error("a settlement the rail has closed is no longer pending")
-	}
-
-	poor := newUser("poorSys", 0)
-	_ = db.CreateUser(ctx, poor)
-
-	// Creditor clear against an empty reserve refuses the same way: ErrInsufficientFunds, no
-	// message SQL, full rollback, and the same commit succeeds once the reserve exists.
-	pcr := newPeer(t, db, "peerClearPoor", "pkClearPoor", -d, 0, now)
-	_, cerr := db.CommitSettlement(ctx, "sid-poor", pcr.ID, poor.ID, d, -d, d, `{"outcome":"clear"}`)
-	if !errors.Is(cerr, kernel.ErrInsufficientFunds) {
-		t.Errorf("clear with empty creditor reserve: got %v, want ErrInsufficientFunds", cerr)
-	}
-	if cerr != nil && strings.Contains(cerr.Error(), "CHECK") {
-		t.Errorf("reserve refusal leaks constraint text: %v", cerr)
-	}
-	if u, _ := db.ReadUser(ctx, pcr.ID); u.Available != -d {
-		t.Errorf("failed clear left a partial write on the row: got %d, want %d", u.Available, -d)
-	}
-	if u, _ := db.ReadUser(ctx, poor.ID); u.Available != 0 {
-		t.Errorf("failed clear moved the poor reserve: got %d, want 0", u.Available)
-	}
-	if err := db.CreateLedgerEntry(ctx, &kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, ToUserID: poor.ID, Amount: d, CreatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.CommitSettlement(ctx, "sid-poor", pcr.ID, poor.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
-		t.Errorf("clear after funding the reserve should succeed: %v", err)
-	}
-	if u, _ := db.ReadUser(ctx, pcr.ID); u.Available != 0 {
-		t.Errorf("funded clear: peer row got %d, want 0", u.Available)
-	}
-
-	// A draw that came out payable holds the debt until it is paid: no other outcome for that peer
-	// commits meanwhile, whatever it says, and the rule lives in the commit itself so that two draws
-	// finishing together cannot both slip past it.
-	ph := newPeer(t, db, "peerHeld", "pkHeld", -d, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-h1", ph.ID, sys.ID, 0, 0, d, `{"outcome":"pay"}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.CommitSettlement(ctx, "sid-h2", ph.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("a clear while a payable draw stands: got %v, want ErrInvalidState", err)
-	}
-	if u, _ := db.ReadUser(ctx, ph.ID); u.Available != -d {
-		t.Errorf("the held debt moved: %d, want %d", u.Available, -d)
-	}
-
-	// Two settlements drawn on one debt: the first clears it, and the second finds nothing left to
-	// clear. Without that the row would be credited twice for one debt and the creditor would lose
-	// it twice over.
-	pdd := newPeer(t, db, "peerTwice", "pkTwice", -d, 0, now)
-	if _, err := db.CommitSettlement(ctx, "sid-t1", pdd.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.CommitSettlement(ctx, "sid-t2", pdd.ID, sys.ID, d, -d, d, `{"outcome":"clear"}`); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("clearing a debt that is already gone: got %v, want ErrInvalidState", err)
-	}
-	if u, _ := db.ReadUser(ctx, pdd.ID); u.Available != 0 {
-		t.Errorf("one debt cleared twice left the row at %d, want 0", u.Available)
-	}
-
-	// The conservation guard rejects a non-conservative outcome record.
-	if _, err := db.CommitSettlement(ctx, "sid-bad", pc.ID, sys.ID, d, 0, d, `{"outcome":"clear"}`); err == nil {
-		t.Error("CommitSettlement must reject dClear+variance != 0")
-	}
-}
-
 func TestBeginRunAndSubcall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -1410,43 +1170,46 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 	}
 }
 
-// CommitFailedCall (the recovery settle op) fully restores the balance.
-func TestPremiumReserveReleasedFromTrace(t *testing.T) {
+// A call that fails gives back the lottery stake it took, whatever the caller's kernel remembers of
+// it. Recovery rebuilds the request from nothing, so the amount to release is read from the trace
+// row alone: a stake the store could not find would stay locked forever.
+func TestAFailedCallReleasesItsStake(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	sys := newUser("sys", 0)
 	_ = db.CreateUser(ctx, sys)
-	const price, reserve = int64(100), int64(5)
-	peer := newPeer(t, db, "peer", "pk", price+reserve, 0, now)
-
-	p := newProcess(peer.ID)
-	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, PremiumBPS: 500, PremiumParked: reserve, CreatedAt: now}
-	if err := db.BeginRun(ctx, p, root, peer.ID, price, reserve, 0); err != nil {
+	const price, stake = int64(100), int64(5)
+	caller := newUser("caller", price+stake)
+	if err := db.CreateUser(ctx, caller); err != nil {
 		t.Fatal(err)
 	}
-	if u, _ := db.ReadUser(ctx, peer.ID); u.Available != 0 || u.Locked != price+reserve {
-		t.Fatalf("after BeginRun: available=%d locked=%d, want 0/%d", u.Available, u.Locked, price+reserve)
+
+	p := newProcess(caller.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: caller.ID, Ticket: stake, CreatedAt: now}
+	if err := db.BeginRun(ctx, p, root, caller.ID, price, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ := db.ReadUser(ctx, caller.ID); u.Available != 0 || u.Locked != price+stake {
+		t.Fatalf("after BeginRun: available=%d locked=%d, want 0/%d", u.Available, u.Locked, price+stake)
 	}
 
-	// Settle as a failure with a full refund — mirrors recoverTrace, which passes NO premium reserve
-	// (it rebuilds the request fresh); the store must read the reserve from the trace row alone.
 	tx := &kernel.Transaction{
-		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: peer.ID,
-		CallerUserID: peer.ID, TargetUserID: peer.ID, ActionID: "dummy",
+		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: caller.ID,
+		CallerUserID: caller.ID, TargetUserID: caller.ID, ActionID: "dummy",
 		Status: kernel.TxFailure, Gross: price, Reason: "recovered", ArgsJSON: []byte("{}"), ReplyJSON: []byte("null"),
 		StartedAt: now, EndedAt: now,
 	}
 	buildFn := func(refund int64) (*kernel.Receipt, error) {
-		charge := price - refund // full refund ⇒ charge 0 ⇒ premium 0
+		charge := price - refund // a full refund charges nothing
 		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: tx.ID, TraceID: root.ID, ActionID: "dummy", Status: kernel.TxFailure, Charge: charge, CreatedAt: now}, nil
 	}
 	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, sys.ID, price, nil, "", "recovered", ""); err != nil {
 		t.Fatal(err)
 	}
-	// Reserve fully released: locked back to 0, available restored — no leak.
-	if u, _ := db.ReadUser(ctx, peer.ID); u.Locked != 0 || u.Available != price+reserve {
-		t.Errorf("after recovery: available=%d locked=%d, want %d/0 (reserve leaked in locked?)", u.Available, u.Locked, price+reserve)
+	// Stake fully released: locked back to 0, available restored — no leak.
+	if u, _ := db.ReadUser(ctx, caller.ID); u.Locked != 0 || u.Available != price+stake {
+		t.Errorf("after recovery: available=%d locked=%d, want %d/0 (the stake leaked in locked?)", u.Available, u.Locked, price+stake)
 	}
 }
 
@@ -1753,7 +1516,7 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginStepCall(ctx, step.ID, ct, 0); err != nil {
+	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1826,7 +1589,7 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	err := db.BeginStepCall(ctx, step.ID, ct, 0)
+	err := db.BeginStepCall(ctx, step.ID, ct)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("BeginStepCall with broken park: got %v, want ErrInvalidState", err)
 	}
@@ -3310,7 +3073,7 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 		}
 		_ = db.CreateStep(ctx, step)
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		_ = db.BeginStepCall(ctx, step.ID, ct, 0)
+		_ = db.BeginStepCall(ctx, step.ID, ct)
 		return step, ct
 	}
 
@@ -3484,7 +3247,7 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
+	_ = db.BeginStepCall(ctx, step.ID, ct)
 
 	// Create a descendant subcall of the completion trace and commit a transaction for it.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -3541,7 +3304,7 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	}
 	_ = db.CreateStep(ctx, step)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct, 0)
+	_ = db.BeginStepCall(ctx, step.ID, ct)
 
 	// Make the completion trace non-empty: lock funds via a subcall.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -3722,6 +3485,42 @@ func TestListPurgeablePeers(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// excluded: a foreign call it made here is still unrevealed — its reveal is keyed on this account
+	owedp := newPeer(t, db, "owedp", "k-owedp", 0, 0, old)
+	{
+		p := newProcess(owner.ID)
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerUserID: owedp.ID, CreatedAt: old}
+		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// excluded: a call we made to it is still waiting to tell it how the draw came out
+	unrev := newPeer(t, db, "unrev", "k-unrev", 0, 0, old)
+	{
+		p := newProcess(owner.ID)
+		key := "idem-unrev"
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerUserID: owner.ID, IdempotencyKey: &key, CreatedAt: old}
+		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ExecForTest(ctx, `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,gross,net,started_at,ended_at)
+			VALUES (?,?,?,'',?,?,?,'a','success',11,11,?,?)`, uuid.New().String(), p.ID, tr.ID, owner.ID, owner.ID, unrev.ID, timeToStr(old), timeToStr(old)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// excluded: a call we made to it is still awaiting its receipt — the retry settles through the
+	// proxy this peer owns
+	parked := newPeer(t, db, "parked", "k-parked", 0, 0, old)
+	{
+		p := newProcess(owner.ID)
+		key := "idem-parked"
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: parked.ID, CallerUserID: owner.ID, IdempotencyKey: &key, CreatedAt: old}
+		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// excluded: a local (non-peer) account, even though old and zero-balance
 	local := newUser("local", 0)
 	local.CreatedAt = old
@@ -3729,7 +3528,7 @@ func TestListPurgeablePeers(t *testing.T) {
 
 	// The §13 contact cache must NOT count as activity: a fresh last_seen on the idle peer keeps
 	// it purgeable, or answering gossip would immortalize a zombie peer.
-	if err := db.RecordKernelContact(ctx, idle.KernelPublicKey, true, now, nil); err != nil {
+	if err := db.RecordKernelContact(ctx, idle.KernelPublicKey, true, now); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 
@@ -3751,8 +3550,7 @@ func TestRecordKernelContact(t *testing.T) {
 	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
 	key := peer.KernelPublicKey
 
-	credit := int64(900)
-	if err := db.RecordKernelContact(ctx, key, true, now, &credit); err != nil {
+	if err := db.RecordKernelContact(ctx, key, true, now); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	got, _ := db.ReadKernel(ctx, key)
@@ -3762,19 +3560,13 @@ func TestRecordKernelContact(t *testing.T) {
 	if got.LastContactFailedAt != nil {
 		t.Error("a success must not touch last_contact_failed_at")
 	}
-	if got.PeerCredit == nil || *got.PeerCredit != 900 {
-		t.Errorf("peer_credit = %v, want 900", got.PeerCredit)
-	}
 
-	// A nil credit advances last_seen but keeps the prior value (COALESCE).
+	// A later contact advances last_seen.
 	later := now.Add(time.Hour)
-	if err := db.RecordKernelContact(ctx, key, true, later, nil); err != nil {
-		t.Fatalf("RecordKernelContact nil credit: %v", err)
+	if err := db.RecordKernelContact(ctx, key, true, later); err != nil {
+		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	got, _ = db.ReadKernel(ctx, key)
-	if got.PeerCredit == nil || *got.PeerCredit != 900 {
-		t.Errorf("nil credit must keep prior 900, got %v", got.PeerCredit)
-	}
 	if !got.LastSeen.Equal(later) {
 		t.Errorf("last_seen = %v, want %v", got.LastSeen, later)
 	}
@@ -3782,7 +3574,7 @@ func TestRecordKernelContact(t *testing.T) {
 	// Neither timestamp ever moves backwards, so a slow observation cannot overwrite newer truth.
 	// Sub-second spacing is the case lexical text ordering gets wrong, hence julianday().
 	stale := later.Add(-500 * time.Millisecond)
-	if err := db.RecordKernelContact(ctx, key, true, stale, nil); err != nil {
+	if err := db.RecordKernelContact(ctx, key, true, stale); err != nil {
 		t.Fatalf("stale success: %v", err)
 	}
 	got, _ = db.ReadKernel(ctx, key)
@@ -3792,7 +3584,7 @@ func TestRecordKernelContact(t *testing.T) {
 
 	// A failure lands on its own column and leaves the success untouched: a reader compares them.
 	failedAt := later.Add(time.Minute)
-	if err := db.RecordKernelContact(ctx, key, false, failedAt, nil); err != nil {
+	if err := db.RecordKernelContact(ctx, key, false, failedAt); err != nil {
 		t.Fatalf("failure: %v", err)
 	}
 	got, _ = db.ReadKernel(ctx, key)
@@ -3802,7 +3594,7 @@ func TestRecordKernelContact(t *testing.T) {
 	if !got.LastSeen.Equal(later) {
 		t.Errorf("failure moved last_seen to %v, want %v held", got.LastSeen, later)
 	}
-	if err := db.RecordKernelContact(ctx, key, false, failedAt.Add(-time.Second), nil); err != nil {
+	if err := db.RecordKernelContact(ctx, key, false, failedAt.Add(-time.Second)); err != nil {
 		t.Fatalf("stale failure: %v", err)
 	}
 	got, _ = db.ReadKernel(ctx, key)
@@ -3811,7 +3603,7 @@ func TestRecordKernelContact(t *testing.T) {
 	}
 
 	// Observing a kernel this one has never met creates nothing (§13): no row, no error.
-	if err := db.RecordKernelContact(ctx, "k-unknown-kernel", false, now, nil); err != nil {
+	if err := db.RecordKernelContact(ctx, "k-unknown-kernel", false, now); err != nil {
 		t.Fatalf("unknown key must be a silent no-op: %v", err)
 	}
 	if rk, _ := db.ReadKernel(ctx, "k-unknown-kernel"); rk != nil {
@@ -4182,7 +3974,7 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
 	}
 	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
-		proxy.ID, sys.ID, 0, 0, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		sys.ID, 0, 0, nil, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 
@@ -4390,8 +4182,8 @@ func TestListKernelsRoster(t *testing.T) {
 	if _, ok := def["rosterK4"]; ok {
 		t.Error("a suspended counterparty must be hidden by default")
 	}
-	if v := def["rosterK1"]; v == nil || !v.HasAccount || v.Available != 5 || v.Petname != "titan" {
-		t.Errorf("counterparty row = %+v, want an account with balance 5 and petname titan", v)
+	if v := def["rosterK1"]; v == nil || !v.HasAccount || v.Petname != "titan" {
+		t.Errorf("counterparty row = %+v, want an account under the petname titan", v)
 	}
 	if v := def["rosterK3"]; v == nil || v.HasAccount || v.Nickname != "minibox" || v.Petname != "" {
 		t.Errorf("discovery-only row = %+v, want no account and an unbound nickname", v)
@@ -4416,8 +4208,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	if err := db.SetGossipCursor(ctx, key, "cursor-1"); err != nil {
 		t.Fatal(err)
 	}
-	credit := int64(42)
-	if err := db.RecordKernelContact(ctx, key, true, now, &credit); err != nil {
+	if err := db.RecordKernelContact(ctx, key, true, now); err != nil {
 		t.Fatal(err)
 	}
 	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)
@@ -4432,8 +4223,8 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	if rk.GossipCursor != "cursor-1" {
 		t.Errorf("cursor = %q, want cursor-1 (observation must not touch it)", rk.GossipCursor)
 	}
-	if rk.LastSeen == nil || rk.PeerCredit == nil || *rk.PeerCredit != 42 {
-		t.Errorf("sync cache lost: last_seen=%v credit=%v", rk.LastSeen, rk.PeerCredit)
+	if rk.LastSeen == nil {
+		t.Error("the sync cache lost last_seen")
 	}
 	if rk.Nickname != "nick" || rk.About != "about" {
 		t.Errorf("an empty observation must preserve prior metadata, got %q/%q", rk.Nickname, rk.About)
@@ -4783,8 +4574,10 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 	db := openAt(t, path)
 	ctx := context.Background()
 	for _, want := range []*kernel.RailTransfer{
-		{ID: "sidA", Kind: kernel.RailKindClaim, Party: "peerA", Amount: 100, Credit: 30, Status: kernel.RailStatusCredited},
-		{ID: "sidB", Kind: kernel.RailKindSettlement, Party: "peerB", Amount: 120, Credit: 40, Status: kernel.RailStatusAnnounced},
+		// "claim" and "settlement" are retired kinds no new row ever takes; these are history, kept
+		// only so the money that crossed keeps counting in the solvency audit.
+		{ID: "sidA", Kind: "claim", Party: "peerA", Amount: 100, Credit: 30, Status: kernel.RailStatusCredited},
+		{ID: "sidB", Kind: "settlement", Party: "peerB", Amount: 120, Credit: 40, Status: kernel.RailStatusAnnounced},
 	} {
 		got, err := db.ReadRailTransfer(ctx, want.ID)
 		if err != nil || got == nil {
@@ -4797,9 +4590,6 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 		// Nothing is left for the worker to drive: both sides are finished history.
 		if got.Open() {
 			t.Errorf("%s is still open after conversion", want.ID)
-		}
-		if pending, _ := db.HasPendingSettlement(ctx, got.Party); pending {
-			t.Errorf("%s still reads as an unsettled debt", want.ID)
 		}
 	}
 	// The cash rows now read as crossings in the direction the money went, so the vault counts them:

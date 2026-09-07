@@ -222,7 +222,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	}, 0, 0, 0, "")
+	}, 0, 0, 0, "", "")
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}
@@ -587,80 +587,51 @@ func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
 	}
 }
 
-// TestSettleRefusalMapsPeerCode: a peer's non-200 settle reply surfaces under the code it carried
-// (a typed reserve refusal stays insufficient_funds), and a codeless or malformed body still yields
-// an error rather than a panic.
-func TestSettleRefusalMapsPeerCode(t *testing.T) {
-	err := settleRefusal("finish", []byte(`{"code":"insufficient_funds","error":"operator reserve below settlement variance"}`))
-	if !errors.Is(err, ErrInsufficientFunds) {
-		t.Errorf("typed refusal lost its class: %v", err)
+// TestDrawIsFairAndAgreed exercises the settlement draw (P10): it is a pure function of the three
+// values both kernels hold, so the two sides always agree; it pays nothing on a zero obligation and
+// the obligation itself when no lottery applies; and over many nonces it pays the face value with
+// probability d/L, which is what makes the expected payment the obligation.
+func TestDrawIsFairAndAgreed(t *testing.T) {
+	secret, nonce := []byte("secret"), []byte("nonce")
+	if Draw("t1", secret, nonce, 40, 100) != Draw("t1", secret, nonce, 40, 100) {
+		t.Fatal("the draw is not deterministic, so the two kernels could disagree")
 	}
-	if !strings.Contains(err.Error(), "peer refused settlement finish") || !strings.Contains(err.Error(), "operator reserve") {
-		t.Errorf("refusal message lost its context: %v", err)
+	if got := Draw("t1", secret, nonce, 0, 100); got != 0 {
+		t.Errorf("a zero obligation drew %d, want 0", got)
 	}
-	if err := settleRefusal("open", []byte(`not json`)); err == nil {
-		t.Error("malformed refusal body must still be an error")
+	if got := Draw("t1", secret, nonce, 40, 0); got != 40 {
+		t.Errorf("with no lottery the obligation is paid exactly, got %d", got)
 	}
-}
-
-// TestSettleOutcomeAndPayloads exercises the residual-settlement primitives (§13): the fair outcome
-// function's determinism, boundaries, and E[pay]≈d/Q distribution; the creditor record sign/verify
-// roundtrip with tamper detection; and the disjointness of the settle_open / settle_finish scopes.
-func TestSettleOutcomeAndPayloads(t *testing.T) {
-	// Deterministic in (id, s, n, Q, d).
-	if settleOutcome("sid", "secret", "nonce", 100, 40) != settleOutcome("sid", "secret", "nonce", 100, 40) {
-		t.Fatal("settleOutcome is not deterministic")
+	if got := Draw("t1", secret, nonce, 100, 100); got != 100 {
+		t.Errorf("an obligation at the face value is paid exactly, got %d", got)
 	}
-	// d=0 never pays; d=Q always pays (the whole probability mass).
-	if settleOutcome("sid", "secret", "nonce", 100, 0) {
-		t.Error("d=0 must never pay")
-	}
-	if !settleOutcome("sid", "secret", "nonce", 100, 100) {
-		t.Error("d=Q must always pay")
-	}
-	// Empirical E[pay] ≈ d/Q over many nonces (EV-exactness of the mechanism).
-	const Q, d, N = int64(100), int64(30), 20000
+	// Empirical E[payment] ≈ d over many nonces: the mechanism's whole point.
+	const L, d, N = int64(100), int64(30), 20000
 	pays := 0
 	for i := 0; i < N; i++ {
-		if settleOutcome("sid", "secret", fmt.Sprint(i), Q, d) {
+		if Draw("t1", secret, []byte(fmt.Sprint(i)), d, L) == L {
 			pays++
 		}
 	}
 	if frac := float64(pays) / N; frac < 0.27 || frac > 0.33 {
-		t.Errorf("empirical pay fraction %.3f, want ≈0.30 (d/Q)", frac)
+		t.Errorf("empirical pay fraction %.3f, want ≈0.30 (d/L)", frac)
 	}
+}
 
+// TestRevealDomainIsDisjoint: a reveal signature must not verify under any other domain (§12), so a
+// captured reveal cannot be replayed as some other kind of authorization.
+func TestRevealDomainIsDisjoint(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	creditor := base64.RawURLEncoding.EncodeToString(pub)
-
-	// Record sign/verify roundtrip with tamper detection.
-	k := &Kernel{cfg: Config{SigningKey: priv, Network: playNet}}
-	rec := &SettlementRecord{
-		SettlementID: "sid", Creditor: creditor, Debtor: "debtor-key", Amount: 3, Quantum: 10,
-		Mode: "probabilistic", Commitment: "abc", ExpiresAt: time.Now().UTC(), CreatedAt: time.Now().UTC(),
-	}
-	if err := k.signSettlementRecord(rec); err != nil {
-		t.Fatal(err)
-	}
-	if err := playNet.verifySettlementRecord(rec, creditor); err != nil {
-		t.Fatalf("record should verify: %v", err)
-	}
-	rec.Amount = 4 // tamper
-	if err := playNet.verifySettlementRecord(rec, creditor); err == nil {
-		t.Error("a tampered record must not verify")
-	}
-
-	// Domain disjointness: a signature made under the settle_open domain must not verify under the
-	// settle_finish domain (§12), even for the SAME payload — disjointness is now the domain prefix.
-	sig, err := playNet.sign(priv, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"))
+	p := RevealPayload{Counterparty: "c", Recipient: "r", Secret: "s", TicketID: "t1", Timestamp: "ts"}
+	sig, err := playNet.sign(priv, sigDomainReveal, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := playNet.verify(pub, sigDomainSettleOpen, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err != nil {
-		t.Fatalf("settle_open should verify against itself: %v", err)
+	if err := playNet.verify(pub, sigDomainReveal, p, sig); err != nil {
+		t.Fatalf("a reveal should verify against itself: %v", err)
 	}
-	if err := playNet.verify(pub, sigDomainSettleFinish, settleOpenPayload("c", "r", "sid", 5, "ts"), sig); err == nil {
-		t.Error("a settle_open signature must not verify under the settle_finish domain")
+	if err := playNet.verify(pub, sigDomainFedCall, p, sig); err == nil {
+		t.Error("a reveal signature must not verify under the fed_call domain")
 	}
 }
 
@@ -670,17 +641,23 @@ func TestSettleOutcomeAndPayloads(t *testing.T) {
 func TestRemoteReceiptInvalidValue(t *testing.T) {
 	replyHash, _ := jcsHashStr("null")
 	const rbps, mp = int64(500), int64(100)
-	if got := remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")); got != "" {
+	k := &Kernel{econ: Economy{RemoteBPS: rbps}}
+	if got := k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", ReplyHash: replyHash}, mp, rbps, []byte("null")); got != "" {
 		t.Errorf("valid value-free receipt rejected: %s", got)
 	}
-	if remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
 		t.Error("a success delivering value must be quarantined")
 	}
-	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil) == "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil) == "" {
 		t.Error("a failure delivering value must be quarantined")
 	}
-	if remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0}, mp, rbps, nil) != "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0}, mp, rbps, nil) != "" {
 		t.Error("a value-free failure must settle")
+	}
+	// An obligation nobody can draw for is not settleable: without the seller's nonce the buyer
+	// would be choosing the outcome alone (P10).
+	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+		t.Error("a charged receipt with no nonce must be quarantined")
 	}
 }
 
@@ -841,7 +818,7 @@ func TestMarkedUpPrice(t *testing.T) {
 	// base + ceil(base*bps/10000) computed naively. Bases straddle every residue class boundary.
 	for _, base := range []int64{0, 1, 9999, 10000, 10001, 19999, 123456, 999999999} {
 		for _, bps := range []int64{0, 1, 500, 2000, 9999, 10000} {
-			got, err := markedUpPrice(base, bps)
+			got, err := Economy{}.ServingPrice(base, bps)
 			if err != nil {
 				t.Fatalf("markedUpPrice(%d,%d): unexpected error %v", base, bps, err)
 			}
@@ -855,20 +832,20 @@ func TestMarkedUpPrice(t *testing.T) {
 	// A price that no naive implementation could handle: base*bps overflows int64, but the
 	// quotient/remainder split keeps the result exact and representable.
 	const big = int64(1) << 55
-	got, err := markedUpPrice(big, 10000)
+	got, err := Economy{}.ServingPrice(big, 10000)
 	if err != nil {
-		t.Fatalf("markedUpPrice(2^55, 10000): unexpected error %v", err)
+		t.Fatalf("Economy{}.ServingPrice(2^55, 10000): unexpected error %v", err)
 	}
 	if got != 2*big {
-		t.Errorf("markedUpPrice(2^55, 10000) = %d, want %d", got, 2*big)
+		t.Errorf("Economy{}.ServingPrice(2^55, 10000) = %d, want %d", got, 2*big)
 	}
 
 	// Rejections: out-of-range inputs, and a result that cannot be represented.
 	for _, c := range []struct{ base, bps int64 }{
 		{-1, 500}, {100, -1}, {100, 10001}, {math.MaxInt64, 1}, {math.MaxInt64 - 1, 10000},
 	} {
-		if _, err := markedUpPrice(c.base, c.bps); err == nil {
-			t.Errorf("markedUpPrice(%d,%d) must be rejected", c.base, c.bps)
+		if _, err := (Economy{}).ServingPrice(c.base, c.bps); err == nil {
+			t.Errorf("a markup of %d at %d bps must be rejected", c.base, c.bps)
 		}
 	}
 }
@@ -878,7 +855,7 @@ func TestMarkedUpPrice(t *testing.T) {
 func TestPricedStoreDerivesLocalTotal(t *testing.T) {
 	base := int64(100)
 	rbps := int64(500)
-	s := &pricedStore{importBPS: 500}
+	s := &pricedStore{econ: Economy{ImportBPS: 500}}
 
 	// mp=100 at remote_bps=500 → sr=105; import_bps=500 → 105 + ceil(105*500/10000) = 111.
 	a := &Action{Kind: KindRemoteProxy, Price: 999, BasePrice: &base, RemoteBPS: &rbps}
@@ -892,7 +869,7 @@ func TestPricedStoreDerivesLocalTotal(t *testing.T) {
 	// The same row under a different local policy: 105 + ceil(105*2000/10000) = 126. Nothing is
 	// stored, so a policy change reprices with no re-resolve.
 	b := &Action{Kind: KindRemoteProxy, BasePrice: &base, RemoteBPS: &rbps}
-	if _, err := (&pricedStore{importBPS: 2000}).price(b); err != nil {
+	if _, err := (&pricedStore{econ: Economy{ImportBPS: 2000}}).price(b); err != nil {
 		t.Fatal(err)
 	}
 	if b.Price != 126 {
@@ -901,7 +878,7 @@ func TestPricedStoreDerivesLocalTotal(t *testing.T) {
 }
 
 func TestPricedStoreLeavesOtherRowsAlone(t *testing.T) {
-	s := &pricedStore{importBPS: 2000}
+	s := &pricedStore{econ: Economy{ImportBPS: 2000}}
 
 	// A local action's price is authored, not derived.
 	local := &Action{Kind: KindHTTP, Price: 42}
@@ -926,7 +903,7 @@ func TestPricedStorePropagatesOverflow(t *testing.T) {
 	base := int64(math.MaxInt64)
 	rbps := int64(500)
 	a := &Action{Kind: KindRemoteProxy, Price: 7, BasePrice: &base, RemoteBPS: &rbps}
-	if _, err := (&pricedStore{importBPS: 500}).price(a); err == nil {
+	if _, err := (&pricedStore{econ: Economy{ImportBPS: 500}}).price(a); err == nil {
 		t.Fatal("an unrepresentable total must be an error, not a fallback to the stored price")
 	}
 	if a.Price != 7 {
@@ -934,7 +911,7 @@ func TestPricedStorePropagatesOverflow(t *testing.T) {
 	}
 
 	// The list form fails the whole read rather than returning a mix of derived and stale rows.
-	if _, err := (&pricedStore{importBPS: 500}).priceMany([]*Action{a}, nil); err == nil {
+	if _, err := (&pricedStore{econ: Economy{ImportBPS: 500}}).priceMany([]*Action{a}, nil); err == nil {
 		t.Error("priceMany must propagate the overflow")
 	}
 }
@@ -983,5 +960,26 @@ func manifestFixtures() []struct {
 		{"nested-schemas", withNested, "ec8e5e5f130550f733f4e45e56ce552dc87b35a1517b01537f4bf1edc4e0793e"},
 		// A display-only handle rename must hash identically to the base fixture.
 		{"owner-handle-renamed", renamed, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
+	}
+}
+
+// A dispatch that can owe nothing carries no ticket terms: no secret, no commitment, no face value,
+// no stake (P4). A priced one carries all of them.
+func TestAFreeDispatchCarriesNoTicketTerms(t *testing.T) {
+	k := &Kernel{econ: Economy{Lottery: 100}}
+	for _, price := range []int64{0, 10} {
+		t := t
+		a := &Action{OwnerUserID: "seller", Price: price}
+		tr := &Trace{}
+		if err := k.prepareDispatch(context.Background(), tr, a, nil, "", price, 0); err != nil {
+			t.Fatal(err)
+		}
+		d := dispatched(tr.DispatchJSON)
+		if price == 0 && (d.Secret != "" || d.Lottery != 0 || tr.Ticket != 0) {
+			t.Errorf("a free dispatch carried terms: secret=%q lottery=%d stake=%d", d.Secret, d.Lottery, tr.Ticket)
+		}
+		if price > 0 && (d.Secret == "" || d.Lottery != 100 || tr.Ticket != 100) {
+			t.Errorf("a priced dispatch lacked terms: secret=%q lottery=%d stake=%d", d.Secret, d.Lottery, tr.Ticket)
+		}
 	}
 }

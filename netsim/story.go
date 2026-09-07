@@ -28,18 +28,17 @@ var kernelPlan = []struct {
 	name                         string
 	handle                       string
 	feeBps, remoteBps, importBps int
-	exposureMax                  int64
+	creditLimit                  int64
 }{
-	// The cap must outlast the trading rounds. A pair that reaches it settles in the middle of
-	// trading, which on a chain is an unbudgeted payment and a quarter of an hour of finality; the
-	// point of accumulating debt is that hundreds of calls become one payment. The heaviest
-	// position here is k1 owing k3 about 189 credits a round, so twelve rounds reach roughly 2270.
-	// The low cap that makes the exposure engine visible is exercised in the Sybil act instead.
-	{"k1", "hub", 2000, 500, 500, 3000},
-	{"k2", "shop", 1000, 700, 300, 3000},
-	{"k3", "maker", 2500, 0, 1000, 3000},
-	{"k4", "buyer", 0, 500, 0, 3000},
-	{"k5", "late", 1500, 1000, 500, 3000},
+	// The credit limit must outlast the trading rounds. It bounds what a kernel has delivered and
+	// not been paid for, and here that is one round's obligations at most — every one of them is
+	// settled before the round ends, because a seller serves nobody who still owes it. The low limit
+	// that makes the engine refuse is exercised in the Sybil act instead.
+	{"k1", "hub", 2000, 500, 500, 30000},
+	{"k2", "shop", 1000, 700, 300, 30000},
+	{"k3", "maker", 2500, 0, 1000, 30000},
+	{"k4", "buyer", 0, 500, 0, 30000},
+	{"k5", "late", 1500, 1000, 500, 30000},
 }
 
 // Users, and how money reaches them.
@@ -139,7 +138,7 @@ const shortOfMoney = `credits, call costs|insufficient|balance|funds`
 
 // sybilPlan is the attacker's identities. They are named here so the declared shape counts their
 // deposits and their debts: an attacker who cannot pay for a call is refused for want of money and
-// never reaches the exposure cap, which is the thing under test.
+// never reaches the credit limit, which is the thing under test.
 var sybilPlan = []string{"k6", "k7"}
 
 // The attackers are kernels too, and the oracle must be able to predict what they were charged.
@@ -149,11 +148,13 @@ const (
 	sybilImportBps = 500
 )
 
-// sybilVictimCap is the low exposure limit the shop is put on for the attack. The economy itself
-// runs on a cap its trading cannot reach — a pair that settles mid-trade costs a payment and a
-// finality wait for nothing — so the engine is made visible here instead, on one kernel, for the
-// length of one act.
-const sybilVictimCap = 400
+// sybilVictimHeadroom is how much unpaid delivered work the shop will carry beyond wherever its
+// honest trading has already left it, for the length of the attack. It is a couple of the shop's own
+// calls rather than a round number, because the counter moves in both directions while the attack
+// runs — cash from earlier trades keeps landing, and on a slow rail it can land faster than three
+// attackers can borrow. A headroom the attack crosses in its first few calls is reached whatever the
+// drift, which is what makes the refusal it is looking for actually happen.
+const sybilVictimHeadroom = 60
 
 // StoryVersion changes whenever the economy does, so two reports are never compared as if they
 // measured the same thing.
@@ -199,19 +200,17 @@ func (s *story) deposited(kernel string, credits int64) {
 	s.deposits.Total += credits * s.scale
 }
 
-// settlement is one payment the story asked for, with the peer rows on both sides as they stood
-// the moment before it was opened. The report checks the delta against the amount; no ledger key is
-// assumed, because play keys the credit by the settlement reference and a chain keys it by the
-// transaction hash.
+// settlement is one obligation the story saw closed: what the buyer owed, what actually moved on the
+// rail for it, and whether the seller's books closed against it. The report checks that the money
+// that moved is what the draw decided, and that the seller was credited what it was owed.
 type settlement struct {
-	ID                string `json:"id"`
-	Debtor            string `json:"debtor"`
-	Creditor          string `json:"creditor"`
-	Amount            int64  `json:"amount"`
-	CreditorRowBefore int64  `json:"creditor_row_before"`
-	CreditorRowAfter  int64  `json:"creditor_row_after"`
-	Closed            bool   `json:"closed"`
-	WallMs            int64  `json:"wall_ms"`
+	ID         string `json:"id"`
+	Debtor     string `json:"debtor"`
+	Creditor   string `json:"creditor"`
+	Amount     int64  `json:"amount"`     // what moved on the rail
+	Obligation int64  `json:"obligation"` // what the buyer owed
+	Closed     bool   `json:"closed"`
+	WallMs     int64  `json:"wall_ms"`
 }
 
 // px converts a price in credits to the base units the kernel counts in. A chain counts in the
@@ -255,26 +254,25 @@ func Run(n *Net, rounds int) (*story, error) {
 
 func (s *story) k(name string) *Kernel { return s.n.Kernels[name] }
 
-// opts is how every kernel in the story is configured: from its plan entry, with the exposure cap
-// as given. The kernel refuses to start unless 0 < settlement_trigger < exposure_max, and it
-// refuses by exiting — which a run discovers as a kernel that never came up, ninety seconds later,
-// with every later act broken — so the rule is applied here, once, where the figures are chosen.
-func (s *story) opts(name string, cap int64) bootOpts {
+// storyLottery is the ticket face value every kernel in the story draws for, in credits. It sits
+// above most obligations here and below some, so both branches of the draw are exercised: an
+// obligation under it is paid with probability D/L, and one at or above it is paid exactly. It is
+// what turns hundreds of calls into a handful of payments, which is the property the rail cost of
+// this run measures.
+const storyLottery = 100
+
+// opts is how every kernel in the story is configured: from its plan entry, with the credit limit
+// as given. Every kernel draws under the same face value, so a payment costs the same wherever it
+// is made and the report can compare one kernel's rail bill with another's.
+func (s *story) opts(name string, limit int64) bootOpts {
 	fee, remote, imp, handle := sybilFeeBps, sybilRemoteBps, sybilImportBps, name
 	for _, k := range kernelPlan {
 		if k.name == name {
 			fee, remote, imp, handle = k.feeBps, k.remoteBps, k.importBps, k.handle
 		}
 	}
-	trigger := int64(500)
-	if trigger >= cap {
-		trigger = cap - 1
-	}
-	if cap > 0 && !(trigger > 0 && trigger < cap) {
-		panic(fmt.Sprintf("kernel %s: exposure cap %d leaves no room for a settlement trigger", name, cap))
-	}
 	return bootOpts{Handle: handle, FeeBps: fee, RemoteBps: remote, ImportBps: imp,
-		ExposureMax: cap * s.scale, SettlementTrig: trigger * s.scale,
+		CreditLimit: limit * s.scale, Lottery: storyLottery * s.scale,
 		RetrySeconds: 2, Bootstrap: s.boot}
 }
 
@@ -388,7 +386,7 @@ func storyRates() map[string]kernelRates {
 
 func (s *story) actKernels() error {
 	for _, p := range kernelPlan[:4] { // the fifth joins later, into an economy already running
-		if _, err := s.join(p.name, p.exposureMax, ""); err != nil {
+		if _, err := s.join(p.name, p.creditLimit, ""); err != nil {
 			return err
 		}
 	}
@@ -501,14 +499,16 @@ func (s *story) actCatalogue() error {
 
 // ---- trading ----------------------------------------------------------------
 
-// buy makes one purchase. A refusal for want of credit with the seller's kernel is not a failure:
-// it is the exposure engine doing its job, and the answer is to settle and try again.
+// buy makes one purchase. A refusal because the seller is still owed for work it already delivered
+// is not a failure: it is the credit engine doing its job, and the answer is to settle and try
+// again. That is also what the economy looks like in practice — a seller serves the buyers who have
+// paid it.
 func (s *story) buy(kernel, user, action string) (ok bool, needsSettlement bool) {
 	out, err := s.k(kernel).Run(user, "--json", "run", action, `{"msg":"netsim"}`)
 	if err == nil && strings.Contains(out, "tx_id") {
 		return true, false
 	}
-	return false, strings.Contains(out, "credit with peer")
+	return false, strings.Contains(out, "credit with peer") || strings.Contains(out, "exhausted")
 }
 
 func (s *story) actTrading(rounds int) error {
@@ -582,101 +582,91 @@ func (s *story) burst() {
 		ok, callers*each, elapsed, s.burstCallsPerSec)
 }
 
-// peerRow is what the creditor's books say the debtor's account holds. Negative means the debtor
-// owes; zero means nothing is outstanding between them.
-func (s *story) peerRow(creditor, debtor string) int64 {
-	out, _ := s.k(creditor).Run("sysop-"+creditor, "--json", "admin", "peers", "--all")
-	var rows []map[string]any
-	if json.Unmarshal([]byte(out), &rows) != nil {
-		return 0
+// owed is how many obligations a buyer still owes a seller: what the seller has delivered and not
+// been paid for. Zero means nothing is outstanding between them.
+func (s *story) owed(seller, buyer string) int {
+	n := 0
+	for _, st := range s.outstanding(seller) {
+		if s.isDebtor(buyer, st.Debtor) {
+			n++
+		}
 	}
-	for _, r := range rows {
-		if r["public_key"] == s.k(debtor).Key {
-			if f, ok := r["available"].(float64); ok {
-				return int64(f)
+	return n
+}
+
+// isDebtor reports whether an obligation's named debtor is this kernel, however the seller renders
+// it — by the petname it bound or by the raw key.
+func (s *story) isDebtor(buyer, debtor string) bool {
+	k := s.k(buyer)
+	return k != nil && (debtor == k.Handle || debtor == k.Key || strings.HasSuffix(debtor, k.Key[:8]))
+}
+
+// outstanding is what a seller is waiting to be paid for, as the operator sees it: each obligation a
+// buyer has said it paid, named by the fact that closes it.
+func (s *story) outstanding(seller string) []settlement {
+	out, _ := s.k(seller).Run("sysop-"+seller, "--json", "admin", "deposit")
+	var body struct {
+		Owed []struct {
+			ID         string `json:"id"`
+			Peer       string `json:"peer"`
+			Obligation int64  `json:"obligation"`
+			Amount     int64  `json:"amount"`
+		} `json:"owed"`
+	}
+	if json.Unmarshal([]byte(out), &body) != nil {
+		return nil
+	}
+	found := make([]settlement, 0, len(body.Owed))
+	for _, r := range body.Owed {
+		found = append(found, settlement{ID: r.ID, Creditor: seller, Debtor: r.Peer,
+			Amount: r.Amount, Obligation: r.Obligation})
+	}
+	return found
+}
+
+// settle closes what a buyer owes a seller. The buyer commits its payment when it settles the call
+// and the rail sends it; what remains is the seller confirming the money arrived, which on a world
+// whose facts are the operator's own records is the operator's act, and on a chain is the deposit
+// scan's. Either way the story waits for the seller's books to say nothing is outstanding.
+func (s *story) settle(buyer, seller string) error {
+	if s.k(buyer) == nil || s.k(seller) == nil {
+		return fmt.Errorf("no such kernel")
+	}
+	deadline := time.Now().Add(s.n.Rail.SettleWait())
+	for {
+		rows := s.outstanding(seller)
+		for _, st := range rows {
+			if st.Debtor != "" && !s.isDebtor(buyer, st.Debtor) {
+				continue
+			}
+			if err := s.n.Rail.Credit(s.k(seller), st.ID, st.Debtor, st.Amount); err == nil {
+				st.Closed = true
+				s.opened = append(s.opened, st)
 			}
 		}
-	}
-	return 0
-}
-
-// open asks the debtor to pay the creditor and records the payment with the creditor's row as it
-// stood immediately before. It does not wait: waiting for each settlement in turn costs a
-// public chain's finality apiece, which for a whole economy is hours.
-func (s *story) open(debtor, creditor string) (*settlement, error) {
-	d, c := s.k(debtor), s.k(creditor)
-	before := s.peerRow(creditor, debtor)
-	out, _ := d.Run("sysop-"+debtor, "--json", "admin", "settle", c.Handle)
-	var m map[string]any
-	if json.Unmarshal([]byte(out), &m) != nil {
-		return nil, fmt.Errorf("no settlement was opened: %s", firstLine(out))
-	}
-	id, _ := m["settlement_id"].(string)
-	if id == "" {
-		return nil, fmt.Errorf("no settlement was opened: %s", firstLine(out))
-	}
-	amount := int64(0)
-	if f, ok := m["amount"].(float64); ok {
-		amount = int64(f)
-	}
-	st := &settlement{ID: id, Debtor: debtor, Creditor: creditor, Amount: amount, CreditorRowBefore: before}
-	if err := s.n.Rail.Pay(d, c, id, amount); err != nil {
-		return st, err
-	}
-	s.opened = append(s.opened, *st)
-	return st, nil
-}
-
-// await waits for one opened settlement to clear and records the creditor's row afterwards, which
-// is the evidence the report checks: the row must have moved by exactly the amount paid.
-func (s *story) await(st *settlement) error {
-	started := time.Now()
-	err := s.n.Rail.Await(s.k(st.Debtor), s.k(st.Creditor), st.ID, st.Amount,
-		func() int64 { return s.peerRow(st.Creditor, st.Debtor) })
-	st.CreditorRowAfter = s.peerRow(st.Creditor, st.Debtor)
-	st.Closed = err == nil
-	st.WallMs = time.Since(started).Milliseconds()
-	for i := range s.opened {
-		if s.opened[i].ID == st.ID {
-			s.opened[i] = *st
+		if s.owed(seller, buyer) == 0 {
+			return nil
 		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s still owes %s for %d calls", buyer, seller, s.owed(seller, buyer))
+		}
+		time.Sleep(time.Second)
 	}
-	return err
 }
 
-// settleAll pays every debt in a set, opening all the payments before waiting for any: waiting for
-// each in turn costs a public chain's finality apiece.
+// settleAll closes every obligation in a set of ordered pairs.
 func (s *story) settleAll(pairs [][2]string) (done, failed int) {
-	var batch []*settlement
 	for _, p := range pairs {
-		if s.k(p[0]) == nil || s.k(p[1]) == nil || s.peerRow(p[1], p[0]) >= 0 {
+		if s.k(p[0]) == nil || s.k(p[1]) == nil || s.owed(p[1], p[0]) == 0 {
 			continue
 		}
-		st, err := s.open(p[0], p[1])
-		if err != nil {
-			failed++
-			continue
-		}
-		batch = append(batch, st)
-	}
-	for _, st := range batch {
-		if s.await(st) == nil {
+		if s.settle(p[0], p[1]) == nil {
 			done++
 		} else {
 			failed++
 		}
 	}
 	return done, failed
-}
-
-// settle opens one payment and waits for it. Used where the story must trade again immediately
-// afterwards; the final pass opens every payment first and waits for them together.
-func (s *story) settle(debtor, creditor string) error {
-	st, err := s.open(debtor, creditor)
-	if err != nil {
-		return err
-	}
-	return s.await(st)
 }
 
 // ---- refusals ---------------------------------------------------------------
@@ -895,7 +885,7 @@ func (s *story) write(name, body string) {
 
 func (s *story) actLateJoiner() error {
 	p := kernelPlan[4]
-	k, err := s.join(p.name, p.exposureMax, "")
+	k, err := s.join(p.name, p.creditLimit, "")
 	if err != nil {
 		return err
 	}
@@ -935,10 +925,13 @@ func (s *story) actChurn() error {
 	// with the response dropped). Claiming it here would be claiming a result this act cannot
 	// produce.
 	k2, k3 := s.k("k2"), s.k("k3")
-	before := k3.Balance("dan")
+	// The buyer whose money is watched is one that only ever buys. A user who also sells earns
+	// while the window is open — from its own trades, and from obligations settling that have
+	// nothing to do with the outage — and its total would say nothing about who gained from what.
+	before := k3.Holdings("eve")
 	k2.Stop()
 
-	out, err := k3.Run("dan", "run", "cara@shop/quote", `{"msg":"gone"}`)
+	out, err := k3.Run("eve", "run", "cara@shop/quote", `{"msg":"gone"}`)
 	s.n.Check("churn.call_to_an_offline_provider_does_not_succeed", err != nil,
 		"a call to a kernel that had been killed reported success: "+firstLine(out))
 
@@ -955,7 +948,7 @@ func (s *story) actChurn() error {
 		"funds are parked but the supervision view does not say since when")
 
 	restartedAt := time.Now()
-	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].exposureMax)); err != nil {
+	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].creditLimit)); err != nil {
 		return err
 	}
 	back := poll(90*time.Second, 3*time.Second, func() bool {
@@ -969,9 +962,9 @@ func (s *story) actChurn() error {
 	s.recoverySeconds = time.Since(restartedAt).Seconds()
 	s.n.Check("churn.trade_resumes_after_a_restart", back,
 		"trade never resumed with a kernel that came back")
-	s.n.Check("churn.buyer_gained_nothing_from_the_outage", k3.Balance("dan") <= before,
-		fmt.Sprintf("a buyer's balance rose across a provider's death: %d then %d",
-			before, k3.Balance("dan")))
+	s.n.Check("churn.buyer_gained_nothing_from_the_outage", k3.Holdings("eve") <= before,
+		fmt.Sprintf("a buyer held more after a provider's death than before it: %d then %d",
+			before, k3.Holdings("eve")))
 	return nil
 }
 
@@ -1021,55 +1014,87 @@ func (s *story) attackSybil() {
 		fail(err.Error())
 		return
 	}
-	// The victim's books are cleared first — lowering the cap under debt the honest economy ran up
-	// starts the attack past the line — and it is then put on the low cap the exposure engine
-	// exists for. The economy itself runs on a cap its trading cannot reach, because a pair that
-	// settles mid-trade costs a payment and a finality wait for nothing.
+	// The victim's books are cleared first — leaving the limit under work the honest economy already
+	// ran up would start the attack past the line — and it is then put on a limit one small headroom
+	// above where its trading has left it. The headroom, not any absolute number, is what the attack
+	// is measured against: honest trading may leave the counter anywhere, including below zero when a
+	// winning draw has paid more than was owed.
 	s.settleAll([][2]string{{"k1", "k2"}, {"k3", "k2"}, {"k4", "k2"}, {"k5", "k2"}})
+	before := s.exposureOf("k2")
+	cap := before + sybilVictimHeadroom*s.scale
+	if cap < 0 {
+		cap = 0
+	}
 	s.k("k2").Stop()
-	if _, err := s.n.Boot("k2", s.opts("k2", sybilVictimCap)); err != nil {
+	victim := s.opts("k2", sybilVictimHeadroom)
+	victim.CreditLimit = cap
+	if _, err := s.n.Boot("k2", victim); err != nil {
 		fail("the victim would not restart: " + err.Error())
 		return
 	}
 	defer s.restoreVictim()
 
-	// Both identities borrow, alongside an honest kernel, until the shop refuses someone. The cap
-	// governs the total owed by everyone, not any one row, and the refusal must be the exposure
-	// engine's — a refusal for want of the caller's own money would let an unfunded attack look
-	// like a defended one.
+	// Both identities take delivery and never pay, alongside an honest kernel, until the shop
+	// refuses someone. The limit governs the total the shop has delivered and not been paid for, not
+	// any one identity's share, and the refusal must be the credit engine's — a refusal for want of
+	// the caller's own money would let an unfunded attack look like a defended one.
+	//
+	// What the attack is measured against is the absolute ceiling, not what it added. The guarantee
+	// is that the shop's unpaid delivered work never passes its limit however many identities
+	// appear; a delta cannot express it, because a draw that wins pays the whole face value, so cash
+	// received can exceed what was owed and leave the counter below zero — against which any
+	// increase reads as larger than the limit while the limit itself was never breached.
 	refused := false
 	for i := 0; i < 12; i++ {
 		for _, b := range []struct{ kernel, user string }{{"k6", "sybil-k6"}, {"k7", "sybil-k7"}, {"k3", "dan"}} {
 			out, err := s.k(b.kernel).Run(b.user, "--json", "run", "cara@shop/quote", `{"msg":"sybil"}`)
-			refused = refused || (err != nil && (strings.Contains(out, "credit with peer") || strings.Contains(out, "exposure")))
+			refused = refused || (err != nil && (strings.Contains(out, "credit with peer") || strings.Contains(out, "exhausted")))
 		}
 	}
-	peers, _ := read[[]map[string]any](s.k("k2"), "sysop-k2", "admin", "peers", "--all")
-	var owed int64
-	for _, r := range peers {
-		if v := num(r, "available"); v < 0 {
-			owed -= v
-		}
-	}
+	after := s.exposureOf("k2")
 	s.n.Check("attack.sybil_reached_the_cap", refused,
-		"nobody was ever refused for want of credit, so the cap was never reached and the attack proves nothing")
-	s.n.Check("attack.sybil_shares_one_cap", owed <= sybilVictimCap*s.scale,
-		fmt.Sprintf("peers owe %d in total against one cap of %d", owed, sybilVictimCap*s.scale))
+		"nobody was ever refused for want of credit, so the limit was never reached and the attack proves nothing")
+	s.n.Check("attack.sybil_shares_one_cap", after <= cap,
+		fmt.Sprintf("three identities carried the shop to %d of unpaid delivered work, past its one limit of %d (it began at %d)",
+			after, cap, before))
+}
+
+// exposureOf is what a kernel has delivered to foreign buyers and not been paid for.
+func (s *story) exposureOf(name string) int64 {
+	if s.k(name) == nil {
+		return 0
+	}
+	m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "identity")
+	return num(m, "exposure")
+}
+
+// mustMap is the first value of a read that may have failed, so a check reports a zero rather than
+// a panic when a kernel is unreachable.
+func mustMap(m map[string]any, _ error) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }
 
 // restoreVictim puts the shop back on the economy's own cap, so the acts that follow trade under
 // the same terms as the acts before.
 func (s *story) restoreVictim() {
 	s.k("k2").Stop()
-	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].exposureMax)); err != nil {
+	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].creditLimit)); err != nil {
 		s.n.Check("attack.sybil_victim_restored", false, err.Error())
 		return
 	}
 	// A restarted kernel listens on a new port, so its peers must find it again. Without this the
 	// next act's refusal is about a kernel that could not be reached, which is a different reason
-	// from the one under test.
+	// from the one under test. A buyer that still owes the shop is refused for that instead, which
+	// is also a different reason, so what it owes is settled before reachability is judged.
 	if !poll(60*time.Second, 2*time.Second, func() bool {
-		good, _ := s.buy("k3", "dan", "cara@shop/quote")
+		good, needs := s.buy("k3", "dan", "cara@shop/quote")
+		if needs {
+			_ = s.settle("k3", "k2")
+			good, _ = s.buy("k3", "dan", "cara@shop/quote")
+		}
 		return good
 	}) {
 		s.n.Check("attack.sybil_victim_restored", false, "the shop was never reachable again after the attack")
@@ -1182,56 +1207,59 @@ func (s *story) attackSquatting() {
 func (s *story) actSettleAll() error {
 	names := []string{"k1", "k2", "k3", "k4", "k5"}
 	names = append(names, sybilPlan...)
+	var pairs [][2]string
+	for _, d := range names {
+		for _, c := range names {
+			if d != c {
+				pairs = append(pairs, [2]string{d, c})
+			}
+		}
+	}
 
-	// Open every payment first, then wait for them together. Waiting for each in turn costs a
-	// public chain's finality apiece — a quarter of an hour on Arbitrum Sepolia — which for a
-	// dozen positions is hours. Submitted together they finalize together.
-	//
-	// The pass repeats because paying one debt is itself activity, and a retry landing during the
-	// pass can open a position the pass has already looked at. It is bounded, so a debt that will
-	// not clear is reported rather than looped over.
-	done, failed := 0, 0
-	for pass := 1; pass <= 3; pass++ {
-		var pairs [][2]string
-		for _, d := range names {
-			for _, c := range names {
-				if d != c {
-					pairs = append(pairs, [2]string{d, c})
+	// A buyer pays before it tells the seller which payment settles the obligation, so nothing can be
+	// settled until the money it committed has actually moved. On a chain that is the chain's own
+	// pace, which is why this waits rather than assuming.
+	quiet := func() bool {
+		for _, name := range names {
+			if s.k(name) == nil {
+				continue
+			}
+			m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "identity")
+			sys, _ := m["sys"].(map[string]any)
+			if num(sys, "pending_payouts") != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	if !poll(s.n.Rail.SettleWait(), 2*time.Second, quiet) {
+		fmt.Println("  some payments are still in flight")
+	}
+
+	// Settling is itself activity: closing one obligation lets the seller serve that buyer again, and
+	// a retry landing during the pass opens one the pass has already looked at. So it repeats until
+	// nothing anywhere is owed, bounded by what the rail needs to make a payment final — on a chain
+	// the money is not the kernel's to see until the chain says so.
+	done := 0
+	settled := poll(s.n.Rail.SettleWait(), 3*time.Second, func() bool {
+		d, _ := s.settleAll(pairs)
+		done += d
+		if d > 0 {
+			fmt.Printf("  %d positions settled\n", d)
+		}
+		for _, c := range names {
+			for _, b := range names {
+				if b != c && s.k(c) != nil && s.k(b) != nil && s.owed(c, b) > 0 {
+					return false
 				}
 			}
 		}
-		d, f := s.settleAll(pairs)
-		done, failed = done+d, failed+f
-		if d == 0 {
-			break
-		}
-		fmt.Printf("  pass %d: %d positions settled\n", pass, d)
+		return true
+	})
+	fmt.Printf("  %d positions settled\n", done)
+	if !settled {
+		fmt.Println("  some obligations are still open")
 	}
-	fmt.Printf("  %d positions settled, %d unresolved\n", done, failed)
 
-	// A creditor may still hold announcements it has not recorded. Recording them is what lets the
-	// two sides' books be compared at all.
-	for _, c := range names {
-		if s.k(c) == nil {
-			continue
-		}
-		out, _ := s.k(c).Run("sysop-"+c, "--json", "admin", "deposit")
-		var rows []map[string]any
-		if json.Unmarshal([]byte(out), &rows) != nil {
-			continue
-		}
-		for _, r := range rows {
-			id, _ := r["id"].(string)
-			party, _ := r["party_handle"].(string)
-			amount := int64(0)
-			if f, ok := r["amount"].(float64); ok {
-				amount = int64(f)
-			}
-			if id != "" {
-				_, _ = s.k(c).Run("sysop-"+c, "admin", "deposit", "--ref", id,
-					"--", party, strconv.FormatInt(amount, 10))
-			}
-		}
-	}
 	return nil
 }

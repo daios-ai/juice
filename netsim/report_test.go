@@ -258,28 +258,29 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 	}
 }
 
-// A payment must move the debt by exactly its own amount. The evidence is the creditor's row on
-// either side of it, because the manual rail and a chain key the credit differently and neither key
-// is something a black-box suite can assume.
-func TestSettlementFidelityChecksTheDebtMoved(t *testing.T) {
-	exact := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500,
-		CreditorRowBefore: -500, CreditorRowAfter: 0, Closed: true}}
+// An obligation must be settled by a payment that is not short: a draw pays what is owed or the
+// whole face value, never less. One that never closed is a break whatever it was for.
+func TestSettlementFidelityChecksWhatWasPaid(t *testing.T) {
+	exact := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500, Obligation: 500, Closed: true}}
 	if b := settlementFidelity(exact); len(b) != 0 {
 		t.Errorf("an exact settlement was reported as a violation: %v", b)
 	}
-	short := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500,
-		CreditorRowBefore: -500, CreditorRowAfter: -100, Closed: true}}
-	if len(settlementFidelity(short)) == 0 {
-		t.Error("a payment of 500 that moved the debt by 400 was accepted")
+	won := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 10000, Obligation: 500, Closed: true}}
+	if b := settlementFidelity(won); len(b) != 0 {
+		t.Errorf("a won draw paying the whole face value was reported as a violation: %v", b)
 	}
-	never := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500, Closed: false}}
+	short := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 400, Obligation: 500, Closed: true}}
+	if len(settlementFidelity(short)) == 0 {
+		t.Error("an obligation of 500 settled by a payment of 400 was accepted")
+	}
+	never := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500, Obligation: 500}}
 	if len(settlementFidelity(never)) == 0 {
-		t.Error("a settlement that never closed was accepted")
+		t.Error("an obligation that never closed was accepted")
 	}
 }
 
-// A debt is one row on the serving side, so it can be recorded on either kernel. Looking at only
-// one direction hides every debt owed by whichever name happens to sort first.
+// An obligation is one row on the serving side, so it can be recorded on either kernel. Looking at
+// only one direction hides everything owed to whichever name happens to sort second.
 func TestOutstandingDebtIsFoundInBothDirections(t *testing.T) {
 	ka, kb := &Kernel{Name: "aaa", Key: "KA"}, &Kernel{Name: "zzz", Key: "KB"}
 	n := &Net{Root: t.TempDir(), Kernels: map[string]*Kernel{"aaa": ka, "zzz": kb},
@@ -288,20 +289,41 @@ func TestOutstandingDebtIsFoundInBothDirections(t *testing.T) {
 	f, _ := openLog(n.Root)
 	n.logFile = f
 	defer f.Close()
-	// The debt is recorded on zzz, the later name: zzz's row for aaa is negative.
+	// The obligation is recorded on zzz, the later name: zzz says aaa owes it for two calls.
 	snaps := map[string]Snapshot{
 		"aaa": {Peers: []map[string]any{{"public_key": "KB", "available": float64(0)}}},
-		"zzz": {Peers: []map[string]any{{"public_key": "KA", "available": float64(-750)}}},
+		"zzz": {
+			Peers: []map[string]any{{"public_key": "KA", "available": float64(0)}},
+			Owed:  []map[string]any{{"id": "c1", "peer": "KA"}, {"id": "c2", "peer": "KA"}},
+		},
 	}
-	if peerBalance(snaps["zzz"], ka) != -750 {
+	if owedBy(snaps["zzz"], ka) != 2 {
 		t.Fatal("the fixture does not record the debt where the test says it does")
 	}
-	_, outstanding := positions(snaps, n.Kernels)
+	contradictions, outstanding := positions(snaps, n.Kernels)
+	if len(contradictions) != 0 {
+		t.Errorf("rows holding nothing were reported as contradictions: %v", contradictions)
+	}
 	var found []string
 	for _, o := range outstanding {
 		found = append(found, strings.Fields(o)[0])
 	}
 	if len(found) != 1 || found[0] != "aaa" {
 		t.Errorf("the debt owed by the earlier-sorting kernel was not found: %v", found)
+	}
+}
+
+// A peer account is identity, attribution and moderation state — never a wallet. A row that holds
+// anything at all is a contradiction under this economy, and the report must say so.
+func TestAPeerRowHoldingMoneyIsAContradiction(t *testing.T) {
+	ka, kb := &Kernel{Name: "aaa", Key: "KA"}, &Kernel{Name: "zzz", Key: "KB"}
+	n := &Net{Root: t.TempDir(), Kernels: map[string]*Kernel{"aaa": ka, "zzz": kb}}
+	snaps := map[string]Snapshot{
+		"aaa": {Peers: []map[string]any{{"public_key": "KB", "available": float64(-750)}}},
+		"zzz": {Peers: []map[string]any{{"public_key": "KA", "available": float64(0)}}},
+	}
+	contradictions, _ := positions(snaps, n.Kernels)
+	if len(contradictions) != 1 {
+		t.Errorf("a peer row holding -750 was not reported: %v", contradictions)
 	}
 }

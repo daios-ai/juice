@@ -35,11 +35,13 @@ type Rail interface {
 	GasUp(k *Kernel, payments int) error
 	// Fund puts money in a user's hands and returns when the kernel counts it as theirs.
 	Fund(k *Kernel, user string, credits int64) error
-	// Pay submits the debtor's payment and returns at once, so many settlements can be in flight:
-	// waiting for each in turn costs a public chain's finality apiece.
-	Pay(debtor, creditor *Kernel, settlementID string, amount int64) error
-	// Await returns when the creditor's books show the debt cleared, or that it did not.
-	Await(debtor, creditor *Kernel, settlementID string, amount int64, peerRow func() int64) error
+	// Credit closes one obligation on the seller's books against the payment the buyer made for it.
+	// On a world whose finalized facts are the operator's own records this is that record; on a
+	// chain the kernel's own deposit scan does it, and this only reports whether it has yet.
+	Credit(seller *Kernel, ticketID, buyer string, amount int64) error
+	// SettleWait is how long a payment may take to become final on this rail, so the story waits for
+	// what a chain actually needs rather than a figure guessed once.
+	SettleWait() time.Duration
 	// Finish measures what the run cost and cleans up.
 	Finish(n *Net) (map[string]any, error)
 }
@@ -87,16 +89,14 @@ func (playRail) Fund(k *Kernel, user string, credits int64) error {
 	return err
 }
 
-func (playRail) Pay(debtor, creditor *Kernel, id string, amount int64) error {
-	return announce(creditor, debtor, id, amount)
+// Credit is the operator's own record that the buyer's payment arrived, which on this world is what
+// makes it final.
+func (playRail) Credit(seller *Kernel, ticketID, buyer string, amount int64) error {
+	return confirmPayment(seller, ticketID, buyer, amount)
 }
 
-func (playRail) Await(debtor, creditor *Kernel, id string, amount int64, peerRow func() int64) error {
-	if peerRow() != 0 {
-		return fmt.Errorf("the debt from %s to %s did not clear when it was recorded", debtor.Name, creditor.Name)
-	}
-	return nil
-}
+// SettleWait is nothing: the operator's record is the finality.
+func (playRail) SettleWait() time.Duration { return 5 * time.Second }
 
 // ---- a chain ----------------------------------------------------------------
 // What anvil and Sepolia share: real contracts, real signatures, a payment that is final only when
@@ -154,34 +154,22 @@ func (c *chainRail) Fund(k *Kernel, user string, credits int64) error {
 	return nil
 }
 
-// Pay announces the payment the debtor submitted when it opened the settlement. On a chain the
-// announcement is advisory — the creditor refuses it until the chain has finalized the payment —
-// so its refusal is not an error here; Await is what waits for finality.
-func (c *chainRail) Pay(debtor, creditor *Kernel, id string, amount int64) error {
-	_ = announce(creditor, debtor, id, amount)
+// Credit does nothing on a chain: the seller's own deposit scan closes an obligation once the
+// payment the buyer named is final, which is the property under test. Reporting success here would
+// be the story doing the kernel's work for it.
+func (c *chainRail) Credit(seller *Kernel, ticketID, buyer string, amount int64) error {
 	return nil
 }
 
-// Await waits for the debt itself to reach zero, not for a duration: a fixed sleep on a chain whose
-// finality runs to a quarter of an hour turns a settle-everything pass into hours, and a short one
-// reports a debt that was merely early. The creditor's own worker credits an announced payment once
-// it is final; announcing again is a no-op when it already has.
-func (c *chainRail) Await(debtor, creditor *Kernel, id string, amount int64, peerRow func() int64) error {
-	if poll(c.await, 5*time.Second, func() bool {
-		_ = announce(creditor, debtor, id, amount)
-		return peerRow() == 0
-	}) {
-		return nil
-	}
-	return fmt.Errorf("the debt from %s to %s did not clear within %s", debtor.Name, creditor.Name, c.await)
-}
+// SettleWait is how long the chain takes to make a payment final, which is what the story waits for.
+func (c *chainRail) SettleWait() time.Duration { return c.await }
 
-// announce tells the creditor to look for the debtor's payment. Flags first, then a bare `--`: a
-// public key is base64url and may begin with a dash, which is otherwise read as an unknown flag and
-// leaves the settlement silently open.
-func announce(creditor, debtor *Kernel, id string, amount int64) error {
-	_, err := creditor.Run("sysop-"+creditor.Name, "admin", "deposit", "--ref", id,
-		"--", debtor.Key, strconv.FormatInt(amount, 10))
+// confirmPayment is the operator's own confirmation that a payment arrived, naming the obligation it
+// closes. Flags first, then a bare `--`: a public key is base64url and may begin with a dash, which
+// is otherwise read as an unknown flag and leaves the obligation silently open.
+func confirmPayment(seller *Kernel, ticketID, buyer string, amount int64) error {
+	_, err := seller.Run("sysop-"+seller.Name, "admin", "deposit", "--ref", ticketID,
+		"--", buyer, strconv.FormatInt(amount, 10))
 	return err
 }
 
@@ -280,7 +268,10 @@ func (a *anvilRail) Prepare(n *Net, s Shape) error {
 	world := map[string]any{
 		"name": "netsim-anvil", "chainId": 31337, "token": token, "decimals": 6,
 		"finality": "finalized", "fromBlock": 0,
-		"venue": map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
+		// The largest ticket a kernel on this world may write, like the shipped worlds carry: the
+		// story draws at storyLottery tokens, and a world without a ceiling permits no ticket at all.
+		"lotteryMax": storyLottery * a.scale,
+		"venue":      map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
 		"gas": map[string]any{"min": "20000000000000000", "max": "50000000000000000",
 			"feeBound": "10000000000000000", "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000},
 	}

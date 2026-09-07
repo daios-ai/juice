@@ -18,7 +18,7 @@ import (
 // the whole position is one query. Every method here is a single compound commit: the balance move
 // and the record that explains it are never two writes.
 
-const railCols = `id,kind,party,amount,credit,destination,status,tx_hash,refill_id,record,reason,created_at,finalized_at`
+const railCols = `id,kind,party,amount,credit,destination,status,tx_hash,refill_id,reason,attempt,created_at,finalized_at`
 
 // hold moves amount from an account's available into its locked, refusing to overdraw. Money in
 // transit lives there: promised, recorded, and unspendable until the promise resolves.
@@ -73,7 +73,7 @@ func insertRail(ctx context.Context, tx *sql.Tx, r *kernel.RailTransfer) error {
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO rail_transfers (`+railCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.Kind, r.Party, r.Amount, r.Credit, r.Destination, r.Status, r.TxHash,
-		r.RefillID, r.Record, r.Reason, timeToStr(r.CreatedAt), nullTimeToStr(r.FinalizedAt))
+		r.RefillID, r.Reason, r.Attempt, timeToStr(r.CreatedAt), nullTimeToStr(r.FinalizedAt))
 	return dbErr(err, "rail: insert row")
 }
 
@@ -86,7 +86,7 @@ func scanRail(scan func(...any) error) (*kernel.RailTransfer, error) {
 	var createdAt string
 	var finalizedAt *string
 	if err := scan(&r.ID, &r.Kind, &r.Party, &r.Amount, &r.Credit, &r.Destination, &r.Status,
-		&r.TxHash, &r.RefillID, &r.Record, &r.Reason, &createdAt, &finalizedAt); err != nil {
+		&r.TxHash, &r.RefillID, &r.Reason, &r.Attempt, &createdAt, &finalizedAt); err != nil {
 		return nil, err
 	}
 	r.CreatedAt = strToTime(createdAt)
@@ -106,6 +106,19 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 		if err != nil && err != sql.ErrNoRows {
 			return dbErr(err, "rail: read deposit")
 		}
+		// A payment some unresolved foreign obligation named its payer for may be that obligation's
+		// money: nobody may be handed it by name until the reveal has said whose it is. The same
+		// rule reconciliation applies, so the operator cannot route around it.
+		if toUserID != "" && row.Party != "" {
+			var reserved bool
+			if err := tx.QueryRowContext(ctx,
+				`SELECT EXISTS (SELECT 1 FROM rail_transfers d WHERE d.id=? AND `+reservedDeposit+`)`, row.ID).Scan(&reserved); err != nil {
+				return dbErr(err, "rail: reservation")
+			}
+			if reserved {
+				return kernel.ErrInvalidState.Wrapf("payment %s may settle a peer's obligation and waits for its reveal", row.ID)
+			}
+		}
 		if existing != nil {
 			if existing.Amount != row.Amount || existing.Party != row.Party {
 				return kernel.ErrInvalidInput.Wrapf("payment %s was already recorded on other terms", row.ID)
@@ -114,10 +127,10 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 			// A payment already booked but still held is exactly what the operator's attribution
 			// names: deliver it now, in this commit, rather than answering with nothing.
 			if toUserID != "" && existing.Status == kernel.RailStatusHeld {
-				out, err = deliverDeposit(ctx, tx, existing, sys, toUserID, row.Credit, "")
+				out, err = deliverDeposit(ctx, tx, existing, sys, toUserID, row.Credit)
 				return err
 			}
-			out, err = readLedgerByExternalKey(ctx, tx, attrKey(row.ID))
+			out, err = readLedgerByExternalKey(ctx, tx, kernel.AttributionKey(row.ID))
 			return err
 		}
 		// The crossing: credits enter the ledger here and nowhere else, against a finalized fact.
@@ -135,7 +148,7 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 		if toUserID == "" {
 			return nil
 		}
-		out, err = deliverDeposit(ctx, tx, row, sys, toUserID, row.Credit, "")
+		out, err = deliverDeposit(ctx, tx, row, sys, toUserID, row.Credit)
 		return err
 	})
 	return out, err
@@ -144,7 +157,7 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 // deliverDeposit hands a held payment to its owner: the hold ends, the owner is credited, and what
 // is left over is the operator's own. One ledger entry records the delivery, so both parties read
 // the same movement from their own ledger.
-func deliverDeposit(ctx context.Context, tx *sql.Tx, row *kernel.RailTransfer, sys, toUserID string, credit int64, claimID string) (*kernel.LedgerEntry, error) {
+func deliverDeposit(ctx context.Context, tx *sql.Tx, row *kernel.RailTransfer, sys, toUserID string, credit int64) (*kernel.LedgerEntry, error) {
 	if credit > row.Amount {
 		return nil, kernel.ErrInvalidInput.Wrap("rail: credit exceeds the payment")
 	}
@@ -158,7 +171,7 @@ func deliverDeposit(ctx context.Context, tx *sql.Tx, row *kernel.RailTransfer, s
 		return nil, err
 	}
 	e := &kernel.LedgerEntry{ID: uuid.NewString(), OperatorUserID: sys, FromUserID: sys,
-		ToUserID: toUserID, Amount: credit, Reason: row.Reason, ExternalKey: attrKey(row.ID),
+		ToUserID: toUserID, Amount: credit, Reason: row.Reason, ExternalKey: kernel.AttributionKey(row.ID),
 		CreatedAt: time.Now().UTC()}
 	if credit > 0 {
 		if err := insertLedgerRow(ctx, tx, e); err != nil {
@@ -170,63 +183,7 @@ func deliverDeposit(ctx context.Context, tx *sql.Tx, row *kernel.RailTransfer, s
 		kernel.RailStatusCredited, timeToStr(time.Now().UTC()), row.ID); err != nil {
 		return nil, dbErr(err, "rail: credit deposit")
 	}
-	if claimID != "" {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE rail_transfers SET status=?, finalized_at=? WHERE id=?`,
-			kernel.RailStatusCredited, timeToStr(time.Now().UTC()), claimID); err != nil {
-			return nil, dbErr(err, "rail: credit claim")
-		}
-	}
 	return e, nil
-}
-
-func attrKey(id string) string { return "attr:" + id }
-
-// AttributeRailDeposit delivers a held payment once its owner is known — because they registered
-// the address it came from, or because it closes a settlement a peer announced.
-func (s *DB) AttributeRailDeposit(ctx context.Context, sys, depositID, toUserID string, credit int64, claimID string) (*kernel.LedgerEntry, error) {
-	var out *kernel.LedgerEntry
-	err := s.withTx(ctx, "rail attribute", func(tx *sql.Tx) error {
-		if e, err := readLedgerByExternalKey(ctx, tx, attrKey(depositID)); err != nil {
-			return err
-		} else if e != nil {
-			out = e
-			return nil
-		}
-		row, err := readRailTx(ctx, tx, depositID)
-		if err == sql.ErrNoRows {
-			return kernel.ErrNotFound.Wrapf("no payment %s", depositID)
-		}
-		if err != nil {
-			return dbErr(err, "rail: read deposit")
-		}
-		if row.Status != kernel.RailStatusHeld {
-			return kernel.ErrInvalidState.Wrapf("payment %s is not held", depositID)
-		}
-		out, err = deliverDeposit(ctx, tx, row, sys, toUserID, credit, claimID)
-		return err
-	})
-	return out, err
-}
-
-// ListRailDeposits returns deposits in one status, optionally only those from one sender.
-func (s *DB) ListRailDeposits(ctx context.Context, status, fromAddress string) ([]*kernel.RailTransfer, error) {
-	q := `SELECT ` + railCols + ` FROM rail_transfers WHERE kind='deposit'`
-	args := []any{}
-	if status != "" {
-		q += ` AND status=?`
-		args = append(args, status)
-	}
-	if fromAddress != "" {
-		q += ` AND party=?`
-		args = append(args, fromAddress)
-	}
-	q += ` ORDER BY created_at`
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, dbErr(err, "rail: list deposits")
-	}
-	return queryList(rows, "rail: list deposits", scanRail)
 }
 
 // ReserveRailTransfer opens an outgoing payment. From this commit the money is nobody's to spend:
@@ -234,45 +191,53 @@ func (s *DB) ListRailDeposits(ctx context.Context, status, fromAddress string) (
 // amount is held until the payment resolves one way or the other.
 func (s *DB) ReserveRailTransfer(ctx context.Context, sys string, row *kernel.RailTransfer) error {
 	return s.withTx(ctx, "rail reserve", func(tx *sql.Tx) error {
-		existing, err := readRailTx(ctx, tx, row.ID)
-		switch {
-		case err == sql.ErrNoRows:
-		case err != nil:
-			return dbErr(err, "rail: read row")
-		case existing.Status != kernel.RailStatusDrawing:
-			return kernel.ErrInvalidInput.Wrapf("%s was already presented", row.ID)
-		}
-		if err := move(ctx, tx, row.Party, -row.Credit); err != nil {
-			return err
-		}
-		if err := move(ctx, tx, sys, -(row.Amount - row.Credit)); err != nil {
-			return err
-		}
-		if err := hold(ctx, tx, sys, row.Amount); err != nil {
-			return err
-		}
-		if row.Credit > 0 {
-			if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
-				ID: uuid.NewString(), OperatorUserID: sys, FromUserID: row.Party, ToUserID: sys,
-				Amount: row.Credit, Reason: row.Reason, ExternalKey: "res:" + row.ID,
-				CreatedAt: row.CreatedAt}); err != nil {
-				return err
-			}
-		}
-		if existing == nil {
-			return insertRail(ctx, tx, row)
-		}
-		// A settlement that was being drawn for is now being paid: the same row carries on.
-		_, err = tx.ExecContext(ctx,
-			`UPDATE rail_transfers SET status=?, amount=?, credit=?, destination=?, record=? WHERE id=?`,
-			row.Status, row.Amount, row.Credit, row.Destination, row.Record, row.ID)
-		return dbErr(err, "rail: promote draw")
+		return reserveRailTx(ctx, tx, sys, row, row.Party, row.Credit, row.CreatedAt)
 	})
+}
+
+// reserveRailTx is that reservation inside an open transaction, so a settlement that decides a
+// payment books it in the same commit that decided it — there is no moment where the books say a
+// draw was won and no money has been set aside for it.
+func reserveRailTx(ctx context.Context, tx *sql.Tx, sys string, row *kernel.RailTransfer, party string, credit int64, at time.Time) error {
+	if _, err := readRailTx(ctx, tx, row.ID); err == nil {
+		return kernel.ErrInvalidInput.Wrapf("%s was already presented", row.ID)
+	} else if err != sql.ErrNoRows {
+		return dbErr(err, "rail: read row")
+	}
+	if err := move(ctx, tx, party, -credit); err != nil {
+		return err
+	}
+	if err := move(ctx, tx, sys, -(row.Amount - credit)); err != nil {
+		return err
+	}
+	if err := hold(ctx, tx, sys, row.Amount); err != nil {
+		return err
+	}
+	if credit > 0 {
+		if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
+			ID: uuid.NewString(), OperatorUserID: sys, FromUserID: party, ToUserID: sys,
+			Amount: credit, Reason: row.Reason, ExternalKey: "res:" + row.ID,
+			CreatedAt: at}); err != nil {
+			return err
+		}
+	}
+	return insertRail(ctx, tx, row)
 }
 
 // RecordRailOutcome stores what presenting the payment produced. A refill, when one was bought
 // instead, is locked from the operator's balance in the same commit, so the authorization and the
 // money set aside for it can never disagree.
+// RetryRailTransfer starts a fresh attempt at a payment whose last one was signed and settled
+// against it. The money stays committed — the debt did not go away because the rail refused it — and
+// only the name it is presented under changes, so the row, the obligation and the seller's view of
+// them are untouched (D23, P10).
+func (s *DB) RetryRailTransfer(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE rail_transfers SET status=?, attempt=attempt+1, tx_hash='' WHERE id=?`,
+		kernel.RailStatusPending, id)
+	return dbErr(err, "rail: retry")
+}
+
 func (s *DB) RecordRailOutcome(ctx context.Context, sys, id, status, txHash, reason string, refill *kernel.RailTransfer) error {
 	return s.withTx(ctx, "rail outcome", func(tx *sql.Tx) error {
 		set := `UPDATE rail_transfers SET status=?, reason=?`
@@ -495,47 +460,6 @@ func (s *DB) ReadRailTransferByRefill(ctx context.Context, refillID string) (*ke
 	return r, dbErr(err, "rail: read refill by purchase")
 }
 
-// CreateRailTransfer records a row that moves no money: a claim a peer says it has paid, which
-// waits for the payment it names, or a settlement being drawn for, which becomes a payment only
-// if the draw says so. An existing row is returned as it stands.
-func (s *DB) CreateRailTransfer(ctx context.Context, row *kernel.RailTransfer) error {
-	return s.withTx(ctx, "rail record", func(tx *sql.Tx) error {
-		if existing, err := readRailTx(ctx, tx, row.ID); err == nil {
-			*row = *existing
-			return nil
-		} else if err != sql.ErrNoRows {
-			return dbErr(err, "rail: read row")
-		}
-		return insertRail(ctx, tx, row)
-	})
-}
-
-// MarkRailTransfer moves a row to a status that involves no money.
-func (s *DB) MarkRailTransfer(ctx context.Context, id, status string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE rail_transfers SET status=? WHERE id=?`, status, id)
-	return dbErr(err, "rail: mark")
-}
-
-// SaveRailRecord replaces what a row remembers, which is how a draw keeps each round it has
-// completed before it starts the next.
-func (s *DB) SaveRailRecord(ctx context.Context, id, record string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE rail_transfers SET record=? WHERE id=?`, record, id)
-	return dbErr(err, "rail: save record")
-}
-
-// DeleteRailTransfer removes a draw that ended without a payment. Only a draw can go: every other
-// row stands for money that moved or is moving.
-func (s *DB) DeleteRailTransfer(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM rail_transfers WHERE id=? AND status='drawing'`, id)
-	if err != nil {
-		return dbErr(err, "rail: delete draw")
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInvalidState.Wrapf("%s is not a draw and cannot be removed", id)
-	}
-	return nil
-}
-
 // ReadRailTransfer returns one row, or nil when the fact is unknown here.
 func (s *DB) ReadRailTransfer(ctx context.Context, id string) (*kernel.RailTransfer, error) {
 	r, err := scanRail(s.db.QueryRowContext(ctx, `SELECT `+railCols+` FROM rail_transfers WHERE id=?`, id).Scan)
@@ -568,19 +492,17 @@ func (s *DB) ListRailTransfers(ctx context.Context, kind, party, status string, 
 	return queryList(rows, "rail: list transfers", scanRail)
 }
 
-// ListOpenRailTransfers returns the rows the worker still has to drive, oldest first. Only the
-// outgoing kinds: a held payment or an announced claim waits on somebody else, and a stream of tiny
-// unclaimed payments must not be able to push a real withdrawal out of the worker's sight. A
-// settlement stays listed after its payment is final, since the creditor still has to be told.
+// ListOpenRailTransfers returns the rows the worker still has to drive, oldest first. Only payments
+// out: a held payment in waits on the operator, and a stream of tiny unclaimed ones must not be able
+// to push a real withdrawal out of the worker's sight.
 func (s *DB) ListOpenRailTransfers(ctx context.Context, limit int) ([]*kernel.RailTransfer, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+railCols+` FROM rail_transfers
-		  WHERE kind IN ('payout','settlement')
-		    AND status NOT IN ('drawing','failed','credited','announced')
-		    AND NOT (status = 'confirmed' AND kind <> 'settlement')
+		  WHERE kind IN ('payout','obligation')
+		    AND status NOT IN ('confirmed','failed','credited','announced')
 		  ORDER BY created_at LIMIT ?`, limit)
 	if err != nil {
 		return nil, dbErr(err, "rail: list open transfers")
@@ -596,15 +518,14 @@ func (s *DB) RailPosition(ctx context.Context, sys string) (*kernel.RailPosition
 	err := s.db.QueryRowContext(ctx, `
 	  SELECT
 	    (SELECT COALESCE(SUM(MAX(0, available+locked)),0) FROM accounts),
-	    (SELECT COALESCE(SUM(MAX(0,-available)),0) FROM accounts WHERE kernel_public_key IS NOT NULL),
 	    (SELECT COALESCE(SUM(CASE WHEN from_user_id IS NULL THEN amount ELSE -amount END),0)
 	       FROM ledger WHERE (from_user_id IS NULL) <> (to_user_id IS NULL) AND id NOT LIKE 'st_%'),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers
-	       WHERE kind IN ('payout','settlement') AND status IN ('pending','submitted','refilling','blocked')),
+	       WHERE kind IN ('payout','obligation') AND status IN ('pending','submitted','refilling','blocked')),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers WHERE kind='deposit' AND status='held'),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers WHERE kind='refill' AND status='pending'),
 	    (SELECT COALESCE(available,0) FROM accounts WHERE id=?)`, sys).
-		Scan(&p.Liabilities, &p.Receivables, &p.Vault, &p.PendingPayouts, &p.HeldDeposits,
+		Scan(&p.Liabilities, &p.Vault, &p.PendingPayouts, &p.HeldDeposits,
 			&p.RefillLocks, &p.SysAvailable)
 	return &p, dbErr(err, "rail: position")
 }
@@ -615,17 +536,4 @@ func (s *DB) SetRailAddress(ctx context.Context, userID, address string, at time
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE accounts SET rail_address=?, updated_at=? WHERE id=?`, address, timeToStr(at), userID)
 	return dbErr(err, "rail: set address")
-}
-
-// ReadUserByRailAddress finds the account a payment's sender belongs to.
-func (s *DB) ReadUserByRailAddress(ctx context.Context, address string) (*kernel.Account, error) {
-	if address == "" {
-		return nil, kernel.ErrNotFound.Wrap("no address")
-	}
-	u, err := scanUserFn(s.db.QueryRowContext(ctx,
-		`SELECT `+userCols+` FROM accounts WHERE rail_address=?`, address).Scan)
-	if err == sql.ErrNoRows {
-		return nil, kernel.ErrNotFound.Wrapf("no account for %s", address)
-	}
-	return u, dbErr(err, "rail: read by address")
 }

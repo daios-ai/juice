@@ -218,19 +218,35 @@ type railTransferView struct {
 	PartyName string `json:"party_handle,omitempty"`
 }
 
-// railTransferViews names the party on each row. A deposit's party is a sender's address, which has
-// no account behind it until somebody registers it, so it is shown as it stands.
+// railTransferViews names the party on each row: a withdrawal's is the account it leaves.
 func railTransferViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.RailTransfer) []*railTransferView {
 	uc := newAccountCache(k, ctx)
 	out := make([]*railTransferView, 0, len(rows))
 	for _, r := range rows {
-		v := &railTransferView{RailTransfer: r}
-		if r.Kind == kernel.RailKindDeposit {
-			v.PartyName = r.Party
-		} else {
-			v.PartyName = uc.reference(r.Party)
-		}
-		out = append(out, v)
+		out = append(out, &railTransferView{RailTransfer: r, PartyName: uc.reference(r.Party)})
+	}
+	return out
+}
+
+// awaiting is what the operator has still to act on, in two real lists rather than a third model
+// that flattens them: payments that arrived from a sender nobody has registered, and obligations a
+// buyer says it paid whose money has not been seen. Each row is named by the `id` that closes it.
+type awaiting struct {
+	Deposits []*railTransferView `json:"deposits"`
+	Owed     []*owedView         `json:"owed"`
+}
+
+// owedView renders the buyer as a reference: a raw account id is never a surface value (D20).
+type owedView struct {
+	*kernel.Owed
+	Peer string `json:"peer"`
+}
+
+func owedViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Owed) []*owedView {
+	uc := newAccountCache(k, ctx)
+	out := make([]*owedView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, &owedView{Owed: r, Peer: uc.reference(r.PeerUserID)})
 	}
 	return out
 }

@@ -13,3 +13,16 @@ type TestCallRequest = callRequest
 func (k *Kernel) TestCall(ctx context.Context, req TestCallRequest) (*CallReply, error) {
 	return k.call(ctx, req)
 }
+
+// DispatchRecordForTest builds the record beginRun freezes on a dispatched trace: the rates, the
+// secret and the lottery this call is committed to. A test that stages a proxy trace by hand needs
+// it, because settlement reads every pricing input from here and nowhere else (§13).
+func DispatchRecordForTest(mp, gross, remoteBPS, importBPS, lottery int64, secret string) *string {
+	return marshalDispatch(nil, "", mp, gross, "", remoteBPS, importBPS, secret, lottery)
+}
+
+// ServingRecordForTest is the seller's half of the same record: what a foreign call was admitted
+// under, for a test that stages one by hand.
+func ServingRecordForTest(remoteBPS, lottery, reserve int64, nonce, commitment string) *string {
+	return marshalServing(remoteBPS, lottery, reserve, nonce, commitment)
+}

@@ -1,139 +1,162 @@
-# Economic simplification
+# Inter-node Micropayment Settlement
 
-Status: design proposal. This document does not amend `requirements.md`, which remains the product
-contract. No implementation should change until this proposal is resolved and folded into that
-contract.
+Status: adopted. Its rules are the contract in `requirements.md` (P10, D14); this document is kept
+as the argument for them, not as a second statement of them.
 
-## Motivation
+## 1. Problem
 
-The present inter-kernel economy combines two optimizations:
+Accounts buy fixed-price services from accounts on other nodes. A node hosts accounts, keeps their
+ledger, and holds one rail account backing it. Accounts are custodial: their money sits in the node's
+rail account, so the node is the only party that pays on the rail and pays its fee. The node takes no
+position in its accounts' trades: every risk and every random outcome lands on the buyer or the
+seller, never on the node.
 
-1. Small obligations accumulate into larger payments to reduce transaction costs.
-2. Providers extend credit so callers can use an action without waiting for rail finality.
+After node B performs a service for an account on node A, B signs the actual charge \(P\). The buyer
+then owes \(D=P(1+r)\), up to the rounding rule, where \(r\) is the seller's advertised premium.
 
-That design introduces negative peer balances, aggregate exposure limits, settlement thresholds,
-manual settlement, probabilistic settlement of residual debt, and extensive recovery and
-reconciliation machinery. This may be premature optimization. Transaction costs should decline as
-payment rails improve, while the protocol complexity remains a permanent cost.
+Typical \(P\) is one or two cents, while a rail payment costs \(F\) of one to fifty cents. Paying
+every obligation directly is uneconomic. Most pairs trade once, so bilateral accumulation does not
+help. Identities are free, so any limit that resets per counterparty is ineffective.
 
-The proposed model separates the two original concerns. A configurable minimum payment handles
-transaction cost. A provider premium prices the short-lived risk of acting before an already
-submitted payment becomes final. Neither concern requires accumulated bilateral credit.
+## 2. Design
 
-## Proposed economic rule
+\(L\) is the lottery size, \(L_{\max}\) its ceiling, \(E\) the node's outstanding credit, \(E_{\max}\)
+its credit limit, \(r\) the risk premium.
 
-Let:
+\(L_{\max}\) is a rail parameter in the world file, so every node on a world shares it without
+negotiation; it is outside the world's defining part, so it moves with the rail fee without forking
+the network. Each operator sets one \(L\le L_{\max}\) for the node. The rail fee is the operator's
+cost, recovered through the import fee, so \(L\) fixes how many rail payments the node makes per unit
+bought and the import fee must cover them, \(\text{import fee}\ge F/L\). For \(D<L\),
 
-- `d` be the all-in expected inter-kernel charge for one call, including the provider's finality
-  premium and every fee disclosed to the caller;
-- `Q` be the rail's minimum economical payment.
+$$
+\Pr(\text{pay }L)=\frac DL,\qquad \Pr(\text{pay }0)=1-\frac DL,
+$$
 
-For each inter-kernel call:
+so \(\mathbb E[\text{payment}]=D\) and \(\operatorname{Var}=D(L-D)\). If \(D\ge L\) the debt is paid
+exactly. The binary \(0/L\) lottery minimises variance for a given probability of using the rail: at
+\(\Pr(\text{pay}>0)=q\) and mean \(D\), Jensen gives second moment at least \(D^2/q\), attained only
+by the constant payment \(D/q\). Probabilistic micropayments are standard (Rivest; Pass–Shelat);
+Livepeer and Orchid use funded versions, which make winning tickets collectible without removing the
+variance.
 
-- If `d >= Q`, the advertised charge is `d` with probability 1.
-- If `0 < d < Q`, the advertised charge is `Q` with probability `d / Q`, and zero otherwise.
-- If `d = 0`, the call is free.
+The buyer pays the exact price \(D\) from the call's budget, and its node charges the import fee on
+\(D\). The lottery's swing is booked to the buyer's own balance: \(+D\) back on cancel, \(-(L-D)\)
+more on pay. Expected charge \(D\). The seller funds the execution of its own action from its own
+balance, so sub-calls and the node's fee settle exactly and locally as for a local trade, and it is
+then credited what arrives: \(L\) or nothing, expected \(D\). Local trades are unchanged.
 
-Thus a sub-minimum action does not advertise `d` as the amount the caller authorizes. Its signed
-terms advertise:
+## 3. Exposure
 
-- maximum charge: `Q`;
-- probability of that charge: `d / Q`;
-- expected charge: `d`.
+Each **node** maintains one counter
 
-The caller must explicitly accept the maximum charge and have that amount available. For example,
-when `Q = 100` and `d = 5`, a call costs either 100 with probability 5%, or zero with probability
-95%. Its expected charge is 5, but its authorized maximum is 100.
+$$
+E=\text{service value delivered to remote buyers}-\text{final rail cash received for it},
+$$
 
-## Call and payment sequence
+and one credit limit \(E_{\max}\). It admits new foreign work only if the advertised maximum charge,
+plus all reserved unfinished work, keeps \(E\le E_{\max}\). Reservations are atomic. Only final cash
+reduces \(E\); a cancelled draw discharges the obligation but leaves \(E\) unchanged. This is the
+central security rule, and the counter is the node's own rather than any peer's: a bound that reset
+per counterparty would be bypassed by minting a counterparty. There is no per-buyer rule beside it,
+for the same reason — identities are free, so one would add an admission subsystem an attacker steps
+around while \(E\) already bounds the loss.
 
-Each call is economically independent:
+The node's ledger is therefore backed by cash alone: every credit corresponds to money on its rail
+account, and its solvency identity has no receivables term.
 
-1. The caller receives signed terms containing the maximum charge, probability, rail, and pricing
-   inputs, and explicitly accepts them.
-2. The caller's kernel reserves the maximum charge.
-3. The payment outcome is determined once and bound to the call's idempotency key. Neither party
-   may choose the outcome, and a retry must never produce a new draw.
-4. A zero outcome releases the reserve without a rail transfer.
-5. A non-zero outcome causes the payer kernel to submit the rail payment immediately. The payment
-   is bound to this call and cannot be reused for another purchase.
-6. The provider verifies the submitted payment and may execute before rail finality. The advertised
-   premium compensates it for finality delay, reorganisation risk, and temporary capital exposure.
-7. The same payment is followed or resubmitted until resolved. A retry creates neither a second
-   payment nor a second draw.
+Admission enforces \(E\le E_{\max}\), so \(\text{cash received}\ge\text{service delivered}-E_{\max}\)
+deterministically and independently of how many identities the buyers use. The bound is on net
+drawdown: premium income drives \(E\) below zero, and later defaults consume that surplus and then up
+to \(E_{\max}\). That is what the premium is for.
 
-"Immediate settlement" therefore means that the outcome and payment instruction are fixed as part
-of the call, rather than accumulated as debt for later operator action. Blockchain finality may
-arrive later. Until then, the system records an in-flight payment, not a reusable credit balance.
+For honest service \(\mathbb E[\Delta E]=P-D=-rP\); for unpaid service \(\Delta E=P\). With a
+fraction \(\alpha\) of volume ultimately unpaid, drift is non-positive iff \(\alpha\le r/(1+r)\).
 
-## Uniform treatment
+Under honest traffic \(E\) is a random walk with negative drift. If \(\theta>0\) solves
 
-Ordinary users and peer kernels follow the same solvency principle: a purchase cannot begin unless
-the payer can cover the explicitly accepted maximum. A peer account cannot become negative, and a
-provider does not grant it a standing credit line.
+$$
+\left(1-\frac DL\right)e^{\theta P}+\frac DL e^{\theta(P-L)}=1,
+$$
 
-The superuser remains an administrative authority for configuration and recovery, but it is not a
-special economic participant. It does not decide when ordinary inter-kernel obligations settle.
+then \(\Pr(\sup E-E_0\ge x)\le e^{-\theta x}\). For \(P\ll L\), \(\theta\approx 2r/((1+r)L)\), so the
+headroom needed to refuse honest buyers with probability at most \(\varepsilon\) is about
+\((1+r)L/(2r)\cdot\ln(1/\varepsilon)\). At \(L=\$10\) and \(\varepsilon=10^{-3}\): about $725 at
+\(r=5\%\), about $210 at \(r=20\%\). The approximate root is not the rigorous bound; a proof uses the
+exact root or a uniform lower bound over all permitted \(L\) and \(P\).
 
-## Composition
+## 4. Protocol
 
-The rule applies independently at every composition boundary:
+1. The buyer's node locks the advertised all-in price for the call's budget and \(L\) from the
+   buyer's own balance, and sends the request with a settlement identifier, \(L\), a commitment
+   to fresh randomness, and the proven rail address a winning ticket will be paid from. An
+   insufficient balance is refused locally before anything is sent.
+2. The seller's node atomically reserves the advertised maximum charge against its credit limit and
+   checks the seller can fund the execution. Either failure is a signed rejection.
+3. The seller performs the service. Its signed receipt carries the actual charge \(P\) and a fresh
+   random value. It needs no prior commitment: it cannot know the joint outcome without the buyer's
+   secret, so it cannot select on it. The reservation is corrected to \(D\).
+4. If \(D\ge L\) the buyer owes \(D\) exactly. Otherwise the buyer reveals its secret and a uniform
+   mapping of the two values and the identifier decides pay \(L\) or cancel; both sides recompute it.
+   On cancel the lock is released and \(D\) returned, so the buyer paid nothing. On pay the buyer's
+   balance carries the rest of \(L\) and the node pays \(L\) on the rail.
+5. The seller closes the obligation only on a final payment from the buyer's node's proven rail
+   address for the required amount; one rail transaction closes one obligation, and the seller is
+   credited the whole of it. A payment from an address some admitted call named as its payer is
+   held until that call's obligation is resolved, since its reveal may still be on its way.
+6. If no valid receipt arrives the call is never presumed dead: it stays parked and is retried under
+   its identifier until a receipt arrives or the maximum pending age expires, and only then settles
+   locally as a failure with no obligation. Every state is durable under the identifier.
 
-- The original caller accepts only the outer action's signed maximum charge.
-- A composer buying a subcall becomes the payer for that subcall and separately accepts and
-  reserves its maximum charge.
-- A subcall's probabilistic outcome cannot increase the original caller's charge beyond the outer
-  contract.
-- The composer bears and prices the variance of its own subcalls.
+Because \(L\) is locked before the request, a pay outcome is funded internally. The rail sends one
+payment at a time, so a burst of winning tickets drains in order; each parallel call locks its own
+ticket, so a composite firing \(n\) remote calls needs \(n\) tickets' worth of free balance.
 
-This preserves one bounded advertised contract at each layer while applying the same rule to every
-payer.
+## 5. Consequences
 
-## Machinery this model replaces
+**Buyer risk.** For \(n\) equal debts the number of \(L\)-payments is \(\mathrm{Binomial}(n,D/L)\); a
+buyer with budget \(B\) exhausts it with an ordinary binomial tail probability. A buyer wanting
+smaller jumps chooses a node with a smaller \(L\) and a larger import fee.
 
-The following concepts should disappear rather than coexist with the new model:
+**Premium.** A seller valuing settlement by mean minus \(\beta\) times variance is indifferent at
+\(D-\beta D(L-D)=P\), hence \(r\approx\beta L\) for \(P\ll L\). In practice \(r\) covers both
+variance and expected default.
 
-- negative peer balances and accumulated bilateral debt;
-- unsecured-credit exposure limits;
-- settlement triggers;
-- operator-initiated ordinary settlement;
-- later netting of many calls;
-- probabilistic settlement applied to residual accumulated debt;
-- reconciliation of opposing peer debt balances.
+**Node.** It earns fees on realised flows, holds no reserve against trade variance or default, and
+its credits are exactly cash-backed.
 
-The system still needs local balances, reservations, signed quotes and receipts, idempotency,
-in-flight rail-payment records, finality observation, deposits, withdrawals, and recovery of an
-interrupted payment.
+**Composition.** Recursive at the trade level and bilateral at every edge: if A buys from B and B
+buys from C, the obligations \(A\to B\) and \(B\to C\) are independent, and B needs both a credit
+limit and buyer-side liquidity. That liquidity is B's own balance, never the budget of the \(A\to B\)
+call — a ticket of \(L\) inside it would force B's price above \(L\) for a one-cent sub-service. In
+one realisation B pays \(L\) to C and receives nothing from A; in the mirror it gains nearly \(L\).
 
-`Q` becomes a rail policy for individual calls, not a threshold used later to settle accumulated
-debt. As transaction costs decline, an operator can lower `Q`. If the rail makes every payment
-economical, `Q` can effectively become zero and all calls can settle for their exact charge.
+## 6. Attack surface
 
-## Decisions still required
+| Attack | Result |
+|---|---|
+| Default on a winning draw | Counted in \(E\); further net drawdown limited by \(E_{\max}\). Requires a dishonest node, since \(L\) was locked. |
+| Trade until first win, then default | Cancelled draws remain in \(E\); exposure cannot be reset. |
+| Identity churn | All buyers share one node-wide counter. |
+| Concurrent requests | Atomic reservation of maximum charges. |
+| Operator sets large \(L\) | Capped by the world's \(L_{\max}\); locked from the buyer's balance before each call. |
+| Seller manipulates draw | Cannot know the outcome without the buyer's secret. |
+| Buyer withholds reveal | Nothing is credited, and the exposure stands against \(E_{\max}\). |
+| Seller withholds receipt | No obligation; reservation released; nothing gained. |
+| Redraw or replay | One identifier, one stored outcome. |
+| Payment misattribution | Final transaction from the proven address, exact amount, unused by another obligation. |
+| Rail outage | Payment pending; exposure stands until cash lands. |
+| Fee spike | Fraction rises as \(F/L_{\max}\); the cap moves with the rail. |
+| Buyer liquidity exhaustion | Buyer's balance against the node's \(L\), and its probability bound. |
+| Seller variance exhaustion | The premium \(r\), \(E_{\max}\), and the operator's reserve. |
+| Operator loss | The rail fee and its spikes, recovered in expectation by the import fee; no position in any trade. |
 
-Before this becomes the product contract, the following must be decided explicitly:
+## 7. Assessment
 
-1. Whether payment buys an accepted execution attempt or only a successful result. Conditional
-   refunds would add another rail transfer and substantially more protocol machinery.
-2. The exact fair-draw construction. It must prevent either party from selecting, withholding, or
-   grinding outcomes and must survive retries and crashes.
-3. What happens when a submitted payment is dropped, replaced, or reorganised after the provider
-   begins work, and how many unresolved payments one counterparty may have at once.
-4. How the premium is calculated and disclosed. It should price finality risk without becoming an
-   implicit, undisclosed fee.
-5. Which rail observation is sufficient for a provider to begin execution before finality.
+The economics are coherent and simpler than bilateral accumulation, manual settlement, or pairwise
+collateral. The primitive is standard; the additions are the node-wide cash-only credit counter and
+the pass-through node. The counter turns identity churn into a bounded drawdown. The pass-through
+removes the operator's reserve and makes node solvency exact.
 
-## Consequence for current work
-
-This is a replacement economic model, not a configuration change. The economic sections of the
-network simulation currently exercise accumulated credit and later settlement. They should not be
-treated as final acceptance tests for this proposal.
-
-The safe order of work is:
-
-1. Resolve the open decisions above.
-2. Amend `requirements.md` and its wire protocol.
-3. Identify and delete the superseded credit and settlement machinery.
-4. Implement the smallest per-call pricing and payment path that satisfies the amended contract.
-5. Rewrite the economic simulation around the new invariants while retaining transport, security,
-   authorization, composition, finality, and recovery coverage that remains applicable.
+One thing changes in the product contract: a remote call's price becomes deterministic in
+expectation, with the actual charge either zero or the lottery size. Local prices stay exact.

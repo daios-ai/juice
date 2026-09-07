@@ -151,9 +151,9 @@ func TestNoRailWritesAKeyIntoTheRunDirectory(t *testing.T) {
 // positional arguments must come after a bare `--` or the key is read as an unknown flag.
 func TestTheManualRailPassesKeysAfterADoubleDash(t *testing.T) {
 	src, _ := os.ReadFile("rail.go")
-	settle := between(string(src), "func announce", "\n}")
-	if !strings.Contains(settle, `"--"`) {
-		t.Error("a settlement passes a public key positionally; without a bare -- a key beginning " +
-			"with a dash is read as a flag and the settlement is silently left open")
+	confirm := between(string(src), "func confirmPayment", "\n}")
+	if !strings.Contains(confirm, `"--"`) {
+		t.Error("confirming a payment passes a public key positionally; without a bare -- a key " +
+			"beginning with a dash is read as a flag and the obligation is silently left open")
 	}
 }

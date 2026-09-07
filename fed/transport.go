@@ -450,7 +450,7 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolResolve), t.handleResolve)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
-	t.host.SetStreamHandler(protocol.ID(ProtocolSettle), t.handleSettle)
+	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
 }
 
 // serveReq reads one typed request frame, runs handle, and writes its response frame. Used by the
@@ -479,9 +479,9 @@ func (t *Transport) handleResolve(s network.Stream) {
 	})
 }
 
-func (t *Transport) handleSettle(s network.Stream) {
-	serveReq(s, func(key string, req SettleRequest) any {
-		return t.cfg.Handlers.OnSettle(context.Background(), key, req)
+func (t *Transport) handleReveal(s network.Stream) {
+	serveReq(s, func(key string, req RevealRequest) any {
+		return t.cfg.Handlers.OnReveal(context.Background(), key, req)
 	})
 }
 
@@ -552,9 +552,9 @@ func (t *Transport) Resolve(ctx context.Context, peerKey string, req ResolveRequ
 	return roundTrip[ResolveRequest, ResolveResponse](ctx, t, peerKey, ProtocolResolve, req)
 }
 
-// Settle runs one round of the two-party residual settlement commit/reveal with the peer (§13).
-func (t *Transport) Settle(ctx context.Context, peerKey string, req SettleRequest) (SettleResponse, error) {
-	return roundTrip[SettleRequest, SettleResponse](ctx, t, peerKey, ProtocolSettle, req)
+// Reveal tells the peer how one obligation's draw came out (P10).
+func (t *Transport) Reveal(ctx context.Context, peerKey string, req RevealRequest) (RevealResponse, error) {
+	return roundTrip[RevealRequest, RevealResponse](ctx, t, peerKey, ProtocolReveal, req)
 }
 
 // Gossip fetches one page of the peer's gossip document, resuming from cursor (§13). An empty

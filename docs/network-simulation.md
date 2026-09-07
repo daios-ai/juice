@@ -24,9 +24,9 @@ The reports would be misread without this distinction.
 | operation | one `juice` command the suite issued | no |
 | top-level call | one action a user asked for | no |
 | nested call | an action bought by another action while it ran | no |
-| blockchain transaction | a mint, a deposit, a settlement payment, an ETH transfer | **yes** |
+| blockchain transaction | a mint, a deposit, a ticket payment, an ETH transfer | **yes** |
 
-Hundreds of cross-kernel calls between the same pair of kernels accumulate as a debt and are paid
+Hundreds of cross-kernel calls between the same pair of kernels cost a handful of payments and are paid
 once. That is why the workload is the same on every rail: rounds are almost free, and only the
 *shape* of the trade graph — how many pairs end up owing each other — decides what a chain run
 costs.
@@ -84,8 +84,9 @@ economy, which is why reports show eight kernels for a five-kernel story.
 11. **A fifth kernel joins** an economy already running, is discovered, sells, and buys.
 12. **A provider is killed** outright and restarted. See the honest scope below.
 13. **Attacks.** Five, described below.
-14. **Everything is settled.** Every payment is opened first and then waited for together — settling
-    them one at a time would cost a public chain's finality apiece, which is hours.
+14. **Everything is settled.** Each obligation a buyer says it has paid is confirmed against the
+    money that arrived, repeatedly until nothing anywhere is owed and no payment is still moving —
+    reading the books mid-movement would report the instant, not the economy.
 
 ## What the report judges
 
@@ -96,10 +97,10 @@ they are the ones that can catch the kernel being wrong rather than merely incon
 | check | kind | what it means |
 |---|---|---|
 | `gross − refund == fee + net + Σ children` on every transaction | consistency | what a caller paid equals what the call kept plus what it spent |
-| money entering equals money held | independent | Σ deposits == Σ (available + locked) over every account on every kernel. Holds with debts open: a cross-kernel call sums to zero across the two kernels, and a settlement moves tokens between vaults without touching an account |
+| money entering equals money held | independent | Σ deposits == Σ (available + locked) over every account on every kernel. A cross-kernel call sums to zero across the two kernels — the charge returns to the caller, whose own stake carries the draw — and a ticket payment moves tokens from one vault to the other |
 | every call charged its advertised terms | independent | local: the price. Cross-kernel: `q` from the published rates. Local failure keeps nothing. **Remote failure may legitimately charge** — the peer may have done paid work before failing — so it must equal the receipt's own draw plus premium, with no import fee |
-| every payment moved the debt by its amount | independent | the creditor's peer row on either side of the settlement |
-| no debt outstanding, in either direction | consistency | a debt is one row on the serving side, so both directions are read |
+| every obligation was settled by a payment that was not short | independent | a draw pays what is owed or the whole face value, never less |
+| no obligation outstanding, in either direction | consistency | an obligation is one row on the serving side, so both directions are read; and no peer row holds money at all |
 | no funds left parked | consistency | read from `process list` (`awaiting_receipt`), not transaction rows: a call still waiting has no settled row |
 | the evidence a peer serves carries no identifying field | independent | checked on the raw response, and a missing projection fails the run |
 | latency, throughput, recovery | measurement | not a verdict |
@@ -119,7 +120,7 @@ attack on the network protocol.
 
 | the attacker wants | what stops it |
 |---|---|
-| more unsecured credit than one identity could draw, by minting identities | one global cap across all peers (the attackers are funded, and the victim is put on a low cap, or the cap is never reached and the test proves nothing) |
+| more unpaid work than one identity could draw, by minting identities | one credit limit for the whole kernel, checked as an absolute ceiling rather than as what the attack added: a winning draw pays the whole face value, so cash received can exceed what was owed and carry the counter below zero, against which any increase overstates. The attackers are funded and the victim is put on a low limit, and somebody must be refused for want of credit, or it is never reached and the test proves nothing |
 | paid work with no balance to pay for it | refusal before anything is locked |
 | one payment credited more than once | a payment reference is honoured once |
 | an action that was never exported | access is not transitive; a kernel does not relay on request; value may not cross a kernel |
@@ -127,7 +128,7 @@ attack on the network protocol.
 
 Lower-level attacks live where they can be made properly: lost, duplicated and refused messages and
 store failures in `cmd/juice/fedsim_test.go`; oversized frames and stream floods in
-`fed/transport_test.go`; concurrent admission at the exposure cap in `store/sqlite_test.go`; forged
+`fed/transport_test.go`; concurrent admission at the credit limit in `store/sqlite_test.go`; forged
 and tampered receipts in `kernel/federation_test.go`, which can re-sign with a peer's key.
 
 ## Coverage
@@ -143,10 +144,10 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 | P7 cross-kernel pricing | **netsim price fidelity** (independent) |
 | P8 steps across kernels | netsim act 7; flow `fed_step_complete` |
 | P9 gossip, evidence | netsim act 10 |
-| P10 settlement | **netsim settlement fidelity**; anvil and Sepolia rails |
+| P10 ticket settlement | **netsim settlement fidelity**; anvil and Sepolia rails |
 | U13 partial refunds | **netsim refund law**, act 6 |
 | U29–U31 provisioning, exporting, both operators paid | netsim acts 2, 3, 4 |
-| U32 exposure cap, Sybil | netsim attack 1; `store/sqlite_test.go` (concurrent) |
+| U32 credit limit, Sybil | netsim attack 1; `store/sqlite_test.go` (concurrent) |
 | U33 settle over a rail | anvil, Sepolia |
 | U34 NAT, relay | `flows_network.sh` — **manual gate, needs a second host** |
 | U35 intermittent connectivity | `fedsim_test.go`; flow `fed_provider_crash_recovery`; netsim act 12 (offline only) |
@@ -159,7 +160,7 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 | G4 crash safety | `fedsim_test.go`; flow `fed_provider_crash_recovery` |
 | G6 no unfunded work | netsim act 5, attack 2 |
 | D12 transport limits | `fed/transport_test.go` |
-| D14 exposure engine | `store/sqlite_test.go` |
+| D14 credit engine | `store/sqlite_test.go` |
 | D23 rail | anvil refill gate; Sepolia |
 
 ## What it does not claim
@@ -184,7 +185,7 @@ made and becomes final, and what the run cost. A test fails if `story.go` so muc
   Ethereum finality instead sets `finality` to `finalized` in `rail/worlds/test.json`.
 
 Before spending anything the Sepolia rail prices the complete story — every mint, deposit, kernel
-gas provision and settlement, from the declared shape — and refuses if it exceeds the cap
+gas provision and ticket payment, from the declared shape — and refuses if it exceeds the cap
 (`JUICE_SEPOLIA_BUDGET`, 0.005 ETH by default). It never spends from the funding account: it moves
 exactly the cap into a wallet made for the run and spends only from there, so whatever the estimate
 got wrong, the run cannot exceed it. At the last measurement the canonical story costs about

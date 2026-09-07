@@ -209,7 +209,7 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	// settle long after import_bps changes, so the rate is frozen alongside it. Proxies only — a
 	// local action's price carries no import fee.
 	if action.Kind == KindRemoteProxy {
-		ibps := k.cfg.ImportBPS
+		ibps := k.econ.ImportBPS
 		step.ImportBPS = &ibps
 	}
 	// The park moves action.Price from the funding trace's available into locked; lock the trace
@@ -431,17 +431,19 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		// catalog reprices — and the rate is the one frozen at creation, so a fee change between
 		// parking and completion cannot move this step's arithmetic (§16). A pre-041 step has no
 		// snapshot and settles from live config, as it does today.
-		ibps := k.cfg.ImportBPS
+		ibps := k.econ.ImportBPS
 		if step.ImportBPS != nil {
 			ibps = *step.ImportBPS
 		}
-		stepTrace.DispatchJSON = marshalDispatch(args, stepID, actionBasePrice(action), step.Price, action.ArtifactHash, actionRemoteBPS(action), ibps)
+		if err := k.prepareDispatch(ctx, stepTrace, action, args, stepID, step.Price, ibps); err != nil {
+			return nil, err
+		}
 	}
 	// A lost waiting→running CAS already carries ErrStepNotClaimed from the store, which marks
 	// only the two genuine claim races. Deliberately NOT relabelled here: BeginStepCall also
 	// reports a park-invariant violation as ErrInvalidState, and a blanket relabel would present
 	// that ledger corruption to a gate as an ordinary lost race and silently drop the contribution.
-	if err := k.store.BeginStepCall(ctx, stepID, stepTrace, k.cfg.ExposureMax); err != nil {
+	if err := k.store.BeginStepCall(ctx, stepID, stepTrace); err != nil {
 		return nil, err
 	}
 

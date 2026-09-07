@@ -69,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
+    local lottery=0 credit_limit=100000 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -78,9 +78,8 @@ write_config() {
         bootstrap_peers=*)               bootstrap_peers=${a#*=} ;;
         remote_retry_interval_seconds=*) remote_retry_interval_seconds=${a#*=} ;;
         discovery_interval_seconds=*)    discovery_interval_seconds=${a#*=} ;;
-        exposure_max=*)                  exposure_max=${a#*=} ;;
-        settlement_trigger=*)            settlement_trigger=${a#*=} ;;
-        settlement_quantum=*)            settlement_quantum=${a#*=} ;;
+        lottery=*)                       lottery=${a#*=} ;;
+        credit_limit=*)                  credit_limit=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
         world=*)                         world=${a#*=} ;;
         rail_rpc=*)                      rail_rpc=${a#*=} ;;
@@ -95,9 +94,8 @@ write_config() {
   "script_memory_bytes": 67108864,
   "fee_bps": $fee_bps,
   "import_bps": $import_bps,
-  "exposure_max": $exposure_max,
-  "settlement_trigger": $settlement_trigger,
-  "settlement_quantum": $settlement_quantum,
+  "lottery": $lottery,
+  "credit_limit": $credit_limit,
   "token_ttl": "15m",
   "log_level": "info",
   "log_format": "json",
@@ -249,6 +247,25 @@ assert_fails() {
 # ---------------------------------------------------------------------------
 strfield() { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 numfield() { python3 -c "import sys,json; print(int(json.loads(sys.argv[1]).get(sys.argv[2],0)))" "$1" "$2" 2>/dev/null; }
+# rowfield json list field — a field of the first row of a named list inside a JSON object.
+rowfield() { python3 -c "
+import sys,json
+rows=json.loads(sys.argv[1]).get(sys.argv[2]) or []
+print('' if not rows else rows[0].get(sys.argv[3],''))" "$1" "$2" "$3" 2>/dev/null; }
+
+# owed_count db home peer — how many obligations one buyer still owes this kernel, from the
+# operator's own worklist. An obligation is kept only by the side that is owed, so this is read on
+# the seller and counted by the buyer it names.
+owed_count() {
+    local db="$1" home="$2" peer="$3"
+    python3 -c "
+import sys,json
+rows=json.loads(sys.argv[1] or '{}').get('owed') or []
+peer=sys.argv[2]
+print(sum(1 for r in rows if r.get('peer') in (peer, peer[:8]) or peer.startswith(r.get('peer',''))))" \
+        "$(jj "$db" "$home" admin deposit)" "$peer" 2>/dev/null || echo 0
+}
+
 # pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.
 pathf() { python3 -c "
 import sys,json

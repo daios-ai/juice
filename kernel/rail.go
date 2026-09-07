@@ -2,9 +2,8 @@ package kernel
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -108,16 +107,18 @@ type RailDeposit struct {
 // Rail transfer kinds. Every external movement is one row, so the money in transit and the money
 // nobody has claimed are the same query.
 const (
-	RailKindDeposit    = "deposit"    // a payment in, held until its sender is known
-	RailKindPayout     = "payout"     // a user's withdrawal
-	RailKindSettlement = "settlement" // what this kernel owes a peer
-	RailKindClaim      = "claim"      // what a peer says it has paid us
-	RailKindRefill     = "refill"     // the fuel lock
+	RailKindDeposit = "deposit" // a payment in, held until its sender is known
+	RailKindPayout  = "payout"  // a user's withdrawal
+	RailKindRefill  = "refill"  // the fuel lock
+	// RailKindObligation is a won draw on its way to the peer it is owed to. It is kept apart from a
+	// withdrawal because the two fail differently: a withdrawal that the rail rejects gives the money
+	// back and the user may ask again, while a debt that fails to pay is still a debt — the money
+	// stays committed and the payment is presented again (P10).
+	RailKindObligation = "obligation"
 )
 
 // Rail transfer statuses.
 const (
-	RailStatusDrawing   = "drawing" // a settlement being drawn for; the row is its durable memory, and no money moves yet
 	RailStatusPending   = "pending"
 	RailStatusSubmitted = "submitted"
 	RailStatusRefilling = "refilling"
@@ -130,9 +131,9 @@ const (
 )
 
 // RailTransfer is one external movement. Amount is what moves on the rail; Credit is what it is
-// worth to Party, which differs only for a settlement, where the cash is the quantum and the credit
-// is the debt. Destination is snapshotted when the row reserves, so nothing — a restart, an address
-// change — can redirect a payment already authorized.
+// worth to Party, which differ only where the operator adds to a payment out of its own balance.
+// Destination is snapshotted when the row reserves, so nothing — a restart, an address change — can
+// redirect a payment already authorized.
 type RailTransfer struct {
 	ID          string     `json:"id"`
 	Kind        string     `json:"kind"`
@@ -143,20 +144,30 @@ type RailTransfer struct {
 	Status      string     `json:"status"`
 	TxHash      string     `json:"tx_hash,omitempty"`
 	RefillID    string     `json:"refill_id,omitempty"`
-	Record      string     `json:"-"`
 	Reason      string     `json:"reason,omitempty"`
+	Attempt     int64      `json:"attempt,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	FinalizedAt *time.Time `json:"finalized_at,omitempty"`
 }
 
-// Open reports whether the row still has work to do. A settlement whose payment is final still has
-// to reach the creditor: until it is announced, the debt is closed on one side only.
+// RailOp is the name this payment is presented to the rail under. The row keeps one identity for the
+// life of the debt — it is what the reveal and the seller know it by — but a rail operation that has
+// been signed and settled has spent its place in the account's sequence, so a fresh attempt must ask
+// under a fresh name or the rail will decline to act at all.
+func (r *RailTransfer) RailOp() string {
+	if r.Attempt == 0 {
+		return r.ID
+	}
+	return fmt.Sprintf("%s#%d", r.ID, r.Attempt)
+}
+
+// Open reports whether the row still has work to do. A payment for a ticket whose money is final
+// still has to reach the seller: until the reveal is acknowledged, the obligation is closed on one
+// side only.
 func (r *RailTransfer) Open() bool {
 	switch r.Status {
-	case RailStatusFailed, RailStatusCredited, RailStatusAnnounced:
+	case RailStatusFailed, RailStatusCredited, RailStatusAnnounced, RailStatusConfirmed:
 		return false
-	case RailStatusConfirmed:
-		return r.Kind == RailKindSettlement
 	}
 	return true
 }
@@ -166,7 +177,6 @@ func (r *RailTransfer) Open() bool {
 // credits outstanding.
 type RailPosition struct {
 	Liabilities    int64 `json:"liabilities"`
-	Receivables    int64 `json:"receivables"`
 	Vault          int64 `json:"vault"`
 	PendingPayouts int64 `json:"pending_payouts"`
 	HeldDeposits   int64 `json:"held_deposits"`
@@ -174,9 +184,11 @@ type RailPosition struct {
 	SysAvailable   int64 `json:"sys_available"`
 }
 
-// Gap is the solvency identity: zero when every credit outstanding is backed by the vault plus the
-// peer debts the exposure cap bounds. A non-zero gap names a broken record, never a policy choice.
-func (p RailPosition) Gap() int64 { return p.Liabilities - p.Receivables - p.Vault }
+// Gap is the solvency identity: zero when every credit outstanding is backed by cash that actually
+// crossed in. There is no receivables term — the ledger is cash-backed, and what strangers owe for
+// delivered work is exposure, which the operator carries and never counts as backing. A non-zero gap
+// names a broken record, never a policy choice.
+func (p RailPosition) Gap() int64 { return p.Liabilities - p.Vault }
 
 // Reserve is what is not the operator's to spend: everything owed to somebody else. It is what the
 // kernel hands the rail as the floor a refill may not dip below.
@@ -253,13 +265,39 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if err != nil {
 		return nil, err
 	}
-
-	// A settlement a peer announced is closed by the payment it named, not by a fresh crossing: the
-	// money is already in, and what is missing is only the operator's confirmation that it arrived.
-	if claim, err := k.store.ReadRailTransfer(ctx, ref); err != nil {
+	target, err := k.store.ReadUser(ctx, targetUserID)
+	if err != nil {
 		return nil, err
-	} else if claim != nil && claim.Kind == RailKindClaim {
-		return k.creditClaim(ctx, claim, targetUserID, amount)
+	}
+
+	// One ingestion path, whatever the operator named. An obligation is not a fresh crossing: naming
+	// one means "the payment this buyer announced has arrived", so the reference resolves to the
+	// payment that obligation named and the money reaches the seller through the ordinary matcher —
+	// which is what makes the rules that decide whose payment it is the same however it was noticed.
+	// Naming a payment directly credits the account given.
+	owed, err := k.store.ReadOwed(ctx, ref, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	// A peer account is identity, never a wallet (D14). The only money that may reach one is the
+	// payment closing an obligation it owes, and that money goes to the seller rather than to the
+	// peer's own row — so naming a peer with anything else is refused here rather than quietly
+	// preloading a balance no path would ever spend.
+	if target.IsPeer() && owed == nil {
+		return nil, ErrInvalidInput.Wrapf("%s is a peer: name the obligation its payment closes, not the peer itself",
+			k.KernelName(ctx, target.KernelPublicKey))
+	}
+	if owed != nil {
+		if owed.Status == OwedCredited {
+			return nil, nil // already recorded: witnessing the same payment again moves no money
+		}
+		if owed.Status != OwedAnnounced {
+			return nil, ErrInvalidState.Wrapf("obligation %s is not awaiting a payment", owed.ID)
+		}
+		if amount > 0 && amount != owed.Amount {
+			return nil, ErrInvalidInput.Wrapf("obligation %s is for %d, not %d", owed.ID, owed.Amount, amount)
+		}
+		ref, amount, targetUserID = owed.TxHash, owed.Amount, ""
 	}
 
 	fact, err := rail.Witness(ctx, ref, amount)
@@ -269,65 +307,73 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if amount > 0 && fact.Amount != amount {
 		return nil, ErrInvalidInput.Wrapf("payment %s is %d, not %d", ref, fact.Amount, amount)
 	}
+	// The deposit is built from the witnessed fact alone — never from what anybody claimed about it.
+	// Its sender is the one thing an obligation cannot supply for itself: a buyer that named someone
+	// else's payment must not have it rewritten as its own.
+	if owed != nil && !sameAddress(fact.From, owed.RailAddr) {
+		return nil, ErrInvalidInput.Wrapf("payment %s came from %s, not from %s", ref, fact.From, owed.RailAddr)
+	}
+	// Every payment enters held and is reconciled — obligations first — before anyone is handed it
+	// by name, so an operator's attribution is the fallback for money no obligation claims, never a
+	// way past the rules that decide whose it is.
 	row := &RailTransfer{ID: fact.Key, Kind: RailKindDeposit, Party: fact.From,
 		Amount: fact.Amount, Credit: fact.Amount, TxHash: fact.TxHash,
-		Status: RailStatusCredited, Reason: reason, CreatedAt: time.Now().UTC()}
-	e, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, targetUserID)
-	if err != nil {
+		Status: RailStatusHeld, Reason: reason, CreatedAt: time.Now().UTC()}
+	if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, ""); err != nil {
 		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
+	}
+	credited, err := k.store.ReconcileDeposits(ctx, k.cfg.FeeRecipientID, 100)
+	if err != nil {
+		return nil, err
+	}
+	var e *LedgerEntry
+	if owed == nil {
+		if e, err = k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, targetUserID); err != nil {
+			return nil, err
+		}
+	} else {
+		// Reconciliation is global, so success means the obligation the operator named closed — not
+		// that something did — and what is reported is this payment's own credit.
+		if now, rerr := k.store.ReadOwed(ctx, owed.ID, owed.PeerUserID); rerr != nil || now == nil || now.Status != OwedCredited {
+			return nil, ErrInvalidState.Wrapf("payment %s does not close obligation %s", fact.TxHash, owed.ID)
+		}
+		for _, c := range credited {
+			if c.ExternalKey == AttributionKey(row.ID) {
+				e = c
+			}
+		}
 	}
 	logger.Info("deposit.created", "deposit_id", row.ID, "target_user_id", targetUserID, "amount", amount,
 		"status", "success", "duration_ms", time.Since(start).Milliseconds())
 	return e, nil
 }
 
-// creditClaim closes a settlement a peer announced, against the payment already booked for it. The
-// debt is worth Credit to the peer's row; the rest of the cash is the operator's own variance.
-func (k *Kernel) creditClaim(ctx context.Context, claim *RailTransfer, targetUserID string, amount int64) (*LedgerEntry, error) {
-	if claim.Status == RailStatusCredited {
-		return nil, ErrInvalidState.Wrapf("settlement %s is already recorded", claim.ID)
-	}
-	if targetUserID != claim.Party {
-		return nil, ErrInvalidInput.Wrapf("settlement %s belongs to another peer", claim.ID)
-	}
-	if amount > 0 && amount != claim.Amount {
-		return nil, ErrInvalidInput.Wrapf("settlement %s paid %d, not %d", claim.ID, claim.Amount, amount)
-	}
-	rail, err := k.railOrFail(ctx)
-	if err != nil {
-		return nil, err
-	}
-	fact, err := rail.Witness(ctx, claim.TxHash, claim.Amount)
-	if err != nil {
-		return nil, err
-	}
-	dep := &RailTransfer{ID: fact.Key, Kind: RailKindDeposit, Party: fact.From,
-		Amount: claim.Amount, Credit: claim.Credit, TxHash: fact.TxHash,
-		Status: RailStatusHeld, CreatedAt: time.Now().UTC()}
-	if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, dep, ""); err != nil {
-		return nil, err
-	}
-	return k.store.AttributeRailDeposit(ctx, k.cfg.FeeRecipientID, dep.ID, claim.Party, claim.Credit, claim.ID)
-}
+// AttributionKey names the ledger entry that delivered one deposit to its owner: the deposit's own
+// fact, prefixed. One definition, so the store writes it and the kernel can find it exactly.
+func AttributionKey(depositID string) string { return "attr:" + depositID }
 
-// ListHeldDeposits is the operator's view of money nobody has claimed, plus the settlements peers
-// say they have paid — everything waiting on a decision only the ledger authority can make.
+// sameAddress compares two rail senders. A world with no addresses proves nothing about who paid, so
+// both sides are empty there and the comparison is trivially true.
+func sameAddress(a, b string) bool { return strings.EqualFold(a, b) }
+
+// ListHeldDeposits is money that has arrived and nobody has claimed: waiting on the one decision
+// only the ledger authority can make, which sender it belongs to.
 func (k *Kernel) ListHeldDeposits(ctx context.Context, operatorID string) ([]*RailTransfer, error) {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
-	held, err := k.store.ListRailTransfers(ctx, RailKindDeposit, "", RailStatusHeld, 200)
-	if err != nil {
+	return k.store.ListRailTransfers(ctx, RailKindDeposit, "", RailStatusHeld, 200)
+}
+
+// ListOwed is what buyers have said they paid and this kernel has not yet seen the money for — the
+// other half of what waits on the operator, and on a world whose finalized facts are its own records
+// the half only the operator can close.
+func (k *Kernel) ListOwed(ctx context.Context, operatorID string) ([]*Owed, error) {
+	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
-	claims, err := k.store.ListRailTransfers(ctx, RailKindClaim, "", RailStatusAnnounced, 200)
-	if err != nil {
-		return nil, err
-	}
-	out := append(held, claims...)
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
-	return out, nil
+	return k.store.ListOwed(ctx, 200)
 }
 
 // ---- Withdrawals: money out (U51) ----
@@ -431,17 +477,18 @@ func (k *Kernel) SetRailAddress(ctx context.Context, callerID, address, signatur
 	if err := k.store.SetRailAddress(ctx, u.ID, canonical, time.Now().UTC()); err != nil {
 		return nil, nil, err
 	}
-	held, err := k.store.ListRailDeposits(ctx, RailStatusHeld, canonical)
+	// Money already here from this sender is now theirs. Deciding that is reconciliation's job and
+	// nobody else's, so registering an address runs it rather than repeating the decision: the same
+	// rule then governs a payment that arrives before the address as one that arrives after.
+	credits, err := k.store.ReconcileDeposits(ctx, k.cfg.FeeRecipientID, 200)
 	if err != nil {
 		return nil, nil, err
 	}
 	var attributed []*LedgerEntry
-	for _, d := range held {
-		e, err := k.store.AttributeRailDeposit(ctx, k.cfg.FeeRecipientID, d.ID, u.ID, d.Amount, "")
-		if err != nil {
-			return nil, nil, err
+	for _, e := range credits {
+		if e.ToUserID == u.ID {
+			attributed = append(attributed, e)
 		}
-		attributed = append(attributed, e)
 	}
 	u.RailAddress = canonical
 	k.log.With(ctx).Info("rail.address.registered", "caller_user_id", u.ID, "attributed", len(attributed))
@@ -470,19 +517,22 @@ func (k *Kernel) RailIdentity(ctx context.Context) (address, proof string) {
 
 // verifyRailIdentity checks a peer's advertised address. On a world without addresses both must be
 // empty; on one with them the signature must prove control, or the peer could name a stranger's.
-func (k *Kernel) verifyRailIdentity(peerKey, address, proof string) error {
+// verifyRailIdentity checks a peer's claim to a rail address and returns the address in the form
+// the rail itself reports senders in — the form a payment from it will carry, and so the only form
+// worth freezing against one.
+func (k *Kernel) verifyRailIdentity(peerKey, address, proof string) (string, error) {
 	if k.rail == nil {
-		return nil
+		return address, nil
 	}
-	_, err := k.rail.Verify(railIdentityMessage(peerKey, k.cfg.Network.Digest, address), address, proof)
-	return err
+	return k.rail.Verify(railIdentityMessage(peerKey, k.cfg.Network.Digest, address), address, proof)
 }
 
 // ---- The worker (D23) ----
 
 // RailPass is one turn of the rail worker: re-drive everything still open, observe payments in,
-// close any settlement claim the payment for it has arrived for, and audit. It does nothing at all
-// until the rail is verified, since an unverified token misstates every amount.
+// close any obligation whose payment has arrived, tell the sellers still waiting how their draws
+// came out, and audit. It does nothing at all until the rail is verified, since an unverified token
+// misstates every amount.
 func (k *Kernel) RailPass(ctx context.Context) {
 	if k.rail == nil {
 		return
@@ -504,7 +554,10 @@ func (k *Kernel) RailPass(ctx context.Context) {
 		k.driveRailTransfer(ctx, row)
 	}
 	k.scanRailDeposits(ctx)
-	k.matchRailClaims(ctx)
+	k.reconcileDeposits(ctx)
+	// A reveal the peer never acknowledged is simply sent again from the row it is recorded on: a
+	// losing draw the seller never heard about would leave it owed forever (P10).
+	k.RevealPending(ctx)
 
 	rep, err := k.railReport(ctx)
 	if err != nil {
@@ -512,7 +565,7 @@ func (k *Kernel) RailPass(ctx context.Context) {
 	}
 	if rep.Gap != 0 {
 		logger.Error("rail.audit.gap", "gap", rep.Gap, "liabilities", rep.Position.Liabilities,
-			"receivables", rep.Position.Receivables, "vault", rep.Position.Vault)
+			"vault", rep.Position.Vault)
 	}
 	if rep.CustodyChecked && !rep.CustodyOK {
 		logger.Error("rail.audit.custody", "difference", rep.Custody, "vault", rep.Position.Vault,
@@ -547,7 +600,7 @@ func (k *Kernel) driveRailStep(ctx context.Context, row *RailTransfer) {
 	logger := k.log.With(ctx)
 	switch row.Status {
 	case RailStatusPending, RailStatusBlocked:
-		out, err := k.rail.Pay(ctx, row.ID, row.Destination, row.Amount)
+		out, err := k.rail.Pay(ctx, row.RailOp(), row.Destination, row.Amount)
 		if err != nil {
 			logger.Warn("rail.pay.failed", "rail_transfer_id", row.ID, "error", err.Error())
 			return
@@ -570,7 +623,7 @@ func (k *Kernel) driveRailStep(ctx context.Context, row *RailTransfer) {
 			_ = k.store.RecordRailOutcome(ctx, k.cfg.FeeRecipientID, row.ID, RailStatusSubmitted, out.TxHash, "", nil)
 		}
 	case RailStatusSubmitted:
-		st, fact, err := k.rail.Outcome(ctx, row.ID)
+		st, fact, err := k.rail.Outcome(ctx, row.RailOp())
 		if err != nil {
 			return
 		}
@@ -581,6 +634,16 @@ func (k *Kernel) driveRailStep(ctx context.Context, row *RailTransfer) {
 			}
 			logger.Info("rail.confirmed", "rail_transfer_id", row.ID, "tx_hash", fact.TxHash)
 		case RailFailed:
+			// A debt that failed to pay is still a debt: the money stays committed rather than being
+			// given back, and the payment is presented again. The attempt that reverted is spent —
+			// asking under it again produces nothing at all — so the next one asks under a fresh
+			// name while the row, the obligation and the seller's view of them stay as they were.
+			// Only a withdrawal, which the user asked for and can ask for again, gives its money back.
+			if row.Kind == RailKindObligation {
+				_ = k.store.RetryRailTransfer(ctx, row.ID)
+				logger.Warn("rail.obligation.retry", "rail_transfer_id", row.ID, "reverted_tx", fact.TxHash)
+				return
+			}
 			if _, err := k.store.CompensateRailTransfer(ctx, k.cfg.FeeRecipientID, row.ID, time.Now().UTC()); err == nil {
 				logger.Warn("rail.failed", "rail_transfer_id", row.ID)
 			}
@@ -612,12 +675,6 @@ func (k *Kernel) driveRailStep(ctx context.Context, row *RailTransfer) {
 		logger.Info("rail.refill.booked", "refill_id", fuel.RefillID, "cost", cost)
 		// The payment the refill made room for was never presented; present it now.
 		_ = k.store.RecordRailOutcome(ctx, k.cfg.FeeRecipientID, row.ID, RailStatusPending, "", "", nil)
-	case RailStatusConfirmed:
-		// Only a settlement is still open here: its payment is final, and the creditor has to be
-		// told which one. One attempt per step, so a peer that is away is asked again next pass.
-		if row.Kind == RailKindSettlement {
-			k.announceSettlement(ctx, row, RailFact{TxHash: row.TxHash})
-		}
 	}
 }
 
@@ -692,8 +749,11 @@ func (k *Kernel) refillFor(ctx context.Context, row *RailTransfer) {
 	}
 }
 
-// scanRailDeposits books every finalized payment in. Booking is keyed by the fact, so re-observing
-// one moves nothing; the kernel's own mark advances only after a pass has booked what it saw.
+// scanRailDeposits books every finalized payment in, held. Who it belongs to is not decided here:
+// reconciliation decides it, obligations first, because a peer's payment can arrive from an address
+// a local account also registered and crediting that account on sight would leave the seller unpaid.
+// Booking is keyed by the fact, so re-observing one moves nothing; the kernel's own mark advances
+// only after a pass has booked what it saw.
 func (k *Kernel) scanRailDeposits(ctx context.Context) {
 	logger := k.log.With(ctx)
 	from, _ := k.store.GetConfig(ctx, railBookedBlockKey)
@@ -708,18 +768,9 @@ func (k *Kernel) scanRailDeposits(ctx context.Context) {
 	}
 	var highest uint64 = since
 	for _, d := range deposits {
-		owner, err := k.store.ReadUserByRailAddress(ctx, d.From)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return
-		}
-		toUser := ""
-		status := RailStatusHeld
-		if owner != nil && owner.IsLiveUser() {
-			toUser, status = owner.ID, RailStatusCredited
-		}
 		row := &RailTransfer{ID: d.Key, Kind: RailKindDeposit, Party: d.From, Amount: d.Amount,
-			Credit: d.Amount, TxHash: d.TxHash, Status: status, CreatedAt: time.Now().UTC()}
-		if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, toUser); err != nil {
+			Credit: d.Amount, TxHash: d.TxHash, Status: RailStatusHeld, CreatedAt: time.Now().UTC()}
+		if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, ""); err != nil {
 			logger.Warn("rail.deposit.failed", "key", d.Key, "error", err.Error())
 			return
 		}
@@ -736,37 +787,18 @@ func (k *Kernel) scanRailDeposits(ctx context.Context) {
 // rail's: the rail records a payment before the kernel commits it.
 const railBookedBlockKey = "rail_booked_block"
 
-// matchRailClaims closes every settlement a peer announced whose payment has since arrived. A claim
-// is closed by a payment that carries the transaction the peer named, comes from that peer's proven
-// address, and is for the amount claimed — so neither an equal-sized payment from somebody else nor
-// a stranger's announcement of a payment they never made can close a debt. Each payment closes at
-// most one claim: two claims naming one payment are two debts, and only the first is settled by it.
-func (k *Kernel) matchRailClaims(ctx context.Context) {
-	claims, err := k.store.ListRailTransfers(ctx, RailKindClaim, "", RailStatusAnnounced, 200)
-	if err != nil || len(claims) == 0 {
-		return
-	}
-	held, err := k.store.ListRailDeposits(ctx, RailStatusHeld, "")
+// reconcileDeposits decides who every payment observed so far belongs to. The store does the whole
+// thing in one transaction, because the join that decides a payment is an obligation's — the sender
+// the buyer proved, the transaction it named, the amount the draw decided — is the rule itself, and
+// a rule applied in Go between two store calls is a rule a later caller can skip.
+func (k *Kernel) reconcileDeposits(ctx context.Context) {
+	closed, err := k.store.ReconcileDeposits(ctx, k.cfg.FeeRecipientID, 200)
 	if err != nil {
+		k.log.With(ctx).Warn("rail.reconcile_failed", "error", err)
 		return
 	}
-	spent := map[string]bool{}
-	for _, c := range claims {
-		from := k.peerRailAddress(ctx, c.Party)
-		if from == "" {
-			continue
-		}
-		for _, d := range held {
-			if spent[d.ID] || d.TxHash != c.TxHash || d.Party != from || d.Amount != c.Amount {
-				continue
-			}
-			if _, err := k.store.AttributeRailDeposit(ctx, k.cfg.FeeRecipientID, d.ID, c.Party, c.Credit, c.ID); err != nil {
-				break
-			}
-			spent[d.ID] = true
-			k.log.With(ctx).Info("rail.settlement.credited", "settlement_id", c.ID, "amount", c.Credit)
-			break
-		}
+	if len(closed) > 0 {
+		k.log.With(ctx).Info("rail.reconciled", "count", len(closed))
 	}
 }
 

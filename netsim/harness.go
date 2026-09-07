@@ -240,6 +240,13 @@ func (k *Kernel) Num(actor, field string, args ...string) int64 {
 // Balance is what an account can spend right now.
 func (k *Kernel) Balance(user string) int64 { return k.Num(user, "available", "user", "me") }
 
+// Holdings is everything a user has, spendable or committed. A cross-kernel call commits a lottery
+// stake as well as its price, so what a caller can spend falls while calls are in flight and rises
+// again when they resolve; only the total says whether the caller is better or worse off (P10).
+func (k *Kernel) Holdings(user string) int64 {
+	return k.Num(user, "available", "user", "me") + k.Num(user, "locked", "user", "me")
+}
+
 // Get reads an HTTP path as an actor, or with no credential at all when the actor is "" — which is
 // how a stranger sees the kernel. It exists for the few reads the command line caps below what a
 // run needs: its own response limit is 10 MiB, which a full transaction list exceeds.
@@ -282,14 +289,14 @@ func (k *Kernel) token(actor string) string {
 }
 
 type bootOpts struct {
-	Handle         string
-	Bootstrap      string
-	ExposureMax    int64
-	FeeBps         int
-	RemoteBps      int
-	ImportBps      int
-	SettlementTrig int64
-	RetrySeconds   int
+	Handle       string
+	Bootstrap    string
+	CreditLimit  int64
+	Lottery      int64
+	FeeBps       int
+	RemoteBps    int
+	ImportBps    int
+	RetrySeconds int
 }
 
 // Boot starts (or restarts) a kernel that outlives the call. Restarting on the same directory is
@@ -305,8 +312,8 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	cfg := map[string]any{
 		"script_timeout_ms": 10000, "script_memory_bytes": 67108864,
 		"fee_bps": o.FeeBps, "remote_bps": o.RemoteBps, "import_bps": o.ImportBps,
-		"exposure_max": o.ExposureMax, "settlement_trigger": o.SettlementTrig,
-		"settlement_quantum": 0, "token_ttl": "60m", "log_level": "info", "log_format": "json",
+		"credit_limit": o.CreditLimit, "lottery": o.Lottery,
+		"token_ttl": "60m", "log_level": "info", "log_format": "json",
 		"allow_local_sources": true, "kernel_handle": o.Handle,
 		"bootstrap_peers":               []string{},
 		"remote_retry_interval_seconds": o.RetrySeconds,

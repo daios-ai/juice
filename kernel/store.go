@@ -59,14 +59,14 @@ type GrantStore interface {
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
 // resolves peerPublicKey to a live path (direct / hole-punched / relayed).
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, args map[string]any) (FederationResult, error)
 }
 
-// FederationSettler runs one round of the /juice/fed/settle/1 residual-settlement exchange against a
-// peer (§13), addressing it by Ed25519 public key. It returns the peer's raw response body (a signed
-// SettlementRecord) and status. The kernel never imports fed.
-type FederationSettler interface {
-	Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce, txHash string, record []byte) (status int, body []byte, err error)
+// TicketRevealer carries one signed reveal to a peer over /juice/fed/settle/1 (P10): how a draw came
+// out, and where the money for a winning one comes from. The kernel owns the payload and its
+// signature; the adapter owns the wire shape and its deadline, and never imports fed.
+type TicketRevealer interface {
+	Reveal(ctx context.Context, peerPublicKey string, payload RevealPayload, signature string) error
 }
 
 // RemoteResolver resolves a single remote action or user on demand over /juice/fed/resolve/1
@@ -74,12 +74,12 @@ type FederationSettler interface {
 // action; ResolveRemoteUser maps a user reference to its stable id and handle on the peer. A nil
 // federation client disables lazy resolution (a cold cross-kernel ref is then a plain ErrNotFound).
 type RemoteResolver interface {
-	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ActionManifest, error)
+	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ResolvedAction, error)
 	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
 }
 
 // StepCaller carries one /juice/fed/step/1 request to a peer (§13): listing the steps parked for
-// this kernel, or completing one. Like FederationSettler, it takes the signed scalars the kernel
+// this kernel, or completing one. Like TicketRevealer, it takes the signed scalars the kernel
 // produced and returns the peer's raw status/body — the kernel owns the protocol (key derivation,
 // signing, settlement disposition), the adapter owns the wire shape and its transport deadline.
 // notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
@@ -90,14 +90,14 @@ type StepCaller interface {
 }
 
 // FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
-// (§13) — dispatch a call, settle a residual debt, resolve one action or principal, carry a step.
+// (§13) — dispatch a call, reveal a draw, resolve one action or principal, carry a step.
 // cmd/juice supplies one object implementing all of them; the kernel holds it as a single named
 // dependency rather than type-asserting capabilities out of the HTTP executor, so a federation
 // change never touches the HTTP adapter. A nil client means federation is unconfigured, reported
 // per call site.
 type FederationClient interface {
 	FederationExecutor
-	FederationSettler
+	TicketRevealer
 	RemoteResolver
 	StepCaller
 }
@@ -239,16 +239,17 @@ type Store interface {
 
 	// ---- Processes ----
 
-	// BeginRun atomically debits W = price + premiumReserve from owner.available→locked, creates
-	// the process with available=0/locked=price, and creates the root trace with available=price;
-	// the extra premiumReserve stays parked in owner.locked for the serving markup, released at
-	// settlement (§13). Admission (§13): an ordinary owner (no kernel_public_key) must have available ≥ W;
-	// a peer owner is bounded not per-row but globally — the projected global gross receivables
-	// G = Σ_peers max(0,−available), with this peer's debt replaced by its post-debit value, must
-	// stay ≤ exposureMax (Sybil-proof: one cap across all peer identities). exposureMax is ignored
-	// for ordinary owners and when W = 0 (a free call adds no exposure). All non-exposure
-	// precondition checks must happen in Go before calling BeginRun.
-	BeginRun(ctx context.Context, p *Process, t *Trace, ownerID string, price, premiumReserve, exposureMax int64) error
+	// BeginRun atomically debits price from owner.available→locked, creates the process with
+	// available=0/locked=price, creates the root trace with available=price, and locks the caller's
+	// transfer value and lottery stake from that caller's own row. Every owner is prepaid: a peer row
+	// never funds anything (P10).
+	//
+	// A positive reserve marks an inbound foreign call: its delivered service is admitted against
+	// the kernel's credit limit in the same transaction — the counter rises by reserve only if the
+	// result stays ≤ limit, and 0 rows there is ErrInsufficientFunds, because checking it in Go
+	// first would race two concurrent admissions past one limit (D14). The trace's frozen terms
+	// carry the same reserve, so the commit that learns the actual charge corrects the counter.
+	BeginRun(ctx context.Context, p *Process, t *Trace, ownerID string, price, reserve, limit int64) error
 
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
@@ -261,15 +262,14 @@ type Store interface {
 	// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
 	// parent_trace.available (the step is being consumed), creates the new trace with
 	// available=step.price, and transitions the step waiting→running.
-	BeginStepCall(ctx context.Context, stepID string, t *Trace, exposureMax int64) error
+	BeginStepCall(ctx context.Context, stepID string, t *Trace) error
 
 	// CommitCall atomically records a successful transaction, creates its receipt,
 	// settles funds (trace.available→target/sys; caller wallet locked released;
 	// owner.locked decremented by taxable), updates trace latency, upserts action stats,
 	// completes the idempotency record (if non-empty), and marks the step done (if non-empty).
-	// The serving-markup reserve parked in the owner's locked at admission (§13) is released here from
-	// the trace's premium_parked snapshot — receipt.Premium to feeRecipientID's sys, the remainder back
-	// to the owner (0 for every local call/subcall, so the premium legs are a no-op).
+	// The obligation a foreign buyer owes for this call is finalized here from the signed charge, and
+	// the exposure it reserved at admission corrected to it (P10). Both are no-ops for a local call.
 	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// CommitFailedCall atomically cancels all outstanding steps in the trace's subtree
@@ -280,10 +280,10 @@ type Store interface {
 	// closure — closeProcessTx runs inside the same DB transaction when the process becomes
 	// quiescent. Implementations must NOT decrement user.locked directly here; doing so
 	// would double-count with the closure step.
-	// buildReceipt is called inside the transaction with the computed refund so that the
-	// signed charge (gross − refund) is guaranteed to match what is committed. It also fixes
-	// receipt.Premium, so the serving-markup legs (the trace's parked reserve released to
-	// feeRecipientID's sys and the owner) cannot diverge from the signed number.
+	// buildReceipt is called inside the transaction with the computed refund so that the signed
+	// charge (gross − refund) is guaranteed to match what is committed — and so the obligation the
+	// same transaction finalizes cannot disagree with the receipt that names it. A failure still
+	// charges what settled beneath it, so it too can leave one (P7).
 	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
 	// EndProcess cancels all waiting steps (returning parked prices to the process owner's
@@ -295,6 +295,8 @@ type Store interface {
 	ReadTrace(ctx context.Context, id string) (*Trace, error)
 	// ReadRootTrace returns the root trace (ParentTraceID IS NULL) for the given process.
 	ReadRootTrace(ctx context.Context, processID string) (*Trace, error)
+	// ListTraces returns a process's traces: listing them yields its execution tree (D11).
+	ListTraces(ctx context.Context, processID string) ([]*Trace, error)
 	// TraceHasTransaction reports whether the trace has settled, i.e. a transaction row exists
 	// for it (the settled-once predicate; §9 capability validity, §11 unique trace transaction).
 	TraceHasTransaction(ctx context.Context, traceID string) (bool, error)
@@ -386,18 +388,18 @@ type Store interface {
 	// Used by EndProcess to fail in-flight calls before closure.
 	ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*Trace, error)
 
-	// CommitRemoteSettlement atomically settles an outbound remote-proxy call (§13):
-	// releases the gross lock q from the caller wallet, pays paid→proxyUserID (the bilateral payable
-	// to the peer, = charge + the peer's serving premium) and importFee→feeRecipientID (the origin's
-	// locally-retained import fee), returns the refund (q−paid−importFee) to the caller wallet,
-	// decrements owner.locked by taxable (paid+importFee), records the transaction+receipt, updates
-	// stats, marks step done (if stepID non-empty), completes the idempotency record (if non-empty),
-	// and closes the process if quiescent.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
-
-	// ---- Traces (by process) ----
-
-	ListTraces(ctx context.Context, processID string) ([]*Trace, error)
+	// CommitRemoteSettlement atomically settles an outbound remote-proxy call (P7, P10).
+	//
+	// The call's budget pays the obligation and the import fee exactly, whatever the draw said: the
+	// refund (q − obligation − importFee) returns to the caller wallet and importFee to
+	// feeRecipientID. The obligation itself does not go to the peer's row — a peer row holds no money
+	// — it returns to the caller C, whose own stake then carries the draw: on a losing ticket C keeps
+	// it, and on a winning one `payout` reserves the face value from C into the operator's hold for
+	// the rail to send. releaseStake is what C locked at dispatch.
+	//
+	// The stake and the caller are read from the trace, so every settlement path releases exactly
+	// what was locked whether or not anything was owed.
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *RailTransfer, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
 
 	// ---- Auth codes (PKCE flow) ----
 
@@ -419,8 +421,8 @@ type Store interface {
 	ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*Grant, error)
 	// DeleteGrant removes one grant (revoke / invalid_grant); ErrNotFound if absent.
 	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
-	// DeleteGrantsForAction removes every grant on an action (deactivating update / delete).
 	DeleteGrantsForAction(ctx context.Context, actionID string) error
+	// DeleteGrantsForAction removes every grant on an action (deactivating update / delete).
 
 	// ---- Connections (shared upstream credential, §8) ----
 
@@ -471,14 +473,6 @@ type Store interface {
 	// on other terms is refused, since the stateless manual rail cannot refuse it itself.
 	CreateRailDeposit(ctx context.Context, sys string, row *RailTransfer, toUserID string) (*LedgerEntry, error)
 
-	// AttributeRailDeposit delivers a held payment to its owner, releasing the remainder to sys.
-	// claimID, when set, is the settlement this closes, marked credited in the same commit.
-	AttributeRailDeposit(ctx context.Context, sys, depositID, toUserID string, credit int64, claimID string) (*LedgerEntry, error)
-
-	// ListRailDeposits returns deposits in one status, optionally only those from one sender —
-	// which is how registering an address attributes what it has already paid in.
-	ListRailDeposits(ctx context.Context, status, fromAddress string) ([]*RailTransfer, error)
-
 	// ReserveRailTransfer opens an outgoing payment: it debits the party, moves what the operator
 	// adds, holds the whole amount on sys, records the ledger leg, and writes the row with its
 	// destination. From this instant the money is unavailable to everyone.
@@ -492,6 +486,10 @@ type Store interface {
 	// out of the ledger under the transaction that carried it.
 	FinalizeRailTransfer(ctx context.Context, sys, id, txHash string, at time.Time) error
 
+	// RetryRailTransfer starts a fresh attempt at a payment the rail signed and then refused. The
+	// money stays committed and the row keeps its identity; only the name it is presented under
+	// changes, since a settled rail operation cannot be asked again.
+	RetryRailTransfer(ctx context.Context, id string) error
 	// CompensateRailTransfer undoes a reservation whose payment finalized without executing,
 	// returning the credit to its owner. The original entries are never edited.
 	CompensateRailTransfer(ctx context.Context, sys, id string, at time.Time) (*LedgerEntry, error)
@@ -506,16 +504,6 @@ type Store interface {
 	// BookRefill closes a refill against the exact amount it consumed, releasing the rest of the
 	// authorized maximum. The maximum is authority; only the cost is ever booked.
 	BookRefill(ctx context.Context, sys, id string, cost int64, executed bool, at time.Time) error
-
-	// CreateRailClaim records a settlement a peer says it has paid, to be closed by the payment it
-	// named. Replaying one announcement returns what was written.
-	CreateRailTransfer(ctx context.Context, row *RailTransfer) error
-
-	// MarkRailTransfer moves a row to a terminal status that involves no money. SaveRailRecord
-	// replaces what a row remembers. DeleteRailTransfer removes a draw that ended without a payment.
-	MarkRailTransfer(ctx context.Context, id, status string) error
-	SaveRailRecord(ctx context.Context, id, record string) error
-	DeleteRailTransfer(ctx context.Context, id string) error
 
 	// ReadRailTransfer returns one row, or nil when the fact is unknown here.
 	ReadRailTransfer(ctx context.Context, id string) (*RailTransfer, error)
@@ -533,9 +521,6 @@ type Store interface {
 
 	// SetRailAddress records where an account is paid. The address is unique across accounts.
 	SetRailAddress(ctx context.Context, userID, address string, at time.Time) error
-
-	// ReadUserByRailAddress finds the account a payment's sender belongs to, or ErrNotFound.
-	ReadUserByRailAddress(ctx context.Context, address string) (*Account, error)
 
 	// ListLedgerByUser returns ledger entries where userID is the source or the
 	// destination, most recent first, bounded by limit/offset.
@@ -556,37 +541,47 @@ type Store interface {
 	// ---- Peer contact ----
 
 	// RecordKernelContact records one contact observation, keyed by public key: a success advances
-	// last_seen and, when the peer reported one, peer_credit (nil leaves the prior value); a failure
-	// advances last_contact_failed_at. Each timestamp only moves forward and neither is cleared, so
-	// a slow observation cannot overwrite newer truth. An unknown key is a no-op — observation binds
-	// nothing (§13). Display-only cache; never a money path, never retention activity.
-	RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time, credit *int64) error
+	// last_seen, a failure advances last_contact_failed_at. Each timestamp only moves forward and
+	// neither is cleared, so a slow observation cannot overwrite newer truth. An unknown key is a
+	// no-op — observation binds nothing (§13). Display-only cache; never a money path, never
+	// retention activity.
+	RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time) error
 
-	// CommitSettlement records one finish outcome atomically, keyed idempotently by settlementID (§13,
-	// the external_key read-first short-circuit — anti-grinding). A "clear" outcome passes dClear=±d,
-	// variance=∓d and extinguishes the debt; a "pay" outcome passes dClear=variance=0, leaving the
-	// debt on the row until the rail closes it. Every outcome is internally conservative: cash that
-	// crosses the rail is booked by the rail table. `debt` (>0) is the ledger row amount. A replay
-	// returns the stored record via storedRecord; "" on first application.
-	CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (storedRecord string, err error)
+	// ---- Obligations and exposure (P10) ----
+	//
+	// An obligation is a projection over the call's own records — the trace with its frozen terms
+	// and reveal, the receipt with its charge, the idempotency record with the name both kernels
+	// share — never a row of its own.
 
-	// ReadSettlementRecord returns the stored record for a settlement (by settlementID), or "" if none
-	// exists yet — the creditor's idempotency/anti-grinding lookup before a finish flip.
-	ReadSettlementRecord(ctx context.Context, settlementID string) (string, error)
-
-	// HasPendingSettlement reports whether peerID has a paid outcome the rail has not closed (§13):
-	// a "pay" settlement whose rail transfer has not reached a final state.
-	HasPendingSettlement(ctx context.Context, peerID string) (bool, error)
-
-	// GrossReceivables returns Σ over peer rows of max(0, −available): the kernel's total unsecured
-	// receivables, compared against exposure_max/settlement_trigger for display (§13).
-	GrossReceivables(ctx context.Context) (int64, error)
+	// ReadOwed returns one obligation by its call's idempotency key, scoped to the peer it was
+	// agreed with, or nil when there is none.
+	ReadOwed(ctx context.Context, id, peerUserID string) (*Owed, error)
+	// ApplyReveal records on the trace how a draw came out. An amount waits for the payment that
+	// carries it, from the payer frozen at admission; nothing owed closes the obligation outright,
+	// and the exposure it added stays either way, since only cash reduces exposure.
+	ApplyReveal(ctx context.Context, traceID string, amount int64, txHash string) error
+	// ReconcileDeposits is the one path every observed payment takes: obligations whose money has
+	// arrived are closed first — the join is the rule, so no caller can credit a payment from the
+	// wrong sender, amount or transaction — and whatever no obligation claimed is then attributed to
+	// the account that registered the address it came from. Returns the credits it wrote.
+	ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]*LedgerEntry, error)
+	// ListOwed is what this kernel is still waiting to be paid for, oldest first.
+	ListOwed(ctx context.Context, limit int) ([]*Owed, error)
+	// Exposure returns what this kernel has delivered to foreign buyers and not been paid for. It may
+	// be negative: premium income accumulates there.
+	Exposure(ctx context.Context) (int64, error)
+	// ListPendingReveals returns the calls whose seller has still to be told how the draw came out,
+	// assembled from the trace, its transaction and the payment row — only those actionable now, so
+	// a payment in flight never blocks the reveals behind it.
+	ListPendingReveals(ctx context.Context, limit int) ([]*PendingReveal, error)
+	// MarkRevealed records that the seller has acknowledged one, closing the payment's row with it.
+	MarkRevealed(ctx context.Context, traceID string) error
 
 	// ---- Kernels (identity, naming, discovery) ----
 
 	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
-	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen/peer_credit, each
-	// of which advances only after its own work is verified and committed (§13).
+	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen, each of which
+	// advances only after its own work is verified and committed (§13).
 	UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on

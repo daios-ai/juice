@@ -4,6 +4,7 @@
   "rpc": "",
   "token": "0x8e87deee3BF1eFE27E8e96ABf205BEDF802ed568",
   "decimals": 6,
+  "lotteryMax": 1000000000,
   "finality": "latest",
   "fromBlock": 297184700,
   "venue": {

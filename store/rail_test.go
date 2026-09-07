@@ -80,13 +80,16 @@ func TestHeldDepositIsNotSpendable(t *testing.T) {
 	if a, l := balances(t, db, sys); a != 0 || l != 300 {
 		t.Fatalf("held money must not be spendable: available=%d locked=%d", a, l)
 	}
-	held, err := db.ListRailDeposits(ctx, kernel.RailStatusHeld, "0xstranger")
-	if err != nil || len(held) != 1 {
-		t.Fatalf("held list: %d %v", len(held), err)
+	// Reconciliation leaves an unclaimed payment exactly where it is.
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 0 {
+		t.Fatalf("an unclaimed payment was given away: %d %v", len(n), err)
 	}
-	// Once its owner is known it is delivered, and the operator's hold ends.
-	if _, err := db.AttributeRailDeposit(ctx, sys, "rail:tx-1", alice, 300, ""); err != nil {
-		t.Fatalf("attribute: %v", err)
+	// Once its sender registers, it is delivered, and the operator's hold ends.
+	if err := db.SetRailAddress(ctx, alice, "0xstranger", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
+		t.Fatalf("reconcile after registration: %d %v", len(n), err)
 	}
 	if a, _ := balances(t, db, alice); a != 300 {
 		t.Errorf("owner after attribution: %d, want 300", a)
@@ -94,9 +97,9 @@ func TestHeldDepositIsNotSpendable(t *testing.T) {
 	if a, l := balances(t, db, sys); a != 0 || l != 0 {
 		t.Errorf("operator after attribution: %d/%d, want 0/0", a, l)
 	}
-	// Attributing it again returns what was written and moves nothing.
-	if _, err := db.AttributeRailDeposit(ctx, sys, "rail:tx-1", alice, 300, ""); err != nil {
-		t.Fatalf("replay: %v", err)
+	// Reconciling again moves nothing: the payment is spent.
+	if n, _ := db.ReconcileDeposits(ctx, sys, 10); len(n) != 0 {
+		t.Errorf("a delivered payment was delivered again (%d)", len(n))
 	}
 	if a, _ := balances(t, db, alice); a != 300 {
 		t.Errorf("attributing twice paid twice: %d", a)
@@ -289,7 +292,7 @@ func TestOpenAndAllRailTransfersAreDifferentQuestions(t *testing.T) {
 // One address belongs to one account, whoever registers it first, and it is found by exactly the
 // canonical form that was stored.
 func TestRailAddressIsUniqueAcrossAccounts(t *testing.T) {
-	db, _, alice := railFixture(t)
+	db, sys, alice := railFixture(t)
 	ctx := context.Background()
 	bob := newUser("bob", 0)
 	if err := db.CreateUser(ctx, bob); err != nil {
@@ -302,12 +305,25 @@ func TestRailAddressIsUniqueAcrossAccounts(t *testing.T) {
 	if err := db.SetRailAddress(ctx, bob.ID, "0xabc", time.Now().UTC()); err == nil {
 		t.Error("one address must belong to one account")
 	}
-	got, err := db.ReadUserByRailAddress(ctx, "0xabc")
-	if err != nil || got.ID != alice {
-		t.Errorf("lookup by sender: %v %v", got, err)
+	// The address is what reconciliation attributes a payment by, so the registration must be what
+	// a payment from that sender reaches — and a payment from an unregistered one must reach nobody.
+	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:known", "0xabc", 30), ""); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := db.ReadUserByRailAddress(ctx, "0xnobody"); err == nil {
-		t.Error("an unregistered sender must not resolve to an account")
+	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:stranger", "0xnobody", 30), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ReconcileDeposits(ctx, sys, 10); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := balances(t, db, alice); a != 30 {
+		t.Errorf("the registered sender's payment reached %d, want 30", a)
+	}
+	if a, _ := balances(t, db, bob.ID); a != 0 {
+		t.Errorf("the account that lost the address was credited: %d", a)
+	}
+	if r, _ := db.ReadRailTransfer(ctx, "rail:stranger"); r.Status != kernel.RailStatusHeld {
+		t.Errorf("an unregistered sender's payment must stay held: %s", r.Status)
 	}
 }
 
@@ -344,9 +360,16 @@ func TestWorkerListIgnoresWhatItDoesNotDrive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	claim := &kernel.RailTransfer{ID: "sid", Kind: kernel.RailKindClaim, Party: alice, Amount: 5, Credit: 5,
-		Status: kernel.RailStatusAnnounced, CreatedAt: time.Now().UTC()}
-	if err := db.CreateRailTransfer(ctx, claim); err != nil {
+	told := uuid.NewString()
+	obligation := &kernel.RailTransfer{ID: told, Kind: kernel.RailKindObligation, Party: alice, Amount: 5, Credit: 5,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := db.ReserveRailTransfer(ctx, sys, obligation); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinalizeRailTransfer(ctx, sys, told, "0xtold", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordRailOutcome(ctx, sys, told, kernel.RailStatusAnnounced, "0xtold", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	id := uuid.NewString()
@@ -361,16 +384,17 @@ func TestWorkerListIgnoresWhatItDoesNotDrive(t *testing.T) {
 	}
 }
 
-// A settlement whose payment is final is not finished: the creditor has still to be told, so the
-// worker keeps it until it is announced. A payout at the same point is done.
-func TestWorkerKeepsAConfirmedSettlementUntilAnnounced(t *testing.T) {
+// A crossing that has landed leaves the rail worker's list, whichever kind it is. An obligation
+// payment is not finished at that point — the seller still has to be told — but telling it belongs
+// to the reveal worker, which finds it by the call it paid for rather than by driving the row.
+func TestTheRailWorkerIsDoneWhenTheCrossingLands(t *testing.T) {
 	db, sys, alice := railFixture(t)
 	ctx := context.Background()
 	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:in:0", "0xalice", 500), alice); err != nil {
 		t.Fatal(err)
 	}
-	payout, settlement := uuid.NewString(), uuid.NewString()
-	for id, kind := range map[string]string{payout: kernel.RailKindPayout, settlement: kernel.RailKindSettlement} {
+	payout, obligation := uuid.NewString(), uuid.NewString()
+	for id, kind := range map[string]string{payout: kernel.RailKindPayout, obligation: kernel.RailKindObligation} {
 		row := &kernel.RailTransfer{ID: id, Kind: kind, Party: alice, Amount: 50, Credit: 50,
 			Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
 		if err := db.ReserveRailTransfer(ctx, sys, row); err != nil {
@@ -381,15 +405,10 @@ func TestWorkerKeepsAConfirmedSettlementUntilAnnounced(t *testing.T) {
 		}
 	}
 	open, err := db.ListOpenRailTransfers(ctx, 100)
-	if err != nil || len(open) != 1 || open[0].ID != settlement {
-		t.Fatalf("only the confirmed settlement is still the worker's: %d %v", len(open), err)
+	if err != nil || len(open) != 0 {
+		t.Fatalf("a crossing that has landed is nothing more for the rail worker to do: %d %v", len(open), err)
 	}
-	if err := db.MarkRailTransfer(ctx, settlement, kernel.RailStatusAnnounced); err != nil {
-		t.Fatal(err)
-	}
-	if open, _ := db.ListOpenRailTransfers(ctx, 100); len(open) != 0 {
-		t.Errorf("an announced settlement is finished, still listed: %d", len(open))
-	}
+	_, _ = payout, obligation
 }
 
 // A fuel lock is taken before the rail signs, at everything the operator could spend, and settles
@@ -456,80 +475,37 @@ func TestRefillLockSettlesAtThePurchase(t *testing.T) {
 	}
 }
 
-// A settlement being drawn for is a row before it is a payment: it moves nothing, the worker does
-// not drive it, the position does not count it, and it becomes the payment in place if the draw
-// says so — or goes away if it does not. Only a draw can go away.
-func TestADrawIsARowBeforeItIsAPayment(t *testing.T) {
-	db, sys, peer := railFixture(t)
+// A payment for a won draw is money in transit exactly like a withdrawal, and stops being so when
+// the seller has been told: at that point the buyer's side of the trade is finished.
+func TestAnObligationPaymentIsInTransitUntilTheSellerIsTold(t *testing.T) {
+	db, sys, buyer := railFixture(t)
 	ctx := context.Background()
-	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:earn", "0xop", 100), sys); err != nil {
+	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:earn", "0xbuyer", 100), buyer); err != nil {
 		t.Fatal(err)
 	}
-	// The peer's row holds the debt the draw is for; the debtor's reserve takes it from there.
-	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:owed", "0xpeer", 3), peer); err != nil {
+	pay := &kernel.RailTransfer{ID: "won-1", Kind: kernel.RailKindObligation, Party: buyer,
+		Destination: "0xseller", Amount: 40, Credit: 40,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := db.ReserveRailTransfer(ctx, sys, pay); err != nil {
 		t.Fatal(err)
 	}
-	draw := &kernel.RailTransfer{ID: "sid-draw", Kind: kernel.RailKindSettlement, Party: peer, Amount: 4, Credit: 3,
-		Status: kernel.RailStatusDrawing, Record: `{"nonce":"n"}`, CreatedAt: time.Now().UTC()}
-	if err := db.CreateRailTransfer(ctx, draw); err != nil {
+	// The money leaves the buyer and is held by the operator, which is what presents it to the rail.
+	if a, _ := balances(t, db, buyer); a != 60 {
+		t.Fatalf("the payment must come out of the buyer's balance: %d", a)
+	}
+	if _, l := balances(t, db, sys); l != 40 {
+		t.Fatalf("the operator must hold what it is about to send: %d", l)
+	}
+	if pos, _ := db.RailPosition(ctx, sys); pos.PendingPayouts != 40 {
+		t.Errorf("a reserved payment is money in transit: %+v", pos)
+	}
+	if err := db.FinalizeRailTransfer(ctx, sys, pay.ID, "0xhash", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveRailRecord(ctx, draw.ID, `{"nonce":"n","open":{}}`); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := db.ReadRailTransfer(ctx, draw.ID); got.Record != `{"nonce":"n","open":{}}` {
-		t.Errorf("the row must remember what it was told: %q", got.Record)
-	}
-	if open, _ := db.ListOpenRailTransfers(ctx, 10); len(open) != 0 {
-		t.Errorf("the worker has nothing to drive in a draw: %+v", open[0])
-	}
-	pos, _ := db.RailPosition(ctx, sys)
-	if pos.PendingPayouts != 0 || pos.RefillLocks != 0 {
-		t.Errorf("a draw is not money in transit: %+v", pos)
-	}
-	if a, l := balances(t, db, sys); a != 100 || l != 0 {
-		t.Errorf("a draw moves nothing: %d/%d", a, l)
-	}
-
-	// The draw says pay: the same row is reserved and driven from here.
-	draw.Status, draw.Record = kernel.RailStatusPending, `{"outcome":"pay"}`
-	if err := db.ReserveRailTransfer(ctx, sys, draw); err != nil {
-		t.Fatal(err)
-	}
-	got, _ := db.ReadRailTransfer(ctx, draw.ID)
-	if got.Status != kernel.RailStatusPending || got.Record != `{"outcome":"pay"}` {
-		t.Fatalf("the draw must become the payment in place: %+v", got)
-	}
-	if a, l := balances(t, db, sys); a != 99 || l != 4 {
-		t.Errorf("the reserve must move exactly as for a new payment: %d/%d", a, l)
-	}
-	if pos, _ := db.RailPosition(ctx, sys); pos.PendingPayouts != 4 {
-		t.Errorf("a reserved payment is in transit: %+v", pos)
-	}
-	if err := db.ReserveRailTransfer(ctx, sys, draw); err == nil {
-		t.Error("a payment already presented must not be reserved twice")
-	}
-	if err := db.DeleteRailTransfer(ctx, draw.ID); err == nil {
-		t.Error("a payment stands for money and cannot be removed")
-	}
-	// A payment the creditor has heard of is no longer in transit.
-	if err := db.MarkRailTransfer(ctx, draw.ID, kernel.RailStatusAnnounced); err != nil {
+	if err := db.RecordRailOutcome(ctx, sys, pay.ID, kernel.RailStatusAnnounced, "0xhash", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if pos, _ := db.RailPosition(ctx, sys); pos.PendingPayouts != 0 {
-		t.Errorf("an announced settlement is finished, not in transit: %+v", pos)
-	}
-
-	// A draw that says clear goes away.
-	gone := &kernel.RailTransfer{ID: "sid-clear", Kind: kernel.RailKindSettlement, Party: peer, Amount: 4, Credit: 3,
-		Status: kernel.RailStatusDrawing, Record: `{"nonce":"n"}`, CreatedAt: time.Now().UTC()}
-	if err := db.CreateRailTransfer(ctx, gone); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.DeleteRailTransfer(ctx, gone.ID); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := db.ReadRailTransfer(ctx, gone.ID); got != nil {
-		t.Errorf("a cleared draw leaves no row: %+v", got)
+		t.Errorf("a payment the seller has heard of is finished, not in transit: %+v", pos)
 	}
 }

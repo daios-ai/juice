@@ -61,13 +61,26 @@ _chain_pay_in() {
 # vault_of db — where a kernel is paid, read from its own banner.
 vault_of() { strfield "$(http_body GET "$(url "$1")/health")" rail_address; }
 
-# await_peer_row db home peer want — wait for a peer row's balance to reach want, mining as we go:
-# a chain settlement closes only once the payment is final and the worker has seen it.
-await_peer_row() {
+# await_owed db home peer want — wait for what a peer owes to reach want, mining as we go:
+# an obligation closes only once its payment is final and the worker has seen it.
+await_owed() {
     local db="$1" home="$2" peer="$3" want="$4" got="" deadline=$(( $(date +%s) + 90 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         anvil_mine 2
-        got=$(numfield "$(jj "$db" "$home" admin show -- "$peer")" available)
+        got=$(owed_count "$db" "$home" "$peer")
+        [ "$got" = "$want" ] && break
+        sleep 0.5
+    done
+    echo "$got"
+}
+
+# await_token_balance token address want — wait for an on-chain balance to reach want, mining as we
+# go, so a test does not have to guess how long a payment takes to be final.
+await_token_balance() {
+    local token="$1" addr="$2" want="$3" got="" deadline=$(( $(date +%s) + 90 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        anvil_mine 2
+        got=$(anvil_uint "$token" "balanceOf(address)(uint256)" "$addr")
         [ "$got" = "$want" ] && break
         sleep 0.5
     done
@@ -147,7 +160,7 @@ flow_rail_chain_settlement() {
         || { fail "rail_chain_settlement.foundry" "anvil and cast must be on PATH"; return; }
     local dir; dir=$(new_dir)
     _chain_world "$dir" rail_chain_settlement || return
-    FED_RCFG=("${CHAIN_CFG[@]}" exposure_max=10000000 settlement_trigger=5000000)
+    FED_RCFG=("${CHAIN_CFG[@]}")
     FED_LCFG=("${CHAIN_CFG[@]}")
     _fed_setup "$dir" || { fail "rail_chain_settlement.setup" "setup failed"; return; }
     local lkey="$FED_LKEY"
@@ -160,34 +173,31 @@ flow_rail_chain_settlement() {
     assert_jnum "rail_chain_settlement.debtor_funded" "$(jj "$FED_DBL" "$FED_HL" user me)" available 5000000
     anvil_send "$ANVIL_KEY" "$lvault" --value 1ether
 
-    # L buys from R on credit, and now owes it.
+    # R's provider funds its own work, out of a real payment in: a foreign call is served on the
+    # seller's money (P10), and on a chain that money can only come from the chain.
+    _chain_pay_in "$FED_DBR" "$FED_HR" 0x3333333333333333333333333333333333333333333333333333333333333333 5000000 >/dev/null
+    anvil_send "$ANVIL_KEY" "$rvault" --value 1ether
+
+    # L buys from R and now owes it. With no lottery the obligation is paid exactly.
     publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price 1000000 >/dev/null
-    assert_nonempty "rail_chain_settlement.call_on_credit" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
-    local d; d=$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)
-    assert_eq "rail_chain_settlement.debt" 1050000 "$d"
+    local tx; tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)
+    assert_nonempty "rail_chain_settlement.call" "$tx"
+    local d ticket; d=1050000
+    ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx")" ticket_id)
+    assert_nonempty "rail_chain_settlement.names_its_ticket" "$ticket"
+    assert_eq "rail_chain_settlement.seller_is_owed" 1 "$(owed_count "$FED_DBR" "$FED_HR" "$lkey")"
 
-    # R must know where L pays from before it can believe any payment is L's.
-    local seen="" deadline=$(( $(date +%s) + 30 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        seen=$(strfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" rail_address)
-        [ "$seen" = "$lvault" ] && break
-        sleep 0.5
-    done
-    assert_eq "rail_chain_settlement.creditor_knows_debtor_address" "$lvault" "$seen"
-
-    # The debtor pays on the chain and names the payment.
+    # The buyer pays on the chain by itself: the money is committed at settlement and the worker
+    # sends it, then tells the seller which payment settles the obligation.
     local before; before=$(anvil_uint "$CHAIN_TOKEN" "balanceOf(address)(uint256)" "$rvault")
-    local out; out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)
-    assert_nonempty "rail_chain_settlement.settlement_id" "$(strfield "$out" settlement_id)"
-    assert_eq "rail_chain_settlement.debtor_row_reserved" 0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+    assert_eq "rail_chain_settlement.money_reached_seller" $((before + d)) \
+        "$(await_token_balance "$CHAIN_TOKEN" "$rvault" $((before + d)))"
 
-    # The money lands in R's account on the chain, and R's books close by themselves.
-    assert_eq "rail_chain_settlement.creditor_row_closed" 0 "$(await_peer_row "$FED_DBR" "$FED_HR" "$lkey" 0)"
-    assert_eq "rail_chain_settlement.money_reached_creditor" $((before + d)) \
-        "$(anvil_uint "$CHAIN_TOKEN" "balanceOf(address)(uint256)" "$rvault")"
-    assert_jnum "rail_chain_settlement.debtor_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
-    assert_jnum "rail_chain_settlement.creditor_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
-    assert_json "rail_chain_settlement.nothing_left" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
+    # R's books close by themselves once the money is observed: the scan matches the payment to the
+    # obligation by the sender L proved, the amount drawn, and the transaction L named.
+    assert_eq "rail_chain_settlement.seller_paid" 0 "$(await_owed "$FED_DBR" "$FED_HR" "$lkey" 0)"
+    assert_jnum "rail_chain_settlement.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
+    assert_jnum "rail_chain_settlement.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
 }
 
 # Fuel, and what happens when it cannot be bought. A kernel pays for its own gas out of `sys`

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/daios-ai/juice/rail"
 	"os"
 	"regexp"
 	"strings"
@@ -43,7 +44,7 @@ func TestTheRailInterfaceOffersNoStoryChoices(t *testing.T) {
 	iface := between(string(src), "type Rail interface {", "\n}")
 	allowed := map[string]bool{
 		"Name": true, "Prepare": true, "Config": true, "Scale": true, "GasUp": true,
-		"Fund": true, "Pay": true, "Await": true, "Finish": true,
+		"Fund": true, "Credit": true, "SettleWait": true, "Finish": true,
 	}
 	for _, line := range strings.Split(iface, "\n") {
 		line = strings.TrimSpace(line)
@@ -203,26 +204,37 @@ func TestEveryCommandThatTakesAKeyPassesItAfterADoubleDash(t *testing.T) {
 	}
 }
 
-// The kernel refuses a configuration whose settlement trigger is not below its exposure limit, and
-// refuses it by exiting at boot — which a run discovers as a kernel that never came up, ninety
-// seconds later, with every later act broken. The one constructor every kernel goes through applies
-// the rule itself; this checks it does so for every cap the story uses.
-func TestEveryKernelConfigurationSatisfiesTheKernelsOwnRule(t *testing.T) {
+// Every kernel in the story draws under the same face value, so a payment costs the same wherever
+// it is made and one kernel's rail bill is comparable with another's. The face value must also be
+// something the shipped worlds permit, or a kernel refuses the configuration at boot — which a run
+// discovers as a kernel that never came up, with every later act broken.
+func TestEveryKernelDrawsUnderTheSameFaceValue(t *testing.T) {
 	s := &story{scale: 1}
-	caps := []int64{sybilVictimCap, 3000}
+	limits := []int64{sybilVictimHeadroom}
 	for _, k := range kernelPlan {
-		caps = append(caps, k.exposureMax)
+		limits = append(limits, k.creditLimit)
 	}
-	for _, c := range caps {
+	for _, c := range limits {
 		o := s.opts("k1", c)
-		if !(o.SettlementTrig > 0 && o.SettlementTrig < o.ExposureMax) {
-			t.Errorf("cap %d: trigger %d is not strictly between 0 and the cap", c, o.SettlementTrig)
+		if o.Lottery != storyLottery {
+			t.Errorf("limit %d: lottery %d, want %d", c, o.Lottery, storyLottery)
+		}
+		if o.CreditLimit != c {
+			t.Errorf("limit %d: configured as %d", c, o.CreditLimit)
 		}
 	}
-	defer func() {
-		if recover() == nil {
-			t.Error("a cap of 1 leaves no room for a trigger and must be refused at construction")
+	for _, name := range []string{"play", "test"} {
+		w, err := rail.Load(name)
+		if err != nil {
+			t.Fatalf("world %s: %v", name, err)
 		}
-	}()
-	s.opts("k1", 1)
+		scale := int64(1)
+		for i := uint8(0); i < w.Decimals; i++ {
+			scale *= 10
+		}
+		if want := storyLottery * scale; w.LotteryMax < want {
+			t.Errorf("world %s permits a ticket of at most %d; the story draws for %d",
+				name, w.LotteryMax, want)
+		}
+	}
 }

@@ -49,6 +49,15 @@ type callRequest struct {
 	IdempotencyRecordID string
 }
 
+// sold is what this call was sold to a foreign buyer for: the markup it was quoted at and this
+// kernel's half of its draw, both frozen on the trace at admission (D19). Zero and empty for a local
+// call, which owes nothing and draws for nothing — and for an outbound dispatch, whose own frozen
+// terms live in the disjoint half of the same record.
+func sold(t *Trace) (remoteBPS int64, nonce string) {
+	rbps, _, n := ServingTerms(t.DispatchJSON)
+	return rbps, n
+}
+
 // RunRequest is input to Run, the ordinary root-call entry point (§4): a struct so a new optional
 // term is a field, not a signature break at every call site. Federation ingress keeps its own entry
 // point (RunFederated), so its authority is not expressible here.
@@ -358,13 +367,14 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	if resolver == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
 	}
-	m, err := resolver.ResolveRemoteAction(ctx, peerKey, r.Owner, r.Name)
+	res, err := resolver.ResolveRemoteAction(ctx, peerKey, r.Owner, r.Name)
 	if err != nil {
 		return nil, err // ErrPeerUnreachable / ErrNotFound already typed by the resolver
 	}
-	if m == nil {
+	if res == nil || res.Manifest == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
 	}
+	m := res.Manifest
 	if err := k.cfg.Network.VerifyManifestSignature(peerKey, m); err != nil {
 		return nil, ErrUnauthorized.Wrap("remote manifest signature is invalid")
 	}
@@ -385,6 +395,15 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	// Best-effort and must never fail the call; the account must.
 	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
 		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
+	}
+	// Where the peer is paid, proved by its own rail key. A buyer owes the moment it calls, so it
+	// learns this with the contract rather than waiting for a gossip pass that may not have run
+	// (P10). An unproven address is simply not learned: the peer stays unpayable, and the call that
+	// would take on a debt is refused rather than settled into a payment nobody can send.
+	if _, verr := k.verifyRailIdentity(peerKey, res.RailAddress, res.RailProof); res.RailAddress != "" && verr == nil {
+		if uerr := k.store.UpsertKernel(ctx, peerKey, "", "", res.RailAddress, res.RailProof, time.Now().UTC()); uerr != nil {
+			k.log.With(ctx).Warn("kernel.rail_address.store_failed", "public_key", peerKey, "error", uerr.Error())
+		}
 	}
 	if mount == nil {
 		mount, err = k.EnsureKernelAccount(ctx, peerKey)
@@ -605,9 +624,9 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
 		// from the rounded local total, which cannot recover it exactly (§16).
 		mp = actionBasePrice(action)
-		key := uuid.New().String()
-		trace.IdempotencyKey = &key
-		trace.DispatchJSON = marshalDispatch(req.Args, req.StepID, mp, lockPrice, action.ArtifactHash, actionRemoteBPS(action), k.cfg.ImportBPS)
+		if err := k.prepareDispatch(ctx, trace, action, req.Args, req.StepID, lockPrice, k.econ.ImportBPS); err != nil {
+			return nil, err
+		}
 	}
 
 	callerWalletID, callerWalletKind := k.callerWallet(req, process, parentTrace)
@@ -706,7 +725,11 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		if trace.IdempotencyKey != nil {
 			ikey = *trace.IdempotencyKey
 		}
-		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, action.ArtifactHash, ikey, req.Args)
+		// The commitment is derived from the secret the dispatch record froze, so a retry after
+		// restart offers the peer the same one it was first committed to (P10).
+		d := dispatched(trace.DispatchJSON)
+		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, action.ArtifactHash, ikey,
+			commitmentOf(d.Secret), d.Lottery, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
 		if fr.NotDispatched {
@@ -755,7 +778,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		return reply, ErrInternal.Wrap("could not read trace")
 	}
 	taxable := postTrace.Available
-	net, fee := ComputeFee(taxable, k.cfg.FeeBPS)
+	net, fee := k.econ.Fee(taxable)
 
 	replyJSON, _ := json.Marshal(reply)
 	ktx.ReplyJSON = json.RawMessage(replyJSON)
@@ -763,11 +786,12 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	// Two independent channels (§13). The EXECUTION premium is levied on the charge (= gross) at the
-	// rate snapshotted on the trace, and released from premium_parked at settlement. The VALUE channel
-	// is local and untaxed, so it carries no premium: the receipt records exactly what was delivered.
-	premium := ceilDiv(ktx.Gross*trace.PremiumBPS, 10000)
-	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo) // success: charge = gross, value delivered
+	// Two independent channels (§13). A foreign call also owes this kernel's serving markup on the
+	// charge, which rides on the receipt and is settled by the ticket rather than by any local row.
+	// The VALUE channel is local and untaxed, so it carries no premium.
+	soldAt, nonce := sold(trace)
+	premium := k.econ.Premium(ktx.Gross, soldAt)
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo, nonce) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		mu.Unlock()
 		// Same as the post-execution read failure above: the settlement committed, so its receipt is
@@ -815,11 +839,10 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.ParentTraceID = dbTrace.ParentTraceID
 	trace.IdempotencyKey = dbTrace.IdempotencyKey
 	trace.DispatchJSON = dbTrace.DispatchJSON
-	// The serving-markup and value-transfer snapshots (§13) ride on the funded root trace; carry them
-	// into the adopted trace so the receipt levies the correct premium and the value is released to its
-	// beneficiary at settlement.
-	trace.PremiumBPS = dbTrace.PremiumBPS
-	trace.PremiumParked = dbTrace.PremiumParked
+	// The stake and value snapshots (§13, P10) ride on the funded root trace; carry them into the
+	// adopted trace so settlement releases exactly what was locked and delivers the value to its
+	// beneficiary.
+	trace.Ticket = dbTrace.Ticket
 	trace.Value = dbTrace.Value
 	trace.ValueTo = dbTrace.ValueTo
 	return dbTrace.Available
@@ -1125,17 +1148,17 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		}
 	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
-	// Serving-markup premium (§13): the rate is snapshotted on the trace, so premium — levied on the
-	// actual failed charge (gross−refund), computed inside the receipt closure so the signed number and
-	// the committed legs cannot diverge — is available on EVERY failure path (execution, recovery,
-	// forced closure, max-age expiry), not only those with the in-memory request. The parked reserve is
-	// released inside CommitFailedCall from the trace snapshot. Both 0 for local calls.
+	// A failure still charges for whatever settled beneath it, so a foreign buyer can still owe for
+	// one (P7). The charge is only known inside the commit, so the receipt and the obligation that
+	// names it are both built there, from the same number — and at the terms the trace froze, which
+	// is what lets a recovered settlement sign the receipt the buyer was promised.
+	soldAt, nonce := sold(trace)
 	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
 		charge := tx.Gross - refund
 		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value is 0
 		// and refundTransferEffect returns the whole value reserve to the caller C.
-		r, err := k.buildReceipt(tx, charge, ceilDiv(charge*trace.PremiumBPS, 10000), 0, "")
+		r, err := k.buildReceipt(tx, charge, k.econ.Premium(charge, soldAt), 0, "", nonce)
 		committed = r
 		return r, err
 	}
@@ -1153,15 +1176,4 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 // backstop against a wedged single-connection store. Callers must defer cancel().
 func settlementContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-}
-
-// ComputeFee computes (net, fee) from the taxable amount (= trace.available post-execution).
-// fee = ceil(taxable * feeBPS / 10000). Invariant: net + fee == taxable.
-func ComputeFee(taxable, feeBPS int64) (net, fee int64) {
-	if taxable == 0 || feeBPS == 0 {
-		return taxable, 0
-	}
-	fee = (taxable*feeBPS + 9999) / 10000
-	net = taxable - fee
-	return
 }

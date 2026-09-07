@@ -285,3 +285,22 @@ func TestFedListenAddrsIsReadFromConfig(t *testing.T) {
 		t.Errorf("fed_listen_addrs read back as %v", cfg.FedListenAddrs)
 	}
 }
+
+// The credit limit defaults from the world's ceiling, not from the ticket the operator chose:
+// choosing exact settlement (`lottery: 0`) must not silently set the limit to zero and refuse
+// every paid inbound call. And the ceiling is the ceiling even when it is zero — a world with no
+// lottery accepts no ticket at all.
+func TestEconomyDefaultsFromTheWorldCeiling(t *testing.T) {
+	zero := int64(0)
+	econ, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero}).Economy(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if econ.CreditLimit != 100*100 {
+		t.Errorf("credit limit with lottery 0 = %d, want a hundred tickets at the ceiling", econ.CreditLimit)
+	}
+	five := int64(5)
+	if _, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &five}).Economy(0); err == nil {
+		t.Error("a ticket above a ceiling of zero was accepted")
+	}
+}

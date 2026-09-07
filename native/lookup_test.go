@@ -260,14 +260,14 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 		t.Error("last_seen present before any contact")
 	}
 	failedAt := time.Now().UTC().Truncate(time.Second)
-	if err := st.RecordKernelContact(ctx, peerKey, false, failedAt, nil); err != nil {
+	if err := st.RecordKernelContact(ctx, peerKey, false, failedAt); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	if _, remote = hits(); remote["last_contact_failed_at"] != failedAt.Format(time.RFC3339) {
 		t.Errorf("last_contact_failed_at: got %v, want %v", remote["last_contact_failed_at"], failedAt.Format(time.RFC3339))
 	}
 	seenAt := failedAt.Add(time.Minute)
-	if err := st.RecordKernelContact(ctx, peerKey, true, seenAt, nil); err != nil {
+	if err := st.RecordKernelContact(ctx, peerKey, true, seenAt); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 	local, remote = hits()

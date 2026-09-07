@@ -18,7 +18,7 @@ _fed_setup() {
     # discovery interval lets each kernel verify the others via routing discovery within the flow (§13):
     # R learns L only on R's next pass, which the multi-hop gossip flow depends on.
     # Per-kernel extra config, optionally set by the caller before calling (e.g.
-    # FED_RCFG=(exposure_max=1000)). Consumed and cleared here so it never leaks into the next flow.
+    # FED_RCFG=(lottery=1000)). Consumed and cleared here so it never leaks into the next flow.
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 "${FED_RCFG[@]:-}" || return 1
     FED_BOOT=$(kernel_fed_addr "$FED_DBR")
     [ -n "$FED_BOOT" ] || return 1
@@ -157,17 +157,18 @@ flow_fed_suspend_blocks() {
     assert_eq "fed_suspend_blocks.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
+# A foreign call is served on the seller's own money: the seller funds the work and is repaid when
+# the buyer's obligation settles (P10). A provider with nothing to fund it with cannot serve, and the
+# refusal is the operator's to fix — never the caller's own insufficient funds.
 flow_fed_denial_underfunded() {
     echo "=== FLOW fed_denial_underfunded ==="
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_denial_underfunded.setup" "setup failed"; return; }
 
-    # Paid action on R; L imports it but is NOT funded on R → underfunded → 402 denial receipt.
+    # A paid action on R, whose owner holds nothing to fund the work with.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)
     j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
 
-    # The CLI attributes it to THIS kernel's exhausted credit on the peer (operator remedy), with a
-    # distinct exit code — never the caller's own insufficient_funds (§13 peer_unfunded).
     local run_out rc
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid-svc '{}' 2>&1); rc=$?
     assert_eq "fed_denial_underfunded.run_exit_peer_unfunded" 10 "$rc"
@@ -207,18 +208,19 @@ flow_fed_import_duty() {
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}' >/dev/null 2>&1
     assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1103
 
-    # R deposits to L's account by key (handshake-free: this both provisions and funds it, §13).
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" -- "$FED_LKEY" 5000 >/dev/null 2>&1
+    # R's provider funds its own work, so it holds working capital; L funds its caller.
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
-    local ub pb; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$FED_LKEY")" available)
+    local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}')" tx_id)
     assert_nonempty "fed_pricing.call_succeeded" "$tx_id"
-    local ua pa; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available); pa=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$FED_LKEY")" available)
-    # L's sys is caller AND origin fee recipient: locks 1103, gets the 53 import fee back → net 1050 out.
+    local ua; ua=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
+    # L's sys is caller AND origin fee recipient: locks 1103, gets the 53 import fee back. With the
+    # lottery off, the obligation of 1050 is paid exactly, so the caller is out exactly that.
     assert_eq "fed_pricing.user_charged" 1050 "$(( ub - ua ))"
-    # L's account on R pays the cross-kernel obligation: charge 1000 + serving premium 50 = 1050.
-    assert_eq "fed_pricing.peer_charged" 1050 "$(( pb - pa ))"
+    # A peer row holds no money at all: what L owes rides on an obligation, not on a balance (P10).
+    assert_eq "fed_pricing.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$FED_LKEY")" available)"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_jnum "fed_pricing.tx_gross" "$tx" gross 1103
     assert_jnum "fed_pricing.tx_net"   "$tx" net 1050
@@ -234,6 +236,13 @@ flow_fed_import_duty() {
         || { fail "fed_pricing.restart_l" "L did not restart"; return; }
     j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
     assert_jnum "fed_pricing.reprices_on_policy_change" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1260
+
+    # The obligation from that call is settled before the next one, so what the next call is charged
+    # is about the new price and nothing else. Trade is not gated on any one buyer's record: the
+    # credit limit bounds the total, and a rule per identity would be bypassed by minting one (D14).
+    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" ticket_id)
+    assert_nonempty "fed_pricing.names_its_ticket" "$ticket"
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$FED_LKEY" 1050 >/dev/null 2>&1
 
     # And the price shown is the price charged: gross on the next call is the new total, not the old.
     local ub2; ub2=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -412,7 +421,8 @@ r=json.loads(sys.argv[1]); res=r.get('result',r).get('results',[])
 print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('action',''))),''))" "$lk" "@$rkey/greet" 2>/dev/null)
     assert_nonempty "fed_discovery.card_quote_hash" "$dhash"
 
-    j "$dbr" "$hr" admin deposit --ref "$(newref)" -- "$(kernel_key "$dbl" "$hl")" 5000 >/dev/null 2>&1
+    # R's provider funds its own work; L funds its caller.
+    j "$dbr" "$hr" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
     j "$dbl" "$hl" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
     assert_nonempty "fed_discovery.pinned_first_call" \
         "$(strfield "$(jj "$dbl" "$hl" run "sys@$rkey/greet" '{}' --quote-hash "$dhash")" tx_id)"
@@ -420,10 +430,9 @@ print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('act
         "$(strfield "$(jj "$dbl" "$hl" action show "sys@$rkey/greet")" quote_hash)"
 }
 
-# flow_fed_peer_sync: the discovery timer also pulls gossip from known peers (§13 peer sync),
-# caching each peer's liveness (last_seen) and OUR credit on it (peer_credit, from the peer's reported
-# counterparty_balance). Proves the "better sync" surfacing: after R deposits L's proxy, L's own
-# `admin peers` learns that credit without L ever calling R.
+# flow_fed_peer_sync: the discovery timer pulls gossip from known peers (§13 peer sync), caching each
+# peer's liveness. Proves the surfacing: L learns R is reachable from the timer alone, without ever
+# calling R again.
 flow_fed_peer_sync() {
     echo "=== FLOW fed_peer_sync ==="
     local dir; dir=$(new_dir)
@@ -447,19 +456,15 @@ flow_fed_peer_sync() {
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_peer_sync.resolve" "resolve/rename failed"; return; }
-    j "$dbr" "$hr" admin deposit --ref "$(newref)" -- "$lkey" 250 >/dev/null 2>&1
-
-    # A peer-sync pass runs at startup, then every 2s. Poll L's own peer list until it has cached
-    # the credit R reports for us — no call to R involved.
-    local credit=""
+    # A peer-sync pass runs at startup, then every 2s. Poll L's own peer list until it has recorded
+    # reaching R — no call to R involved.
+    local seen=""
     local i
     for i in $(seq 1 20); do
-        credit=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('peer_credit') if p.get('peer_credit') is not None else '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
-        [ "$credit" = "250" ] && break
+        seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+        [ -n "$seen" ] && break
         sleep 1
     done
-    assert_eq "fed_peer_sync.credit_cached" 250 "$credit"
-    local seen; seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
     assert_nonempty "fed_peer_sync.last_seen_cached" "$seen"
 }
 
@@ -486,16 +491,10 @@ flow_fed_inspect_read_only() {
     [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_inspect_read_only.rkey" "no R/L key"; return; }
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally and bind the
-    # kernel-r alias. R funds L's proxy by key so R reports our credit.
+    # kernel-r alias.
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_read_only.resolve" "resolve/rename failed"; return; }
-    j "$dbr" "$hr" admin deposit --ref "$(newref)" -- "$lkey" 250 >/dev/null 2>&1
-
-    local pc='import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get("petname")=="kernel-r"),{});print(p.get("peer_credit") if p.get("peer_credit") is not None else "")'
-    # Baseline: with the sync pass parked at 3600s and no inspect yet, L has NOT cached R's report.
-    assert_eq "fed_inspect_read_only.baseline_uncached" "" \
-        "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
 
     # The cold resolve above was a real outbound contact, so it dated the peer. Inspect is not:
     # whatever that left, inspect must leave exactly as it found it.
@@ -508,8 +507,6 @@ flow_fed_inspect_read_only() {
     assert_json "fed_inspect_read_only.inspect_online" "$doc" online True
 
     # ...and it left nothing behind: the cache is exactly as it was.
-    assert_eq "fed_inspect_read_only.credit_still_uncached" "" \
-        "$(python3 -c "$pc" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
     assert_eq "fed_inspect_read_only.last_seen_unchanged" "$seen_before" \
         "$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
 }
@@ -617,59 +614,44 @@ flow_fed_step_complete() {
         "$(jj "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}')"
 }
 
-# flow_settlement exercises the §13 residual settlement protocol end-to-end over the real transport:
-# L draws R's global exposure (unfunded paid call), so L owes R a sub-quantum debt, then `admin settle`
-# runs the two-party probabilistic commit/reveal and both bilateral rows clear to zero.
-flow_settlement() {
-    echo "=== FLOW settlement ==="
+# A cross-kernel obligation settles by a lottery ticket (P10): the buyer draws with a secret it
+# committed to before the work and the seller's nonce from the receipt, both sides compute the same
+# outcome, and either the obligation is discharged for nothing or the face value is paid on the rail.
+# The face value here sits well above the obligation, so the draw genuinely applies; the flow asserts
+# what must hold whichever way it falls.
+flow_ticket() {
+    echo "=== FLOW ticket ==="
     local dir; dir=$(new_dir)
-    # R (creditor) extends global exposure and sets the fee-rational quantum; L (debtor) shares Q so it
-    # takes the probabilistic branch for a sub-quantum debt. Q sits just above the debt, so the draw
-    # usually comes out payable — the branch with more to go wrong — while still reaching clear. _fed_setup does the rest of the bring-up,
-    # including the cold resolve of the price-0 greet that provisions R's proxy and binds kernel-r
-    # without drawing credit; the paid action below then resolves on its own first call.
-    FED_RCFG=(exposure_max=1000 settlement_trigger=500 settlement_quantum=12)
-    FED_LCFG=(settlement_quantum=12)
-    _fed_setup "$dir" || { fail "settlement.setup" "setup failed"; return; }
+    FED_LCFG=(lottery=100)
+    _fed_setup "$dir" || { fail "ticket.setup" "setup failed"; return; }
     local lkey="$FED_LKEY"
 
-    # R: paid action (mp=10). L funds only its OWN caller, never prepaying on R.
+    # R's provider funds its own work (a foreign call is served on the seller's money, P10); L funds
+    # its caller and its own stake.
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
-    # L calls the paid action unfunded on R → R admits it against its global exposure → L now owes R.
-    assert_nonempty "settlement.call_on_credit" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
-    local d; d=$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)
-    assert_eq "settlement.debtor_owes_r" 11 "$d"   # charge 10 + serving premium 1
-    assert_eq "settlement.creditor_owed_by_l" -11 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
+    assert_nonempty "ticket.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
 
-    # R flags settlement_due once gross receivables reach Y (display only, FIX 3) — 11 < 500 here, so not yet.
-    assert_json "settlement.identity_has_quantum" "$(jj "$FED_DBR" "$FED_HR" admin identity)" settlement_quantum 12
+    # Whatever the draw, a peer row holds nothing: what is owed rides on the obligation, never a balance.
+    assert_eq "ticket.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
 
-    # Settle: L is the debtor; d=11 < Q=100 → the probabilistic commit/reveal runs over the transport.
-    local out; out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)
-    assert_json "settlement.settled" "$out" mode probabilistic
-    local outcome sid
-    outcome=$(strfield "$out" outcome); sid=$(strfield "$out" settlement_id)
-    assert_eq "settlement.outcome_valid" ok "$(case "$outcome" in pay|clear) echo ok;; *) echo "bad:$outcome";; esac)"
+    # mp 10 → sr 11 → q 12, of which the import fee of 1 returns to this kernel's own sys — the
+    # caller here. So a losing draw costs the caller nothing at all, and a winning one costs exactly
+    # the face value it staked. Either is a valid outcome of one draw; nothing in between is.
+    local after; after=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
+    local paid=$(( before - after ))
+    assert_eq "ticket.charge_is_a_draw" ok \
+        "$(case "$paid" in 0) echo ok;; 100) echo ok;; *) echo "bad:$paid";; esac)"
 
-    if [ "$outcome" = "clear" ]; then
-        # A cleared draw extinguishes the debt immediately on both kernels — no money moves.
-        assert_json "settlement.clear_status" "$out" status settled
-        assert_eq "settlement.clear_debtor_row"   0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
-        assert_eq "settlement.clear_creditor_row" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
-    else
-        # A payable draw pays the quantum and announces it, so the debtor's books close. What the
-        # creditor then does with the announcement is the same machinery flow_rail_settlement drives
-        # deterministically; here the point is only that the draw resolved into a real payment.
-        assert_json "settlement.pay_announced" "$out" status announced
-        assert_eq "settlement.pay_debtor_row" 0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
-        assert_contains "settlement.pay_claim_reached_creditor" "$sid" "$(j "$FED_DBR" "$FED_HR" admin deposit)"
-        return
-    fi
-
-    # Nothing left to settle: a second run reports the zero position, not a new flip.
-    assert_json "settlement.idempotent" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
+    # Both kernels agree what the draw decided, and both sets of books add up.
+    assert_jnum "ticket.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
+    assert_jnum "ticket.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
+    # The seller has delivered the whole obligation of 11 unpaid, whatever the draw said: only cash
+    # reduces the exposure, and no cash has arrived yet either way.
+    assert_jnum "ticket.exposure_recorded" "$(jj "$FED_DBR" "$FED_HR" admin identity)" exposure 11
 }
 
 # flow_transfer exercises the value channel across a federated pair (§13). Value is LOCAL to a kernel:
@@ -683,7 +665,7 @@ flow_transfer() {
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r exposure_max=1000 settlement_trigger=500 || { fail "transfer.setup_r" "boot"; return; }
+    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r || { fail "transfer.setup_r" "boot"; return; }
     local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
     j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
@@ -749,22 +731,26 @@ flow_fed_provider_crash_recovery() {
     # buyer retries on a one-second interval: the default is 60s with exponential backoff, which
     # would make the result depend on how long this flow happened to wait rather than on whether
     # the call can settle at all.
-    FED_RCFG=(exposure_max=1000 settlement_trigger=500)
     FED_LCFG=(remote_retry_interval_seconds=1)
     _fed_setup "$dir" || { fail "fed_crash.setup" "setup failed"; return; }
 
     # A buyer on L with money, and a priced action on R that takes long enough to be interrupted.
+    # R's provider funds its own work, so it holds money of its own (P10).
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
     deposit "$FED_DBL" "$FED_HL" buyer 1000
+    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
 
     local sport; sport=$(backend_port)
     start_slow_backend "$sport" 8
     publish "$FED_DBR" "$FED_HR" slow --kind http --source "http://127.0.0.1:${sport}/slow" \
         --description "a service slow enough to interrupt" --price 20 >/dev/null 2>&1
 
-    # Warm the proxy so the crash lands on the call rather than on the resolve.
-    j "$FED_DBL" "$ha" run sys@kernel-r/slow '{}' >/dev/null 2>&1
+    # Warm the proxy so the crash lands on the call rather than on the resolve, and settle what that
+    # call owed: R serves nobody who still owes it for work already delivered (P10).
+    local warm; warm=$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/slow '{}')" tx_id)
+    local wtick; wtick=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$warm")" ticket_id)
+    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin deposit --ref "$wtick" -- "$FED_LKEY" 21 >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
 
     # Call again and kill the provider while it is still upstream.

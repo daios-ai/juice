@@ -45,8 +45,8 @@ func (f *fakeFed) Call(_ context.Context, _ string, _ fed.CallRequest) (fed.Call
 func (f *fakeFed) Resolve(_ context.Context, _ string, _ fed.ResolveRequest) (fed.ResolveResponse, error) {
 	return fed.ResolveResponse{}, errors.New("fed: resolve not used in these tests")
 }
-func (f *fakeFed) Settle(_ context.Context, _ string, _ fed.SettleRequest) (fed.SettleResponse, error) {
-	return fed.SettleResponse{}, errors.New("fed: settle not used in these tests")
+func (f *fakeFed) Reveal(_ context.Context, _ string, _ fed.RevealRequest) (fed.RevealResponse, error) {
+	return fed.RevealResponse{}, errors.New("fed: reveal not used in these tests")
 }
 func (f *fakeFed) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
 	f.lastStep = req
@@ -196,7 +196,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 
 	// mp=20 at the default 500 bps serving markup → serving 21; +500 bps import → 23 all-in.
 	const mp, wantAllIn = int64(20), float64(23)
-	rbps := kernel.DefaultConfig().RemoteBPS
+	rbps := kernel.DefaultEconomy().RemoteBPS
 	m := kernel.ActionManifest{
 		ActionID: "act-1", OwnerHandle: handle, Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: mp, RemoteBPS: rbps,
@@ -346,8 +346,7 @@ func TestInspectWritesNothing(t *testing.T) {
 		t.Fatalf("seeded peer should start with no last_seen, got %+v", before)
 	}
 
-	bal := int64(777)
-	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key, CounterpartyBalance: &bal})
+	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 
 	// The response itself is live: what must not happen is persistence of what it saw.
@@ -361,9 +360,6 @@ func TestInspectWritesNothing(t *testing.T) {
 	}
 	if after.LastSeen != nil {
 		t.Errorf("inspect must not persist last_seen, got %v", after.LastSeen)
-	}
-	if after.PeerCredit != nil {
-		t.Errorf("inspect must not persist peer_credit, got %v", *after.PeerCredit)
 	}
 }
 
@@ -381,7 +377,7 @@ func peerStepServer(t *testing.T, f *fakeFed) (*server, string) {
 	// The outbound step protocol runs kernel-side over kernel.StepCaller (§13), so the fake backs a
 	// real fedAdapter: these tests exercise the whole path, not a stub of it.
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil)
+	adapter := newFedAdapter(self, nil, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 	return &server{kernel: k, log: log.Discard(), fed: f}, key
@@ -517,7 +513,7 @@ func TestCompletePeerStep_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil)
+	adapter := newFedAdapter(self, nil, nil)
 	const key = "k-offline-peer"
 
 	// No transport at all, and a transport that cannot reach the peer, are both "unreachable".
@@ -531,8 +527,8 @@ func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	if _, _, err := adapter.ResolveRemoteUser(context.Background(), key, "bob"); !named(err, key) {
 		t.Errorf("user resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
-	if _, _, err := adapter.Settle(context.Background(), key, "open", "", "", "s1", 0, "", "", nil); !named(err, key) {
-		t.Errorf("settle with an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
+	if err := adapter.Reveal(context.Background(), key, kernel.RevealPayload{TicketID: "t1"}, "sig"); !named(err, key) {
+		t.Errorf("reveal to an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
 }
 

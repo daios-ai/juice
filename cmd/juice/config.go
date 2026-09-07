@@ -84,11 +84,10 @@ type ServerConfig struct {
 	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
 	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
 	FeeBPS                     int64        `json:"fee_bps"`
-	RemoteBPS                  int64        `json:"remote_bps"`         // serving-side markup on inbound remote calls (§13)
-	ImportBPS                  int64        `json:"import_bps"`         // origin-side import fee on outbound remote calls, retained locally (§13)
-	ExposureMax                int64        `json:"exposure_max"`       // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
-	SettlementTrigger          int64        `json:"settlement_trigger"` // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
-	SettlementQuantum          int64        `json:"settlement_quantum"` // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
+	RemoteBPS                  int64        `json:"remote_bps"`   // serving-side markup on inbound remote calls (§13)
+	ImportBPS                  int64        `json:"import_bps"`   // origin-side import fee on outbound remote calls, retained locally (§13)
+	Lottery                    *int64       `json:"lottery"`      // L: ticket face value (P10); 0 = pay every obligation exactly; unset = the world's ceiling
+	CreditLimit                *int64       `json:"credit_limit"` // E_max: most unpaid delivered service carried at once (P10); unset = 100 tickets
 	TokenTTL                   string       `json:"token_ttl"`
 	AuthIssuer                 string       `json:"auth_issuer"`
 	AuthAudience               string       `json:"auth_audience"`
@@ -156,13 +155,10 @@ func DefaultServerConfig() ServerConfig {
 		FeeBPS:            2000,
 		RemoteBPS:         500,
 		ImportBPS:         500,
-		// A fresh kernel serves remote paid calls out of the box (§13): X=1000 caps the total
-		// unsecured credit it extends across all peers (a bounded, Sybil-proof maximum loss),
-		// flagged for settlement at Y=500. Set exposure_max=0 to opt into prepaid-only. Q stays 0
-		// (rail-dependent; the operator sets it from F/r to enable the probabilistic residual path).
-		ExposureMax:       1000,
-		SettlementTrigger: 500,
-		SettlementQuantum: 0,
+		// A fresh kernel serves remote paid calls out of the box (P10). Both money figures are left
+		// unset here because their sensible values depend on the world: a ticket at the world's own
+		// ceiling, and a credit limit of a hundred of them. A base-unit number written here would
+		// mean a hundredth of a token on one world and a hundred tokens on another.
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",
@@ -248,34 +244,6 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	if tokenSecret != "" {
 		cfg.TokenSecret = tokenSecret
 	}
-
-	for _, bps := range []struct {
-		name  string
-		value int64
-		dst   *int64
-	}{
-		{"fee_bps", c.FeeBPS, &cfg.FeeBPS},
-		{"remote_bps", c.RemoteBPS, &cfg.RemoteBPS},
-		{"import_bps", c.ImportBPS, &cfg.ImportBPS},
-	} {
-		if bps.value < 0 || bps.value > 10000 {
-			return kernel.Config{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
-		}
-		*bps.dst = bps.value
-	}
-
-	// Global exposure policy (§13): X ≥ 0; when X > 0 the settlement trigger must sit strictly inside
-	// it (0 < Y < X) so a flagged peer is still below the hard cap; Q ≥ 0 (0 disables the residual path).
-	if c.ExposureMax < 0 || c.SettlementQuantum < 0 {
-		return kernel.Config{}, fmt.Errorf("exposure_max and settlement_quantum must be non-negative")
-	}
-	if c.ExposureMax > 0 && !(c.SettlementTrigger > 0 && c.SettlementTrigger < c.ExposureMax) {
-		return kernel.Config{}, fmt.Errorf("settlement_trigger must satisfy 0 < settlement_trigger < exposure_max when exposure_max > 0")
-	}
-	cfg.ExposureMax = c.ExposureMax
-	cfg.SettlementTrigger = c.SettlementTrigger
-	cfg.SettlementQuantum = c.SettlementQuantum
-
 	tokenTTL, err := time.ParseDuration(c.TokenTTL)
 	if err != nil {
 		return kernel.Config{}, fmt.Errorf("token_ttl invalid: %w", err)
@@ -289,4 +257,48 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	cfg.PeerRetention = c.peerRetention()
 	cfg.DiscoveryInterval = c.discoveryInterval()
 	return cfg, nil
+}
+
+// Economy assembles the money rules from this configuration and the world it runs on (P10). The
+// world supplies the ticket ceiling, because what a payment costs is a property of the rail; the
+// operator chooses its own ticket at or below it, and how much unpaid work it will carry.
+//
+// Both money figures default from the ceiling rather than from a fixed number: base units mean
+// different amounts on different worlds, so a shipped 1000 would be a hundredth of a token on one
+// and a hundred tokens on another.
+func (c ServerConfig) Economy(lotteryMax int64) (kernel.Economy, error) {
+	econ := kernel.DefaultEconomy()
+	for _, bps := range []struct {
+		name  string
+		value int64
+		dst   *int64
+	}{
+		{"fee_bps", c.FeeBPS, &econ.FeeBPS},
+		{"remote_bps", c.RemoteBPS, &econ.RemoteBPS},
+		{"import_bps", c.ImportBPS, &econ.ImportBPS},
+	} {
+		if bps.value < 0 || bps.value > 10000 {
+			return kernel.Economy{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
+		}
+		*bps.dst = bps.value
+	}
+	econ.LotteryMax = lotteryMax
+	econ.Lottery = lotteryMax
+	if c.Lottery != nil {
+		econ.Lottery = *c.Lottery
+	}
+	if econ.Lottery < 0 {
+		return kernel.Economy{}, fmt.Errorf("lottery must not be negative")
+	}
+	if econ.Lottery > lotteryMax {
+		return kernel.Economy{}, fmt.Errorf("lottery %d exceeds this world's ceiling of %d", econ.Lottery, lotteryMax)
+	}
+	econ.CreditLimit = 100 * lotteryMax
+	if c.CreditLimit != nil {
+		econ.CreditLimit = *c.CreditLimit
+	}
+	if econ.CreditLimit < 0 {
+		return kernel.Economy{}, fmt.Errorf("credit_limit must not be negative")
+	}
+	return econ, nil
 }

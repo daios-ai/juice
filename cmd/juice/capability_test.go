@@ -305,7 +305,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	// A recording transport behind a real adapter: any federation dispatch shows up in lastStep.
 	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-peer"}`), stepStatus: 200}
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil)
+	adapter := newFedAdapter(self, nil, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 

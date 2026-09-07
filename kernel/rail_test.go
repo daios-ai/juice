@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/store"
 )
 
 // fakeRail is a rail whose every outcome the test chooses, so the money rules can be exercised
@@ -160,7 +160,7 @@ func (f *fakeRail) Witness(_ context.Context, ref string, amount int64) (kernel.
 	if amount <= 0 {
 		return kernel.RailDeposit{}, kernel.ErrInvalidInput.Wrap("amount must be positive")
 	}
-	return kernel.RailDeposit{Key: "rail:ref:" + ref, TxHash: "ref:" + ref, Amount: amount}, nil
+	return kernel.RailDeposit{Key: "rail:ref:" + ref, TxHash: ref, Amount: amount}, nil
 }
 
 func (f *fakeRail) FinalizedBalances(context.Context) (int64, string, uint64, bool, error) {
@@ -502,58 +502,94 @@ func peerWithAddress(t *testing.T, k *kernel.Kernel, st kernel.Store, key, addr 
 	return peer
 }
 
-// A claim closes only against a payment from the debtor's own proven address. An equal payment
-// from anybody else, even in the very transaction the debtor named, closes nothing.
-func TestClaimMatchesOnlyTheDebtorsOwnPayment(t *testing.T) {
+// announcedOwed puts a seller-side obligation in the state the buyer has said it paid, so a test can
+// drive the half of settlement that waits for the money to actually arrive. It goes through the same
+// admission and commit the kernel uses, because those are what the obligation is read off.
+func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, txHash string, amount int64) *kernel.Owed {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peerID,
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: sellerID, Status: kernel.ProcessOpen, CreatedAt: now}
+	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: sellerID, ActionID: "a",
+		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedRailAddress: from, CreatedAt: now,
+		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm")}
+	// The execution itself is free here so the seller's balance stays what each test set it to; the
+	// obligation is read off the receipt's charge, which is what the buyer owes.
+	if err := st.BeginRun(ctx, p, tr, sellerID, 0, amount, amount*100); err != nil {
+		t.Fatal(err)
+	}
+	tx := &kernel.Transaction{ID: uuid.NewString(), ProcessID: p.ID, TraceID: tr.ID, OwnerUserID: sellerID,
+		CallerUserID: peerID, TargetUserID: sellerID, ActionID: "a", Status: kernel.TxSuccess,
+		StartedAt: now, EndedAt: now}
+	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: sellerID, TxID: tx.ID, TraceID: tr.ID,
+		ActionID: "a", Status: kernel.TxSuccess, Charge: amount, Nonce: "0a0b", CreatedAt: now}
+	if err := st.CommitCall(ctx, tx, receipt, tr.ID, p.ID, kernel.CallerProcess, sellerID, "", 0, 0, nil, rec.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ApplyReveal(ctx, tr.ID, amount, txHash); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.ReadOwed(ctx, id, peerID)
+	return got
+}
+
+// An obligation closes only against a payment from the buyer's own proven address. An equal payment
+// from anybody else, even in the very transaction the buyer named, closes nothing.
+func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {
 	k, st, fr, sys := railFixture(t)
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "0xdebtor")
-	// The peer owes nothing yet; a claim is what it says it paid us.
-	claim := &kernel.RailTransfer{ID: "sid-1", Kind: kernel.RailKindClaim, Party: peer.ID,
-		Amount: 40, Credit: 40, TxHash: "0xpaid", Status: kernel.RailStatusAnnounced, CreatedAt: time.Now().UTC()}
-	if err := st.CreateRailTransfer(ctx, claim); err != nil {
-		t.Fatal(err)
-	}
+	seller := setupUser(t, st, "seller", 0)
+	announcedOwed(t, st, "tk-1", peer.ID, seller.ID, "0xdebtor", "0xpaid", 40)
 
 	fr.deposits = []kernel.RailDeposit{{Key: "rail:0xpaid:0", TxHash: "0xpaid", From: "0xstranger", Amount: 40, Block: 1}}
 	k.RailPass(ctx)
-	if row, _ := st.ReadRailTransfer(ctx, "sid-1"); row.Status != kernel.RailStatusAnnounced {
-		t.Fatalf("a stranger's payment closed the claim: %s", row.Status)
+	if got, _ := st.ReadOwed(ctx, "tk-1", peer.ID); got.Status != kernel.OwedAnnounced {
+		t.Fatalf("a stranger's payment closed the obligation: %s", got.Status)
 	}
 
 	fr.deposits = append(fr.deposits, kernel.RailDeposit{Key: "rail:0xpaid:1", TxHash: "0xpaid", From: "0xdebtor", Amount: 40, Block: 1})
 	k.RailPass(ctx)
-	if row, _ := st.ReadRailTransfer(ctx, "sid-1"); row.Status != kernel.RailStatusCredited {
-		t.Fatalf("the debtor's own payment must close the claim: %s", row.Status)
+	if got, _ := st.ReadOwed(ctx, "tk-1", peer.ID); got.Status != kernel.OwedCredited {
+		t.Fatalf("the buyer's own payment must close the obligation: %s", got.Status)
 	}
-	if avail, _ := balanceOf(t, st, peer.ID); avail != 40 {
-		t.Errorf("the debt must be credited to the peer's row: %d", avail)
+	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
+		t.Errorf("the seller must be credited what it was owed: %d", avail)
+	}
+	if avail, _ := balanceOf(t, st, peer.ID); avail != 0 {
+		t.Errorf("a peer row holds no money: %d", avail)
 	}
 	_ = sys
 }
 
-// The operator's record of a peer's payment names the transaction the peer announced, never the
-// settlement's own id, which is not a fact anything outside could witness.
-func TestOperatorClosesAClaimAgainstTheNamedPayment(t *testing.T) {
-	k, st, fr, sys := railFixture(t)
+// On a rail with no addresses the operator's own record is what makes the payment final, and it
+// names the obligation it closes. Recording it twice moves money once.
+func TestOperatorClosesATicketAgainstItsPayment(t *testing.T) {
+	k, st, _, sys := railFixture(t)
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "0xdebtor")
-	claim := &kernel.RailTransfer{ID: "sid-2", Kind: kernel.RailKindClaim, Party: peer.ID,
-		Amount: 40, Credit: 40, TxHash: "0xpaid2", Status: kernel.RailStatusAnnounced, CreatedAt: time.Now().UTC()}
-	if err := st.CreateRailTransfer(ctx, claim); err != nil {
-		t.Fatal(err)
-	}
-	fr.deposits = []kernel.RailDeposit{{Key: "rail:0xpaid2:0", TxHash: "0xpaid2", From: "0xdebtor", Amount: 40, Block: 1}}
+	seller := setupUser(t, st, "seller", 0)
+	announcedOwed(t, st, "tk-2", peer.ID, seller.ID, "", "0xpaid2", 40)
 
-	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "sid-2"); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2"); err != nil {
 		t.Fatalf("operator record: %v", err)
 	}
-	dep, _ := st.ReadRailTransfer(ctx, "rail:0xpaid2:0")
-	if dep == nil || dep.Status != kernel.RailStatusCredited {
-		t.Fatalf("the witnessed payment must be the announced transaction, got %+v", dep)
+	if got, _ := st.ReadOwed(ctx, "tk-2", peer.ID); got.Status != kernel.OwedCredited {
+		t.Fatalf("ticket: %s", got.Status)
 	}
-	if row, _ := st.ReadRailTransfer(ctx, "sid-2"); row.Status != kernel.RailStatusCredited {
-		t.Errorf("claim: %s", row.Status)
+	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
+		t.Fatalf("the seller must be credited 40, got %d", avail)
+	}
+	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2"); err != nil {
+		t.Fatalf("a repeat must be safe: %v", err)
+	}
+	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
+		t.Errorf("a repeated record paid twice: %d", avail)
 	}
 }
 
@@ -732,22 +768,19 @@ func TestUnaffordableFuelBlocksThePayment(t *testing.T) {
 // Two payments in one transaction are two facts. A claim is matched by the transaction and the
 // debtor's proven address together, so another sender's payment in the same transaction cannot
 // shadow it.
-func TestClaimMatchesWithinAMultiPaymentTransaction(t *testing.T) {
+func TestTicketMatchesWithinAMultiPaymentTransaction(t *testing.T) {
 	k, st, fr, _ := railFixture(t)
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "0xdebtor")
-	claim := &kernel.RailTransfer{ID: "sid-3", Kind: kernel.RailKindClaim, Party: peer.ID,
-		Amount: 40, Credit: 40, TxHash: "0xshared", Status: kernel.RailStatusAnnounced, CreatedAt: time.Now().UTC()}
-	if err := st.CreateRailTransfer(ctx, claim); err != nil {
-		t.Fatal(err)
-	}
+	seller := setupUser(t, st, "seller", 0)
+	announcedOwed(t, st, "tk-3", peer.ID, seller.ID, "0xdebtor", "0xshared", 40)
 	fr.deposits = []kernel.RailDeposit{
 		{Key: "rail:0xshared:0", TxHash: "0xshared", From: "0xdebtor", Amount: 40, Block: 1},
 		{Key: "rail:0xshared:1", TxHash: "0xshared", From: "0xother", Amount: 40, Block: 1},
 	}
 	k.RailPass(ctx)
-	if row, _ := st.ReadRailTransfer(ctx, "sid-3"); row.Status != kernel.RailStatusCredited {
-		t.Fatalf("the debtor's payment shares a transaction with another and must still close the claim: %s", row.Status)
+	if got, _ := st.ReadOwed(ctx, "tk-3", peer.ID); got.Status != kernel.OwedCredited {
+		t.Fatalf("the buyer's payment shares a transaction with another and must still close it: %s", got.Status)
 	}
 	if other, _ := st.ReadRailTransfer(ctx, "rail:0xshared:1"); other.Status != kernel.RailStatusHeld {
 		t.Errorf("the other sender's payment must stay held: %s", other.Status)
@@ -767,32 +800,31 @@ func TestCustodyReportsWhetherItWasChecked(t *testing.T) {
 	}
 }
 
-// flakyAnnouncer is a federation client whose settlement channel can be down, so the announcement
-// of a payment already made can fail and must be retried.
-type flakyAnnouncer struct {
+// flakyRevealer is a federation client whose reveal channel can be down, so a draw already decided
+// can fail to reach the seller and must be sent again.
+type flakyRevealer struct {
 	*fakeFederationHTTP
-	down      bool
-	announces int
+	down    bool
+	reveals int
 }
 
-func (f *flakyAnnouncer) Settle(_ context.Context, _, kind, _, _, _ string, _ int64, _, _ string, _ []byte) (int, []byte, error) {
-	if kind == "announce" {
-		f.announces++
-	}
+func (f *flakyRevealer) Reveal(_ context.Context, _ string, p kernel.RevealPayload, _ string) error {
+	f.reveals++
 	if f.down {
-		return 0, nil, kernel.ErrPeerUnreachable.Wrap("peer is away")
+		return kernel.ErrPeerUnreachable.Wrap("peer is away")
 	}
-	return 200, []byte(`{"status":"announced"}`), nil
+	f.revealed = append(f.revealed, p)
+	return nil
 }
 
-// A settlement paid but not yet announced is not finished: the creditor's books are still open.
-// The worker keeps announcing until the peer has heard, whatever happened in between.
-func TestPaidSettlementIsAnnouncedUntilThePeerHears(t *testing.T) {
+// A losing draw the seller never heard about leaves it owed forever, so the reveal is the buyer's
+// obligation and the worker keeps sending it until the peer has taken it.
+func TestALostRevealIsSentAgain(t *testing.T) {
 	st := newTestStore(t)
 	sys := setupSys(t, nil, st)
 	cfg := testConfig()
 	cfg.FeeRecipientID = sys.ID
-	fed := &flakyAnnouncer{fakeFederationHTTP: &fakeFederationHTTP{}, down: true}
+	fed := &flakyRevealer{fakeFederationHTTP: &fakeFederationHTTP{}, down: true}
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
 	k.SetRail(newFakeRail())
 	ctx := context.Background()
@@ -800,215 +832,112 @@ func TestPaidSettlementIsAnnouncedUntilThePeerHears(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := peerWithAddress(t, k, st, "kpeerDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "0xcreditor")
-	// We owe the peer 11, and hold enough of our own to pay it.
-	if _, err := k.Deposit(ctx, sys.ID, sys.ID, 100, "", "earn"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.(interface {
-		ExecForTest(context.Context, string, ...any) error
-	}).ExecForTest(ctx, `UPDATE accounts SET available = 11 WHERE id = ?`, peer.ID); err != nil {
-		t.Fatal(err)
-	}
+	buyer := setupUser(t, st, "buyer", 0)
 
-	out, err := k.SettlePeer(ctx, sys.ID, peer.ID)
-	if err != nil {
-		t.Fatalf("settle: %v", err)
-	}
-	sid, _ := out["settlement_id"].(string)
-	row, _ := st.ReadRailTransfer(ctx, sid)
-	if row.Status != kernel.RailStatusConfirmed || fed.announces != 1 {
-		t.Fatalf("paid with the peer away: status=%s announces=%d", row.Status, fed.announces)
-	}
+	// A draw that lost: no payment was made, and the seller still has to be told so.
+	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-lost", "aa")
 
-	// The peer is still away: the worker tries again, and the row stays open.
 	k.RailPass(ctx)
-	if row, _ = st.ReadRailTransfer(ctx, sid); row.Status != kernel.RailStatusConfirmed || fed.announces != 2 {
-		t.Fatalf("still away: status=%s announces=%d", row.Status, fed.announces)
+	if fed.reveals == 0 {
+		t.Fatal("the worker never tried to tell the seller")
 	}
-	// The peer returns: the next pass tells it, and only then is the settlement finished.
+	if revealedFlag(t, st, trace) {
+		t.Fatal("an unacknowledged reveal must leave the call waiting to be told")
+	}
+
 	fed.down = false
 	k.RailPass(ctx)
-	if row, _ = st.ReadRailTransfer(ctx, sid); row.Status != kernel.RailStatusAnnounced || fed.announces != 3 {
-		t.Fatalf("peer back: status=%s announces=%d", row.Status, fed.announces)
+	if !revealedFlag(t, st, trace) {
+		t.Fatal("once the seller has heard, the draw is finished")
 	}
+
+	// And it stops: a finished obligation is not announced forever.
+	before := fed.reveals
 	k.RailPass(ctx)
-	if fed.announces != 3 {
-		t.Errorf("an announced settlement must not be announced again: %d", fed.announces)
+	if fed.reveals != before {
+		t.Errorf("a closed obligation was announced again (%d → %d)", before, fed.reveals)
 	}
 }
 
-// settleRouter carries one kernel's settlement rounds to another and remembers them, so a test can
-// present a round again exactly as its author signed it — which is what a debtor grinding for a
-// better draw would do.
-type settleRouter struct {
-	*fakeFederationHTTP
-	creditor  *kernel.Kernel
-	debtorKey string
-	opens     []settleRound
-	finishes  []string // settlement ids the debtor finished, in order
-	loseReply bool     // deliver the finish to the creditor, then lose its answer on the way back
-}
-
-type settleRound struct {
-	ts, sig, id string
-	amount      int64
-}
-
-func (r *settleRouter) Settle(ctx context.Context, _, kind, ts, sig, id string, amount int64, nonce, txHash string, record []byte) (int, []byte, error) {
-	if kind == "open" {
-		r.opens = append(r.opens, settleRound{ts: ts, sig: sig, id: id, amount: amount})
-	}
-	status, body, err := r.creditor.HandleSettle(ctx, r.debtorKey, kind, ts, sig, id, amount, nonce, txHash, record)
-	if kind == "finish" {
-		r.finishes = append(r.finishes, id)
-		if r.loseReply {
-			return 0, nil, kernel.ErrPeerUnreachable.Wrap("the answer was lost on the way back")
-		}
-	}
-	return status, body, err
-}
-
-// twoKernels builds a creditor owed d by a debtor that reaches it over a settleRouter.
-func twoKernels(t *testing.T, d, Q int64) (kC, kD *kernel.Kernel, stC, stD kernel.Store, sysD *kernel.Account, peerOnC, peerOnD *kernel.Account, creditorKey string, router *settleRouter) {
+// dispatchedCall stages what the buyer keeps of a remote call it has settled: the trace holding the
+// secret it committed to, and the transaction naming the peer it bought from and what it owes. Those
+// two records are the whole buy-side memory of a draw — there is no separate obligation row on this
+// side — and the transaction's net is the obligation, which is what makes the call revealable.
+func dispatchedCall(t *testing.T, st kernel.Store, buyerID, peerID, key, secret string) string {
 	t.Helper()
 	ctx := context.Background()
-	stC = newTestStore(t)
-	sysC := setupSys(t, nil, stC)
-	cfgC := testConfig()
-	cfgC.FeeRecipientID, cfgC.SettlementQuantum = sysC.ID, Q
-	kC = newKernel(cfgC, kernel.Dependencies{Store: stC, Logger: log.Discard()})
-	kC.SetRail(newFakeRail())
-	if _, err := kC.Deposit(ctx, sysC.ID, sysC.ID, 1000, "", "earn"); err != nil {
+	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: buyerID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, CallerUserID: buyerID,
+		IdempotencyKey: &key, DispatchJSON: kernel.DispatchRecordForTest(11, 11, 0, 0, 100, secret),
+		CreatedAt: time.Now().UTC()}
+	if err := st.BeginRun(ctx, p, tr, buyerID, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	stD = newTestStore(t)
-	sysD = setupSys(t, nil, stD)
-	cfgD := testConfig()
-	cfgD.FeeRecipientID, cfgD.SettlementQuantum = sysD.ID, Q
-	router = &settleRouter{fakeFederationHTTP: &fakeFederationHTTP{}, creditor: kC}
-	kD = newKernel(cfgD, kernel.Dependencies{Store: stD, Logger: log.Discard(), Federation: router})
-	kD.SetRail(newFakeRail())
-	if _, err := kD.Deposit(ctx, sysD.ID, sysD.ID, 100, "", "earn"); err != nil {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := st.(*store.DB).ExecForTest(ctx,
+		`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,
+		   target_user_id,action_id,status,gross,net,started_at,ended_at)
+		 VALUES (?,?,?,'',?,?,?,'a','success',11,11,?,?)`,
+		uuid.NewString(), p.ID, tr.ID, buyerID, buyerID, peerID, now, now); err != nil {
 		t.Fatal(err)
 	}
-	debtorKey := publicKeyOf(cfgD)
-	creditorKey = publicKeyOf(cfgC)
-	router.debtorKey = debtorKey
-	for _, id := range []struct {
-		st  kernel.Store
-		key string
-	}{{stC, creditorKey}, {stD, debtorKey}} {
-		if err := id.st.SetConfig(ctx, "signing_public_key", id.key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	peerOnC = peerWithAddress(t, kC, stC, debtorKey, "0xdebtor")
-	peerOnD = peerWithAddress(t, kD, stD, creditorKey, "0xcreditor")
-	setBalance(t, stC, peerOnC.ID, -d)
-	setBalance(t, stD, peerOnD.ID, d)
-	return
+	return tr.ID
 }
 
-// A draw is written down before its first round and finished by its own id. When the creditor's
-// answer to the finish is lost, the creditor has already committed an outcome; the debtor must
-// then come back for that same draw, never start another, and the two ledgers must agree.
-func TestALostFinishReplyResumesTheSameDraw(t *testing.T) {
-	const d, Q = 3, 4
-	ctx := context.Background()
-	_, kD, stC, stD, sysD, peerOnC, peerOnD, creditorKey, router := twoKernels(t, d, Q)
-
-	router.loseReply = true
-	if _, err := kD.SettlePeer(ctx, sysD.ID, creditorKey); err == nil {
-		t.Fatal("a lost answer must surface as an error")
-	}
-	// The debtor remembers exactly one draw, still in progress, and has moved no money on it.
-	draws, _ := stD.ListRailTransfers(ctx, kernel.RailKindSettlement, peerOnD.ID, kernel.RailStatusDrawing, 10)
-	if len(draws) != 1 || len(router.finishes) != 1 || draws[0].ID != router.finishes[0] {
-		t.Fatalf("the draw must be on record under the id the creditor answered: %d draws, finishes=%v", len(draws), router.finishes)
-	}
-	if a, l := balanceOf(t, stD, sysD.ID); a != 100 || l != 0 {
-		t.Fatalf("a draw in progress moves nothing: %d/%d", a, l)
-	}
-
-	// Trying again finishes that draw: the creditor answers the same finish with the same record.
-	router.loseReply = false
-	res, err := kD.SettlePeer(ctx, sysD.ID, creditorKey)
-	if err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	if len(router.finishes) != 2 || router.finishes[1] != router.finishes[0] || len(router.opens) != 1 {
-		t.Fatalf("the same draw must be finished, not a new one opened: opens=%d finishes=%v", len(router.opens), router.finishes)
-	}
-	stored, _ := stC.ReadSettlementRecord(ctx, router.finishes[0])
-	var outcome kernel.SettlementRecord
-	if err := json.Unmarshal([]byte(stored), &outcome); err != nil {
-		t.Fatalf("the creditor's record: %q %v", stored, err)
-	}
-	// Whichever way the draw went, both ledgers say the same thing.
-	debtorOwes, _ := balanceOf(t, stD, peerOnD.ID)
-	creditorIsOwed, _ := balanceOf(t, stC, peerOnC.ID)
-	switch outcome.Outcome {
-	case "clear":
-		if debtorOwes != 0 || creditorIsOwed != 0 || res["outcome"] != "clear" {
-			t.Errorf("cleared: debtor row %d, creditor row %d, result %v", debtorOwes, creditorIsOwed, res)
-		}
-		if left, _ := stD.ListRailTransfers(ctx, kernel.RailKindSettlement, peerOnD.ID, "", 10); len(left) != 0 {
-			t.Errorf("a cleared draw leaves no row: %+v", left[0])
-		}
-	case "pay":
-		row, _ := stD.ReadRailTransfer(ctx, router.finishes[0])
-		if row == nil || row.Status == kernel.RailStatusDrawing || debtorOwes != 0 || creditorIsOwed != -d {
-			t.Errorf("payable: row %+v, debtor row %d, creditor row %d", row, debtorOwes, creditorIsOwed)
-		}
-		if pending, _ := stC.HasPendingSettlement(ctx, peerOnC.ID); !pending {
-			t.Error("the creditor must be expecting the payment")
-		}
-	default:
-		t.Fatalf("no outcome on the creditor: %+v", outcome)
-	}
-}
-
-func setBalance(t *testing.T, st kernel.Store, id string, available int64) {
+// revealedFlag reports whether the seller has acknowledged this call's draw.
+func revealedFlag(t *testing.T, st kernel.Store, traceID string) bool {
 	t.Helper()
-	exec := st.(interface {
-		ExecForTest(context.Context, string, ...any) error
-	}).ExecForTest
-	if err := exec(context.Background(), `UPDATE accounts SET available=? WHERE id=?`, available, id); err != nil {
+	var n int64
+	if err := st.(*store.DB).QueryRowForTest(context.Background(),
+		`SELECT revealed FROM traces WHERE id=?`, traceID, &n); err != nil {
 		t.Fatal(err)
 	}
+	return n == 1
 }
 
-// A debt is drawn for once. The draw is fair only if losing it settles the matter: a debtor allowed
-// to open a second settlement on a position it has already lost would keep drawing under fresh
-// identifiers until a clear came up, and walk away having paid nothing for what it owed.
-func TestADebtIsDrawnForOnce(t *testing.T) {
-	const d, Q = 3, 4
+// A won draw is not announced until its payment is final: a seller told of a payment that never
+// confirms would be owed forever.
+func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
+	st := newTestStore(t)
+	sys := setupSys(t, nil, st)
+	cfg := testConfig()
+	cfg.FeeRecipientID = sys.ID
+	fed := &flakyRevealer{fakeFederationHTTP: &fakeFederationHTTP{}}
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
+	fr := newFakeRail()
+	fr.stall = true // the payment is submitted but not yet final
+	k.SetRail(fr)
 	ctx := context.Background()
-	kC, kD, stC, stD, sysD, peerOnC, peerOnD, creditorKey, router := twoKernels(t, d, Q)
-	debtorKey := router.debtorKey
-
-	// Draw until the debtor loses. A clear ends the debt, so the position is restored to try again;
-	// once a draw is payable the debt stands until it is paid, which is the state under test.
-	var payable bool
-	for i := 0; i < 40 && !payable; i++ {
-		setBalance(t, stC, peerOnC.ID, -d)
-		setBalance(t, stD, peerOnD.ID, d)
-		res, err := kD.SettlePeer(ctx, sysD.ID, creditorKey)
-		if err != nil {
-			t.Fatalf("settle: %v", err)
-		}
-		payable = res["outcome"] != "clear"
+	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
+		t.Fatal(err)
 	}
-	if !payable {
-		t.Fatal("no payable draw in forty attempts; the outcome function is not drawing")
+	peer := peerWithAddress(t, k, st, "kpeerEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", "0xcreditor")
+	buyer := setupUser(t, st, "buyer", 0)
+	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 100, "", "earn"); err != nil {
+		t.Fatal(err)
+	}
+	dispatchedCall(t, st, buyer.ID, peer.ID, "tk-won", "aa")
+	pay := &kernel.RailTransfer{ID: "tk-won", Kind: kernel.RailKindObligation, Party: buyer.ID,
+		Destination: "0xcreditor", Amount: 100, Credit: 100,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := st.ReserveRailTransfer(ctx, sys.ID, pay); err != nil {
+		t.Fatal(err)
 	}
 
-	// The debtor presents its own opening round again, signature and all. The debt is still there,
-	// so nothing but the standing settlement stands in the way.
-	last := router.opens[len(router.opens)-1]
-	status, _, err := kC.HandleSettle(ctx, debtorKey, "open", last.ts, last.sig, last.id, last.amount, "", "", nil)
-	if err != nil || status != 409 {
-		t.Fatalf("a second draw on a debt already lost: status=%d err=%v, want 409", status, err)
+	k.RailPass(ctx)
+	if fed.reveals != 0 {
+		t.Fatalf("a payment still in flight was announced %d times", fed.reveals)
+	}
+
+	fr.mu.Lock()
+	fr.status["tk-won"] = kernel.RailConfirmed
+	fr.mu.Unlock()
+	k.RailPass(ctx)
+	if fed.reveals != 1 {
+		t.Fatalf("a final payment must be announced exactly once, got %d", fed.reveals)
+	}
+	if len(fed.revealed) != 1 || fed.revealed[0].TxHash == "" {
+		t.Errorf("the announcement must name the payment: %+v", fed.revealed)
 	}
 }
 
@@ -1059,5 +988,203 @@ func TestAStalledPurchaseIsPresentedAgainNotRepeated(t *testing.T) {
 	}
 	if fr.refills != 1 {
 		t.Errorf("fuel bought %d times, want once", fr.refills)
+	}
+}
+
+// What admission counts against the credit limit is the most the call can owe, the serving markup
+// included — not the bare price. Reserving the price alone would let every admitted call carry its
+// markup past the limit, so a buyer could always draw more unpaid work than the operator allowed.
+func TestTheCreditLimitCountsTheWholeObligation(t *testing.T) {
+	st := newTestStore(t)
+	econ := kernel.DefaultEconomy()
+	econ.CreditLimit, econ.RemoteBPS = 1000, 500 // a 5% markup on top of the price
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, Economy: econ})
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+	seller := setupUser(t, st, "seller", 10000)
+	peer := peerWithAddress(t, k, st, "kpeerFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "0xbuyer")
+	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	act := setupAction(t, st, seller.ID, "quote", 100)
+	act.Visibility = kernel.VisibilityPublic
+	if err := st.UpdateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RunFederated(ctx, peer.ID, seller.ID, "quote", map[string]any{}, "", kernel.BuyerTerms{Commitment: "cm"}); err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	// The call charged 100 and the seller's own markup adds 5, so the buyer owes 105 and that is
+	// what the kernel has delivered unpaid.
+	got, err := k.Exposure(ctx, sys.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 105 {
+		t.Errorf("exposure after one 100-credit call at a 5%% markup = %d, want 105", got)
+	}
+}
+
+// A payment the rail signed and that then reverted is presented again, because the debt did not go
+// away — but never under the same name: a settled rail operation cannot be asked twice, so reusing
+// it would ask nothing at all forever. The money stays committed, unlike a withdrawal, which gives
+// its money back. And the rail must not be left halted: a blocked row stops every withdrawal and
+// every obligation payment on the kernel, so a reverted ticket that parked there would take the
+// whole rail down with no way to clear it.
+func TestARevertedObligationPaymentIsPresentedAgainUnderAFreshName(t *testing.T) {
+	k, st, fr, sys := railFixture(t)
+	ctx := context.Background()
+	buyer := setupUser(t, st, "buyer", 0)
+	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 100, "", "earn"); err != nil {
+		t.Fatal(err)
+	}
+	pay := &kernel.RailTransfer{ID: "won-1", Kind: kernel.RailKindObligation, Party: buyer.ID,
+		Destination: "0xseller", Amount: 40, Credit: 40,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := st.ReserveRailTransfer(ctx, sys.ID, pay); err != nil {
+		t.Fatal(err)
+	}
+	// Submitted, then mined and reverted.
+	fr.stall = true
+	k.RailPass(ctx)
+	first, _ := st.ReadRailTransfer(ctx, "won-1")
+	presented := fr.pays
+	fr.mu.Lock()
+	fr.status[first.RailOp()] = kernel.RailFailed
+	fr.mu.Unlock()
+	k.RailPass(ctx)
+
+	row, _ := st.ReadRailTransfer(ctx, "won-1")
+	if row.Attempt == first.Attempt {
+		t.Fatalf("a reverted payment was not given a fresh attempt: still %d", row.Attempt)
+	}
+	if row.RailOp() == first.RailOp() {
+		t.Fatalf("the fresh attempt reuses the spent name %q", row.RailOp())
+	}
+	if a, _ := balanceOf(t, st, buyer.ID); a != 60 {
+		t.Errorf("a debt that failed to pay is still a debt: the buyer has %d, want 60", a)
+	}
+	// The rail is still running: nothing about a reverted ticket halts withdrawals.
+	if reason, _, _ := k.RailStop(ctx); reason != "" {
+		t.Errorf("a reverted ticket halted the whole rail: %q", reason)
+	}
+	// And it was genuinely presented again rather than parked, in the same pass that saw the revert.
+	if fr.pays <= presented {
+		t.Errorf("the payment was never presented again (%d attempts, was %d)", fr.pays, presented)
+	}
+	if row.Status != kernel.RailStatusSubmitted {
+		t.Errorf("the fresh attempt is not in flight: %s", row.Status)
+	}
+}
+
+// A payment is booked from the fact the rail witnessed, never from what anybody claimed about it: a
+// buyer that announces someone else's transaction must not have it rewritten as its own.
+func TestAnObligationClosesOnlyAgainstItsBuyersOwnWitnessedPayment(t *testing.T) {
+	k, st, _, sys := railFixture(t)
+	ctx := context.Background()
+	peer := peerWithAddress(t, k, st, "kpeerGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG", "0xdebtor")
+	seller := setupUser(t, st, "seller", 0)
+	// The obligation names a payment that a stranger, not this buyer, actually made.
+	announcedOwed(t, st, "tk-9", peer.ID, seller.ID, "0xstranger", "0xpaid", 40)
+
+	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-9"); err == nil {
+		t.Fatal("a payment from another sender was booked as the buyer's own")
+	}
+	if got, _ := st.ReadOwed(ctx, "tk-9", peer.ID); got.Status != kernel.OwedAnnounced {
+		t.Errorf("the obligation must stay open: %s", got.Status)
+	}
+	if avail, _ := balanceOf(t, st, seller.ID); avail != 0 {
+		t.Errorf("the seller was credited a stranger's payment: %d", avail)
+	}
+}
+
+// Where a buyer pays from is proven and frozen when its call is admitted, not learned later: an
+// unproven address is refused, a priced call from a buyer proving none is refused on a world with
+// addresses, and an accepted one names the payer on the obligation from that moment — before any
+// payment can land, and for a buyer this kernel had never pulled.
+func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
+	k, st, fr, sys := railFixture(t)
+	ctx := context.Background()
+	seller := setupUser(t, st, "seller", 10000)
+	peer := peerWithAddress(t, k, st, "kpeerHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "")
+	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	act := setupAction(t, st, seller.ID, "quote", 100)
+	act.Visibility = kernel.VisibilityPublic
+	if err := st.UpdateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	run := func(terms kernel.BuyerTerms) error {
+		_, err := k.RunFederated(ctx, peer.ID, seller.ID, "quote", map[string]any{}, "", terms)
+		return err
+	}
+
+	free := setupAction(t, st, seller.ID, "free", 0)
+	free.Visibility = kernel.VisibilityPublic
+	if err := st.UpdateAction(ctx, free); err != nil {
+		t.Fatal(err)
+	}
+	k.RegisterNativeHandler("free", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		return map[string]any{}, nil
+	})
+
+	fr.verifyErr = errors.New("bad proof")
+	if err := run(kernel.BuyerTerms{Commitment: "cm", RailAddress: "0xbuyer", RailProof: "forged"}); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("an unproven payer must be refused, got %v", err)
+	}
+	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
+	// that would reject an empty address if asked.
+	if _, err := k.RunFederated(ctx, peer.ID, seller.ID, "free", map[string]any{}, "", kernel.BuyerTerms{}); err != nil {
+		t.Fatalf("a free call must not need a payer: %v", err)
+	}
+	var frozen int64
+	if err := st.(*store.DB).QueryRowForTest(ctx,
+		`SELECT COUNT(*) FROM traces WHERE action_id=? AND (dispatch_json IS NOT NULL OR owed_rail_address <> '')`, free.ID, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if frozen != 0 {
+		t.Error("a call that owes nothing froze ticket terms")
+	}
+	fr.verifyErr = nil
+	if err := run(kernel.BuyerTerms{Commitment: "cm"}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("a priced call naming no payer must be refused on a world with addresses, got %v", err)
+	}
+	if err := run(kernel.BuyerTerms{Commitment: "cm", RailAddress: "0xBUYER", RailProof: "ok"}); err != nil {
+		t.Fatalf("a proven payer must be admitted: %v", err)
+	}
+	var id string
+	if err := st.(*store.DB).QueryRowForTest(ctx,
+		`SELECT owed_rail_address FROM traces WHERE caller_user_id=? AND owed_rail_address <> ''`, peer.ID, &id); err != nil {
+		t.Fatalf("no trace froze the payer: %v", err)
+	}
+	if id != "0xbuyer" {
+		t.Errorf("frozen payer = %q, want the canonical form the rail verified", id)
+	}
+	_ = sys
+}
+
+// Recording the payment for one obligation reports success only if that obligation closed.
+// Reconciliation is global: with two obligations naming the same payment, the older takes it, and
+// the one the operator named stays open — which must be reported as such, not as success.
+func TestRecordingAPaymentReportsOnTheObligationNamed(t *testing.T) {
+	k, st, _, sys := railFixture(t)
+	ctx := context.Background()
+	peer := peerWithAddress(t, k, st, "kpeerIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", "0xdebtor")
+	seller := setupUser(t, st, "seller", 0)
+	announcedOwed(t, st, "tk-older", peer.ID, seller.ID, "", "0xsame", 40)
+	announcedOwed(t, st, "tk-named", peer.ID, seller.ID, "", "0xsame", 40)
+
+	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-named"); err == nil {
+		t.Fatal("reported success while the obligation named stayed open")
+	}
+	if got, _ := st.ReadOwed(ctx, "tk-named", peer.ID); got.Status != kernel.OwedAnnounced {
+		t.Errorf("the obligation named = %s, want still announced", got.Status)
+	}
+	if got, _ := st.ReadOwed(ctx, "tk-older", peer.ID); got.Status != kernel.OwedCredited {
+		t.Errorf("the older obligation took the payment: %s", got.Status)
+	}
+	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
+		t.Errorf("one payment credited %d, want 40 once", avail)
 	}
 }

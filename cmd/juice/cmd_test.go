@@ -51,10 +51,22 @@ func testConfig(secret string) kernel.Config {
 	return cfg
 }
 
+// testEconomy is the money policy every test kernel starts from. The lottery is off, so every
+// obligation is paid exactly and the arithmetic a test asserts is the one it wrote; a test about
+// the draw turns it on deliberately.
+func testEconomy() kernel.Economy {
+	econ := kernel.DefaultEconomy()
+	econ.CreditLimit, econ.LotteryMax = 100000, 1_000_000
+	return econ
+}
+
 // newKernel builds a kernel from cfg and the adapters in deps, with a discarded logger and the
 // manual rail, so what every test wires the same way is wired once.
 func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	deps.Config, deps.Logger = cfg, log.Discard()
+	if deps.Economy == (kernel.Economy{}) {
+		deps.Economy = testEconomy()
+	}
 	k := kernel.New(deps)
 	k.SetRail(rail.NewManual())
 	return k

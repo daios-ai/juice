@@ -59,8 +59,10 @@ func (m *Manual) RefillCost(context.Context, string) (int64, kernel.RailStatus, 
 // ScanDeposits finds nothing on its own: money arrives here only when the operator says it has.
 func (m *Manual) ScanDeposits(context.Context, uint64) ([]kernel.RailDeposit, error) { return nil, nil }
 
-// Witness turns the operator's reference into the fact it names. The reference is required, and it
-// is what makes the record idempotent: without one, a repeated command would mint money.
+// Witness turns the operator's reference into the fact it names, which is what a world with no chain
+// has instead of a finalized transaction. The reference is required, and it is what makes the record
+// idempotent: without one, a repeated command would mint money. It is also the payment's only name
+// here, so it is reported as the transaction that carried it.
 func (m *Manual) Witness(_ context.Context, ref string, amount int64) (kernel.RailDeposit, error) {
 	if ref == "" {
 		return kernel.RailDeposit{}, kernel.ErrInvalidInput.Wrap("name the payment being recorded")
@@ -68,7 +70,7 @@ func (m *Manual) Witness(_ context.Context, ref string, amount int64) (kernel.Ra
 	if amount <= 0 {
 		return kernel.RailDeposit{}, kernel.ErrInvalidInput.Wrap("amount must be positive")
 	}
-	return kernel.RailDeposit{Key: "rail:ref:" + ref, TxHash: "ref:" + ref, Amount: amount}, nil
+	return kernel.RailDeposit{Key: "rail:ref:" + ref, TxHash: ref, Amount: amount}, nil
 }
 
 // FinalizedBalances reports nothing to compare against: there is no outside to read.

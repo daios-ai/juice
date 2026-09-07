@@ -227,18 +227,19 @@ and trust verbs:
 ./juice admin deposit                  # payments held for a sender nobody has registered
 ./juice admin suspend carol            # one reversible lever, humans and kernels alike
 ./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
-./juice admin peers                    # counterparties and discovered kernels, balances, last seen
+./juice admin peers                    # counterparties and discovered kernels, last seen
 ./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
-./juice admin identity                 # own key, addresses, rail and exposure position
-./juice admin settle <peer>            # pay off the bilateral balance on the network's rail
+./juice admin identity                 # own key, addresses, rail position, money rules and credit
 ./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
 ```
 
-Serving strangers is bounded-risk by construction: a global exposure cap limits total
-unsecured credit across all peers at once, so minting identities buys an attacker
-nothing. `admin identity` shows the position; `admin settle` clears debts — including,
-below the configured quantum, by a provably fair coin flip that makes tiny debts
-economical to settle.
+Every cross-kernel call is paid for on its own. A charge too small to be worth a rail
+payment is settled by a ticket: it pays a fixed larger amount with the probability that
+makes the average payment the charge, so a stream of small calls costs a handful of
+payments rather than one apiece, and neither side can pick the outcome. Serving
+strangers is bounded-risk by construction: one credit limit bounds all the work this
+kernel has delivered and not been paid for, so minting identities buys an attacker
+nothing. `admin identity` shows the position.
 
 ## Configuration
 
@@ -252,7 +253,7 @@ The ones you are most likely to touch:
 | `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
-| `exposure_max` / `settlement_trigger` | Unsecured-credit cap across all peers, and the "please settle" threshold |
+| `lottery` / `credit_limit` | The ticket a cross-kernel charge is settled by (`0` pays every charge exactly), and the ceiling on work delivered and unpaid |
 | `native.*` | Stdlib prices and LLM URL/models (`native.llm`) |
 | `allow_local_sources` | Permit private-network URLs for action sources (off by default; loopback always allowed) |
 | `log_level` / `log_file` / `log_format` | Structured logging |

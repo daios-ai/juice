@@ -1,7 +1,7 @@
 package main
 
 // Outbound federation (§13). One adapter owns everything this kernel needs to reach a peer —
-// transport dispatch, request signing, settlement rounds, and resolve — so a federation change
+// transport dispatch, request signing, draw reveals, and resolve — so a federation change
 // never touches the HTTP action executor. It implements kernel.FederationClient and holds neither
 // the kernel nor its private key: signing is a callback into the kernel, which owns the key (§12).
 
@@ -19,17 +19,18 @@ import (
 // process federates nothing), and localPubKey/signFederation are supplied at construction from the
 // kernel, which loads the signing key at bootstrap.
 type fedAdapter struct {
-	transport      federationTransport // libp2p federation carrier; nil off the serving path
-	localPubKey    string              // this kernel's base64url Ed25519 public key
-	signFederation signerFunc          // signs as this kernel; the private key never leaves the kernel
-	recordContact  contactRecorder     // journals whether a peer answered (§13); nil off the serving path
+	transport      federationTransport                           // libp2p federation carrier; nil off the serving path
+	localPubKey    string                                        // this kernel's base64url Ed25519 public key
+	signFederation signerFunc                                    // signs as this kernel; the private key never leaves the kernel
+	railIdentity   func(context.Context) (address, proof string) // where a winning ticket is paid from
+	recordContact  contactRecorder                               // journals whether a peer answered (§13); nil off the serving path
 }
 
 // newFedAdapter builds the adapter around the kernel's own signer. Only the signers it uses are
 // injected: outbound calls need the fed_call signature, while step and settle signing stay on the
 // paths that own them (the control path and the kernel respectively).
-func newFedAdapter(localPubKey string, sign signerFunc) *fedAdapter {
-	return &fedAdapter{localPubKey: localPubKey, signFederation: sign}
+func newFedAdapter(localPubKey string, sign signerFunc, railIdentity func(context.Context) (string, string)) *fedAdapter {
+	return &fedAdapter{localPubKey: localPubKey, signFederation: sign, railIdentity: railIdentity}
 }
 
 // SetTransport installs the libp2p carrier once serve has started it, completing construction.
@@ -84,24 +85,28 @@ func contactFromResult(fr kernel.FederationResult) contactOutcome {
 // needs to check. A peer that answers with a refusal was still reached.
 func (c *fedAdapter) contacted(ctx context.Context, peerKey string, outcome contactOutcome) {
 	if c.recordContact != nil {
-		c.recordContact(ctx, peerKey, outcome, nil)
+		c.recordContact(ctx, peerKey, outcome)
 	}
 }
 
 // signerFunc signs a federation request with the platform key, returning (signature, timestamp).
-type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash string) (sig, ts string, err error)
+type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash, commitment string, lottery int64) (sig, ts string, err error)
 
 // ExecuteFederation sends a cross-kernel call over the libp2p federation transport (§13),
 // addressing the peer by its Ed25519 public key. The routing (peer key, action id) that used
 // to live in a URL is now explicit arguments. A missing transport, or a transport error,
 // returns a zero FederationResult so the kernel keeps the call pending for retry.
-func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
+func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, args map[string]any) (kernel.FederationResult, error) {
 	if c.transport == nil {
 		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
+	var addr, proof string
+	if c.railIdentity != nil {
+		addr, proof = c.railIdentity(ctx)
+	}
 	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
-		peerPublicKey, actionID, expectedContractHash, idempotencyKey, args)
+		peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment, lottery, addr, proof, args)
 	c.contacted(ctx, peerPublicKey, contactFromResult(fr))
 	return fr, err
 }
@@ -111,7 +116,7 @@ func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actio
 type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
 	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
-	Settle(ctx context.Context, peerKey string, req fed.SettleRequest) (fed.SettleResponse, error)
+	Reveal(ctx context.Context, peerKey string, req fed.RevealRequest) (fed.RevealResponse, error)
 	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
 }
 
@@ -160,28 +165,34 @@ func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Dura
 	return resp.Status, resp.Body, false, nil
 }
 
-// Settle implements kernel.FederationSettler over /juice/fed/settle/1 (§13): the debtor forwards one
-// signed round to the peer and returns its raw response body (a signed SettlementRecord) and status.
-func (c *fedAdapter) Settle(ctx context.Context, peerPublicKey, kind, timestamp, signature, settlementID string, amount int64, nonce, txHash string, record []byte) (int, []byte, error) {
+// Reveal implements kernel.TicketRevealer over /juice/fed/settle/1 (P10): the buyer tells the seller
+// how one obligation's draw came out. The kernel owns the payload and its signature; a refusal is
+// reported as-is so the worker can try again from the ticket row.
+func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.RevealPayload, signature string) error {
 	if c.transport == nil {
-		return 0, nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
-	resp, err := c.transport.Settle(ctx, peerPublicKey, fed.SettleRequest{
-		Kind: kind, Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
-		SettlementID: settlementID, Amount: amount, Nonce: nonce, TxHash: txHash, Record: record,
+	octx, cancel := context.WithTimeout(ctx, fedStepListTimeout)
+	defer cancel()
+	resp, err := c.transport.Reveal(octx, peerPublicKey, fed.RevealRequest{
+		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature,
+		TicketID: p.TicketID, Secret: p.Secret, TxHash: p.TxHash,
 	})
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return 0, nil, kernel.PeerUnreachableError(peerPublicKey)
+		return kernel.PeerUnreachableError(peerPublicKey)
 	}
-	return resp.Status, resp.Body, nil
+	if resp.Status != 200 {
+		return kernel.ErrExecutionFailed.Wrapf("the peer refused the reveal (status %d)", resp.Status)
+	}
+	return nil
 }
 
 // ResolveRemoteAction / ResolveRemoteUser implement kernel.RemoteResolver over the transport's
 // /juice/fed/resolve/1 protocol (§13 subscription-free calls): fetch one signed manifest, or map a
 // user reference to its stable id+handle on the peer. A missing transport is ErrPeerUnreachable so
 // the kernel never treats "no network" as "action absent".
-func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ActionManifest, error) {
+func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ResolvedAction, error) {
 	if c.transport == nil {
 		return nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
@@ -193,11 +204,11 @@ func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, own
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote action not found")
 	}
-	var m kernel.ActionManifest
-	if err := json.Unmarshal(resp.Body, &m); err != nil {
+	var r kernel.ResolvedAction
+	if err := json.Unmarshal(resp.Body, &r); err != nil || r.Manifest == nil {
 		return nil, kernel.ErrInvalidInput.Wrap("invalid remote manifest")
 	}
-	return &m, nil
+	return &r, nil
 }
 
 func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (string, string, error) {
@@ -225,7 +236,7 @@ func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref s
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
 // request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
 func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey string, args map[string]any) (kernel.FederationResult, error) {
+	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, railAddress, railProof string, args map[string]any) (kernel.FederationResult, error) {
 
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -237,10 +248,14 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 		Counterparty:         localPubKey,
 		ExpectedContractHash: expectedContractHash,
 		IdempotencyKey:       idempotencyKey,
+		Commitment:           commitment,
+		Lottery:              lottery,
+		RailAddress:          railAddress,
+		RailProof:            railProof,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {
-		if sig, ts, serr := signerFn(actionID, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash); serr == nil {
+		if sig, ts, serr := signerFn(actionID, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash, commitment, lottery); serr == nil {
 			req.Signature = sig
 			req.Timestamp = ts
 		}

@@ -10,9 +10,9 @@ flow_rail_onboard() {
     echo "=== FLOW rail_onboard ==="
     local dir; dir=$(new_dir)
     # The selling kernel serves strangers on credit, which is what makes the first call possible
-    # without anyone prefunding anything (U29).
-    FED_RCFG=(exposure_max=1000 settlement_trigger=500)
+    # without anyone prefunding anything (U29). Serving is funded by the seller's own money.
     _fed_setup "$dir" || { fail "rail_onboard.setup" "setup failed"; return; }
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
     local ha; ha=$(home "$dir" alice)
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
 
@@ -78,50 +78,64 @@ flow_rail_withdraw() {
     assert_jnum "rail_withdraw.books_balance" "$(jj "$db" "$hs" admin identity)" gap 0
 }
 
-# Settlement pays the whole debt and names the payment; the creditor closes its own books against it.
+# A cross-kernel obligation whose face value is below it is paid exactly, with no draw at all — the
+# deterministic path, and the one that always moves money. The buyer pays on the rail, tells the
+# seller which payment settles it, and the seller closes its books when that payment arrives.
 flow_rail_settlement() {
     echo "=== FLOW rail_settlement ==="
     local dir; dir=$(new_dir)
-    # No quantum, so the debt is settled exactly rather than drawn for — the deterministic path, and
-    # the one that always moves money.
-    FED_RCFG=(exposure_max=1000 settlement_trigger=500)
+    # The buyer's rail worker runs often, so the payment it commits at settlement is sent and the
+    # seller told which payment settles the obligation, inside the flow rather than a minute later.
+    FED_LCFG=(remote_retry_interval_seconds=2)
     _fed_setup "$dir" || { fail "rail_settlement.setup" "setup failed"; return; }
     local lkey="$FED_LKEY"
 
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
-    assert_nonempty "rail_settlement.call_on_credit" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
-    assert_eq "rail_settlement.debt" 11 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
+    local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
-    local out sid
-    out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)
-    sid=$(strfield "$out" settlement_id)
-    assert_json "rail_settlement.paid" "$out" status announced
-    assert_json "rail_settlement.mode" "$out" mode exact
-    assert_nonempty "rail_settlement.names_the_payment" "$sid"
-    # The debtor's books close as soon as the payment is final.
-    assert_eq "rail_settlement.debtor_clear" 0 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show kernel-r)" available)"
-    # The creditor's do not: it is owed until it records that the money arrived.
-    assert_eq "rail_settlement.creditor_still_owed" -11 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
-    assert_contains "rail_settlement.claim_waiting" "$sid" "$(j "$FED_DBR" "$FED_HR" admin deposit)"
+    assert_nonempty "rail_settlement.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
+    # mp 10 → sr 11 → q 12. With no lottery the obligation of 11 is paid exactly, so the caller is
+    # out the whole all-in price less the import fee its own kernel keeps.
+    assert_eq "rail_settlement.charged_exactly" 11 "$(( before - $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) ))"
+    # The obligation is a ticket, not a balance: a peer row holds nothing.
+    assert_eq "rail_settlement.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
+    # The seller has delivered work it has not been paid for, and its books say so: the whole
+    # obligation of 11, which is what the buyer owes, not the 10 the action alone charged.
+    assert_jnum "rail_settlement.exposure_recorded" "$(jj "$FED_DBR" "$FED_HR" admin identity)" exposure 11
 
-    # Recording some other payment from the same peer does not close this settlement: only the
-    # payment it names does. (A reference to a payment that never happened is refusable only where
-    # something outside can be asked; here the operator's word is the fact.)
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "unrelated-payment" -- "$lkey" 5 >/dev/null 2>&1
-    assert_contains "rail_settlement.claim_still_open" "$sid" "$(j "$FED_DBR" "$FED_HR" admin deposit)"
+    # The buyer pays, then tells the seller which payment settles it. Wait for the seller to hear:
+    # until it has, it does not know whether it is owed anything at all.
+    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/paid)")" ticket_id)
+    assert_nonempty "rail_settlement.names_its_ticket" "$ticket"
+    local owed="" i
+    for i in $(seq 1 20); do
+        owed=$(owed_count "$FED_DBR" "$FED_HR" "$lkey")
+        [ "$owed" = "1" ] && break
+        sleep 1
+    done
+    assert_eq "rail_settlement.seller_is_owed" 1 "$owed"
 
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$sid" -- "$lkey" 11 >/dev/null 2>&1 || { fail "rail_settlement.record" "failed"; return; }
-    assert_not_contains "rail_settlement.claim_closed" "$sid" "$(j "$FED_DBR" "$FED_HR" admin deposit)"
-    local after; after=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)
-    # Recording it again moves nothing.
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$sid" -- "$lkey" 11 >/dev/null 2>&1
-    assert_eq "rail_settlement.record_idempotent" "$after" "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
+    # The operator's own worklist shows it, named by what closes it: this is how an operator finds
+    # the obligation to record without being told its id by the buyer.
+    local awaiting; awaiting=$(jj "$FED_DBR" "$FED_HR" admin deposit)
+    assert_eq "rail_settlement.listed_by_its_id" "$ticket" "$(rowfield "$awaiting" owed id)"
+    assert_eq "rail_settlement.listed_with_what_is_owed" 11 "$(rowfield "$awaiting" owed obligation)"
+    assert_eq "rail_settlement.listed_against_its_buyer" "$lkey" "$(rowfield "$awaiting" owed peer)"
 
-    # Both sets of books add up, and there is nothing left to settle.
-    assert_jnum "rail_settlement.debtor_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
-    assert_jnum "rail_settlement.creditor_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
-    assert_json "rail_settlement.nothing_left" "$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r)" status settled
+    # On a rail with no addresses the operator's own record is what makes the payment final, and it
+    # names the obligation it closes. Recording it twice moves money once.
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$lkey" 11 >/dev/null 2>&1 || { fail "rail_settlement.record" "failed"; return; }
+    assert_eq "rail_settlement.nothing_owed" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$lkey")"
+    local after; after=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$lkey" 11 >/dev/null 2>&1
+    assert_eq "rail_settlement.record_idempotent" "$after" "$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)"
+
+    # Both sets of books add up, and the cash discharged what was delivered.
+    assert_jnum "rail_settlement.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
+    assert_jnum "rail_settlement.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
+    assert_jnum "rail_settlement.exposure_discharged" "$(jj "$FED_DBR" "$FED_HR" admin identity)" exposure 0
 }
 
 # Two kernels on different networks cannot meet, even sharing a bootstrap node (acceptance 2).
@@ -230,38 +244,38 @@ flow_rail_profile() {
 flow_rail_economic_loop() {
     echo "=== FLOW rail_economic_loop ==="
     local dir; dir=$(new_dir)
-    FED_RCFG=(exposure_max=1000 settlement_trigger=500)
     _fed_setup "$dir" || { fail "rail_economic_loop.setup" "setup failed"; return; }
 
     # A third kernel, C, bootstrapped to the same node so B can reach it.
     local dbc="$dir/c/kernel/juice.db" hc="$dir/csys"
     mkdir -p "$dir/c/kernel" "$hc/.juice"
     start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 \
-        exposure_max=1000 settlement_trigger=500 \
         || { fail "rail_economic_loop.boot_c" "no start"; return; }
     j "$dbc" "$hc" auth login sys --password sys-pass >/dev/null 2>&1
     local ckey; ckey=$(kernel_key "$dbc" "$hc")
     publish "$dbc" "$hc" tooling --kind http --source "http://127.0.0.1:$FED_BPORT" --description "tooling" --price 20 >/dev/null 2>&1
+    j "$dbc" "$hc" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
 
-    # B sells; A's buyer pays for it on credit.
+    # B sells, funding its own work; A's buyer pays for it.
     publish "$FED_DBR" "$FED_HR" service --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a service" --price 200 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
     j "$FED_DBL" "$FED_HL" admin deposit buyer 1000 --ref "$(newref)" >/dev/null 2>&1
     assert_nonempty "rail_economic_loop.buyer_pays_b" "$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/service '{}')" tx_id)"
 
+    # A owes B for the work; B records the payment that settles it and is credited what it is owed.
+    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$(find_id "$(jj "$FED_DBL" "$ha" tx list)" action_name sys/service)")" ticket_id)
+    assert_nonempty "rail_economic_loop.names_its_ticket" "$ticket"
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$FED_LKEY" 210 >/dev/null 2>&1
+    assert_eq "rail_economic_loop.b_books_clear" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY")"
+
     # B has earned: its operator's balance grew by the charge plus its serving markup.
     local earned; earned=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
-    assert_eq "rail_economic_loop.b_earned" 210 "$earned"
-
-    # A owes B; they settle over the rail and B records the payment.
-    local out sid; out=$(jj "$FED_DBL" "$FED_HL" admin settle kernel-r); sid=$(strfield "$out" settlement_id)
-    assert_json "rail_economic_loop.settled" "$out" status announced
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$sid" -- "$FED_LKEY" 210 >/dev/null 2>&1
-    assert_eq "rail_economic_loop.b_books_clear" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$FED_LKEY")" available)"
 
     # B spends its earnings on C: what it sold for is money it can now spend.
-    assert_nonempty "rail_economic_loop.b_buys_from_c" "$(strfield "$(jj "$FED_DBR" "$FED_HR" run "sys@$ckey/tooling" '{}')" tx_id)"
+    local ctx1; ctx1=$(strfield "$(jj "$FED_DBR" "$FED_HR" run "sys@$ckey/tooling" '{}')" tx_id)
+    assert_nonempty "rail_economic_loop.b_buys_from_c" "$ctx1"
     local spent; spent=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
     assert_ne "rail_economic_loop.b_spent" "$earned" "$spent"
     # C's books, checked while nothing is in flight.
@@ -277,9 +291,23 @@ flow_rail_economic_loop() {
     # is now — the ordinary consequence of restarting a node others reach through.
     stop_server "$dbc"
     start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$(kernel_fed_addr "$FED_DBR")" \
-        discovery_interval_seconds=2 exposure_max=1000 settlement_trigger=500 \
+        discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.restart_c" "did not restart"; return; }
     await_login "$dbc" "$hc" || { fail "rail_economic_loop.c_answers" "not serving after restart"; return; }
+    # C will not serve B again until it has been paid for what it already delivered (P10), so the
+    # loop closes the way it must: the obligation is settled, and only then is there more trade.
+    local ctick; ctick=$(strfield "$(jj "$FED_DBR" "$FED_HR" tx show "$ctx1")" ticket_id)
+    assert_nonempty "rail_economic_loop.names_its_ticket" "$ctick"
+    # C can only record the payment once B has told it how the draw came out; until then C does not
+    # know it is owed anything. Wait for that, rather than racing the reveal across a restart.
+    local cowed="" i
+    for i in $(seq 1 20); do
+        cowed=$(owed_count "$dbc" "$hc" "$FED_RKEY")
+        [ "$cowed" = "1" ] && break
+        sleep 1
+    done
+    assert_eq "rail_economic_loop.c_is_owed" 1 "$cowed"
+    j "$dbc" "$hc" admin deposit --ref "$ctick" -- "$FED_RKEY" 21 >/dev/null 2>&1
     local bought=""
     for _ in $(seq 15); do
         bought=$(strfield "$(jj "$FED_DBR" "$FED_HR" run "sys@$ckey/tooling" '{}')" tx_id)

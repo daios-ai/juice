@@ -113,7 +113,7 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 
 	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "inner"}
 	cfg := testConfig()
-	cfg.FeeBPS, cfg.FeeRecipientID = 2000, feeUser.ID
+	cfg.FeeRecipientID = feeUser.ID
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	_, tr := beginTestRun(t, st, carol.ID, outer)
@@ -1021,7 +1021,7 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
 	cfg := testConfig()
-	cfg.FeeBPS, cfg.FeeRecipientID = 2000, feeUser.ID
+	cfg.FeeRecipientID = feeUser.ID
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
@@ -1190,7 +1190,7 @@ func TestComputeFee(t *testing.T) {
 		{100, 10000, 0, 100},
 	}
 	for _, tc := range tests {
-		net, fee := kernel.ComputeFee(tc.taxable, tc.feeBPS)
+		net, fee := (kernel.Economy{FeeBPS: tc.feeBPS}).Fee(tc.taxable)
 		if net != tc.wantNet || fee != tc.wantFee {
 			t.Errorf("ComputeFee(%d, %d) = (%d, %d), want (%d, %d)",
 				tc.taxable, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
@@ -1203,7 +1203,7 @@ func TestComputeFee(t *testing.T) {
 
 func TestComputeFeeInvariant(t *testing.T) {
 	for taxable := int64(0); taxable <= 10000; taxable++ {
-		net, fee := kernel.ComputeFee(taxable, 2000)
+		net, fee := (kernel.Economy{FeeBPS: 2000}).Fee(taxable)
 		if net+fee != taxable {
 			t.Fatalf("taxable=%d: net(%d)+fee(%d) != taxable", taxable, net, fee)
 		}
@@ -1620,7 +1620,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 	t.Run("missing recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
 		cfg := testConfig()
-		cfg.FeeBPS, cfg.FeeRecipientID = 2000, "" // 20% fee — no recipient set
+		cfg.FeeRecipientID = "" // 20% fee — no recipient set
 		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
@@ -1630,7 +1630,7 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 	t.Run("nonexistent recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
 		cfg := testConfig()
-		cfg.FeeBPS, cfg.FeeRecipientID = 2000, "no-such-user"
+		cfg.FeeRecipientID = "no-such-user"
 		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
@@ -1640,8 +1640,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 	t.Run("zero fee_bps passes with no recipient", func(t *testing.T) {
 		st := newTestStore(t)
 		cfg := testConfig()
-		cfg.FeeBPS = 0
-		k := newKernel(cfg, kernel.Dependencies{Store: st})
+		econ := testEconomy()
+		econ.FeeBPS = 0
+		k := newKernel(cfg, kernel.Dependencies{Store: st, Economy: econ})
 		if err := k.ValidateFeeRecipient(ctx); err != nil {
 			t.Errorf("expected no error when fee_bps=0, got %v", err)
 		}
@@ -1834,7 +1835,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	exec := &subcallThenFailExec{targetUser: provider.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
-	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "")
+	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "", kernel.BuyerTerms{})
 	if err == nil {
 		t.Fatal("expected outer call to fail")
 	}

@@ -501,7 +501,7 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	const rcpt = "recipient-kernel-key"
 	stepSig, _ := testNet.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
 	listSig, _ := testNet.SignStepListPayload(priv, cp, rcpt, ts)
-	callSig, _ := testNet.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash)
+	callSig, _ := testNet.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, "", 0)
 
 	// A call signature must not pass as a step signature, nor either step kind as the other.
 	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
@@ -513,7 +513,7 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	if err := testNet.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
 		t.Error("a step completion signature must not verify as a step list")
 	}
-	if err := testNet.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, stepSig); err == nil {
+	if err := testNet.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, "", 0, stepSig); err == nil {
 		t.Error("a step signature must not verify as a federation call")
 	}
 	// Sanity: each verifies under its own domain.

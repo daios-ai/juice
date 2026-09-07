@@ -110,7 +110,9 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 		return *rej
 	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
-		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
+		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, kernel.BuyerTerms{
+			Commitment: req.Commitment, Lottery: req.Lottery, RailAddress: req.RailAddress, RailProof: req.RailProof,
+		}, []byte(req.Args))
 	if err != nil {
 		// No receipt to settle on → the caller treats this as pending (retry).
 		return fedError(err)
@@ -147,22 +149,31 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	return fedOK(status, body)
 }
 
-// OnSettle answers the /juice/fed/settle/1 residual-settlement exchange (§13): the creditor side of
-// the two-party commit/reveal. The connection-key check and freshness window mirror OnCall/OnStep;
-// the kernel verifies the debtor's scoped signature and applies the three-way legs idempotently.
-func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.SettleRequest) fed.SettleResponse {
+// ownKey is this kernel's own public key, the recipient every inbound signature is bound to.
+func (h *fedHandlers) ownKey(ctx context.Context) string {
+	k, _ := h.kernel.GetConfig(ctx, configKeySigningPublic)
+	return k
+}
+
+// OnReveal answers the /juice/fed/settle/1 protocol (P10): the seller side of one obligation's
+// draw. The connection-key check and freshness window mirror OnCall/OnStep; the kernel verifies the
+// buyer's signature, recomputes the outcome from the revealed secret, and applies it idempotently.
+func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.RevealRequest) fed.RevealResponse {
 	if rej := h.admit(req.Counterparty, peerKey, false); rej != nil {
 		return *rej
 	}
 	if err := checkFederationTimestamp(req.Timestamp); err != nil {
 		return fedError(err)
 	}
-	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
-		req.SettlementID, req.Amount, req.Nonce, req.TxHash, []byte(req.Record))
+	t, err := h.kernel.HandleReveal(ctx, req.Counterparty, kernel.RevealPayload{
+		Counterparty: req.Counterparty, Recipient: h.ownKey(ctx), Secret: req.Secret,
+		TicketID: req.TicketID, Timestamp: req.Timestamp, TxHash: req.TxHash,
+	}, req.Signature)
 	if err != nil {
 		return fedError(err)
 	}
-	return fed.Response{Status: status, Body: body}
+	body, _ := json.Marshal(t)
+	return fed.Response{Status: http.StatusOK, Body: body}
 }
 
 // OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
@@ -191,7 +202,12 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 		if err != nil {
 			return fedError(err)
 		}
-		return fedOK(http.StatusOK, m)
+		// The reply carries where this kernel is paid, with its own proof. A buyer takes on an
+		// obligation the moment it calls, so it must know how to pay before it does — and one cold
+		// resolve is all a first call has (P10). It rides beside the manifest rather than inside it:
+		// the contract is what the action is, not where its kernel banks.
+		addr, proof := h.kernel.RailIdentity(ctx)
+		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, RailAddress: addr, RailProof: proof})
 	case "user":
 		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
 		if err != nil {
@@ -204,8 +220,7 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 }
 
 // OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
-// public key; GetGossip uses it to report the requesting peer its credit here (counterparty_balance,
-// §13 peer sync). req.Cursor resumes the evidence stream.
+// public key. req.Cursor resumes the evidence stream.
 func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
 	g, err := h.kernel.GetGossip(ctx, peerKey, req.Cursor)
 	if err != nil {
@@ -428,7 +443,7 @@ func replayStepRecord(rec *kernel.IdempotencyRecord, stepID string) (int, map[st
 	if receipt.Status != kernel.TxSuccess {
 		// A settled FAILURE still charged the caller, so the replay carries the same ids the fresh
 		// response did — otherwise a retry after a dropped connection loses the only pointer to the
-		// transaction it paid for, which is the loss withSettlementMeta exists to prevent.
+		// transaction it paid for, which is the loss this branch exists to prevent.
 		body["error"], body["code"] = result["error"], result["code"]
 		body["meta"] = map[string]string{
 			"step_id": stepID, "tx_id": receipt.TxID,
@@ -481,7 +496,7 @@ func settleIdempotencyWithReceipt(k *kernel.Kernel, ctx context.Context, recID, 
 
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
-func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
+func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, buyer kernel.BuyerTerms, rawBody []byte) (int, map[string]any, error) {
 	argsHash := sha256HexBytes(rawBody)
 
 	if err := checkFederationTimestamp(tsStr); err != nil {
@@ -491,8 +506,13 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
 	// transport-authenticated caller key (OnCall proved connection key == counterparty).
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	if err := k.Network().VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+	if err := k.Network().VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, buyer.Commitment, buyer.Lottery, sigStr); err != nil {
 		return 0, nil, err
+	}
+	// A buyer may not quote a ticket larger than this world allows: the face value is what its own
+	// draw pays, so an unbounded one would let a caller name a payment nobody agreed to (P10).
+	if max := k.LotteryMax(); buyer.Lottery < 0 || buyer.Lottery > max {
+		return 0, nil, kernel.ErrInvalidInput.Wrapf("a ticket of %d exceeds this network's ceiling of %d", buyer.Lottery, max)
 	}
 	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
 	// signature-valid caller with no account here gets a zero-balance one, so a price-0 call
@@ -568,13 +588,13 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 	}
 
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID)
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID, buyer)
 	if callErr != nil {
 		wireCode, wireMsg := wireError(callErr)
 		errJSON, _ := json.Marshal(map[string]string{"error": wireMsg, "code": wireCode})
 		// A committed transaction (reply carries a receipt) means the call settled — possibly
 		// with charge > 0 from settled descendants. Return THAT receipt so the caller settles
-		// the real charge, preserving bilateral conservation rather than under-paying with 0.
+		// the real charge, so the two kernels agree on what was charged rather than under-paying with 0.
 		if reply != nil && reply.ReceiptID != "" {
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)

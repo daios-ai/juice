@@ -265,6 +265,13 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 	cfg.Network = world.Network()
+	// Every money rule comes from one place, built from the operator's configuration and the world's
+	// own ticket ceiling (P10): what a payment costs is a property of the rail, so the ceiling rides
+	// with it and the operator picks a ticket at or below it.
+	econ, err := globalCfg.Economy(world.LotteryMax)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+	}
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
 	k := kernel.New(kernel.Dependencies{
@@ -273,12 +280,13 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		HTTP:     httpExec, // one cohesive HTTP concern: dispatch + ordinary fetching
 		Embedder: embedder,
 		Config:   cfg,
+		Economy:  econ,
 		Logger:   logger,
 	})
 	// Federation is a separate adapter, constructed around the kernel's own signer and attached
 	// after (§13): it holds neither the kernel nor the private key, and its transport arrives at
 	// serve time via SetTransport. Signing goes live when bootstrap calls SetSigningKey.
-	fedAdapter := newFedAdapter("", k.SignFederation)
+	fedAdapter := newFedAdapter("", k.SignFederation, k.RailIdentity)
 	k.SetFederation(fedAdapter)
 
 	// Wire credential encryption. Generate a key on first use and persist it. Fail loudly if the

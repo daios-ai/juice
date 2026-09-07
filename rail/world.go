@@ -48,6 +48,11 @@ type World struct {
 	FromBlock uint64   `json:"fromBlock"`
 	Venue     venueCfg `json:"venue"`
 	Gas       gasCfg   `json:"gas"`
+	// LotteryMax is the largest ticket a kernel on this world may write (P10). It rides with the
+	// rail because it is a property of what a payment there costs, and it is outside the defining
+	// part so it can follow that cost without splitting the network. An operator picks its own
+	// lottery at or below it; every kernel refuses a foreign call quoting more.
+	LotteryMax int64 `json:"lotteryMax"`
 }
 
 type venueCfg struct {
@@ -103,6 +108,9 @@ func Load(nameOrPath string) (World, error) {
 func (w World) validate() error {
 	if w.Name == "" {
 		return fmt.Errorf("world file has no name")
+	}
+	if w.LotteryMax < 0 {
+		return fmt.Errorf("world %q states a negative lottery ceiling", w.Name)
 	}
 	if strings.ContainsAny(w.Name, "/@ ") {
 		return fmt.Errorf("world name %q must be a bare name", w.Name)

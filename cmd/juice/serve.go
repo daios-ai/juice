@@ -305,16 +305,16 @@ const (
 // write is detached from the caller's context, because the very timeout that proves a peer
 // unreachable would otherwise cancel the write recording it, and its error is dropped, because a
 // display-cache write must never change the result of the operation that observed it.
-type contactRecorder func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64)
+type contactRecorder func(ctx context.Context, peerKey string, outcome contactOutcome)
 
 // newContactRecorder is where an undecided outcome stops: only proof is persisted, so callers report
 // what happened and none of them has to know that "may have arrived" means "write nothing".
-func newContactRecorder(record func(context.Context, string, bool, *int64) error) contactRecorder {
-	return func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64) {
+func newContactRecorder(record func(context.Context, string, bool) error) contactRecorder {
+	return func(ctx context.Context, peerKey string, outcome contactOutcome) {
 		if peerKey == "" || outcome == contactUnknown {
 			return
 		}
-		_ = record(context.WithoutCancel(ctx), peerKey, outcome == contactReached, credit)
+		_ = record(context.WithoutCancel(ctx), peerKey, outcome == contactReached)
 	}
 }
 
@@ -331,7 +331,7 @@ type fedDiscoverer interface {
 // namespace, then pulls gossip from the union of the namespace's providers, configured bootstrap
 // seeds, and known counterparties. On a VERIFIED pull — one authenticated as the key we dialed
 // (g.PublicKey == key) that accumulates cleanly — it refreshes the catalog, advances the evidence
-// cursor, and (for a counterparty) caches liveness/credit. A non-verified pull (transport error, bad
+// cursor, and records that the peer was reached. A non-verified pull (transport error, bad
 // JSON, key mismatch, or accumulate rejection) is logged and retried a later pass; discovery holds no
 // per-candidate attempt state, since routing discovery re-surfaces live kernels every pass. One
 // structured discovery.pass summary ends the pass: Debug when nothing failed, Info otherwise.
@@ -385,7 +385,7 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		if err != nil {
 			// The rotation retries a later pass. Only a dial that never connected proves the peer is
 			// unreachable (§13); a stream that broke mid-pull proves nothing and records nothing.
-			recordContact(ctx, key, contactFromErr(err), nil)
+			recordContact(ctx, key, contactFromErr(err))
 			fail("transport", err)
 			continue
 		}
@@ -409,9 +409,8 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 			_ = setCursor(ctx, key, next)
 		}
 		// Recorded after accumulation, which is what upserts the kernel row: an earlier write would
-		// no-op on a first contact. CounterpartyBalance is set only for a known counterparty (§13),
-		// so passing it through needs no separate roster check.
-		recordContact(ctx, key, contactReached, g.CounterpartyBalance)
+		// no-op on a first contact.
+		recordContact(ctx, key, contactReached)
 	}
 
 	fields := []any{"candidates", len(keys), "ok", ok, "failed", failed, "duration_ms", time.Since(start).Milliseconds()}
@@ -612,7 +611,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
 		r.Post("/control/deposit", srv.ctlDeposit)
 		r.Get("/control/deposits", srv.ctlListDeposits)
-		r.Post("/control/peers/settle", srv.ctlSettlePeer)
 		r.Get("/control/peers", srv.ctlListPeers)
 		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
 		r.Get("/control/identity", srv.ctlIdentity)

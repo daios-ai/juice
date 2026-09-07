@@ -53,8 +53,13 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		}
 	}
 
-	sig, err := net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash)
+	// A call that stakes no ticket omits both new fields, so its canonical form — and this
+	// signature — are exactly what they were before the lottery existed.
+	sig, err := net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash, "", 0)
 	check("fed_call", "7nvN8-uTEDnPSjjxUvSNBp-pfbUIgtKe3SvSRWv2hPCoELwhjoz_Z3TrRkde8c08qCyGnCy4HbZcUb2V7B-zCw", sig, err)
+
+	sig, err = net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash, "cm-1", 100)
+	check("fed_call_ticket", "0m14WxVaIc55g7LlT_qXVVaS9bS8dj8LewbnbAdivDoH_3XIjfT_aubuDv1p0yzgZimyXgKjbSrX4UL08yfjBQ", sig, err)
 
 	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash)
 	check("step_complete", "pG89K-ofhZ8xs-ggsVRJ9eNGeOsTcTFQejYfyIboALe7WyHVjZl2qKEF2-Gk4YDCk8vL37QWlIHOwPXHkiueDA", sig, err)
@@ -65,17 +70,10 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.SignStepListPayload(key, cp, recipient, ts)
 	check("step_list", "hWP8ddJWQ4eDzSPL9T55CVoFzKhWOvlgiZpBfZtNQC1Z4BA1nhU0bFxDCXvrdDE0ZN8xUG-9xB0KOLo9vyjnCg", sig, err)
 
-	sig, err = net.sign(key, sigDomainSettleOpen, settleOpenPayload(cp, recipient, settleID, 42, ts))
-	check("settle_open", "pw7IjPlg2dO4N6zDTPfdpV8aRiNzthHy7e9TXlERHC6WZW0yYqm3hIi-wxrfi6QkhjOttbgYCqaFIfCTqPWuDg", sig, err)
-
-	sig, err = net.sign(key, sigDomainSettleFinish, settleFinishPayload(cp, recipient, settleID, nonce, ts))
-	check("settle_finish", "FL4cBKM0uSLirTLoEVSGo55Yto5CnHkWZujVL9r_2cScomtl_J6WVgXay-UvQ0vNjnWjfp8-X0t0WB95ctU-Dg", sig, err)
-
-	sig, err = net.sign(key, sigDomainSettleAnnounce, settleAnnouncePayload(cp, recipient, settleID, "tx-1", ts))
-	check("settle_announce", "s-xO3HCxXhZLhGQuX_lAa6djf9AGtVuj7cP--pViJkRpcS8Ss52t_wfx0BbIKqKTtubKFNhpcJCglhzf7ZT7CQ", sig, err)
-
-	sig, err = net.sign(key, sigDomainSettleReconcile, settleReconcilePayload(cp, recipient, settleID, ts))
-	check("settle_reconcile", "YtLuLELLzN69HTiLQi6OaOXJADKHk6rth9Ly9r9n5aGtwkWnTHADveN6vLRuaiV-0NKwC2cdVvnKqxAOpGS_Dw", sig, err)
+	sig, err = net.sign(key, sigDomainReveal, RevealPayload{
+		Counterparty: cp, Recipient: recipient, Secret: "s", TicketID: settleID, Timestamp: ts, TxHash: "tx-1",
+	})
+	check("reveal", "hjdLt6kUB26CIp1ODDCEtfsjYQUGZ4ymN6duaxbur9BicucTq3cKqNJJlc_DfcehEnfd-oYxEAPMfSD4v5n3CA", sig, err)
 
 	m := &ActionManifest{
 		ActionID: actionID, OwnerID: "owner-1", OwnerHandle: "alice", Name: "greet",
@@ -86,11 +84,4 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.SignManifest(key, m)
 	check("manifest", "WOYz6ZZKYV4jhDweoekj5wGyTWPbtY-e-Jgpb5RAVJ-cUOUiglPttUo2YrjZK51RhJaKYpknvMIZhUggOBEpDw", sig, err)
 
-	rec := &SettlementRecord{
-		SettlementID: settleID, Creditor: cp, Debtor: recipient, Amount: 42, Quantum: 100,
-		Mode: "probabilistic", Commitment: "H", Nonce: nonce, Secret: "s", Outcome: "pay",
-		ExpiresAt: fixedTime, CreatedAt: fixedTime,
-	}
-	sig, err = net.sign(key, sigDomainSettlementRec, rec)
-	check("settlement_record", "5le2X3fMYhyPPZvbERmeaqNABEwr5qBNq5-MvqLzW9u_EyKc4wH0mXJX_ZArQvDdaxYMEisiEyVYjoKYWqIdAg", sig, err)
 }

@@ -77,17 +77,16 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 		writeOr(w, acct, nil)
 		return
 	}
-	// A kernel target renders one flat record: its naming state plus the account state when one
-	// exists, so `available` reads the same here as for a local account.
+	// A kernel target renders one flat record: its naming state, plus what it owes us when it has
+	// traded here. A peer account holds no balance of its own (P10), so none is shown.
 	rk, _ := s.kernel.ReadKernel(r.Context(), key)
 	out := map[string]any{"public_key": key}
 	if rk != nil {
 		out["petname"], out["nickname"], out["about"], out["rail_address"] = rk.Petname, rk.Nickname, rk.About, rk.RailAddress
-		out["last_seen"], out["peer_credit"] = rk.LastSeen, rk.PeerCredit
+		out["last_seen"] = rk.LastSeen
 	}
 	if acct != nil {
-		out["id"], out["available"], out["locked"] = acct.ID, acct.Available, acct.Locked
-		out["suspended_at"], out["created_at"] = acct.SuspendedAt, acct.CreatedAt
+		out["id"], out["suspended_at"], out["created_at"] = acct.ID, acct.SuspendedAt, acct.CreatedAt
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -184,67 +183,37 @@ func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
 }
 
-// ctlListDeposits shows what is waiting on the operator: money whose sender nobody has claimed, and
-// settlements a peer says it has paid.
+// ctlListDeposits shows what is waiting on the operator, in one list: money that has arrived whose
+// sender nobody has claimed, and obligations a buyer says it has paid whose money this kernel has
+// not yet seen. Both wait on the same decision, so both belong in the same view.
 func (s *server) ctlListDeposits(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.kernel.ListHeldDeposits(r.Context(), callerFrom(r))
+	ctx, caller := r.Context(), callerFrom(r)
+	held, err := s.kernel.ListHeldDeposits(ctx, caller)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeOr(w, railTransferViews(s.kernel, r.Context(), rows), nil)
-}
-
-// ctlSettlePeer settles the bilateral position with a peer (§13): exact when the debt is at least Q,
-// otherwise the probabilistic residual protocol. Either way the kernel pays on the rail and announces
-// the payment; the creditor closes its own books when that payment arrives. Superuser only.
-func (s *server) ctlSettlePeer(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Handle string `json:"handle"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	// Settlement is kernel-only, so it uses the kernel resolver directly rather than the mixed
-	// wrapper (§14): a petname or key names the counterparty, and it must already hold an account.
-	key, err := s.resolvePeerKey(r.Context(), req.Handle)
+	owed, err := s.kernel.ListOwed(ctx, caller)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	u, err := s.kernel.ReadAccountByKernelKey(r.Context(), key)
-	if err != nil || u == nil {
-		writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
-		return
-	}
-	res, err := s.kernel.SettlePeer(r.Context(), callerFrom(r), u.ID)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, awaiting{
+		Deposits: railTransferViews(s.kernel, ctx, held),
+		Owed:     owedViews(s.kernel, ctx, owed),
+	})
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
-	// The roster (§14): every known kernel by public key — counterparties (with an account and
-	// balance) and discovery-only kernels (no account) — this kernel excluded, served by one store
-	// query. Suspended counterparties are included only with ?all=1, like action list hides inactive.
+	// The roster (§14): every known kernel by public key — counterparties this kernel has traded
+	// with and kernels known only from discovery — itself excluded, served by one store query.
+	// Suspended counterparties are included only with ?all=1, like action list hides inactive.
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
 	limit, offset := listBounds(r)
 	views, err := s.kernel.ListKernels(r.Context(), all, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-	// Flag debtor counterparties when global gross receivables have reached Y (display only, FIX 3).
-	if settlementDueConfigured() {
-		if gross, err := s.kernel.GrossReceivables(r.Context()); err == nil && gross >= globalCfg.SettlementTrigger {
-			for _, v := range views {
-				if v.HasAccount && v.Available < 0 {
-					v.SettlementDue = true
-				}
-			}
-		}
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -280,10 +249,10 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey); eerr == nil {
 		resp["evidence"] = ev
 	}
-	// Local account info when this peer is a financial counterparty here (§14 inspect): the bilateral
-	// balance and suspension, independent of whether the peer is currently reachable.
+	// Local account state when this peer has traded here (§14 inspect): whether it is suspended,
+	// independent of whether it is currently reachable. No balance: a peer row holds no money (P10).
 	if pu, _ := s.kernel.ReadAccountByKernelKey(ctx, peerKey); pu != nil {
-		resp["account"] = map[string]any{"available": pu.Available, "locked": pu.Locked, "suspended": pu.SuspendedAt != nil}
+		resp["account"] = map[string]any{"suspended": pu.SuspendedAt != nil}
 	}
 
 	// Live view when the peer answers: a fresh gossip pull (identity + own signed manifests).
@@ -355,13 +324,6 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
 }
 
-// settlementDueConfigured reports whether the settlement trigger Y can flag anything: only a kernel
-// that extends credit accrues receivables to settle, so at exposure_max 0 (prepaid-only) Y is inert
-// however it is configured (§13).
-func settlementDueConfigured() bool {
-	return globalCfg.ExposureMax > 0 && globalCfg.SettlementTrigger > 0
-}
-
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen
 // addresses. This is how an operator obtains the key to share for friending, now that the
 // .well-known document is gone (§13).
@@ -377,11 +339,11 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
 	}
-	gross, _ := s.kernel.GrossReceivables(ctx)
+	econ := s.kernel.Economy()
+	exposure, _ := s.kernel.Exposure(ctx, callerFrom(r))
 	out := map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
-		"exposure_max": globalCfg.ExposureMax, "settlement_trigger": globalCfg.SettlementTrigger,
-		"settlement_quantum": globalCfg.SettlementQuantum, "gross_receivables": gross,
-		"settlement_due": settlementDueConfigured() && gross >= globalCfg.SettlementTrigger}
+		"lottery": econ.Lottery, "credit_limit": econ.CreditLimit, "exposure": exposure,
+		"fee_bps": econ.FeeBPS, "remote_bps": econ.RemoteBPS, "import_bps": econ.ImportBPS}
 	// The rail position: what is held, what is promised elsewhere, and whether the books still add
 	// up (D23). An operator reads this before believing any other number here.
 	if rep, err := s.kernel.RailInspect(ctx, callerFrom(r)); err == nil {
@@ -393,7 +355,7 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 			"pending_payouts": rep.Position.PendingPayouts, "held_deposits": rep.Position.HeldDeposits,
 			"refill_locks": rep.Position.RefillLocks}
 		out["solvency"] = map[string]any{"liabilities": rep.Position.Liabilities,
-			"receivables": rep.Position.Receivables, "vault": rep.Position.Vault, "gap": rep.Gap}
+			"vault": rep.Position.Vault, "gap": rep.Gap}
 		out["custody"] = map[string]any{"checked": rep.CustodyChecked, "difference": rep.Custody, "ok": rep.CustodyOK}
 		if rep.StopReason != "" {
 			out["stop"] = map[string]any{"reason": rep.StopReason, "since": rep.StopSince}
