@@ -21,13 +21,13 @@ func sha256Hex(s string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// receiptHash is SHA-256(CanonicalJSON(the full stored receipt, signature included)) hex — the ONE
+// ReceiptHash is SHA-256(CanonicalJSON(the full stored receipt, signature included)) hex — the ONE
 // definition of a receipt's portable identity, used on both sides of the remote-receipt evidence
 // join (§13). A rating hashes its receipt with this; an EvidenceReceipt's RemoteReceiptHash uses it;
 // a receiver joins A's RemoteReceiptHash to B's ReceiptHash byte-for-byte. It must never be conflated
 // with tx.RemoteReceiptHash, which hashes the RAW wire bytes for settlement-integrity and would not
 // match a re-canonicalized hash (Go marshal order ≠ JCS order).
-func receiptHash(r *Receipt) (string, error) {
+func ReceiptHash(r *Receipt) (string, error) {
 	b, err := CanonicalJSON(r)
 	if err != nil {
 		return "", ErrInternal.Wrapf("canonicalize receipt: %v", err)
@@ -45,15 +45,13 @@ func receiptHashFromJSON(receiptJSON string) (string, error) {
 	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
 		return "", ErrInternal.Wrapf("decode receipt: %v", err)
 	}
-	return receiptHash(&r)
+	return ReceiptHash(&r)
 }
 
-// actionBasePrice is the seller's manifest price (mp) snapshotted on a proxy row. Falling back to
-// the stored total is only reached for a pre-041 row, which re-resolves before it is next funded.
+// actionBasePrice is the seller's manifest price (mp) snapshotted on a proxy row. Every funding
+// boundary heals the snapshot first (ensureBasePrice), so mp is never reverse-calculated from the
+// rounded local total, which cannot recover it exactly.
 func actionBasePrice(a *Action) int64 {
-	if a == nil {
-		return 0
-	}
 	if a.BasePrice != nil {
 		return *a.BasePrice
 	}
@@ -301,16 +299,31 @@ func ServingReserve(dispatchJSON *string) (reserve int64, foreign bool) {
 // §14's substitute for reading a target action that may be private. One type serves both ends of the
 // protocol — the serving kernel builds it, the buying kernel decodes it — so neither side can drift.
 type PeerStepView struct {
-	ID           string          `json:"id"`
-	PartialArgs  json.RawMessage `json:"partial_args,omitempty"`
-	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
-	Price        int64           `json:"price"`
-	CreatedAt    time.Time       `json:"created_at"`
+	ID string `json:"id"`
+	// RequiredCaller names which principal on the RECEIVING kernel the step is addressed to, when
+	// it is addressed to one of its users rather than to the kernel itself. It is that kernel's own
+	// id, so it discloses nothing of the parking kernel: it lets the receiver route the step to the
+	// user who may complete it, which completion already demands (step_auth).
+	RequiredCaller string          `json:"required_caller,omitempty"`
+	PartialArgs    json.RawMessage `json:"partial_args,omitempty"`
+	AllowedInput   map[string]any  `json:"allowed_input,omitempty"`
+	Price          int64           `json:"price"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// PeerStepList is one page of a peer's answer: the steps, and whether more are waiting than the
+// page could carry (P8) — a bounded page with no continuation, so the flag is the whole signal.
+type PeerStepList struct {
+	Steps     []PeerStepView `json:"steps"`
+	Truncated bool           `json:"truncated,omitempty"`
 }
 
 // NewPeerStepView projects one waiting step into the peer-facing shape (§13).
 func (k *Kernel) NewPeerStepView(s *Step, action *Action) *PeerStepView {
 	v := &PeerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
+	if s.RequiredCallerRemoteID != nil {
+		v.RequiredCaller = *s.RequiredCallerRemoteID
+	}
 	if action != nil {
 		v.AllowedInput = DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
 	}
@@ -402,29 +415,21 @@ func (n Network) verify(pub ed25519.PublicKey, domain string, v any, sigB64 stri
 	return nil
 }
 
-// VerifyRemoteReceipt verifies the stored remote receipt for a remote-proxy transaction.
-// Available to any party satisfying CanReadTransaction. Returns ErrInvalidState for
-// non-remote-proxy transactions (no remote receipt stored).
-//
-// Checks:
-//   - ReceiptHash: SHA-256(remote_receipt_json) == stored hash
-//   - Signature: Ed25519 over JCS(receipt with Signature="") by peer key
-//   - ActionID: receipt.action_id == tx.remote_action_id (or tx.action_id if no remote ID)
-//   - Status: receipt.status == tx.status
-//   - Charge: tx.net == receipt.charge + receipt.premium (what the buyer owes)
-//   - Premium: receipt.premium == ceil((receipt.charge+receipt.value)*remote_bps/10000) for the proxy-row snapshot
-//   - SettlementArith: tx.fee == ceil(tx.net*import_bps/10000) for success, 0 for failure
-//   - Draw: the ticket paid what the recorded secret, the receipt's nonce and the obligation decide
-//   - ArgsHash: receipt.args_hash == SHA-256(JCS(tx.args))
-//   - ReplyHash: receipt.reply_hash == SHA-256(JCS(tx.result)) on success
-func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string) (*ReceiptVerification, error) {
+// VerifyReceipt audits the signed receipt behind one transaction, offline, against what this
+// kernel stored (§11, U36). Available to any party satisfying CanReadTransaction. Every committed
+// call has a receipt, so both kinds are answerable: a call this kernel executed is audited against
+// its own key, and one a peer executed against the peer's, with the extra facts only a cross-kernel
+// call has — the frozen rates, the settlement arithmetic and the draw (P7, P10). Checks that do not
+// apply are absent rather than silently true; a signature this network does not accept is reported
+// invalid, never re-signed.
+func (k *Kernel) VerifyReceipt(ctx context.Context, subjectID, txID string) (*ReceiptVerification, error) {
 	tv, err := k.ReadTransaction(ctx, subjectID, txID)
 	if err != nil {
 		return nil, err
 	}
 	tx := tv.Transaction
 	if tx.RemoteReceiptJSON == "" {
-		return nil, ErrInvalidState.Wrap("transaction has no remote receipt")
+		return k.verifyLocalReceipt(ctx, tx)
 	}
 
 	var r Receipt
@@ -432,112 +437,104 @@ func (k *Kernel) VerifyRemoteReceipt(ctx context.Context, subjectID, txID string
 		return nil, ErrInternal.Wrapf("decode remote receipt: %v", err)
 	}
 
-	// Resolve the remote kernel's public key. tx.TargetUserID is the proxy user (remote peer).
-	owner, err := k.store.ReadUser(ctx, tx.TargetUserID)
+	// The rates and the secret come from the dispatch record, which froze them at the funding
+	// boundary (§13): the action row's markup and local config both move, so auditing against them
+	// would fail a historically-correct settlement after any rate change.
+	tr, err := k.store.ReadTrace(ctx, tx.TraceID)
 	if err != nil {
 		return nil, err
 	}
-
-	var checks ReceiptChecks
-
-	// 1. Hash integrity.
-	checks.ReceiptHash = sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash
-
-	// 2. Signature, under this kernel's own network prefix — a receipt signed under any other is
-	// reported invalid, never re-signed (U36, G7).
-	if owner.KernelPublicKey != "" {
-		if pub, derr := decodeRemotePublicKey(owner.KernelPublicKey); derr == nil {
-			cp := r
-			cp.Signature = ""
-			checks.Signature = k.cfg.Network.verify(pub, sigDomainReceipt, cp, r.Signature) == nil
-		}
+	if tr == nil {
+		return nil, ErrNotFound.Wrap("the transaction's trace is missing")
 	}
-
-	// 3. ActionID: receipt carries the remote action's ID.
-	if tx.RemoteActionID != "" {
-		checks.ActionID = r.ActionID == tx.RemoteActionID
-	} else {
-		checks.ActionID = r.ActionID == tx.ActionID
-	}
-
-	// 4. Status consistency.
-	checks.Status = r.Status == tx.Status
-
-	// 5. Charge: local tx.net (the EXECUTION obligation paid to the proxy) must equal receipt.charge +
-	// receipt.premium. The value channel is settled separately on the caller's own reserve, not through
-	// tx.net, so it is audited by its own check below (§13, the un-folded two-channel model).
-	checks.Charge = tx.Net == r.Charge+r.Premium
-
-	// 6. Premium: the execution serving markup must equal ceil(charge·remote_bps) for the
-	// manifest-snapshot rate on the proxy row. Both rates come from the dispatch record, which froze
-	// them at the funding boundary (§13): the action row's markup and local config both move, so
-	// auditing against them would fail a historically-correct settlement after any rate change.
-	var d dispatchPayload
+	d := dispatched(tr.DispatchJSON)
 	var obligationID string
-	if tr, terr := k.store.ReadTrace(ctx, tx.TraceID); terr == nil && tr != nil {
-		d = dispatched(tr.DispatchJSON)
-		if tr.IdempotencyKey != nil {
-			obligationID = *tr.IdempotencyKey
-		}
+	if tr.IdempotencyKey != nil {
+		obligationID = *tr.IdempotencyKey
 	}
-	rbps, importBPS := d.RemoteBPS, d.ImportBPS
-	checks.Premium = r.Premium == k.econ.Premium(r.Charge, rbps)
+	obligation, importFee, arithOK := k.econ.RemoteSettlement(r.Charge, r.Premium, d.RemoteBPS, d.ImportBPS, tx.Status == TxSuccess)
 
-	// 6b. Draw: what was actually paid must be what the two halves of the randomness decide (P10).
-	// Nothing is read back from a ledger of its own — the audit re-derives the outcome from the
-	// secret this call froze and the nonce the peer signed, and compares it against the payment the
-	// settlement made. A call that owed nothing has nothing to check.
-	checks.Draw = true
-	if obligation := r.Charge + r.Premium; obligation > 0 && obligationID != "" {
-		want := Draw(obligationID, mustHex(d.Secret), mustHex(r.Nonce), obligation, d.Lottery)
+	checks := ReceiptChecks{
+		// Hash integrity, then the signature under this kernel's own network prefix.
+		"receipt_hash": sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash,
+		"signature":    k.cfg.Network.verifyReceiptSignature(&r, tx.RemoteSignerKey) == nil,
+		"action_id":    r.ActionID == firstNonEmpty(tx.RemoteActionID, tx.ActionID),
+		"status":       r.Status == tx.Status,
+		// The execution obligation the buyer owes, and the serving markup inside it. The value
+		// channel settles on the caller's own reserve, never through tx.net (§13).
+		"charge":  tx.Net == obligation,
+		"premium": arithOK,
+		// The origin's import fee on the actual obligation, and the ceiling the caller authenticated
+		// and locked before dispatch — it can never be charged more than that.
+		"settlement_arith":    tx.Fee == importFee,
+		"charge_ceiling":      obligation <= tx.Gross,
+		"refund_conservation": tx.Refund == tx.Gross-tx.Net-tx.Fee,
+		"args_hash":           receiptHashMatches(r.ArgsHash, tx.ArgsJSON),
+		// What was actually paid must be what the two halves of the randomness decide (P10). The
+		// audit re-derives the outcome from the secret this call froze and the nonce the peer signed,
+		// reading nothing back from a ledger of its own. A call that owed nothing has nothing to
+		// check; one that owed something and has no ticket to draw with fails, never passes.
+		"draw": obligation == 0,
+	}
+	if obligation > 0 && obligationID != "" {
 		paid := int64(0)
 		if p, perr := k.store.ReadRailTransfer(ctx, obligationID); perr == nil && p != nil {
 			paid = p.Amount
 		}
-		checks.Draw = paid == want
+		checks["draw"] = paid == Draw(obligationID, mustHex(d.Secret), mustHex(r.Nonce), obligation, d.Lottery)
 	}
-
-	// 7. Settlement arithmetic: the origin import fee on the actual obligation (tx.net = paid).
 	if tx.Status == TxSuccess {
-		checks.SettlementArith = tx.Fee == k.econ.ImportFee(tx.Net, importBPS)
-	} else {
-		checks.SettlementArith = tx.Fee == 0
+		checks["reply_hash"] = receiptHashMatches(r.ReplyHash, tx.ReplyJSON)
 	}
-
-	// 7b. Charge ceiling (§13): the caller can never be charged more than the local price it
-	// authenticated and locked before dispatch.
-	checks.ChargeCeiling = r.Charge+r.Premium <= tx.Gross
-
-	// 7. Refund conservation: stored refund must equal gross − net − fee exactly.
-	checks.RefundConservation = tx.Refund == tx.Gross-tx.Net-tx.Fee
-
-	// 8. Args hash.
-	if h, hashErr := jcsHashStr(string(tx.ArgsJSON)); hashErr == nil {
-		checks.ArgsHash = r.ArgsHash == h
-	}
-
-	// 9. Reply hash (only meaningful on success).
-	if tx.Status == TxSuccess {
-		if h, hashErr := jcsHashStr(string(tx.ReplyJSON)); hashErr == nil {
-			checks.ReplyHash = r.ReplyHash == h
-		}
-	} else {
-		checks.ReplyHash = true // not applicable on failure
-	}
-
-	valid := checks.ReceiptHash && checks.Signature && checks.ActionID &&
-		checks.Status && checks.Charge && checks.Premium && checks.SettlementArith &&
-		checks.ChargeCeiling && checks.RefundConservation && checks.ArgsHash && checks.ReplyHash &&
-		checks.Draw
 
 	return &ReceiptVerification{
 		TransactionID:         txID,
-		Valid:                 valid,
-		RemoteKernelHandle:    owner.Handle,
-		RemoteKernelPublicKey: owner.KernelPublicKey,
+		Valid:                 checks.allHeld(),
+		RemoteKernelHandle:    k.KernelName(ctx, tx.RemoteSignerKey),
+		RemoteKernelPublicKey: tx.RemoteSignerKey,
 		Checks:                checks,
 		Receipt:               &r,
 	}, nil
+}
+
+// verifyLocalReceipt audits the receipt this kernel signed for a call it executed itself, against
+// its own key. Same question, one issuer: there is no peer key, no frozen cross-kernel rate and no
+// draw, so those checks do not appear.
+func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*ReceiptVerification, error) {
+	r, err := k.store.ReadReceiptByTxID(ctx, tx.ID)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, ErrNotFound.Wrap("transaction has no receipt")
+	}
+	checks := ReceiptChecks{
+		"signature": k.cfg.Network.verifyReceiptSignature(r, k.ourKeyB64()) == nil,
+		"action_id": r.ActionID == tx.ActionID,
+		"status":    r.Status == tx.Status,
+		// P5: charge is the full allocation on success, and what settled beneath it on a failure;
+		// the signed split must be the row's, or the row has been moved under the signature.
+		"charge":     r.Charge == tx.Gross-tx.Refund,
+		"settlement": r.Gross == tx.Gross && r.Net == tx.Net && r.Fee == tx.Fee,
+		"args_hash":  receiptHashMatches(r.ArgsHash, tx.ArgsJSON),
+	}
+	if tx.Status == TxSuccess {
+		checks["reply_hash"] = receiptHashMatches(r.ReplyHash, tx.ReplyJSON)
+	}
+	return &ReceiptVerification{TransactionID: tx.ID, Valid: checks.allHeld(), Checks: checks, Receipt: r}, nil
+}
+
+// receiptHashMatches compares a receipt's hash of a payload against the payload this kernel stored.
+func receiptHashMatches(want string, payload json.RawMessage) bool {
+	h, err := jcsHashStr(string(payload))
+	return err == nil && want == h
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // ReceiptSigningBytes returns the exact domain-prefixed bytes a receipt signature covers (§12) — the
@@ -549,9 +546,9 @@ func (n Network) ReceiptSigningBytes(r *Receipt) ([]byte, error) {
 	return n.payload(sigDomainReceipt, cp)
 }
 
-// verifyRemoteReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
+// verifyReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
 // closed on an empty key: a missing key must never let an unverified receipt pass as valid (§13).
-func (n Network) verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) error {
+func (n Network) verifyReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	if pubKeyB64 == "" {
 		return ErrInvalidState.Wrap("peer public key is not configured; cannot verify receipt signature")
 	}
@@ -567,7 +564,7 @@ func (n Network) verifyRemoteReceiptSignature(r *Receipt, pubKeyB64 string) erro
 // parseAndVerifyRemoteReceipt parses receiptJSON and enforces the settlement preconditions:
 // signature, action_id, and args_hash must all match what we requested. Returns ErrTimeout
 // (keep-trace-open) on absent, unparseable, invalidly signed, or mismatched receipts so the
-// trace is never settled against a receipt that fails the invariants VerifyRemoteReceipt audits.
+// trace is never settled against a receipt that fails the invariants VerifyReceipt audits.
 // Settlement must only proceed when this function returns without error.
 func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash string) (*Receipt, error) {
 	if receiptJSON == "" {
@@ -577,7 +574,7 @@ func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedAct
 	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
-	if err := n.verifyRemoteReceiptSignature(&r, pubKeyB64); err != nil {
+	if err := n.verifyReceiptSignature(&r, pubKeyB64); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt: invalid signature")
 	}
 	if expectedActionID != "" && r.ActionID != expectedActionID {
@@ -592,7 +589,7 @@ func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedAct
 // remoteReceiptInvalid returns a non-empty reason when a validly-signed remote receipt breaches the
 // §13 settlement invariants (success ⇒ charge = mp and reply_hash matches; failure ⇒ 0 ≤ charge ≤ mp),
 // so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
-// record that would fail VerifyRemoteReceipt. An empty string means the receipt is settleable.
+// record that would fail VerifyReceipt. An empty string means the receipt is settleable.
 func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte) string {
 	// refresh_proxy is only ever a valid zero-charge pre-execution rejection (§13 rule C). A receipt
 	// setting it on a success or any charged failure is malformed and quarantines, so a hostile peer
@@ -621,8 +618,9 @@ func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byt
 	default:
 		return "unknown status"
 	}
-	// The execution premium must be the manifest-snapshot rate on the actual charge (§13).
-	if r.Premium != k.econ.Premium(r.Charge, rbps) {
+	// The execution premium must be the manifest-snapshot rate on the actual charge (§13) — the
+	// same calculation settlement commits and the audit re-runs.
+	if _, _, ok := k.econ.RemoteSettlement(r.Charge, r.Premium, rbps, 0, false); !ok {
 		return "premium != ceil(charge*rbps)"
 	}
 	// An obligation must be drawable: without the seller's nonce there is no draw, and a buyer that
@@ -636,6 +634,16 @@ func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byt
 // remotePendingMaxAge is how long a dispatched call may stay unsettled before it settles locally as
 // a failure with a full refund (§13). One definition: the settle path quotes it to the caller as the
 // refund-eligibility time, and the retry loop enforces it.
+// pendingMeta attaches the durable handle for money reserved on a call still awaiting a remote
+// receipt (§13): the process to watch, when the reserve started, and when a refund becomes due.
+// `since` is the PENDING call's own start, never the start of whatever is reporting it — a parent
+// that failed early would otherwise date its child's reserve from the wrong call.
+func (k *Kernel) pendingMeta(err *KernelError, processID string, since time.Time) *KernelError {
+	return err.WithMeta("process_id", processID).
+		WithMeta("pending_since", since.UTC().Format(time.RFC3339)).
+		WithMeta("refund_eligible_at", since.Add(k.remotePendingMaxAge()).UTC().Format(time.RFC3339))
+}
+
 func (k *Kernel) remotePendingMaxAge() time.Duration {
 	if k.cfg.RemotePendingMaxAge == 0 {
 		return 24 * time.Hour
@@ -665,11 +673,8 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		// left with money reserved and no way to follow it. The original cause stays the message's
 		// head: absent, unparseable, badly signed, and mismatched receipts are different diagnoses.
 		if errors.Is(err, ErrTimeout) {
-			eligible := trace.CreatedAt.Add(k.remotePendingMaxAge()).UTC().Format(time.RFC3339)
-			return nil, ErrTimeout.Wrapf("%v; result confirmation is pending — funds remain reserved on process %s and the call retries automatically", err, trace.ProcessID).
-				WithMeta("process_id", trace.ProcessID).
-				WithMeta("pending_since", trace.CreatedAt.UTC().Format(time.RFC3339)).
-				WithMeta("refund_eligible_at", eligible)
+			return nil, k.pendingMeta(ErrTimeout.Wrapf("%v; result confirmation is pending — funds remain reserved on process %s and the call retries automatically", err, trace.ProcessID),
+				trace.ProcessID, trace.CreatedAt)
 		}
 		return nil, err
 	}
@@ -678,7 +683,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// A validly-signed receipt is the peer's final, deterministic word: idempotent retry returns
 	// the same bytes, so a receipt that breaches the §13 settlement invariants can never heal.
 	// Settle it terminally as receipt-invalid (charge 0, full refund, raw receipt kept as evidence,
-	// no retry) rather than clamp-and-commit a record that would fail our own VerifyRemoteReceipt
+	// no retry) rather than clamp-and-commit a record that would fail our own VerifyReceipt
 	// audit. Reconcile the discrepancy out of band (§13). The reply bytes are marshalled once so
 	// the hash here is computed over exactly what gets stored.
 	var replyJSON []byte
@@ -686,7 +691,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		replyJSON, _ = json.Marshal(fr.Result)
 	}
 	charge := r.Charge
-	var premium, importFee int64
+	var premium int64
 	quarantined := false
 	if invalid := k.remoteReceiptInvalid(r, mp, rbps, replyJSON); invalid != "" {
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
@@ -701,16 +706,14 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			ktx.ReplyJSON = json.RawMessage(replyJSON)
 		}
 	}
-	// What we owe the peer for this call, and what we retain for importing it. The import fee is
-	// levied on the obligation at the DISPATCHED rate (§13) and only on a delivered call.
-	obligation := charge + premium
-	if ktx.Status == TxSuccess {
-		importFee = k.econ.ImportFee(obligation, importBPS)
-	}
+	// What we owe the peer for this call, and what we retain for importing it — the one calculation
+	// the offline audit re-runs against this settlement (P7).
+	obligation, importFee, _ := k.econ.RemoteSettlement(charge, premium, rbps, importBPS, ktx.Status == TxSuccess)
 	ktx.Net = obligation
 	ktx.Fee = importFee
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
+	ktx.RemoteSignerKey = target.KernelPublicKey // stored with the receipt it verified (G7)
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	// A rejection is the peer's refusal to execute, at any price: an executed failure that consumed
@@ -777,6 +780,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
+	k.SettleReady(sctx)
 
 	// Rule C (§8/§13): a settlement outcome proving the cached row wrong invalidates it, so the next
 	// call re-resolves. Three such outcomes: a signed refresh_proxy rejection (the contract moved), a
@@ -890,20 +894,11 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 		return ErrInvalidState.Wrap("federation executor not configured")
 	}
 	mp := dispatch.RemotePrice
-	if mp == 0 {
-		// Fallback for a pre-041 dispatch that recorded none.
-		mp = actionBasePrice(action)
-	}
 	// The locked gross is the proxy's full two-step local price (§13) — what BeginRun/BeginStepCall
-	// funded — not the bare serving markup; settlement pays charge+premium to the peer and the import
-	// fee to origin sys out of it, refunding the remainder. Take it from the dispatch record, which
-	// froze it at the funding boundary: the action's price now floats with local policy, so re-reading
-	// the column here would refund a call at a rate it was never locked at. Pre-041 dispatches
-	// recorded no gross; those fall back to the column, which for them is still the funded value.
+	// funded — taken from the dispatch record, which froze it at the funding boundary: the action's
+	// price floats with local policy, so re-reading the column would refund a call at a rate it was
+	// never locked at.
 	q := dispatch.Gross
-	if q == 0 {
-		q = action.Price
-	}
 
 	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
 
@@ -941,7 +936,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	if now.Sub(trace.CreatedAt) > k.remotePendingMaxAge() {
 		ktx.Status = TxFailure
 		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
-		_, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
+		_, _, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
 		return sErr
 	}
 	return nil
@@ -966,9 +961,9 @@ func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, input
 
 // SignStepList signs a step-list request with the platform key and returns
 // (signature, timestamp). recipient is the peer being addressed.
-func (k *Kernel) SignStepList(counterparty, recipient string) (sig, ts string, err error) {
+func (k *Kernel) SignStepList(counterparty, recipient, forUserID string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts)
+	sig, err = k.cfg.Network.SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts, forUserID)
 	return
 }
 
@@ -1037,33 +1032,29 @@ func stepReply(status int, body []byte, notDispatched bool, err error, peerKey s
 // PeerStepsAwaitingUs lists the steps a peer holds for this kernel (§13), for admin inspect and for
 // the payment-descriptor lookup below. One bounded fetch: the queue is a handful of pending
 // cross-kernel approvals, not a corpus.
-func (k *Kernel) PeerStepsAwaitingUs(ctx context.Context, peerKey string) ([]PeerStepView, error) {
+func (k *Kernel) PeerStepsAwaitingUs(ctx context.Context, peerKey, forUserID string) (*PeerStepList, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
 	self := k.selfKey(ctx)
-	sig, ts, err := k.SignStepList(self, peerKey)
+	sig, ts, err := k.SignStepList(self, peerKey, forUserID)
 	if err != nil {
 		return nil, err
 	}
-	status, body, notDispatched, err := k.fedClient.ListPeerSteps(ctx, peerKey, ts, sig)
+	status, body, notDispatched, err := k.fedClient.ListPeerSteps(ctx, peerKey, ts, sig, forUserID)
 	reply, err := stepReply(status, body, notDispatched, err, peerKey)
 	if err != nil {
 		return nil, err
 	}
-	raw, ok := reply["steps"]
-	if !ok {
-		return nil, nil
-	}
-	b, _ := json.Marshal(raw)
 	// Values, not pointers: the list is peer-controlled, and a reply of {"steps":[null]} would
 	// otherwise decode to a nil element that every reader must remember to guard. Decoding into
 	// values makes the malformed entry a zero one, which matches no step id and carries no payment.
-	var views []PeerStepView
-	if json.Unmarshal(b, &views) != nil {
+	b, _ := json.Marshal(reply)
+	var list PeerStepList
+	if json.Unmarshal(b, &list) != nil {
 		return nil, ErrExecutionFailed.Wrap("malformed peer step list")
 	}
-	return views, nil
+	return &list, nil
 }
 
 // completePeerStepRaw signs and dispatches one completion under an ALREADY-DERIVED idempotency key:
@@ -1081,13 +1072,15 @@ func (k *Kernel) completePeerStepRaw(ctx context.Context, peerKey, stepID string
 		return nil, err
 	}
 	var attestation, attestTS string
+	superuser := false
 	if forUserID != "" {
-		if attestation, attestTS, err = k.SignStepAuth(self, peerKey, forUserID, stepID); err != nil {
+		superuser = k.IsSuperuser(ctx, forUserID)
+		if attestation, attestTS, err = k.SignStepAuth(self, peerKey, forUserID, stepID, superuser); err != nil {
 			return nil, err
 		}
 	}
 	status, body, notDispatched, err := k.fedClient.CompletePeerStep(ctx, peerKey, ts, sig, stepID,
-		idempotencyKey, input, forUserID, attestation, attestTS)
+		idempotencyKey, input, forUserID, attestation, attestTS, superuser)
 	return stepReply(status, body, notDispatched, err, peerKey)
 }
 
@@ -1157,6 +1150,11 @@ func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerI
 	remoteUserID, _, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
 	if rerr != nil {
 		return "", "", rerr
+	}
+	// An empty id is not a principal. Accepted, it would address the step to the peer kernel
+	// itself — operator scope, decided by a remote reply — and strand the user it was meant for.
+	if remoteUserID == "" {
+		return "", "", ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
 	}
 	// First meaningful use (§13): a verified remote-user resolve is our own outbound act, so a
 	// petname is bound here too — on the petname being unbound, not on the account being absent
@@ -1332,6 +1330,73 @@ func (k *Kernel) PeerKeys(ctx context.Context) []string {
 	return keys
 }
 
+// tradeGroup is one issuer's rows about one trade, in first-seen order.
+type tradeGroup struct{ rows []*EvidenceRow }
+
+// tradeGroups collapses evidence rows onto the trades they name. Rows are unique on the issuer's
+// OWN receipt hash, which it mints, but one trade of ours is one receipt of one action: an issuer's
+// rows naming the same receipt for the same action are one trade, so one purchase is one use and
+// at most one rating. A row that names no trade stands alone under its own hash: it can be shown,
+// never linked.
+func tradeGroups(rows []*EvidenceRow) []*tradeGroup {
+	var out []*tradeGroup
+	index := map[[3]string]*tradeGroup{}
+	for _, e := range rows {
+		key := [3]string{e.IssuerPublicKey, e.SubjectActionID, e.RemoteReceiptHash}
+		if e.RemoteReceiptHash == "" {
+			key[2] = "own:" + e.ReceiptHash
+		}
+		g := index[key]
+		if g == nil {
+			g = &tradeGroup{}
+			index[key] = g
+			out = append(out, g)
+		}
+		g.rows = append(g.rows, e)
+	}
+	return out
+}
+
+// rating is the one rating a trade carries: its rows must agree, or the issuer has rated one trade
+// two ways — equivocation by another route (D16) — and it carries none. A row outside the rating
+// contract is not a rating; an equivocated row contributes nothing.
+func (g *tradeGroup) rating() (RatingEvidence, bool) {
+	var first *RatingEvidence
+	for _, e := range g.rows {
+		if e.Equivocated {
+			return RatingEvidence{}, false // the issuer has told two stories about this trade
+		}
+		if e.RatingJSON == "" {
+			continue
+		}
+		var rt RatingEvidence
+		if json.Unmarshal([]byte(e.RatingJSON), &rt) != nil || validRating(rt.Rating, rt.Note) != nil {
+			return RatingEvidence{}, false // a row outside the contract voids the trade, as the projection does
+		}
+		if first == nil {
+			first = &rt
+			continue
+		}
+		if first.Rating != rt.Rating || !sameNote(first.Note, rt.Note) {
+			return RatingEvidence{}, false
+		}
+	}
+	if first == nil {
+		return RatingEvidence{}, false
+	}
+	return *first, true
+}
+
+func sameNote(a, b *string) bool {
+	text := func(n *string) string {
+		if n == nil {
+			return ""
+		}
+		return *n
+	}
+	return text(a) == text(b) // an absent note and an empty one are the same absence
+}
+
 // SubjectEvidence derives the retained-evidence metrics about a subject kernel from the local
 // evidence cache (§13), grouped by issuer. Uses/successes/failures/latency count ONLY issuer==subject
 // rows (first-party execution evidence, so a remote call is never double-counted). A rating counts
@@ -1345,30 +1410,37 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 	if err != nil {
 		return nil, err
 	}
-	// Index subject-kernel's own execution receipts by ReceiptHash so a rating from another issuer can
-	// be confirmed trade-backed: it must reference one of these and be named as its counterparty.
-	type execFact struct{ counterparty string }
-	execByHash := map[string]execFact{}
+	// Index the subject's own execution receipts by hash AND action, so a counterparty's row or a
+	// rating is confirmed trade-backed only against the receipt of the very action it claims, and
+	// only when that receipt names the issuer as counterparty.
+	execKey := func(hash, action string) string { return hash + "\x1f" + action }
+	counterpartyOf := map[string]string{}
 	for _, e := range rows {
 		if e.IssuerPublicKey == subjectKernelPublicKey {
-			execByHash[e.ReceiptHash] = execFact{counterparty: e.CounterpartyKernelPublicKey}
+			counterpartyOf[execKey(e.ReceiptHash, e.SubjectActionID)] = e.CounterpartyKernelPublicKey
 		}
 	}
+	linked := func(e *EvidenceRow) bool {
+		cp, ok := counterpartyOf[execKey(e.RemoteReceiptHash, e.SubjectActionID)]
+		return ok && e.RemoteReceiptHash != "" && cp == e.IssuerPublicKey
+	}
 	agg := map[string]*SubjectEvidenceRow{}
-	key := func(issuer, action string) string { return issuer + "\x1f" + action }
 	get := func(issuer, action string) *SubjectEvidenceRow {
-		kk := key(issuer, action)
+		kk := issuer + "\x1f" + action
 		if agg[kk] == nil {
 			agg[kk] = &SubjectEvidenceRow{IssuerPublicKey: issuer, SubjectActionID: action}
 		}
 		return agg[kk]
 	}
-	for _, e := range rows {
+	// One trade is one use and at most one rating (tradeGroups), whatever number of rows an issuer
+	// wrote about it. Interaction metrics come from each issuer's OWN evidence: the subject's
+	// self-reported executions when issuer == subject (the execution summary), each other issuer's
+	// directly-observed calls otherwise (its counterparty-experience row) — two views never summed
+	// together (§13), so no call is double-counted. A counterparty's interaction and a rating are
+	// trade-backed only through the two-kernel link; a claim without it is shown, never taken on faith.
+	for _, g := range tradeGroups(rows) {
+		e := g.rows[0]
 		row := get(e.IssuerPublicKey, e.SubjectActionID)
-		// Interaction metrics come from each issuer's OWN evidence about the subject: the subject's
-		// self-reported executions when issuer == subject (the execution summary), and each other
-		// issuer's directly-observed calls otherwise (its counterparty-experience row). The two views
-		// read this field but are never summed together (§13 two views), so no call is double-counted.
 		var er EvidenceReceipt
 		if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) == nil {
 			row.Uses++
@@ -1380,35 +1452,19 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 			if lat := er.CreatedAt.Sub(er.StartedAt).Milliseconds(); lat >= 0 {
 				row.AvgLatencyMs += float64(lat)
 			}
-			// Corroboration (§13): a counterparty-experience interaction (issuer != subject) is
-			// trade-backed only when the subject's OWN execution evidence names this issuer as
-			// counterparty and the receipt hashes join — the same two-kernel link a rating needs. A
-			// self-issued claim without that link is retained but shown unverified, never taken on faith.
-			if e.IssuerPublicKey != subjectKernelPublicKey && e.RemoteReceiptHash != "" {
-				if ef, ok := execByHash[e.RemoteReceiptHash]; ok && ef.counterparty == e.IssuerPublicKey {
-					row.CorroboratedUses++
-				}
+			if e.IssuerPublicKey != subjectKernelPublicKey && linked(e) {
+				row.CorroboratedUses++
 			}
 		}
-		// Rating metrics: any issuer, but only counted when trade-backed and non-equivocated.
-		if e.RatingJSON != "" && !e.Equivocated {
-			var rt RatingEvidence
-			if json.Unmarshal([]byte(e.RatingJSON), &rt) == nil {
-				linked := false
-				if e.RemoteReceiptHash != "" {
-					if ef, ok := execByHash[e.RemoteReceiptHash]; ok && ef.counterparty == e.IssuerPublicKey {
-						linked = true
-					}
+		if rt, ok := g.rating(); ok {
+			if linked(e) {
+				row.RatingCount++
+				row.RatingMean += rt.Rating
+				if rt.Note != nil && *rt.Note != "" {
+					row.Notes = append(row.Notes, *rt.Note)
 				}
-				if linked {
-					row.RatingCount++
-					row.RatingMean += rt.Rating
-					if rt.Note != nil && *rt.Note != "" {
-						row.Notes = append(row.Notes, *rt.Note)
-					}
-				} else {
-					row.UnverifiedRatings++
-				}
+			} else {
+				row.UnverifiedRatings++
 			}
 		}
 	}
@@ -1535,7 +1591,7 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 // (canonical JSON — the one definition shared with the serving kernel's ReceiptHash), never the raw
 // tx.RemoteReceiptHash. Signed under the evidence_receipt domain.
 func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*EvidenceReceipt, error) {
-	rh, err := receiptHash(row.Receipt)
+	rh, err := ReceiptHash(row.Receipt)
 	if err != nil {
 		return nil, err
 	}
@@ -1947,6 +2003,9 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 		if err := k.cfg.Network.verify(pub, sigDomainRating, rc, b.Rating.Signature); err != nil {
 			return ErrUnauthorized.Wrap("rating signature invalid")
 		}
+		if err := validRating(b.Rating.Rating, b.Rating.Note); err != nil {
+			return err
+		}
 		rJSON, _ := json.Marshal(b.Rating)
 		row.RatingJSON = string(rJSON)
 		row.EffectiveAt = b.Rating.CreatedAt
@@ -2301,12 +2360,22 @@ type stepAuthPayload struct {
 	StepID       string `json:"step_id"`
 	Timestamp    string `json:"timestamp"`
 	UserID       string `json:"user_id"`
+	// Superuser is the home kernel's word that this user is its operator: the scope a step
+	// addressed to the kernel itself demands, which nothing else could tell the serving side.
+	// Omitted when false, so an ordinary user's attestation is byte-identical to before.
+	Superuser bool `json:"superuser,omitempty"`
 }
 
+// stepListPayload asks a peer which of its parked steps this kernel may complete. UserID names one
+// principal on the requesting kernel when the question is asked on a user's behalf, as completion
+// already is (step_auth): listing and completing then have the same granularity, so a user can see
+// the work addressed to them rather than only its operator. Omitted for a kernel-level ask, whose
+// canonical bytes are therefore unchanged.
 type stepListPayload struct {
 	Counterparty string `json:"counterparty"`
 	Recipient    string `json:"recipient"`
 	Timestamp    string `json:"timestamp"`
+	UserID       string `json:"user_id,omitempty"`
 }
 
 // verifyPeerSignature verifies a peer's base64url Ed25519 signature over a payload in its own
@@ -2360,15 +2429,15 @@ func (n Network) VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient,
 // SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
 // authorized completing step stepID (§13). recipient binds it to the serving kernel, closing
 // cross-kernel replay.
-func (n Network) SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string) (string, error) {
+func (n Network) SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string, superuser bool) (string, error) {
 	return n.sign(key, sigDomainStepAuth, stepAuthPayload{Counterparty: counterparty,
-		Recipient: recipient, StepID: stepID, Timestamp: timestamp, UserID: userID})
+		Recipient: recipient, StepID: stepID, Timestamp: timestamp, UserID: userID, Superuser: superuser})
 }
 
 // VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
-func (n Network) VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp, sigB64 string) error {
+func (n Network) VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp string, superuser bool, sigB64 string) error {
 	p := stepAuthPayload{Counterparty: counterparty, Recipient: recipient, StepID: stepID,
-		Timestamp: timestamp, UserID: userID}
+		Timestamp: timestamp, UserID: userID, Superuser: superuser}
 	if err := n.verifyPeer(pubKeyB64, sigDomainStepAuth, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step attestation is invalid")
 	}
@@ -2377,23 +2446,23 @@ func (n Network) VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, use
 
 // SignStepAuth stamps the current time and signs the step_auth attestation with this kernel's
 // platform key. counterparty is this kernel's own key; recipient is the serving peer's key.
-func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string) (sig, ts string, err error) {
+func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string, superuser bool) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts)
+	sig, err = k.cfg.Network.SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts, superuser)
 	return
 }
 
 // SignStepListPayload creates a base64url Ed25519 signature over the canonical step-list payload.
 // The sigDomainStepList prefix keeps this key-set disjoint from every other signed payload (§12).
-func (n Network) SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp string) (string, error) {
+func (n Network) SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp, forUserID string) (string, error) {
 	return n.sign(key, sigDomainStepList, stepListPayload{Counterparty: counterparty,
-		Recipient: recipient, Timestamp: timestamp})
+		Recipient: recipient, Timestamp: timestamp, UserID: forUserID})
 }
 
 // VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
 // recipient must be the verifying kernel's own public key.
-func (n Network) VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, sigB64 string) error {
-	p := stepListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp}
+func (n Network) VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, forUserID, sigB64 string) error {
+	p := stepListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp, UserID: forUserID}
 	if err := n.verifyPeer(pubKeyB64, sigDomainStepList, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}

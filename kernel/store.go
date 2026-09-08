@@ -85,8 +85,8 @@ type RemoteResolver interface {
 // notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
 type StepCaller interface {
 	CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
-		input []byte, forUserID, userAttestation, userTimestamp string) (status int, body []byte, notDispatched bool, err error)
-	ListPeerSteps(ctx context.Context, peerKey, timestamp, signature string) (status int, body []byte, notDispatched bool, err error)
+		input []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (status int, body []byte, notDispatched bool, err error)
+	ListPeerSteps(ctx context.Context, peerKey, timestamp, signature, forUserID string) (status int, body []byte, notDispatched bool, err error)
 }
 
 // FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
@@ -239,55 +239,31 @@ type Store interface {
 
 	// ---- Processes ----
 
-	// BeginRun atomically debits price from owner.available→locked, creates the process with
-	// available=0/locked=price, creates the root trace with available=price, and locks the caller's
-	// transfer value and lottery stake from that caller's own row. Every owner is prepaid: a peer row
-	// never funds anything (P10).
-	//
-	// A positive reserve marks an inbound foreign call: its delivered service is admitted against
-	// the kernel's credit limit in the same transaction — the counter rises by reserve only if the
-	// result stays ≤ limit, and 0 rows there is ErrInsufficientFunds, because checking it in Go
-	// first would race two concurrent admissions past one limit (D14). The trace's frozen terms
-	// carry the same reserve, so the commit that learns the actual charge corrects the counter.
+	// BeginRun is D3's run write set. A positive reserve marks an inbound foreign call, admitted
+	// against the credit limit in the SAME statement — checking it in Go first would race two
+	// concurrent admissions past one limit (D14).
 	BeginRun(ctx context.Context, p *Process, t *Trace, ownerID string, price, reserve, limit int64) error
 
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
 	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
 
-	// BeginSubcall atomically deducts price from the parent trace's available into its locked
-	// and creates the child trace with available=price.
+	// BeginSubcall is D3's call-entry write set.
 	BeginSubcall(ctx context.Context, parentTraceID string, t *Trace, price int64) error
 
-	// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
-	// parent_trace.available (the step is being consumed), creates the new trace with
-	// available=step.price, and transitions the step waiting→running.
+	// BeginStepCall is D3's step-call write set.
 	BeginStepCall(ctx context.Context, stepID string, t *Trace) error
 
-	// CommitCall atomically records a successful transaction, creates its receipt,
-	// settles funds (trace.available→target/sys; caller wallet locked released;
-	// owner.locked decremented by taxable), updates trace latency, upserts action stats,
-	// completes the idempotency record (if non-empty), and marks the step done (if non-empty).
-	// The obligation a foreign buyer owes for this call is finalized here from the signed charge, and
-	// the exposure it reserved at admission corrected to it (P10). Both are no-ops for a local call.
+	// CommitCall is D3's success write set.
 	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
 
-	// CommitFailedCall atomically cancels all outstanding steps in the trace's subtree
-	// (collecting their parked prices), refunds trace.available + step prices to the caller
-	// wallet, records a failure transaction, creates its receipt, updates trace latency,
-	// upserts action stats, completes the idempotency record (if non-empty), and marks the
-	// step done (if non-empty). The process owner's user.locked is decremented at process
-	// closure — closeProcessTx runs inside the same DB transaction when the process becomes
-	// quiescent. Implementations must NOT decrement user.locked directly here; doing so
-	// would double-count with the closure step.
-	// buildReceipt is called inside the transaction with the computed refund so that the signed
-	// charge (gross − refund) is guaranteed to match what is committed — and so the obligation the
-	// same transaction finalizes cannot disagree with the receipt that names it. A failure still
-	// charges what settled beneath it, so it too can leave one (P7).
+	// CommitFailedCall is D3's failure write set. Two traps for an implementation: user.locked is
+	// decremented at process closure, never here, or the two double-count; and buildReceipt runs
+	// INSIDE the transaction, with the computed refund, so the signed charge cannot disagree with
+	// what is committed.
 	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
 
-	// EndProcess cancels all waiting steps (returning parked prices to the process owner's
-	// available balance), then returns process.available to the owner, and closes the process.
+	// EndProcess is D3's closure write set.
 	EndProcess(ctx context.Context, processID string) error
 
 	// ---- Traces ----
@@ -312,6 +288,9 @@ type Store interface {
 
 	// ---- Ratings ----
 
+	// ListPublicRatings is the action's public projection, local and trade-backed peer ratings
+	// together, paged in the query (D11, D16).
+	ListPublicRatings(ctx context.Context, actionID, selfKey string, limit, offset int) ([]PublicRating, error)
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 	// CreateRatingAndUpdateStats atomically inserts a rating and updates rating_count/rating_estimate.
 	CreateRatingAndUpdateStats(ctx context.Context, r *Rating, actionID string, rating float64) error
@@ -355,7 +334,7 @@ type Store interface {
 	ReadStep(ctx context.Context, id string) (*Step, error)
 	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
 	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Step, error)
-	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int) ([]*Step, error)
+	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*Step, error)
 	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetStepAndRepark(ctx context.Context, stepID string) error
@@ -377,12 +356,13 @@ type Store interface {
 	// These are in-flight remote proxy calls awaiting settlement by RetryPendingRemoteDispatches.
 	ListPendingRemoteTraces(ctx context.Context) ([]*Trace, error)
 
-	// ListDirectUnsettledChildren returns traces whose parent_trace_id equals parentTraceID
-	// and that have no committed transaction. Used by settleFailedCall to pre-settle child
-	// traces (e.g. timed-out remote subcalls) before committing the parent failure, so that
-	// the parent's refund correctly includes the child's allocation.
-	ListDirectUnsettledChildren(ctx context.Context, parentTraceID string) ([]*Trace, error)
-
+	// ListReadyTraces are the traces a recorded outcome can settle now: outcome recorded, no
+	// transaction, nothing unsettled beneath (D3). Every settlement commit refuses with
+	// ErrSettlementDeferred and records the outcome when a child is still in flight.
+	ListReadyTraces(ctx context.Context) ([]*Trace, error)
+	// ConsumedByChildren is what the trace's settled children kept: the sum of their gross less
+	// refund, the part of the trace's allocation that left it for good.
+	ConsumedByChildren(ctx context.Context, traceID string) (int64, error)
 	// ListUnsettledTracesForProcess returns all traces for a process that have no committed
 	// transaction, ordered deepest-first. Includes both orphan and pending-remote traces.
 	// Used by EndProcess to fail in-flight calls before closure.

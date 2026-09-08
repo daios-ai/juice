@@ -21,6 +21,9 @@ func DispatchRecordForTest(mp, gross, remoteBPS, importBPS, lottery int64, secre
 	return marshalDispatch(nil, "", mp, gross, "", remoteBPS, importBPS, secret, lottery)
 }
 
+// PublicKeyB64 is this kernel's own key in the form evidence names a subject by.
+func (k *Kernel) PublicKeyB64() string { return k.ourKeyB64() }
+
 // ServingRecordForTest is the seller's half of the same record: what a foreign call was admitted
 // under, for a test that stages one by hand.
 func ServingRecordForTest(remoteBPS, lottery, reserve int64, nonce, commitment string) *string {

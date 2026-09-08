@@ -86,21 +86,6 @@ type Kernel struct {
 	railMu      sync.Mutex
 	lookupHost  func(context.Context, string) ([]string, error)
 	userHandles sync.Map // user ID → handle, cached for readable logging
-	// traceStripes serialize a trace's fund-spends against that trace's settlement (§9): with
-	// out-of-kernel capability composition, callbacks mutate a live trace concurrently with the
-	// settlement that reads its taxable available, so the two must be mutually exclusive.
-	traceStripes [64]sync.Mutex
-}
-
-// traceLock returns the striped mutex guarding a trace's spend/settlement exclusivity (§9).
-// Keyed by trace id: the same trace always maps to the same stripe; distinct traces rarely
-// collide and, if they do, merely serialize harmlessly. Fixed size, no per-trace cleanup.
-func (k *Kernel) traceLock(traceID string) *sync.Mutex {
-	var h uint32 = 2166136261
-	for i := 0; i < len(traceID); i++ { // FNV-1a
-		h = (h ^ uint32(traceID[i])) * 16777619
-	}
-	return &k.traceStripes[h%uint32(len(k.traceStripes))]
 }
 
 // callerHandle returns a user's handle for logging, caching id→handle lookups.
@@ -557,7 +542,7 @@ func splitScopes(s string) []string {
 	})
 }
 
-// parseScopeJSON reads a stored scopes_json (a JSON array), tolerating a legacy space-separated form.
+// parseScopeJSON reads a stored scopes_json (a JSON array), tolerating a space-separated form.
 func parseScopeJSON(s string) []string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -568,16 +553,6 @@ func parseScopeJSON(s string) []string {
 		return arr
 	}
 	return splitScopes(s)
-}
-
-// actionScopesJSON returns an action's requested scopes as a JSON array string.
-func actionScopesJSON(auth *AuthInput) string {
-	sc := splitScopes(authField(auth.Config, "scopes"))
-	if len(sc) == 0 {
-		return ""
-	}
-	b, _ := json.Marshal(sc)
-	return string(b)
 }
 
 // unionScopes merges requested scopes into an existing stored set, returning the widened JSON and
@@ -638,6 +613,19 @@ const maxOwnerActions = 100000
 // maxRatingNoteBytes bounds a rating note (§11): a rating note is gossiped as network-distributed
 // text under the platform signature, so it is capped. Fixed, not configurable.
 const maxRatingNoteBytes = 1024
+
+// validRating is the one rating contract (D4): a binary value and a bounded note. It binds a rating
+// given here and one that arrives by gossip alike — a signature proves who said it, not that it is
+// a rating.
+func validRating(value float64, note *string) error {
+	if value != 0 && value != 1 {
+		return ErrInvalidInput.Wrap("rating must be 0 or 1")
+	}
+	if note != nil && len(*note) > maxRatingNoteBytes {
+		return ErrInvalidInput.Wrapf("rating note exceeds %d bytes", maxRatingNoteBytes)
+	}
+	return nil
+}
 
 // gossipEvidenceCap (E) is the number of most-recent evidence rows retained and gossiped per
 // (issuer, subject_kernel, subject_action) (§13). Fixed, not configurable.
@@ -1509,7 +1497,7 @@ func (k *Kernel) httpSourceFromURL(ctx context.Context, rawURL, method string, p
 // leave the corresponding field unchanged.
 func (k *Kernel) mergeHTTPSource(ctx context.Context, existing string, rawURL, method *string, params *[]HTTPParam) (string, error) {
 	var s HTTPSource
-	_ = json.Unmarshal([]byte(existing), &s) // tolerate empty/legacy source
+	_ = json.Unmarshal([]byte(existing), &s) // an absent source merges as the zero value
 	if s.Type == "" {
 		s.Type = "http"
 	}
@@ -1530,7 +1518,7 @@ func (k *Kernel) mergeHTTPSource(ctx context.Context, existing string, rawURL, m
 }
 
 // httpSourceBaseURL extracts the base URL from a stored kind=http source for
-// validation. Falls back to the raw string for legacy/unstructured sources.
+// validation. An unstructured source is its own base URL.
 func httpSourceBaseURL(source string) string {
 	var s HTTPSource
 	if json.Unmarshal([]byte(source), &s) == nil && s.BaseURL != "" {
@@ -2451,6 +2439,23 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	if reply != nil {
 		reply.ProcessID = p.ID // the handle for process show/end when work parks (§14)
 	}
+	// A root call can fail while a remote child it dispatched is still awaiting its receipt: that
+	// child is not presumed dead (P7), so its allocation stays reserved and the process stays open
+	// until a receipt or the pending bound settles it. Report the failure with the same handle a
+	// parked call gives, dated from the pending child — the reserve is that call's, not this one's.
+	var ke *KernelError
+	if err != nil && errors.As(err, &ke) && ke.Meta["process_id"] == "" {
+		if since, serr := k.AwaitingReceiptSince(ctx, []string{p.ID}); serr == nil {
+			if at, parked := since[p.ID]; parked {
+				err = k.pendingMeta(ke, p.ID, at)
+			}
+		}
+		// A root whose outcome waits on a local call still running beneath it (D3): the process is
+		// the handle to follow it by, and the receipt follows that call's own settlement.
+		if reply.Deferred() && ke.Meta["process_id"] == "" {
+			err = ke.WithMeta("process_id", p.ID)
+		}
+	}
 	return reply, err
 }
 
@@ -2678,11 +2683,8 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 // Only the direct buyer (the process owner who paid) may rate.
 // Ratings are stored in a separate ratings table; the transaction row is never modified.
 func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rating float64, note *string) (*Rating, error) {
-	if rating != 0 && rating != 1 {
-		return nil, ErrInvalidInput.Wrap("rating must be 0 or 1")
-	}
-	if note != nil && len(*note) > maxRatingNoteBytes {
-		return nil, ErrInvalidInput.Wrapf("rating note exceeds %d bytes", maxRatingNoteBytes)
+	if err := validRating(rating, note); err != nil {
+		return nil, err
 	}
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
@@ -2697,6 +2699,21 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	// Only the direct buyer (process owner) may rate.
 	if callerID != tx.OwnerUserID {
 		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
+	}
+	// On a call served to a peer the seller funds its own work, so it owns the process and would
+	// otherwise be rating itself (§6 role law). The payer is abroad and rates its own proxy
+	// transaction at home. The shape is a ROOT trace answering an inbound record: a step a peer
+	// completes here is never a root, so it stays the local payer's. Read from the trace, not from
+	// the caller's account — retention purges a peer's key from its account row, and a gate keyed on
+	// it would reopen for exactly the transactions old enough to have outlived their peer.
+	if tx.ParentTraceID == "" {
+		tr, terr := k.store.ReadTrace(ctx, tx.TraceID)
+		if terr != nil {
+			return nil, terr
+		}
+		if tr != nil && tr.IdempotencyRecordID != nil {
+			return nil, ErrUnauthorized.Wrap("a call served to a peer is rated by its payer, on the kernel that paid")
+		}
 	}
 	// ratings.rated_tx_id UNIQUE rejects a duplicate atomically with the same ErrInvalidInput (§11);
 	// a read-then-write pre-check could only race it.
@@ -2714,7 +2731,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 		r.RatedReceiptID = &receipt.ID
 		// The portable link a v0.13 evidence bundle carries so a receiver joins this rating to its
 		// receipt (§13). Hashes the full canonical receipt (same definition as EvidenceReceipt.ReceiptHash).
-		h, herr := receiptHash(receipt)
+		h, herr := ReceiptHash(receipt)
 		if herr != nil {
 			return nil, herr
 		}
@@ -2739,6 +2756,13 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 // ListRatings returns ratings for an action ordered by creation time descending.
 func (k *Kernel) ListRatings(ctx context.Context, actionID string, limit, offset int) ([]*Rating, error) {
 	return k.store.ListRatings(ctx, actionID, limit, offset)
+}
+
+// ActionRatings is one action's public ratings projection (§11): the ratings its local payers gave
+// and the trade-backed ratings its remote payers gave on their own kernels (D16), newest first —
+// so a buyer who paid abroad is as much a part of the provider's track record as one who paid here.
+func (k *Kernel) ActionRatings(ctx context.Context, actionID string, limit, offset int) ([]PublicRating, error) {
+	return k.store.ListPublicRatings(ctx, actionID, k.ourKeyB64(), limit, offset)
 }
 
 // ---- Stats ----

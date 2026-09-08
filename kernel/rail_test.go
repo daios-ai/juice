@@ -2,8 +2,6 @@ package kernel_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -939,11 +937,6 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	if len(fed.revealed) != 1 || fed.revealed[0].TxHash == "" {
 		t.Errorf("the announcement must name the payment: %+v", fed.revealed)
 	}
-}
-
-// publicKeyOf is a kernel's own public key as its peers name it.
-func publicKeyOf(cfg kernel.Config) string {
-	return base64.RawURLEncoding.EncodeToString(cfg.SigningKey.Public().(ed25519.PublicKey))
 }
 
 // A purchase can be durable and still never reach the chain, and the rail then refuses every later

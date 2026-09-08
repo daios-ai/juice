@@ -1764,7 +1764,7 @@ func TestStartRemoteRetryLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		startRemoteRetryLoop(ctx, nil, list, retry, time.Millisecond)
+		startRemoteRetryLoop(ctx, nil, list, retry, func(context.Context) {}, time.Millisecond)
 		close(done)
 	}()
 
@@ -1805,7 +1805,7 @@ func TestStartRemoteRetryLoopDrainsFirst(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go startRemoteRetryLoop(ctx, []*kernel.Trace{parked}, list, retry, time.Hour)
+	go startRemoteRetryLoop(ctx, []*kernel.Trace{parked}, list, retry, func(context.Context) {}, time.Hour)
 
 	select {
 	case id := <-calls:
@@ -2547,11 +2547,16 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 		t.Fatal("call returned empty tx_id")
 	}
 
-	// Non-remote-proxy transaction → 409 ErrInvalidState.
+	// A local call is verifiable too: one surface, audited against this kernel's own key (§11).
 	resp := httpDo(t, srv, "GET", "/v1/transactions/"+txID+"/receipt-verification", nil, tok)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("non-remote-proxy: want 409, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("local receipt verification: want 200, got %d", resp.StatusCode)
+	}
+	var v kernel.ReceiptVerification
+	decodeResponse(t, resp, &v)
+	if !v.Valid {
+		t.Errorf("local receipt reported invalid over HTTP, checks=%v", v.Checks)
 	}
 
 	// Unknown transaction → 404.
@@ -2559,6 +2564,21 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown tx: want 404, got %d", resp2.StatusCode)
+	}
+}
+
+// A peer serves one page of what it holds, under its own order: a filter or an offset has nothing
+// to act on, so combining one with ?peer= is refused rather than silently ignored.
+func TestServeListStepsPeerRefusesFilters(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	_, tok := makeUser(t, k, "peer-list-flags")
+	for _, q := range []string{"limit=5", "offset=1", "status=waiting", "process_id=x"} {
+		resp := httpDo(t, srv, "GET", "/v1/steps?peer=cGVlcg&"+q, nil, tok)
+		resp.Body.Close()
+		if resp.StatusCode != kernel.ErrInvalidInput.HTTP {
+			t.Errorf("?peer with %s: want %d, got %d", q, kernel.ErrInvalidInput.HTTP, resp.StatusCode)
+		}
 	}
 }
 

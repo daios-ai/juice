@@ -64,15 +64,21 @@ flow_fed_rename() {
     assert_nonempty "fed_rename.callable_under_new" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@myremote/greet '{}')" tx_id)"
 }
 
-# _all_receipt_checks vr_json — "OK" iff valid=true and all 9 receipt checks are true.
+# _all_receipt_checks vr_json — "OK" iff valid=true, every check that ran held, and the audits a
+# cross-kernel receipt must always answer are among them. A check that does not apply is absent
+# rather than reported as passing, so reply_hash is required only where there is a reply to hash.
 _all_receipt_checks() {
     python3 -c "
 import sys,json
 vr=json.loads(sys.argv[1]); c=vr.get('checks',{}); bad=[]
 if vr.get('valid') is not True: bad.append('valid')
-for k in ['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','charge_ceiling','refund_conservation','args_hash','reply_hash']:
+required=['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','charge_ceiling','refund_conservation','args_hash','draw']
+if c.get('status') is True and vr.get('receipt',{}).get('status')=='success': required.append('reply_hash')
+for k in required:
     if c.get(k) is not True: bad.append(k)
-print('OK' if not bad else 'FAIL:'+','.join(bad))" "$1" 2>/dev/null
+for k,v in c.items():
+    if v is not True: bad.append(k)
+print('OK' if not bad else 'FAIL:'+','.join(sorted(set(bad))))" "$1" 2>/dev/null
 }
 
 flow_federation_import_execute() {
@@ -125,9 +131,14 @@ flow_fed_verify_receipt() {
     assert_eq   "fed_verify.signature_check" True "$(pathf "$vr" checks.signature)"
     assert_eq   "fed_verify.receipt_hash_check" True "$(pathf "$vr" checks.receipt_hash)"
 
-    # Verifying a non-remote-proxy (local) tx → ErrInvalidState.
-    local ltx; ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys/time '{}')" tx_id)
-    assert_fails "fed_verify.local_tx_rejected" "" -- j "$FED_DBL" "$FED_HL" tx verify "$ltx"
+    # A local call is verifiable by the same command, against this kernel's own key: one audit
+    # surface, whoever executed. The peer-only audits are absent, never true by default.
+    local ltx lvr
+    ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys/time '{}')" tx_id)
+    lvr=$(jj "$FED_DBL" "$FED_HL" tx verify "$ltx")
+    assert_json "fed_verify.local_tx_valid" "$lvr" valid True
+    assert_eq "fed_verify.local_signature_check" True "$(pathf "$lvr" checks.signature)"
+    assert_not_contains "fed_verify.local_omits_peer_audits" "receipt_hash" "$lvr"
 }
 
 flow_fed_all_receipt_checks() {
@@ -582,6 +593,13 @@ flow_fed_step_complete() {
     # A peer is served the request, not the requester (§13): no local identity crosses.
     assert_not_contains "fed_step_complete.no_owner_handle" "owner_handle" "$listed"
     assert_not_contains "fed_step_complete.no_created_by" "created_by" "$listed"
+
+    # The operator's own window is not the only one: `step list --peer` asks the same question over
+    # the same protocol, so the party who may complete a step can also see it (§13).
+    local held; held=$(jj "$FED_DBL" "$FED_HL" step list --peer="$FED_RKEY")
+    assert_contains "fed_step_complete.user_lists_peer_held_step" "$step_id" "$held"
+    assert_contains "fed_step_complete.user_list_carries_allowed_input" "allowed_input" "$held"
+    assert_not_contains "fed_step_complete.user_list_withholds_requester" "owner_handle" "$held"
 
     # L completes it with the SAME command that completes a local step — a step is a step.
     # The completion runs on R, funded by the price parked there at creation.

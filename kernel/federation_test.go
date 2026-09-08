@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1272,9 +1273,9 @@ func TestSettleRemoteCallValidChargeNotClamped(t *testing.T) {
 	if tx.Fee != wantImportFee {
 		t.Errorf("import fee: got %d, want %d", tx.Fee, wantImportFee)
 	}
-	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, tx.ID)
+	v, err := k.VerifyReceipt(ctx, caller.ID, tx.ID)
 	if err != nil {
-		t.Fatalf("VerifyRemoteReceipt: %v", err)
+		t.Fatalf("VerifyReceipt: %v", err)
 	}
 	if !v.Valid {
 		t.Errorf("expected valid receipt, got checks %+v", v.Checks)
@@ -1504,6 +1505,30 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 	}
 }
 
+// TestResolveRequiredCallerRefusesEmptyRemoteID: a peer that answers a user reference with an empty
+// id is answering with no principal. Accepted, the step would be addressed to the peer kernel
+// itself — operator scope, decided by a remote reply — and the user it was meant for could never
+// complete it.
+func TestResolveRequiredCallerRefusesEmptyRemoteID(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	setupSys(t, nil, st)
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	fake := &fakeFederationHTTP{resolveUserID: "", resolveHandle: "alice"}
+	k := newTestKernelWithHTTP(st, fake)
+	if _, err := k.EnsureKernelAccount(ctx, peerKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("empty resolved id: want ErrInvalidInput, got %v", err)
+	}
+	fake.resolveUserID = "alice-id"
+	if _, remote, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); err != nil || remote != "alice-id" {
+		t.Fatalf("a resolved id addresses the principal: remote=%q err=%v", remote, err)
+	}
+}
+
 // Rule D (§8): a remote_proxy's active bit is kernel-managed; manual enable/disable is rejected.
 func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 	st := newTestStore(t)
@@ -1623,20 +1648,20 @@ func TestStepAuthSignatureDomainDisjoint(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	cp, recip, uid, sid, ts := "cpkey", "recipkey", "user-1", "step-1", "2026-07-31T00:00:00Z"
 
-	sig, err := testNet.SignStepAuthPayload(priv, cp, recip, uid, sid, ts)
+	sig, err := testNet.SignStepAuthPayload(priv, cp, recip, uid, sid, ts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, sig); err != nil {
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, false, sig); err != nil {
 		t.Fatalf("valid attestation rejected: %v", err)
 	}
 	// A different user_id must not verify against the same signature.
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, "other", sid, ts, sig); err == nil {
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, "other", sid, ts, false, sig); err == nil {
 		t.Error("wrong user_id verified")
 	}
 	// Domain disjointness: step-complete and step_auth signatures never verify as each other.
 	csig, _ := testNet.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash")
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, csig); err == nil {
+	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, false, csig); err == nil {
 		t.Error("step-complete signature verified as step_auth")
 	}
 	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", sig); err == nil {
@@ -1866,23 +1891,119 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	_ = reply
 
 	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
-	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	v, err := k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
 	if err != nil {
-		t.Fatalf("VerifyRemoteReceipt: %v", err)
+		t.Fatalf("VerifyReceipt: %v", err)
 	}
-	if !v.Checks.ReceiptHash {
+	if !v.Checks["receipt_hash"] {
 		t.Error("expected ReceiptHash check=true")
 	}
-	if !v.Checks.Signature {
+	if !v.Checks["signature"] {
 		t.Error("expected Signature check=true")
 	}
-	if !v.Checks.ActionID {
+	if !v.Checks["action_id"] {
 		t.Error("expected ActionID check=true")
+	}
+	// Retention purges the peer, emptying its account of the key. The evidence stored with the
+	// charge carries the key it verified under, so the receipt verifies exactly as before (U36).
+	if err := st.PurgePeerCascade(ctx, remoteUser.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	if anon, _ := st.ReadUser(ctx, remoteUser.ID); anon == nil || anon.IsPeer() {
+		t.Fatal("purge did not empty the peer account; the test would prove nothing")
+	}
+	after, err := k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyReceipt after purge: %v", err)
+	}
+	if !after.Valid || !after.Checks["signature"] {
+		t.Errorf("a genuine receipt stopped verifying once its peer was purged: checks=%v", after.Checks)
+	}
+	if after.RemoteKernelPublicKey == "" {
+		t.Errorf("the verification no longer names the signer")
 	}
 }
 
-func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
+// traceReadFails is a store whose trace read fails: verification must then refuse to answer, not
+// proceed with zeroed dispatch data that a free call would pass against.
+type traceReadFails struct{ kernel.Store }
+
+func (traceReadFails) ReadTrace(context.Context, string) (*kernel.Trace, error) {
+	return nil, errors.New("disk gone")
+}
+
+// TestVerifyRemoteReceiptFailsClosed: the audit refuses to answer without the trace, and a priced
+// call whose ticket is gone fails its draw check rather than skipping it.
+func TestVerifyRemoteReceiptFailsClosed(t *testing.T) {
+	dbPath := t.TempDir() + "/fc.db"
+	st := newTestStoreAt(t, dbPath)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{}
+	k, a, caller := setupSettleProxy(t, st, fake, priv, pub, "fc-action", 1000)
+	_, tr := beginTestRun(t, st, caller.ID, a)
+	mp := *a.BasePrice
+	premium := (mp*kernel.DefaultEconomy().RemoteBPS + 9999) / 10000
+	now := time.Now().UTC()
+	r := &kernel.Receipt{
+		ID: uuid.New().String(), TxID: "rtx-fc", ActionID: "fc-action",
+		ArgsHash: jcsHashForTest(t, `{}`), ReplyHash: jcsHashForTest(t, `{}`),
+		Status: kernel.TxSuccess, Charge: mp, Premium: premium, StartedAt: now, CreatedAt: now,
+	}
+	r.Signature = signReceiptForTest(t, priv, r)
+	b, _ := json.Marshal(r)
+	fake.receiptJSON = string(b)
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, ExistingTraceID: tr.ID,
+		TargetUserID: a.OwnerUserID, ActionName: "settle-peer/settleact", Args: map[string]any{}})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if v, err := k.VerifyReceipt(ctx, caller.ID, reply.TxID); err != nil || !v.Valid {
+		t.Fatalf("the settled call must verify first: valid=%v err=%v", v != nil && v.Valid, err)
+	}
+
+	// Without the trace there is no answer.
+	blind := newTestKernelWithHTTP(traceReadFails{st}, fake)
+	if _, err := blind.VerifyReceipt(ctx, caller.ID, reply.TxID); err == nil {
+		t.Error("verification answered without the trace it audits against")
+	}
+	// A priced call whose ticket is gone: the draw cannot be checked, so it fails, never passes.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE traces SET idempotency_key=NULL WHERE id=?`, tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	v, err := k.VerifyReceipt(ctx, caller.ID, reply.TxID)
+	if err != nil {
+		t.Fatalf("VerifyReceipt: %v", err)
+	}
+	if v.Valid || v.Checks["draw"] {
+		t.Errorf("a priced call with no ticket verified: valid=%v checks=%v", v.Valid, v.Checks)
+	}
+}
+
+// TestPeerStepsAwaitingUsCarriesTruncated: a peer serves one bounded page (P8); when more is
+// waiting the flag is the only signal, so dropping it would silently hide pending work.
+func TestPeerStepsAwaitingUsCarriesTruncated(t *testing.T) {
 	st := newTestStore(t)
+	fake := &fakeFederationHTTP{stepListBody: `{"steps":[{"id":"s1","price":3}],"truncated":true}`}
+	k := newTestKernelWithHTTP(st, fake)
+	setupSys(t, nil, st)
+	held, err := k.PeerStepsAwaitingUs(context.Background(), "cGVlci10cnVuYw", "")
+	if err != nil {
+		t.Fatalf("PeerStepsAwaitingUs: %v", err)
+	}
+	if len(held.Steps) != 1 || held.Steps[0].ID != "s1" || !held.Truncated {
+		t.Errorf("want one step and truncated=true, got %+v", held)
+	}
+}
+
+func TestVerifyLocalReceipt(t *testing.T) {
+	dbPath := t.TempDir() + "/verify.db"
+	st := newTestStoreAt(t, dbPath)
 	ctx := context.Background()
 	sys := setupSys(t, nil, st)
 	caller := setupUser(t, st, "vrr-caller", 100)
@@ -1926,9 +2047,54 @@ func TestVerifyRemoteReceiptNonRemoteProxy(t *testing.T) {
 	if len(txs) == 0 {
 		t.Fatal("no transactions")
 	}
-	_, err = k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState for non-remote-proxy tx, got %v", err)
+	v, err := k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyReceipt on a local call: %v", err)
+	}
+	if !v.Valid {
+		t.Errorf("local receipt reported invalid, checks=%v", v.Checks)
+	}
+	// The peer-only audits do not apply and must be absent rather than reported as passing.
+	for _, absent := range []string{"receipt_hash", "premium", "settlement_arith", "draw", "charge_ceiling"} {
+		if _, ran := v.Checks[absent]; ran {
+			t.Errorf("check %q ran on a local receipt; it has no peer key, frozen rate or draw", absent)
+		}
+	}
+	if v.RemoteKernelPublicKey != "" {
+		t.Errorf("local verification named a remote kernel %q", v.RemoteKernelPublicKey)
+	}
+
+	// Tampering is done to the FILE, the way corruption or an operator would: no store method may
+	// change a receipt or a transaction (G3). A moved receipt field breaks the kernel's own
+	// signature; a moved transaction field leaves the signature intact and is caught by comparing
+	// the signed split against the row.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE receipts SET charge=charge+1 WHERE tx_id=?`, txs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	v, err = k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyReceipt after receipt tamper: %v", err)
+	}
+	if v.Valid || v.Checks["signature"] {
+		t.Errorf("a receipt row moved under its signature verified: valid=%v checks=%v", v.Valid, v.Checks)
+	}
+	if _, err := raw.Exec(`UPDATE receipts SET charge=charge-1 WHERE tx_id=?`, txs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE transactions SET net=net+1 WHERE id=?`, txs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	v, err = k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("VerifyReceipt after transaction tamper: %v", err)
+	}
+	if v.Valid || !v.Checks["signature"] || v.Checks["settlement"] {
+		t.Errorf("a transaction row moved under a valid receipt verified: valid=%v checks=%v", v.Valid, v.Checks)
 	}
 }
 
@@ -2052,17 +2218,17 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	if len(txs) == 0 {
 		t.Fatal("no transactions found")
 	}
-	v, err := k.VerifyRemoteReceipt(ctx, caller.ID, txs[0].ID)
+	v, err := k.VerifyReceipt(ctx, caller.ID, txs[0].ID)
 	if err != nil {
 		t.Fatalf("VerifyRemoteReceipt after deletion: %v", err)
 	}
-	if !v.Checks.ReceiptHash {
+	if !v.Checks["receipt_hash"] {
 		t.Error("expected ReceiptHash check=true after proxy deletion")
 	}
-	if !v.Checks.Signature {
+	if !v.Checks["signature"] {
 		t.Error("expected Signature check=true after proxy deletion")
 	}
-	if !v.Checks.ActionID {
+	if !v.Checks["action_id"] {
 		t.Error("expected ActionID check=true after proxy deletion")
 	}
 	if !v.Valid {

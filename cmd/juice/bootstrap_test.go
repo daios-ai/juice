@@ -263,7 +263,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	}
 	schema := map[string]any{"type": "object"}
 	spec := native.Spec{Name: "widget", Description: "a widget native", InputSchema: schema, OutputSchema: schema,
-		Handler: func(*kernel.Kernel) kernel.NativeFunc { return nil }}
+		Handler: func(native.Host) kernel.NativeFunc { return nil }}
 	const widgetPrice int64 = 7
 
 	// Build 1 ships "widget".

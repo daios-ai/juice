@@ -273,6 +273,10 @@ type Trace struct {
 	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
 	// record, so a crashed or parked federated call never strands its requester.
 	IdempotencyRecordID *string `json:"idempotency_record_id,omitempty"`
+	// OutcomeJSON is the outcome a call reached while a trace beneath it was still in flight: a
+	// trace settles only after every trace beneath it (D3), so the outcome waits here and the last
+	// child's settlement commits it. Nil while executing, and once settled.
+	OutcomeJSON *string `json:"-"`
 	// Ticket is the lottery stake a cross-kernel call holds from its immediate caller C's own
 	// balance (P10): the face value, locked at dispatch so a winning draw is funded when it lands,
 	// and released by whichever settlement resolves the trace. 0 on every other call.
@@ -314,6 +318,7 @@ type Transaction struct {
 	Reason            string          `json:"reason"`
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
+	RemoteSignerKey   string          `json:"remote_signer_key,omitempty"`   // the key the receipt verified under at settlement, stored with it so verification outlives the peer (G7, U36)
 	StartedAt         time.Time       `json:"started_at"`
 	EndedAt           time.Time       `json:"ended_at"`
 }
@@ -554,30 +559,53 @@ type ResolvedAction struct {
 	RailProof   string          `json:"rail_proof,omitempty"`
 }
 
-// ReceiptVerification is the result of VerifyRemoteReceipt.
+// PublicRating is the market-facing projection of one rating (§11, U39): value, note, when — and
+// where it was given, since a rating a remote payer gave on the kernel that paid is admitted here
+// only as trade-backed evidence (D16), and a reader may weigh the two differently.
+type PublicRating struct {
+	Value     int       `json:"value"`
+	Note      *string   `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+	Source    string    `json:"source"` // "local" or "peer"
+}
+
+// TraceOutcome is what a call reached, recorded on its trace by the settlement commit that refused
+// because a child was still in flight (D3). The sweep that settles the trace later commits exactly
+// this; nothing is re-derived from execution.
+type TraceOutcome struct {
+	Status  TxStatus        `json:"status"`
+	Gross   int64           `json:"gross"` // the call's allocation, which what is left on the trace no longer shows
+	Reason  string          `json:"reason,omitempty"`
+	Args    json.RawMessage `json:"args,omitempty"`
+	Reply   json.RawMessage `json:"reply,omitempty"`
+	EndedAt time.Time       `json:"ended_at"`
+	StepID  string          `json:"step_id,omitempty"` // the step this trace completes, if any
+}
+
+// ReceiptVerification is the result of VerifyReceipt.
 type ReceiptVerification struct {
 	TransactionID         string        `json:"transaction_id"`
 	Valid                 bool          `json:"valid"`
-	RemoteKernelHandle    string        `json:"remote_kernel_handle"`
-	RemoteKernelPublicKey string        `json:"remote_kernel_public_key"`
+	RemoteKernelHandle    string        `json:"remote_kernel_handle,omitempty"`
+	RemoteKernelPublicKey string        `json:"remote_kernel_public_key,omitempty"`
 	Checks                ReceiptChecks `json:"checks"`
 	Receipt               *Receipt      `json:"receipt"`
 }
 
-// ReceiptChecks holds the per-field results of a remote receipt verification.
-type ReceiptChecks struct {
-	ReceiptHash        bool `json:"receipt_hash"`
-	Signature          bool `json:"signature"`
-	ActionID           bool `json:"action_id"`
-	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // execution obligation (tx.net) == receipt.charge + receipt.premium
-	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
-	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
-	ChargeCeiling      bool `json:"charge_ceiling"`      // receipt.charge + receipt.premium <= tx.gross, the authenticated ceiling (§13)
-	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee
-	Draw               bool `json:"draw"`                // the ticket's amount is what the secret, nonce and obligation decide (P10)
-	ArgsHash           bool `json:"args_hash"`
-	ReplyHash          bool `json:"reply_hash"`
+// ReceiptChecks names each audit a receipt verification ran and whether it held (§11). A local and
+// a remote receipt are answerable against different facts — a cross-kernel one adds the peer's key,
+// the rates its dispatch froze and the draw (P7, P10) — so a check that does not apply is absent
+// rather than reported as passing.
+type ReceiptChecks map[string]bool
+
+// allHeld reports whether every check that ran held. A verification that ran none is not one.
+func (c ReceiptChecks) allHeld() bool {
+	for _, held := range c {
+		if !held {
+			return false
+		}
+	}
+	return len(c) > 0
 }
 
 // CallerWalletKind identifies the funding source for CommitCall/CommitFailedCall.

@@ -17,7 +17,7 @@ func Message() Spec {
 			"message": str("Message body"),
 		}, "to", "message"),
 		OutputSchema: obj(map[string]any{"step_id": str("ID of the created step")}),
-		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
 				return executeMessage(ctx, args, callerID, parentTraceID, k)
 			}
@@ -25,7 +25,7 @@ func Message() Spec {
 	}
 }
 
-func executeMessage(ctx context.Context, args map[string]any, callerID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {
+func executeMessage(ctx context.Context, args map[string]any, callerID, parentTraceID string, k Host) (map[string]any, error) {
 	to, _ := args["to"].(string)
 	if to == "" {
 		return nil, kernel.ErrInvalidInput.Wrap("message requires to")

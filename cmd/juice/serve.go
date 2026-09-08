@@ -167,7 +167,7 @@ func runServer(addr string) error {
 		if perr != nil {
 			logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
 		}
-		go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
+		go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, k.SettleReady, globalCfg.remoteRetryInterval())
 
 		// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
 		// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
@@ -260,7 +260,7 @@ func everyTick(ctx context.Context, interval time.Duration, work func(context.Co
 // never overlaps the previous one); every retry is idempotent (same key → the remote replays), so
 // the drain and the first tick overlapping on one trace costs a replay, never a second execution.
 // Stops when ctx is cancelled.
-func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, sweep func(context.Context), interval time.Duration) {
 	for _, tr := range drain {
 		if ctx.Err() != nil {
 			return
@@ -269,6 +269,9 @@ func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(
 	}
 	sched := newBackoffScheduler(interval)
 	everyTick(ctx, interval, func(ctx context.Context) {
+		// Whatever a lost pass left with a recorded outcome settles here (D3), before the retries
+		// that may make more of it ready.
+		sweep(ctx)
 		traces, err := list(ctx)
 		if err != nil {
 			return
@@ -984,12 +987,6 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 
 // ratingView is the public reputation projection of a Rating (§13, §16): the market signal only,
 // never the rater identity, the transaction/receipt it links, or the signature.
-type ratingView struct {
-	Value   int       `json:"value"`
-	Note    *string   `json:"note"`
-	Created time.Time `json:"created_at"`
-}
-
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	// Gate on the action's own visibility (anonymous caller allowed for a public action); the read
 	// is independent of the action's active state so reputation survives deactivation (§8).
@@ -998,16 +995,15 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := listBounds(r)
-	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), limit, offset)
+	ratings, err := s.kernel.ActionRatings(r.Context(), pathID(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	views := make([]ratingView, 0, len(ratings))
-	for _, rt := range ratings {
-		views = append(views, ratingView{Value: int(rt.Rating), Note: rt.Note, Created: rt.CreatedAt})
+	if ratings == nil {
+		ratings = []kernel.PublicRating{}
 	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, ratings)
 }
 
 func (s *server) updateActionTarget(w http.ResponseWriter, r *http.Request) {
@@ -1097,7 +1093,7 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
+	v, err := s.kernel.VerifyReceipt(r.Context(), callerFrom(r), pathID(r))
 	writeOr(w, v, err)
 }
 
@@ -1184,6 +1180,32 @@ func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
 // ---- Step handlers ----
 
 func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
+	// ?peer= asks a peer which of its parked steps this caller may complete — the listing half of
+	// `step complete --peer`, under the same rule: an ordinary user asks as themselves and sees the
+	// steps addressed to them, the superuser asks as the whole kernel and sees all of them (§13).
+	if peer := strings.TrimSpace(r.URL.Query().Get("peer")); peer != "" {
+		// A peer serves one bounded page of what it holds, under its own order (P8): there is
+		// nothing here for a filter or an offset to act on, so asking is an error, never silence.
+		for _, p := range []string{"process_id", "status", "limit", "offset"} {
+			if r.URL.Query().Get(p) != "" {
+				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the steps it holds", p))
+				return
+			}
+		}
+		callerID := callerFrom(r)
+		forUserID := callerID
+		if s.kernel.IsSuperuser(r.Context(), callerID) {
+			forUserID = ""
+		}
+		peerKey, err := s.resolvePeerKey(r.Context(), peer)
+		if err != nil {
+			writeOr(w, nil, err)
+			return
+		}
+		steps, err := s.kernel.PeerStepsAwaitingUs(r.Context(), peerKey, forUserID)
+		writeOr(w, steps, err)
+		return
+	}
 	limit, offset := listBounds(r)
 	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
 		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
@@ -1240,16 +1262,12 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a step on a peer")
 		}
 		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a step
-		// is a step. An ordinary authenticated user may complete a remote step addressed to THEM: the
-		// home kernel attaches a step_auth attestation naming their stable id, and the serving kernel
-		// enforces it against the step's required remote caller. A superuser completes kernel-level
-		// (no attestation) — the request acts as the whole kernel, for a kernel-addressed step.
+		// is a step. Every caller completes as themselves: the home kernel attests their stable id,
+		// and whether they are its operator, and the serving kernel matches that against the step's
+		// addressing — a user completes the steps addressed to them, the operator those and the ones
+		// addressed to the kernel itself.
 		if req.Peer != "" {
-			callerID := callerFrom(r)
-			forUserID := callerID
-			if s.kernel.IsSuperuser(r.Context(), callerID) {
-				forUserID = "" // kernel-level completion (no per-user attestation)
-			}
+			forUserID := callerFrom(r)
 			peerKey, err := s.resolvePeerKey(r.Context(), strings.TrimSpace(req.Peer))
 			if err != nil {
 				return nil, 0, err

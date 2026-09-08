@@ -341,7 +341,6 @@ type faultStore struct {
 
 func (f *faultStore) armBefore(method string) { f.set(method, false) }
 func (f *faultStore) armAfter(method string)  { f.set(method, true) }
-func (f *faultStore) disarm()                 { f.set("", false) }
 
 func (f *faultStore) set(method string, after bool) {
 	f.mu.Lock()
@@ -592,8 +591,6 @@ func (s *simNode) publish(t *testing.T, owner *kernel.Account, name string, pric
 	}
 	return updated
 }
-
-func ptr[T any](v T) *T { return &v }
 
 // balance reads a user's spendable balance straight from the unwrapped store, so an assertion
 // never depends on the read path under test.

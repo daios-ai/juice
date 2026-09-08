@@ -29,7 +29,7 @@ func Decide(chatter kernel.DecideChatter) Spec {
 			"args":    object("Arguments for the selected action"),
 			"message": object("Optional text message from the model"),
 		}, "action", "args"),
-		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
 				return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, callerID)
 			}

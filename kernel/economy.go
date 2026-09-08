@@ -40,6 +40,21 @@ func (e Economy) Premium(charge, remoteBPS int64) int64 { return markup(charge, 
 
 func (e Economy) ImportFee(amount, importBPS int64) int64 { return markup(amount, importBPS) }
 
+// RemoteSettlement is what one signed receipt obliges, at the rates its dispatch froze (P7): the
+// obligation owed to the peer, the fee the origin retains on it, and whether the markup the seller
+// wrote is the one those rates produce. Settlement and the offline audit both go through here, so
+// what is committed and what verification expects agree by construction rather than by inspection.
+// The rates are parameters, never the live fields beside them: a settlement applies the terms its
+// own call was sold at, which a later config change must not move.
+func (e Economy) RemoteSettlement(charge, premium, remoteBPS, importBPS int64, success bool) (obligation, importFee int64, premiumOK bool) {
+	premiumOK = premium == e.Premium(charge, remoteBPS)
+	obligation = charge + premium
+	if success {
+		importFee = e.ImportFee(obligation, importBPS)
+	}
+	return obligation, importFee, premiumOK
+}
+
 // ServingPrice is D_max: the most a foreign buyer can owe for one call at manifest price mp, at the
 // seller's advertised rate. It is the quoted cross-kernel maximum, before the origin's import fee.
 func (e Economy) ServingPrice(mp, remoteBPS int64) (int64, error) {

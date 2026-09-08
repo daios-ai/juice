@@ -28,7 +28,7 @@ func Lookup() Spec {
 				"last_contact_failed_at": str("When contact with the hosting kernel last failed (RFC 3339); later than last_seen means recent attempts are failing. Absent for local actions and until a first failure"),
 			}), "Ranked list of matching actions"),
 		}),
-		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
 				return executeLookup(ctx, args, callerID, k)
 			}
@@ -36,7 +36,7 @@ func Lookup() Spec {
 	}
 }
 
-func executeLookup(ctx context.Context, args map[string]any, subjectID string, k *kernel.Kernel) (map[string]any, error) {
+func executeLookup(ctx context.Context, args map[string]any, subjectID string, k Host) (map[string]any, error) {
 	query, _ := args["query"].(string)
 	if query == "" {
 		return nil, kernel.ErrInvalidInput.Wrap("lookup requires query argument")

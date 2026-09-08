@@ -346,6 +346,7 @@ func peerInspectCmd() *cobra.Command {
 					PartialArgs  json.RawMessage `json:"partial_args"`
 					AllowedInput json.RawMessage `json:"allowed_input"`
 				} `json:"steps"`
+				StepsTruncated bool `json:"steps_truncated"`
 			}
 			if err := apiCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
 				return err

@@ -102,9 +102,10 @@ type StepRequest struct {
 	StepID          string          `json:"step_id,omitempty"`          // complete only
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`  // complete only
 	Input           json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
-	ForUserID       string          `json:"for_user_id,omitempty"`      // complete: the completing user's stable id on the requesting kernel (§13)
+	ForUserID       string          `json:"for_user_id,omitempty"`      // list/complete: the acting user's stable id on the requesting kernel (§13)
 	UserAttestation string          `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
 	UserTimestamp   string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
+	UserSuperuser   bool            `json:"user_superuser,omitempty"`   // complete: the home kernel attests this user is its operator, the scope a kernel-addressed step demands
 }
 
 // StepResponse carries a step list or completion result. Unlike a call, a step completion parks

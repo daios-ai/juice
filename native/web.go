@@ -30,7 +30,7 @@ func Web(deps WebDeps) Spec {
 			"content_type": str("Response Content-Type header"),
 			"final_url":    str("Final URL fetched, after scheme defaulting and redirects"),
 		}),
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeWeb(ctx, args, deps)
 			}

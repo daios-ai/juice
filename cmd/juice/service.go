@@ -162,6 +162,12 @@ func (c *accountCache) isPeer(id string) bool {
 
 func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *accountCache) *stepWithAction {
 	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.reference(step.RequiredCallerUserID)}
+	// A step addressed to a principal on a peer names that principal, not merely the kernel that
+	// hosts them (§13): the completer is who may complete it, and completion already demands their
+	// attested id. Rendered the way every remote reference is, beneath the peer's local name.
+	if step.RequiredCallerRemoteID != nil {
+		v.RequiredCallerHandle = *step.RequiredCallerRemoteID + "@" + uc.reference(step.RequiredCallerUserID)
+	}
 	if action != nil {
 		v.Action = actionRef(action, uc)
 	}
@@ -409,7 +415,7 @@ type connectorView struct {
 // directoryOf returns the folder a granted action belongs to: its ref up to the LAST "/", so
 // @chat/inbox/send and @chat/inbox/read both group under @chat/inbox (not a flat @chat). A
 // top-level action like @chat/create-room groups under @chat. Falls back to the whole ref when the
-// action did not resolve to @owner/name (an unbackfilled legacy grant showing a raw id).
+// action did not resolve to @owner/name.
 func directoryOf(actionRef string) string {
 	if i := strings.LastIndexByte(actionRef, '/'); i >= 0 {
 		return actionRef[:i]

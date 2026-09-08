@@ -133,17 +133,18 @@ const (
 // kernel hands over signed scalars; this builds the wire request, dispatches it, and reports the
 // raw status/body plus the never-dispatched proof — no Juice semantics are applied here.
 func (c *fedAdapter) CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
-	input []byte, forUserID, userAttestation, userTimestamp string) (int, []byte, bool, error) {
+	input []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (int, []byte, bool, error) {
 	return c.step(ctx, peerKey, fedStepCompleteTimeout, fed.StepRequest{
 		Kind: "complete", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
 		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-		ForUserID: forUserID, UserAttestation: userAttestation, UserTimestamp: userTimestamp,
+		ForUserID: forUserID, UserAttestation: userAttestation, UserTimestamp: userTimestamp, UserSuperuser: userSuperuser,
 	})
 }
 
-func (c *fedAdapter) ListPeerSteps(ctx context.Context, peerKey, timestamp, signature string) (int, []byte, bool, error) {
+func (c *fedAdapter) ListPeerSteps(ctx context.Context, peerKey, timestamp, signature, forUserID string) (int, []byte, bool, error) {
 	return c.step(ctx, peerKey, fedStepListTimeout, fed.StepRequest{
 		Kind: "list", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
+		ForUserID: forUserID,
 	})
 }
 

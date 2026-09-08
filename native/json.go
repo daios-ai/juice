@@ -17,7 +17,7 @@ func JSON(chatter kernel.JSONChatter) Spec {
 			"output_schema": object("JSON Schema the model output must satisfy"),
 		}, "messages", "output_schema"),
 		OutputSchema: obj(map[string]any{"value": object("JSON value conforming to output_schema")}),
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeJSON(ctx, args, chatter)
 			}

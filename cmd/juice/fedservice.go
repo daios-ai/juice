@@ -132,14 +132,14 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	var err error
 	switch req.Kind {
 	case "list":
-		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature)
+		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.ForUserID)
 	case "complete":
 		input := []byte(req.Input)
 		if len(input) == 0 {
 			input = []byte("{}")
 		}
 		status, body, err = handleFederationStepComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
-			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp)
+			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp, req.UserSuperuser)
 	default:
 		return fedError(kernel.ErrInvalidInput.Wrap("unknown step request kind"))
 	}
@@ -286,7 +286,7 @@ func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID
 // handleFederationStepList returns the waiting steps whose required caller is the requesting peer
 // (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
 // — provisioning is reserved for a call, which is what actually creates a billing relationship.
-func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr string) (int, map[string]any, error) {
+func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr, forUserID string) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -294,7 +294,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	if err != nil || self == "" {
 		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := k.Network().VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, sigStr); err != nil {
+	if err := k.Network().VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, forUserID, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A store failure must not read as "nothing is parked for you" — that is precisely the
@@ -309,9 +309,14 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
 	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
 	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
-	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage)
+	// One past the page: a page exactly full reports more only when there is more.
+	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, forUserID, maxPeerStepPage+1)
 	if err != nil {
 		return 0, nil, err
+	}
+	truncated := len(steps) > maxPeerStepPage
+	if truncated {
+		steps = steps[:maxPeerStepPage]
 	}
 	views := make([]*kernel.PeerStepView, len(steps))
 	for i, s := range steps {
@@ -321,7 +326,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
 	// pending cross-kernel approvals, not a corpus.
-	if len(views) == maxPeerStepPage {
+	if truncated {
 		body["truncated"] = true
 	}
 	return http.StatusOK, body, nil
@@ -330,7 +335,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 // handleFederationStepComplete resumes a waiting step on behalf of the requesting peer (§10, §13).
 // Unlike a call, the requester parks nothing locally — the step's price was parked here at creation
 // — so failures are plain typed errors: there is no remote trace awaiting a signed rejection.
-func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte, forUserID, userAttestation, userTimestamp string) (int, map[string]any, error) {
+func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -355,18 +360,33 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	// step_auth attestation naming that user. A missing attestation is a pre-upgrade home kernel,
 	// reported as a typed unauthorized so the requester can surface "upgrade required" rather than a
 	// generic failure. A kernel-level step (no remote id) keeps today's wire/behavior unchanged.
-	if remoteID, rerr := k.StepRemoteRequiredCaller(ctx, stepID); rerr == nil && remoteID != nil {
-		if forUserID == "" || userAttestation == "" || userTimestamp == "" {
-			return 0, nil, kernel.ErrUnauthorized.Wrap("this step requires a home-kernel user attestation (upgrade required)")
+	// Scope must match (§13): a step addressed to one principal on the peer is completed by that
+	// principal, attested by its home kernel; a step addressed to the peer kernel itself is
+	// completed by that kernel — its own bare signature, or a user its home kernel attests is its
+	// operator. Neither scope reaches the other, and a read that fails refuses rather than skips.
+	remoteID, err := k.StepRemoteRequiredCaller(ctx, stepID)
+	if err != nil {
+		return 0, nil, err
+	}
+	if forUserID == "" {
+		if remoteID != nil {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("this step is addressed to a user of your kernel; complete it as that user")
+		}
+	} else {
+		if userAttestation == "" || userTimestamp == "" {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("a completion as a user requires a home-kernel attestation")
 		}
 		if err := checkFederationTimestamp(userTimestamp); err != nil {
 			return 0, nil, err
 		}
-		if err := k.Network().VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userAttestation); err != nil {
+		if err := k.Network().VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userSuperuser, userAttestation); err != nil {
 			return 0, nil, err
 		}
-		if forUserID != *remoteID {
+		switch {
+		case remoteID != nil && forUserID != *remoteID:
 			return 0, nil, kernel.ErrUnauthorized.Wrap("attested user is not the step's required caller")
+		case remoteID == nil && !userSuperuser:
+			return 0, nil, kernel.ErrUnauthorized.Wrap("this step is addressed to your kernel; only its operator completes it")
 		}
 	}
 
@@ -403,7 +423,8 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 			// commit now completes the record. Leave it PENDING so a replay honestly reports a
 			// duplicate in flight rather than claiming an outcome that has not happened yet.
 		case reply != nil:
-			// A transaction committed and then failed; the commit already completed the record.
+			// A transaction committed and then failed, or the outcome waits on a call beneath it
+			// (D3): either way the commit completes the record.
 		default:
 			// Nothing settled and the step is waiting again: no commit will ever complete this
 			// record, so drop it — otherwise a corrected retry is locked out by a key that
@@ -603,8 +624,9 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 		// A parked remote dispatch has committed nothing yet and may still settle with a real
 		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
-		// here would answer the peer with an outcome that has not happened.
-		if errors.Is(callErr, kernel.ErrTimeout) {
+		// here would answer the peer with an outcome that has not happened. The same holds for an
+		// outcome deferred behind a call still running beneath it (D3): its charge is not final.
+		if errors.Is(callErr, kernel.ErrTimeout) || reply.Deferred() {
 			return 0, nil, callErr
 		}
 		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a

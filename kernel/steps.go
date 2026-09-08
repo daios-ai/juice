@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -33,6 +34,7 @@ func (k *Kernel) Recover(ctx context.Context) error {
 	// Any still-pending remote traces are force-failed by settleFailedCall when their
 	// orphan parent traces are settled in phase C below.
 	k.RetryPendingRemoteDispatches(ctx)
+	k.SettleReady(ctx)
 
 	// A: Re-park empty step-completion traces; collect non-empty ones for phase C.
 	// Empty means no subcall started (trace.locked==0, trace.available==step.price, no settled subtx).
@@ -44,8 +46,11 @@ func (k *Kernel) Recover(ctx context.Context) error {
 	for _, row := range orphanSteps {
 		isEmpty := !row.HasSettled && row.TraceLocked == 0 && row.TraceAvailable == row.Price
 		if isEmpty {
+			// A failed re-park aborts recovery — and so the boot. Continuing would let the final
+			// sweep mark this step waiting with its price still in an unreferenced completion trace,
+			// a step nothing can complete again (G4: restart loses no funds, and never pretends).
 			if err := k.store.ResetStepAndRepark(ctx, row.StepID); err != nil {
-				logger.Error("recover.step_repark_failed", "step_id", row.StepID, "error", err)
+				return fmt.Errorf("recovery: re-park step %s: %w", row.StepID, err)
 			}
 		} else {
 			stepByTrace[row.CompletionTraceID] = row.StepID
@@ -60,9 +65,12 @@ func (k *Kernel) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, trace := range traces {
-		stepID := stepByTrace[trace.ID]
-		if err := k.recoverTrace(ctx, logger, trace, "interrupted", stepID); err != nil {
-			logger.Error("recover.trace_failed", "trace_id", trace.ID, "error", err)
+		// Deepest first, so a child's settlement has already climbed to its parent by the time the
+		// loop reaches it (settleTrace then finds it settled). An orphan whose children are still
+		// in flight — dispatched remote calls the retry loop owns — records its outcome and is
+		// settled by the last of them (D3); at startup nothing executes, so it is truly interrupted.
+		if err := k.recoverTrace(ctx, logger, trace, "interrupted", stepByTrace[trace.ID]); err != nil {
+			return fmt.Errorf("recovery: settle trace %s: %w", trace.ID, err)
 		}
 	}
 
@@ -74,31 +82,25 @@ func (k *Kernel) Recover(ctx context.Context) error {
 	return nil
 }
 
-// newTraceFailureTx builds the failure Transaction skeleton shared by the two crash-recovery
-// paths (recoverTrace here and remote-dispatch recovery in federation.go): the role-law fields
-// derived from an orphaned trace and its process. Callers fill in path-specific extras
-// (ParentTraceID, RemoteActionID, Reason, ReplyJSON).
+// newTraceFailureTx builds the failure Transaction skeleton for a trace settled after the fact.
 func newTraceFailureTx(trace *Trace, process *Process, action *Action, gross int64, now time.Time) *Transaction {
 	return &Transaction{
-		ID:           uuid.New().String(),
-		ProcessID:    trace.ProcessID,
-		TraceID:      trace.ID,
-		OwnerUserID:  process.OwnerUserID,
-		CallerUserID: trace.CallerUserID,
-		TargetUserID: trace.ActionOwnerID,
-		ActionID:     trace.ActionID,
-		ActionName:   action.Name,
-		Status:       TxFailure,
-		Gross:        gross,
-		StartedAt:    trace.CreatedAt,
-		EndedAt:      now,
+		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
+		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
+		ActionID: trace.ActionID, ActionName: action.Name, Status: TxFailure, Gross: gross,
+		StartedAt: trace.CreatedAt, EndedAt: now,
 	}
 }
 
-// recoverTrace settles a single orphan trace as a failure with the given reason.
-// stepID is non-empty only for step-completion traces; it causes CommitFailedCall to
-// use CallerStep wallet semantics (parent lock already released) and mark the step done.
-func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Trace, reason, stepID string) error {
+// settleTrace commits an outcome onto an unsettled trace, after the fact: the deferred settlement
+// D3 orders after the trace's children, and startup recovery's `interrupted`. It rebuilds the
+// transaction from the trace and the outcome alone, so what is committed is exactly what was
+// recorded, then goes through the same two settlement paths a live call takes.
+func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) error {
+	if settled, err := k.store.TraceHasTransaction(ctx, trace.ID); err != nil || settled {
+		return err
+	}
+	logger := k.log.With(ctx)
 	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
 	if err != nil {
 		return err
@@ -107,34 +109,83 @@ func (k *Kernel) recoverTrace(ctx context.Context, logger *log.Logger, trace *Tr
 	if err != nil || action == nil {
 		action = &Action{ID: trace.ActionID, Name: "unknown", OwnerUserID: trace.ActionOwnerID}
 	}
-
-	// Completion trace (stepID set): BeginStepCall already released the parent lock, so the
-	// refund routes to the process via CallerStep — same routing as a live call.
-	callerWalletID, callerWalletKind := callerWalletFor(stepID, process.ID, trace.ParentTraceID)
-
-	ktx := newTraceFailureTx(trace, process, action, trace.Available+trace.Locked, time.Now().UTC())
-	ktx.Reason = reason
-	ktx.ReplyJSON = json.RawMessage("null")
-	// An inbound cross-kernel call is settled by a receipt the caller verifies against the
-	// arguments it sent (P5). The crashed process lost them; the record it served kept them.
-	if trace.IdempotencyRecordID != nil {
+	callerWalletID, callerWalletKind := callerWalletFor(o.StepID, process.ID, trace.ParentTraceID)
+	// The allocation: recorded with the outcome by a live call; for a trace recovered after a
+	// crash, what is left on it plus what its settled children consumed, which left it for good.
+	gross := o.Gross
+	if gross == 0 {
+		consumed, err := k.store.ConsumedByChildren(ctx, trace.ID)
+		if err != nil {
+			return err
+		}
+		gross = trace.Available + trace.Locked + consumed
+	}
+	ktx := &Transaction{
+		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
+		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
+		ActionID: trace.ActionID, ActionName: action.Name, Status: o.Status, Reason: o.Reason,
+		Gross: gross, StartedAt: trace.CreatedAt, EndedAt: o.EndedAt,
+		ArgsJSON: o.Args, ReplyJSON: o.Reply,
+	}
+	if trace.ParentTraceID != nil {
+		ktx.ParentTraceID = *trace.ParentTraceID
+	}
+	if len(ktx.ReplyJSON) == 0 {
+		ktx.ReplyJSON = json.RawMessage("null")
+	}
+	if len(ktx.ArgsJSON) == 0 && trace.IdempotencyRecordID != nil {
 		if rec, err := k.store.ReadIdempotencyRecordByID(ctx, *trace.IdempotencyRecordID); err == nil && rec.ArgsJSON != "" {
 			ktx.ArgsJSON = json.RawMessage(rec.ArgsJSON)
 		}
 	}
-
-	recoverErr := ErrInternal.Wrap(reason)
-	req := callRequest{StepID: stepID}
-	// Force-failing a trace here (EndProcess, or crash recovery) is the final settlement for any
-	// inbound cross-kernel record it serves, so thread the id through: otherwise the peer that
-	// requested the work is answered "duplicate in flight" until the record expires and never
-	// learns the call resolved. Read from the trace, so this holds for every action kind — not
-	// only remote proxies, which are the only traces carrying a dispatch payload.
+	req := callRequest{StepID: o.StepID}
 	if trace.IdempotencyRecordID != nil {
 		req.IdempotencyRecordID = *trace.IdempotencyRecordID
 	}
-	_, settleErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, recoverErr)
-	return settleErr
+	latency := o.EndedAt.Sub(trace.CreatedAt).Seconds()
+	if o.Status != TxSuccess {
+		// The recorded reason is the failure's class, and the class is what a peer's replay must
+		// see (P4): the typed error is rebuilt from it, never reported as an internal one.
+		_, _, err := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, ErrorFromCode(o.Reason).Wrap(o.Reason))
+		return err
+	}
+	// Success, after the fact: the budget's remainder is what settled children left, so the
+	// margin is final; the charge is the fixed price (P5). The commit verifies the remainder it
+	// is handed is still the row's, and records the outcome again otherwise.
+	fresh, err := k.store.ReadTrace(ctx, trace.ID)
+	if err != nil {
+		return err
+	}
+	net, fee := k.econ.Fee(fresh.Available)
+	ktx.Net, ktx.Fee = net, fee
+	stats := k.computeStats(ctx, action.ID, ktx, latency)
+	soldAt, nonce := sold(trace)
+	receipt, err := k.buildReceipt(ktx, ktx.Gross, k.econ.Premium(ktx.Gross, soldAt), trace.Value, trace.ValueTo, nonce)
+	if err != nil {
+		return err
+	}
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
+	err = k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, trace.ActionOwnerID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID)
+	if errors.Is(err, ErrSettlementDeferred) {
+		return nil // recorded again; the next pass settles it
+	}
+	if err != nil {
+		return ErrInternal.Wrap("could not commit deferred transaction")
+	}
+	return nil
+}
+
+// recoverTrace settles a trace that nothing else will: recovery at startup and forced closure. An
+// outcome the call itself recorded is honoured; only a call that recorded none was interrupted.
+func (k *Kernel) recoverTrace(ctx context.Context, _ *log.Logger, trace *Trace, reason, stepID string) error {
+	if trace.OutcomeJSON != nil {
+		var o TraceOutcome
+		if json.Unmarshal([]byte(*trace.OutcomeJSON), &o) == nil {
+			return k.settleTrace(ctx, trace, o)
+		}
+	}
+	return k.settleTrace(ctx, trace, TraceOutcome{Status: TxFailure, Reason: reason, EndedAt: time.Now().UTC(), StepID: stepID})
 }
 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
@@ -205,20 +256,15 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		Status:                 StepWaiting,
 		CreatedAt:              now,
 	}
-	// CreateStep is a funding boundary (§16 Price Snapshot Pattern): the price is parked now and may
-	// settle long after import_bps changes, so the rate is frozen alongside it. Proxies only — a
-	// local action's price carries no import fee.
+	// A funding boundary (§16 Price Snapshot Pattern): the price is parked now and may settle long
+	// after import_bps changes, so the rate is frozen alongside it. Proxies only.
 	if action.Kind == KindRemoteProxy {
 		ibps := k.econ.ImportBPS
 		step.ImportBPS = &ibps
 	}
-	// The park moves action.Price from the funding trace's available into locked; lock the trace
-	// so it cannot interleave with that trace's settlement taxable-read (§9 composition fence).
-	mu := k.traceLock(traceID)
-	mu.Lock()
-	err = k.store.CreateStep(ctx, step)
-	mu.Unlock()
-	if err != nil {
+	// The park is a funding statement (D2) and every settlement commit refuses over a step
+	// beneath it (D3): the store carries the order, so no lock does.
+	if err := k.store.CreateStep(ctx, step); err != nil {
 		return nil, err
 	}
 	k.log.With(ctx).Info("step.created", "step_id", step.ID, "trace_id", traceID, "status", "success")
@@ -250,11 +296,11 @@ func (k *Kernel) ListSteps(ctx context.Context, callerID, processID, status stri
 // first — "what awaits me". Unlike ListSteps it takes no superuser widening: the question is
 // scoped to one user by construction, and the federation step protocol (§13) answers it for a
 // peer, which must never be able to widen its view of another kernel's steps.
-func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID string, limit int) ([]*Step, error) {
+func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID, remoteUserID string, limit int) ([]*Step, error) {
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	return k.store.ListStepsAwaitingCaller(ctx, callerID, limit)
+	return k.store.ListStepsAwaitingCaller(ctx, callerID, remoteUserID, limit)
 }
 
 // CompleteStep resumes a waiting step by merging caller input with partial_args and executing the next call.
@@ -429,8 +475,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		stepTrace.IdempotencyKey = &key
 		// Gross is the price the step PARKED, not the action's current one — those differ once the
 		// catalog reprices — and the rate is the one frozen at creation, so a fee change between
-		// parking and completion cannot move this step's arithmetic (§16). A pre-041 step has no
-		// snapshot and settles from live config, as it does today.
+		// parking and completion cannot move this step's arithmetic (§16).
 		ibps := k.econ.ImportBPS
 		if step.ImportBPS != nil {
 			ibps = *step.ImportBPS

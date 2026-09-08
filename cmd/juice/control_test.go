@@ -179,13 +179,3 @@ func TestAdminSuperuserGate(t *testing.T) {
 		t.Errorf("expected superuser-required error, got: %s", body)
 	}
 }
-
-// mustSysID returns the @sys user id (the fee recipient in tests).
-func mustSysID(t *testing.T, k *kernel.Kernel) string {
-	t.Helper()
-	sys, err := k.ReadUserByHandle(context.Background(), "sys")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sys.ID
-}

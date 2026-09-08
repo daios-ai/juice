@@ -935,6 +935,17 @@ func (s *story) actChurn() error {
 	s.n.Check("churn.call_to_an_offline_provider_does_not_succeed", err != nil,
 		"a call to a kernel that had been killed reported success: "+firstLine(out))
 
+	// A composite that reaches the dead kernel fails at its own level while the call it dispatched
+	// is still unanswered. That child may have executed abroad, so the parent's failure must not
+	// settle it (P7): the money stays reserved and the process stays open on it. A refund here
+	// would be this kernel deciding, on no evidence, that a seller it cannot reach is owed nothing.
+	openBefore := s.openProcesses(k3)
+	_, _ = k3.Run("eve", "run", "dan/chain", `{"msg":"parent fails over a dead peer"}`)
+	parkedAfter, _ := s.parkedFunds(k3)
+	s.n.Check("churn.a_failed_parent_does_not_settle_its_dispatched_child",
+		s.openProcesses(k3) >= openBefore || parkedAfter > 0,
+		"a composite failing over an unreachable peer left no call awaiting its receipt, so the child was presumed dead")
+
 	// Funds parked on an unreachable peer are what an operator needs to see (§13), so they are
 	// read from the supervision view and reported with their age. Whether they should have been
 	// released is the protocol's business, not this act's: U35 lets an ambiguously dispatched call
@@ -966,6 +977,19 @@ func (s *story) actChurn() error {
 		fmt.Sprintf("a buyer held more after a provider's death than before it: %d then %d",
 			before, k3.Holdings("eve")))
 	return nil
+}
+
+// openProcesses counts the computations a kernel still holds funds inside. A process stays open
+// while any call it made awaits a remote receipt, so this is what a presumed-dead child would close.
+func (s *story) openProcesses(k *Kernel) int {
+	procs, _ := pages(k, "sysop-"+k.Name, "/v1/processes")
+	open := 0
+	for _, p := range procs {
+		if str(p, "status") == "open" {
+			open++
+		}
+	}
+	return open
 }
 
 // parkedFunds is what a kernel is holding on calls still waiting for a signed receipt, and how long

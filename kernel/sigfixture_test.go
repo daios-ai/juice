@@ -64,10 +64,10 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash)
 	check("step_complete", "pG89K-ofhZ8xs-ggsVRJ9eNGeOsTcTFQejYfyIboALe7WyHVjZl2qKEF2-Gk4YDCk8vL37QWlIHOwPXHkiueDA", sig, err)
 
-	sig, err = net.SignStepAuthPayload(key, cp, recipient, userID, stepID, ts)
+	sig, err = net.SignStepAuthPayload(key, cp, recipient, userID, stepID, ts, false)
 	check("step_auth", "qxmzAfhsS8m80NKP_DTapYAyso-wR_zxDYvOQtDqO9LJonZZOp1hlpj6oBycpfopKaitmgnKrsQfndJkYp2VDA", sig, err)
 
-	sig, err = net.SignStepListPayload(key, cp, recipient, ts)
+	sig, err = net.SignStepListPayload(key, cp, recipient, ts, "")
 	check("step_list", "hWP8ddJWQ4eDzSPL9T55CVoFzKhWOvlgiZpBfZtNQC1Z4BA1nhU0bFxDCXvrdDE0ZN8xUG-9xB0KOLo9vyjnCg", sig, err)
 
 	sig, err = net.sign(key, sigDomainReveal, RevealPayload{

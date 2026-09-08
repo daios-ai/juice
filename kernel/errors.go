@@ -83,6 +83,12 @@ func KernelErrorCode(err error) string {
 // ErrorFromCode maps a stored error code back to its sentinel, so a code that crossed a
 // process or kernel boundary can be re-raised as the same typed error. Unknown codes — an
 // older or newer peer — degrade to ErrExecutionFailed rather than being silently dropped.
+// ErrSettlementDeferred is returned by a settlement commit that refused because a trace beneath
+// the call is still unsettled (D3): the outcome was recorded in that same transaction, and the
+// sweep that follows the last child's settlement commits it. Compared by identity; it is a state,
+// not a client error, so it carries the invalid_state code and is never returned to a caller.
+var ErrSettlementDeferred = &KernelError{Code: "invalid_state", HTTP: 409, Message: "settlement deferred: work is still in flight beneath the call"}
+
 func ErrorFromCode(code string) *KernelError {
 	for _, sentinel := range []*KernelError{
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,

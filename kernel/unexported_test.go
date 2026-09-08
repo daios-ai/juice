@@ -63,6 +63,54 @@ func TestCanCallVisibilityMatrix(t *testing.T) {
 	}
 }
 
+// recordingStore is a nil store that remembers what evidence ingress tried to write.
+type recordingStore struct {
+	Store
+	rows []*EvidenceRow
+}
+
+func (r *recordingStore) UpsertEvidence(_ context.Context, e *EvidenceRow) error {
+	r.rows = append(r.rows, e)
+	return nil
+}
+
+// TestIngestEvidenceRejectsRatingOutsideContract: a gossiped rating is signed, hash-linked — and
+// still a rating: a value outside {0,1} or a note over the bound is refused before it is stored.
+// A signature proves who said it, not that it is a rating.
+func TestIngestEvidenceRejectsRatingOutsideContract(t *testing.T) {
+	rs := &recordingStore{}
+	cfg := DefaultConfig()
+	cfg.Network, cfg.TokenSecret, cfg.IssuerUserID = playNet, "s", "i"
+	k := New(Dependencies{Config: cfg, Store: rs})
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	issuer := base64.RawURLEncoding.EncodeToString(pub)
+	now := time.Now().UTC()
+	bundle := func(value float64, note *string) EvidenceBundle {
+		er := &EvidenceReceipt{ReceiptHash: "H1", SubjectKernelPublicKey: "subj", SubjectActionID: "act",
+			Status: TxSuccess, StartedAt: now, CreatedAt: now}
+		er.Signature, _ = playNet.sign(priv, sigDomainEvidenceReceipt, *er)
+		rt := &RatingEvidence{Rating: value, Note: note, RatedReceiptHash: "H1", CreatedAt: now}
+		rt.Signature, _ = playNet.sign(priv, sigDomainRating, *rt)
+		return EvidenceBundle{EvidenceReceipt: er, Rating: rt}
+	}
+	long := strings.Repeat("n", maxRatingNoteBytes+1)
+	for name, b := range map[string]EvidenceBundle{"value 7": bundle(7, nil), "oversized note": bundle(1, &long)} {
+		if err := k.ingestEvidenceBundle(context.Background(), issuer, b, now); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%s: want ErrInvalidInput, got %v", name, err)
+		}
+	}
+	if len(rs.rows) != 0 {
+		t.Fatalf("a refused rating was still stored: %d row(s)", len(rs.rows))
+	}
+	ok := "fine"
+	if err := k.ingestEvidenceBundle(context.Background(), issuer, bundle(1, &ok), now); err != nil {
+		t.Fatalf("a rating inside the contract: %v", err)
+	}
+	if len(rs.rows) != 1 {
+		t.Fatalf("the valid rating was not stored")
+	}
+}
+
 // TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey: an empty peer public key must make
 // signature verification fail, never be silently skipped — a missing key cannot authenticate
 // a receipt, so it must never let an unverified receipt pass as valid (§13).
@@ -75,11 +123,11 @@ func TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey(t *testing.T) {
 	}
 	r.Signature = sig
 
-	if err := playNet.verifyRemoteReceiptSignature(r, ""); err == nil {
+	if err := playNet.verifyReceiptSignature(r, ""); err == nil {
 		t.Fatal("empty peer key: got nil, want error (must fail closed)")
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if err := playNet.verifyRemoteReceiptSignature(r, pubB64); err != nil {
+	if err := playNet.verifyReceiptSignature(r, pubB64); err != nil {
 		t.Fatalf("valid signature with correct key: %v", err)
 	}
 }
@@ -672,7 +720,7 @@ func TestReceiptHashJoinDefinition(t *testing.T) {
 		ArgsHash: "ah", ReplyHash: "rh", Gross: 10, Net: 8, Fee: 2, Charge: 10,
 		StartedAt: time.Unix(1000, 0).UTC(), CreatedAt: time.Unix(1001, 0).UTC(), Signature: "sig",
 	}
-	h1, err := receiptHash(r)
+	h1, err := ReceiptHash(r)
 	if err != nil {
 		t.Fatal(err)
 	}

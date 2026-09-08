@@ -79,6 +79,11 @@ func settle(t *testing.T, db *DB, seller *kernel.Account, c foreignCall, charge 
 		Gross: charge, Net: charge, StartedAt: now, EndedAt: now}
 	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: seller.ID, TxID: tx.ID, TraceID: c.tr.ID,
 		ActionID: "a", Status: kernel.TxSuccess, Gross: charge, Net: charge, Charge: charge, Nonce: "0a0b", CreatedAt: now}
+	// A settlement's taxable is what the row holds (D2), and the commit says so: what this call
+	// charges less than its allocation is what settled children consumed, simulated here.
+	if _, err := db.db.ExecContext(ctx, `UPDATE traces SET available=? WHERE id=?`, charge, c.tr.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.CommitCall(ctx, tx, receipt, c.tr.ID, c.p.ID, kernel.CallerProcess, seller.ID, "", charge, 0, nil, c.rec.ID, ""); err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,45 +266,6 @@ func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	if got.TxID == nil {
 		t.Error("expected tx_id to be set after execution failure")
 	}
-}
-
-func TestStepCompleteResetsToWaitingOnPreTransactionReject(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
-	ctx := context.Background()
-
-	owner := setupUser(t, st, "prereject-owner", 500)
-	caller := setupUser(t, st, "prereject-caller", 0)
-	action := setupWasmAction(t, st, owner.ID, "prereject-action", "", 0)
-	// Process has funds for the root trace (action.Price=0, so trace.available=0).
-	_, tr := beginTestRun(t, st, owner.ID, action)
-
-	// Create a root trace so the step has a parent (required for step.price > 0 parking).
-	rootReply, err := k.TestCall(ctx, kernel.TestCallRequest{
-		CallerID: owner.ID, ExistingTraceID: tr.ID,
-		TargetUserID: owner.ID, ActionName: action.Name, Args: map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("root call: %v", err)
-	}
-	rootTraceID := rootReply.TraceID
-
-	// Insert a step directly with price=200 to exceed the root trace's available.
-	// BeginStepCall will fail (insufficient trace funds), resetting the step to waiting.
-	step := setupStep(t, st, rootTraceID, action.ID, caller.ID, nil)
-	// Manually set the step price to exceed what's in the trace.
-	// We can't set price via CreateStep kernel function, so patch it via the store.
-	_ = rootTraceID // root trace has available=0 now (100 was used by the root call then settled)
-
-	// CreateStep returns a step with price=0, so BeginStepCall will succeed trivially.
-	// Instead, verify the scenario by creating a step whose BeginStepCall would fail
-	// due to the parent trace having 0 available after the root call settled.
-	// Since the root call consumed all 100 funds (available=0, locked=0 after settlement),
-	// a subcall requiring funds from the trace would fail.
-	// The step has price=0, so no funds are needed; skip this test scenario as
-	// the new wallet model requires steps to pre-allocate their price at creation time.
-	_ = step
-	t.Skip("step price pre-allocation at CreateStep not yet implemented; scenario covered by store tests")
 }
 
 func TestStepTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
@@ -1376,154 +1338,793 @@ func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	}
 }
 
-// TestSettleFailedCallWithPendingRemoteChild verifies that when a parent trace has a
-// pending remote-proxy subcall (child trace with idempotency_key, no tx) and the parent
-// fails, settleFailedCall pre-settles the child first so the full parent price is refunded
-// to the caller and no funds are stranded in the child trace.
-func TestSettleFailedCallWithPendingRemoteChild(t *testing.T) {
-	st := newTestStore(t)
-	// FakeFederationHTTP with empty receiptJSON → ExecuteFederation returns no receipt → ErrTimeout.
-	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+// stagePendingRemoteChild funds a root call and hangs one dispatched remote-proxy subcall under it,
+// left exactly as a dispatch that has not been answered: an idempotency key, a frozen pricing
+// record, and no transaction. `age` backdates the dispatch so a test can drive the pending bound.
+func stagePendingRemoteChild(t *testing.T, st kernel.Store, prefix string, parentPrice, childPrice int64, age time.Duration) (*kernel.Account, *kernel.Process, *kernel.Trace, *kernel.Trace) {
+	t.Helper()
 	ctx := context.Background()
-
-	const parentPrice = 100
-	const childPrice = 60
-
-	owner := setupUser(t, st, "psc-owner", 0)
-	// Remote proxy action with price=childPrice.
+	owner := setupUser(t, st, prefix+"-owner", 0)
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
-		Name: "psc-remote-act", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityPublic, Price: childPrice,
-		Source:    "https://remote.example.com/v1/federation/call?action=@owner/psc-remote-act&counterparty=us",
+		Name: prefix + "-remote-act", Kind: kernel.KindRemoteProxy,
+		Active: true, Visibility: kernel.VisibilityLocal, Price: childPrice,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, remoteAct); err != nil {
-		t.Fatalf("CreateAction remoteAct: %v", err)
+		t.Fatalf("CreateAction remote proxy: %v", err)
 	}
-
-	// Set up an open process+root trace funded with parentPrice.
-	caller := setupUser(t, st, "psc-caller", parentPrice)
-	parentAct := setupLocalAction(t, st, owner.ID, "psc-parent-act", parentPrice)
+	caller := setupUser(t, st, prefix+"-caller", parentPrice)
+	parentAct := setupLocalAction(t, st, owner.ID, prefix+"-parent-act", parentPrice)
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
 
-	// Simulate: parent trace makes a subcall to the remote proxy → BeginSubcall.
-	childTrace := &kernel.Trace{
+	ikey := uuid.New().String()
+	child := &kernel.Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     p.ID,
 		ActionOwnerID: owner.ID,
 		ActionID:      remoteAct.ID,
 		CallerUserID:  owner.ID,
-		CreatedAt:     time.Now().UTC(),
+		CreatedAt:     time.Now().UTC().Add(-age),
+		// Settlement reads every pricing input from the dispatch record and nowhere else (§13).
+		IdempotencyKey: &ikey,
+		DispatchJSON:   kernel.DispatchRecordForTest(childPrice, childPrice, 0, 0, 0, ""),
 	}
-	ikey := uuid.New().String()
-	childTrace.IdempotencyKey = &ikey
-	djson := `{"args":{},"step_id":"","remote_price":60}`
-	childTrace.DispatchJSON = &djson
-	if err := st.BeginSubcall(ctx, root.ID, childTrace, childPrice); err != nil {
+	if err := st.BeginSubcall(ctx, root.ID, child, childPrice); err != nil {
 		t.Fatalf("BeginSubcall: %v", err)
 	}
-	// Remote call timed out: child trace has idempotency_key and no tx. Parent.locked = childPrice.
+	return caller, p, root, child
+}
 
-	// Simulate parent execution failure (e.g. WASM propagated the ErrTimeout).
+// unsettledTraces names the traces in a process that no transaction has answered yet.
+func unsettledTraces(t *testing.T, st kernel.Store, processID string) []string {
+	t.Helper()
+	traces, err := st.ListUnsettledTracesForProcess(context.Background(), processID)
+	if err != nil {
+		t.Fatalf("ListUnsettledTracesForProcess: %v", err)
+	}
+	ids := make([]string, len(traces))
+	for i, tr := range traces {
+		ids[i] = tr.ID
+	}
+	return ids
+}
+
+// TestParentFailureLeavesDispatchedChildPending pins D3's order against a dispatched child: the
+// remote call may have executed abroad, so an interrupted parent neither presumes it dead nor
+// settles ahead of it. Both wait; the process stays open on them; nothing is refunded for work the
+// seller may already be owed for.
+func TestParentFailureLeavesDispatchedChildPending(t *testing.T) {
+	st := newTestStore(t)
+	// No receipt from the peer: the dispatch stays unanswered on every retry.
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+	ctx := context.Background()
+
+	const parentPrice, childPrice = 100, 60
+	caller, p, root, child := stagePendingRemoteChild(t, st, "pfc", parentPrice, childPrice, 0)
+
+	// Recovery records the orphaned parent's outcome (interrupted) and retries — never settles —
+	// the child; the parent settles only after it (D3).
 	if err := k.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
 
-	// Verify: child trace has a failure transaction.
-	childTx, err := st.ReadTrace(ctx, childTrace.ID)
+	got := unsettledTraces(t, st, p.ID)
+	if len(got) != 2 || (got[0] != child.ID && got[1] != child.ID) {
+		t.Fatalf("unsettled traces after recovery: got %v, want the parent waiting on its dispatched child %s", got, child.ID)
+	}
+	if tr, _ := st.ReadTrace(ctx, root.ID); tr.OutcomeJSON == nil {
+		t.Fatal("the interrupted parent recorded no outcome to settle with later")
+	}
+	proc, err := st.ReadProcess(ctx, p.ID)
 	if err != nil {
-		t.Fatalf("ReadTrace child: %v", err)
+		t.Fatalf("ReadProcess: %v", err)
 	}
-	_ = childTx // trace still exists; check for transaction
-	children, err := st.ListDirectUnsettledChildren(ctx, root.ID)
-	if err != nil {
-		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+	if proc.Status != kernel.ProcessOpen {
+		t.Errorf("process status %q, want open while a call still awaits its receipt", proc.Status)
 	}
-	if len(children) != 0 {
-		t.Errorf("expected 0 unsettled children after Recover, got %d", len(children))
-	}
-
-	// Wallet invariant: caller gets back the full parentPrice.
+	// The money is conserved and still reserved: nothing has come back to the caller, because
+	// nothing has been settled that could return it.
 	u, _ := st.ReadUser(ctx, caller.ID)
 	if u.Available+u.Locked != parentPrice {
 		t.Errorf("caller wallet: available=%d locked=%d, want sum=%d", u.Available, u.Locked, parentPrice)
 	}
-	if u.Locked != 0 {
-		t.Errorf("caller.locked=%d after full recovery, want 0", u.Locked)
+	if u.Locked != parentPrice {
+		t.Errorf("caller.locked=%d, want the whole %d still reserved on the open process", u.Locked, parentPrice)
+	}
+	// Nothing has been released yet: the parent's own budget waits with it.
+	if proc.Available+proc.Locked != parentPrice {
+		t.Errorf("process holds available=%d locked=%d, want the whole %d while both wait", proc.Available, proc.Locked, parentPrice)
 	}
 }
 
-// TestRecoverWithOrphanParentAndPendingChild verifies that Recover correctly handles the
-// case where an orphan parent trace has a pending remote-proxy child (idempotency_key set):
-// the child is force-failed first, its funds return to the parent, and then the parent
-// is settled, restoring the full price to the caller.
-func TestRecoverWithOrphanParentAndPendingChild(t *testing.T) {
+// blockingHTTP executes an http action only once released: a call caught mid-execution. With
+// fail set, the release is a failure.
+type blockingHTTP struct {
+	release chan struct{}
+	fail    bool
+}
+
+func (b *blockingHTTP) Execute(ctx context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+	select {
+	case <-b.release:
+		if b.fail {
+			return nil, errors.New("child blew up")
+		}
+		return map[string]any{}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// composingExec is a script whose action makes one subcall through the real host and then fails
+// while that subcall is still executing — the composition race, exactly as a script would produce
+// it. The test closes `proceed` once it has seen the child start.
+type composingExec struct {
+	fakeScriptExec
+	child   string
+	proceed chan struct{}
+}
+
+func (c *composingExec) Execute(_ context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	go func() { _, _ = host.Call(context.Background(), c.child, []byte(`{}`)) }()
+	<-c.proceed
+	return nil, errors.New("parent blew up")
+}
+
+// TestInboundFailureChargesOnlyWhatChildrenSettled is the money behind D3's order, on the side
+// where it is money: a call served to a peer fails while a child is running, and the receipt the
+// buyer settles on is signed only once the child's outcome is known — nothing charged when the
+// child fails, the child's price when it succeeds. Signed at the parent's failure it would have
+// charged the child's allocation either way, and the seller would have kept the refund too.
+func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
+	const parentPrice, childPrice = 100, 40
+	for name, tc := range map[string]struct {
+		childFails bool
+		wantCharge int64
+	}{
+		"child fails":    {true, 0},
+		"child succeeds": {false, childPrice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := newTestStore(t)
+			ctx := context.Background()
+			provider := setupUser(t, st, "icc-provider", 1000)
+			if err := st.UpsertKernel(ctx, "aWNjLXBlZXI", "icc-peer", "", "", "", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			peer := &kernel.Account{ID: uuid.New().String(), KernelPublicKey: "aWNjLXBlZXI", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			if err := st.CreateUser(ctx, peer); err != nil {
+				t.Fatal(err)
+			}
+			parent := &kernel.Action{ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "icc-parent", Kind: kernel.KindWasm,
+				Active: true, Visibility: kernel.VisibilityPublic, Price: parentPrice, Source: "wat",
+				InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+				CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			child := &kernel.Action{ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "icc-child", Kind: kernel.KindHTTP,
+				Active: true, Visibility: kernel.VisibilityLocal, Price: childPrice, Source: "https://child.example/run",
+				InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+				CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			for _, a := range []*kernel.Action{parent, child} {
+				if err := st.CreateAction(ctx, a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			exec := &composingExec{child: provider.Handle + "/" + child.Name, proceed: make(chan struct{})}
+			childHTTP := &blockingHTTP{release: make(chan struct{}), fail: tc.childFails}
+			k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec, HTTP: childHTTP})
+			rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "icc-" + name, CounterpartyUserID: peer.ID,
+				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+			if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+				t.Fatal(err)
+			}
+
+			type outcome struct {
+				reply *kernel.CallReply
+				err   error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				r, err := k.RunFederated(ctx, peer.ID, provider.ID, parent.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+				done <- outcome{r, err}
+			}()
+			// The child has started when two traces of the process are unsettled.
+			var procID string
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) && procID == "" {
+				if procs, _ := st.ListProcesses(ctx, provider.ID, 10, 0); len(procs) == 1 {
+					if len(unsettledTraces(t, st, procs[0].ID)) == 2 {
+						procID = procs[0].ID
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if procID == "" {
+				t.Fatal("the child never started")
+			}
+			close(exec.proceed)
+			got := <-done
+			if got.err == nil || !got.reply.Deferred() {
+				t.Fatalf("the served call must fail with its outcome deferred: reply=%+v err=%v", got.reply, got.err)
+			}
+			if r, _ := st.ReadIdempotencyRecordByID(ctx, rec.ID); r.Status != "pending" {
+				t.Fatalf("the peer's record must stay pending until the charge is final, got %q", r.Status)
+			}
+
+			close(childHTTP.release)
+			var parentTx *kernel.Transaction
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && parentTx == nil; {
+				txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: procID})
+				for _, tx := range txs {
+					if tx.TraceID == got.reply.TraceID {
+						parentTx = tx
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if parentTx == nil {
+				t.Fatal("the parent never settled after its child did")
+			}
+			receipt, err := st.ReadReceiptByTxID(ctx, parentTx.ID)
+			if err != nil || receipt == nil {
+				t.Fatalf("no receipt for the settled parent: %v", err)
+			}
+			if receipt.Charge != tc.wantCharge {
+				t.Errorf("the buyer is charged %d, want %d: what the child consumed and nothing else", receipt.Charge, tc.wantCharge)
+			}
+			if r, _ := st.ReadIdempotencyRecordByID(ctx, rec.ID); r.Status != "complete" {
+				t.Errorf("the peer's record is %q, want complete once the charge is final", r.Status)
+			} else if !strings.Contains(r.ResultJSON, `"code":"`+kernel.ErrExecutionFailed.Code+`"`) {
+				t.Errorf("a deferred failure replays as %s, want the class it failed with (%s)", r.ResultJSON, kernel.ErrExecutionFailed.Code)
+			}
+			if proc, _ := st.ReadProcess(ctx, procID); proc.Status != kernel.ProcessClosed {
+				t.Errorf("process %q, want closed", proc.Status)
+			}
+		})
+	}
+}
+
+// TestParentFailureLeavesExecutingChildAlone pins §5's one-settler rule against the case that
+// makes it necessary: a capability callback has funded a local child and is executing it when
+// the parent fails. The parent settles alone. The child finishes, is paid for the work it did,
+// and its refund reroutes to the process, which then closes whole.
+func TestParentFailureLeavesExecutingChildAlone(t *testing.T) {
 	st := newTestStore(t)
-	// fakeFederationHTTP with empty receipt → retry in Recover returns ErrTimeout → child stays pending,
-	// then settleFailedCall pre-settles it.
-	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+	child := &blockingHTTP{release: make(chan struct{})}
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st,
+		Scripts: &fakeScriptExec{err: errors.New("parent blew up")}, HTTP: child})
 	ctx := context.Background()
 
-	const parentPrice = 80
-	const childPrice = 50
-
-	owner := setupUser(t, st, "roppc-owner", 0)
-	remoteAct := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID,
-		Name: "roppc-remote-act", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityPublic, Price: childPrice,
-		Source:    "https://remote.example.com/v1/federation/call?action=@owner/roppc-remote-act&counterparty=us",
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	const parentPrice, childPrice = 100, 40
+	owner := setupUser(t, st, "pec-owner", 0)
+	caller := setupUser(t, st, "pec-caller", parentPrice)
+	parentAct := setupWasmAction(t, st, owner.ID, "pec-parent", "", parentPrice)
+	childAct := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "pec-child", Kind: kernel.KindHTTP,
+		Active: true, Visibility: kernel.VisibilityLocal, Price: childPrice, Source: "https://child.example/run",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := st.CreateAction(ctx, childAct); err != nil {
+		t.Fatal(err)
 	}
-	if err := st.CreateAction(ctx, remoteAct); err != nil {
-		t.Fatalf("CreateAction: %v", err)
-	}
-
-	caller := setupUser(t, st, "roppc-caller", parentPrice)
-	parentAct := setupLocalAction(t, st, owner.ID, "roppc-parent-act", parentPrice)
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
 
-	// Child remote-proxy subcall in pending state.
-	childTrace := &kernel.Trace{
-		ID:            uuid.New().String(),
-		ProcessID:     p.ID,
-		ActionOwnerID: owner.ID,
-		ActionID:      remoteAct.ID,
-		CallerUserID:  owner.ID,
-		CreatedAt:     time.Now().UTC(),
+	// The callback: a subcall on the parent's trace, as the parent action's owner, mid-execution.
+	done := make(chan error, 1)
+	go func() {
+		_, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: owner.ID, ParentTraceID: root.ID,
+			TargetUserID: owner.ID, ActionName: childAct.Name, Args: map[string]any{}})
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(unsettledTraces(t, st, p.ID)) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
-	ikey := uuid.New().String()
-	childTrace.IdempotencyKey = &ikey
-	djson := `{"args":{},"step_id":"","remote_price":50}`
-	childTrace.DispatchJSON = &djson
-	if err := st.BeginSubcall(ctx, root.ID, childTrace, childPrice); err != nil {
-		t.Fatalf("BeginSubcall: %v", err)
+	if got := unsettledTraces(t, st, p.ID); len(got) != 2 {
+		t.Fatalf("the child never started: unsettled=%v", got)
 	}
-	// At this point: root is an orphan trace (no tx), child has idempotency_key (pending remote).
-	// Simulate server restart: Recover() should handle both.
 
+	// The parent fails while the child is still running.
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct,
+		Args: map[string]any{}, ExistingTraceID: root.ID}); err == nil {
+		t.Fatal("parent call must fail")
+	}
+	if got := unsettledTraces(t, st, p.ID); len(got) != 2 {
+		t.Fatalf("the parent must wait for its executing child, not settle ahead of it: unsettled=%v", got)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
+		t.Fatalf("process closed over an executing child")
+	}
+
+	// The child finishes: paid for its work; its settlement settles the waiting parent.
+	close(child.release)
+	if err := <-done; err != nil {
+		t.Fatalf("the executing child must settle on its own: %v", err)
+	}
+	if got := unsettledTraces(t, st, p.ID); len(got) != 0 {
+		t.Fatalf("still unsettled: %v", got)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
+		t.Errorf("process %q, want closed once every call has settled", proc.Status)
+	}
+	net, fee := testEconomy().Fee(childPrice)
+	if u, _ := st.ReadUser(ctx, owner.ID); u.Available != net {
+		t.Errorf("the child's provider holds %d, want its net %d: work done was not paid", u.Available, net)
+	}
+	if u, _ := st.ReadUser(ctx, caller.ID); u.Available != parentPrice-childPrice || u.Locked != 0 {
+		t.Errorf("caller available=%d locked=%d, want %d and 0", u.Available, u.Locked, parentPrice-childPrice)
+	}
+	if u, _ := st.ReadUser(ctx, testIssuerUserID); u.Available < fee {
+		t.Errorf("the fee recipient holds %d, want at least the child's fee %d", u.Available, fee)
+	}
+}
+
+// TestParentFailureLeavesRunningStepAlone: a claimed step's price has left the parent's lock and
+// funds its completion trace, so it is a call in flight with its own settler (§5). A parent failing
+// meanwhile cancels only waiting steps; the running one completes, is paid, and its refund follows
+// the settled parent's to the process.
+func TestParentFailureLeavesRunningStepAlone(t *testing.T) {
+	st := newTestStore(t)
+	target := &blockingHTTP{release: make(chan struct{})}
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st,
+		Scripts: &fakeScriptExec{err: errors.New("parent blew up")}, HTTP: target})
+	ctx := context.Background()
+
+	const parentPrice, stepPrice = 100, 40
+	owner := setupUser(t, st, "prs-owner", 0)
+	caller := setupUser(t, st, "prs-caller", parentPrice)
+	completer := setupUser(t, st, "prs-completer", 0)
+	parentAct := setupWasmAction(t, st, owner.ID, "prs-parent", "", parentPrice)
+	stepAct := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "prs-step", Kind: kernel.KindHTTP,
+		Active: true, Visibility: kernel.VisibilityLocal, Price: stepPrice, Source: "https://step.example/run",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := st.CreateAction(ctx, stepAct); err != nil {
+		t.Fatal(err)
+	}
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), completer.ID, "")
+	if err != nil {
+		t.Fatalf("CreateStep: %v", err)
+	}
+
+	// The completer claims the step and is executing it.
+	done := make(chan error, 1)
+	go func() {
+		_, err := k.CompleteStep(ctx, completer.ID, step.ID, json.RawMessage(`{}`))
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s, _ := st.ReadStep(ctx, step.ID); s != nil && s.Status == kernel.StepRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s == nil || s.Status != kernel.StepRunning {
+		t.Fatalf("the completion never claimed the step")
+	}
+
+	// The creating call fails while the step is running.
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct,
+		Args: map[string]any{}, ExistingTraceID: root.ID}); err == nil {
+		t.Fatal("parent call must fail")
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepRunning {
+		t.Fatalf("the parent's failure touched a running step: status %q", s.Status)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
+		t.Fatal("process closed over a running step")
+	}
+	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID}); len(txs) != 0 {
+		t.Fatalf("the parent settled ahead of the running step: %+v", txs)
+	}
+
+	// The step completes: paid, done; its settlement settles the parent, whose refund excludes
+	// the price the step consumed; the process closes whole.
+	close(target.release)
+	if err := <-done; err != nil {
+		t.Fatalf("the running step must settle on its own: %v", err)
+	}
+	parentTx, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID, TargetUserID: owner.ID})
+	found := false
+	for _, tx := range parentTx {
+		if tx.TraceID == root.ID {
+			found = true
+			if tx.Refund != parentPrice-stepPrice {
+				t.Errorf("parent refund=%d, want %d: the completed step's price is consumed", tx.Refund, parentPrice-stepPrice)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the parent never settled after its step completed")
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepDone || s.TxID == nil {
+		t.Errorf("step %q with tx %v, want done with its transaction", s.Status, s.TxID)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
+		t.Errorf("process %q, want closed", proc.Status)
+	}
+	net, _ := testEconomy().Fee(stepPrice)
+	if u, _ := st.ReadUser(ctx, owner.ID); u.Available != net {
+		t.Errorf("the step's provider holds %d, want its net %d", u.Available, net)
+	}
+	if u, _ := st.ReadUser(ctx, caller.ID); u.Available != parentPrice-stepPrice || u.Locked != 0 {
+		t.Errorf("caller available=%d locked=%d, want %d and 0: the step's price was refunded twice or never", u.Available, u.Locked, parentPrice-stepPrice)
+	}
+}
+
+// TestFundingRefusesSettledTraceAtAnyPrice: the rules a spend depends on live in the funding
+// statement (§6, §9). A settled trace, or a closed process, funds nothing — zero included, which
+// no balance check alone would refuse — so a capability that expired between its check and its
+// write can start no work and park no step.
+func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
+	ctx := context.Background()
+	owner := setupUser(t, st, "frs-owner", 0)
+	caller := setupUser(t, st, "frs-caller", 10)
+	parentAct := setupWasmAction(t, st, owner.ID, "frs-parent", "", 10)
+	free := setupLocalAction(t, st, owner.ID, "frs-free", 0)
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct, Args: map[string]any{}, ExistingTraceID: root.ID}); err != nil {
+		t.Fatalf("settling the parent: %v", err)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
+		t.Fatal("fixture: the process should have closed")
+	}
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: owner.ID, ParentTraceID: root.ID,
+		TargetUserID: owner.ID, ActionName: free.Name, Args: map[string]any{}})
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a free subcall on a settled trace: want ErrInvalidState, got %v", err)
+	}
+	if _, err := k.CreateStep(ctx, root.ID, free.ID, json.RawMessage(`{}`), owner.ID, ""); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a free step on a settled trace: want ErrInvalidState, got %v", err)
+	}
+	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
+		t.Errorf("a trace was funded under a settled parent: %d traces", len(traces))
+	}
+	if steps, _ := st.ListSteps(ctx, owner.ID, p.ID, "", true, 10, 0); len(steps) != 0 {
+		t.Errorf("a step was parked in a closed process: %d", len(steps))
+	}
+}
+
+// claimsDuringSnapshot is a store that claims a waiting step the moment forced closure has taken
+// its snapshot of unsettled traces: the exact window between the settlement pass and the close.
+type claimsDuringSnapshot struct {
+	kernel.Store
+	stepID string
+	armed  bool
+}
+
+func (c *claimsDuringSnapshot) ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*kernel.Trace, error) {
+	traces, err := c.Store.ListUnsettledTracesForProcess(ctx, processID)
+	if err == nil && c.armed {
+		c.armed = false
+		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: processID, CreatedAt: time.Now().UTC()}
+		if step, rerr := c.Store.ReadStep(ctx, c.stepID); rerr == nil {
+			ct.ActionOwnerID, ct.CallerUserID, ct.ActionID = step.RequiredCallerUserID, step.RequiredCallerUserID, step.ActionID
+		}
+		if berr := c.Store.BeginStepCall(ctx, c.stepID, ct); berr != nil {
+			return nil, berr
+		}
+	}
+	return traces, err
+}
+
+// TestEndProcessRefusesToCloseOverACallStartedMeanwhile: forced closure settles what it saw and
+// then closes — and a completion that started in between is in flight. The close refuses in the
+// same transaction that would have committed it, so no refund can ever land in a closed process;
+// ending again settles the newcomer and returns everything to the owner.
+func TestEndProcessRefusesToCloseOverACallStartedMeanwhile(t *testing.T) {
+	st := newTestStore(t)
+	race := &claimsDuringSnapshot{Store: st}
+	k := newTestKernel(race)
+	ctx := context.Background()
+	const price = 100
+	owner := setupUser(t, st, "epr-owner", price)
+	completer := setupUser(t, st, "epr-completer", 0)
+	act := setupLocalAction(t, st, owner.ID, "epr-act", price)
+	stepAct := setupLocalAction(t, st, owner.ID, "epr-step", 40)
+	p, root := beginTestRun(t, st, owner.ID, act)
+	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), completer.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	race.stepID, race.armed = step.ID, true
+
+	err = k.EndProcess(ctx, owner.ID, p.ID)
+	if !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("closing over a call that started meanwhile: want ErrInvalidState, got %v", err)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
+		t.Fatal("the process closed over a running step")
+	}
+	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepRunning {
+		t.Fatalf("the claimed step is %q, want running", s.Status)
+	}
+	if u, _ := st.ReadUser(ctx, owner.ID); u.Available+u.Locked != price {
+		t.Fatalf("money moved on a refused close: available=%d locked=%d", u.Available, u.Locked)
+	}
+
+	// Asked again, the closure settles the newcomer too and returns everything.
+	if err := k.EndProcess(ctx, owner.ID, p.ID); err != nil {
+		t.Fatalf("second EndProcess: %v", err)
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
+		t.Errorf("process %q, want closed", proc.Status)
+	}
+	if u, _ := st.ReadUser(ctx, owner.ID); u.Available != price || u.Locked != 0 {
+		t.Errorf("owner available=%d locked=%d, want %d and 0", u.Available, u.Locked, price)
+	}
+}
+
+// reparkFails / settleFails are stores whose one recovery step fails with errDiskGone: recovery
+// must stop THERE, which the returned error must say by wrapping it.
+var errDiskGone = errors.New("disk gone")
+
+type reparkFails struct{ kernel.Store }
+
+func (reparkFails) ResetStepAndRepark(context.Context, string) error { return errDiskGone }
+
+type settleFails struct{ kernel.Store }
+
+func (settleFails) CommitFailedCall(context.Context, *kernel.Transaction, func(int64) (*kernel.Receipt, error), string, string, string, string, int64, *kernel.Stats, string, string, string) error {
+	return errDiskGone
+}
+
+// TestRecoveryAbortsOnAFailedMoneyStep: a recovery that cannot re-park or settle refuses to
+// continue — and so the boot fails — rather than sweep on and mark a step waiting whose price is
+// still in an unreferenced completion trace, a step nothing could ever complete again (G4).
+func TestRecoveryAbortsOnAFailedMoneyStep(t *testing.T) {
+	cases := map[string]struct {
+		wrap  func(kernel.Store) kernel.Store
+		abort error // the failure recovery must stop at, as the returned error reports it
+		check func(t *testing.T, st kernel.Store, step *kernel.Step, ct *kernel.Trace)
+	}{
+		// The re-park fails first: nothing after it ran, so the step was not flipped to waiting
+		// over a price still sitting in its completion trace.
+		"re-park fails": {func(s kernel.Store) kernel.Store { return reparkFails{s} }, errDiskGone,
+			func(t *testing.T, st kernel.Store, step *kernel.Step, ct *kernel.Trace) {
+				if s, _ := st.ReadStep(context.Background(), step.ID); s.Status != kernel.StepRunning {
+					t.Errorf("step %q, want still running for the next attempt", s.Status)
+				}
+				if settled, _ := st.TraceHasTransaction(context.Background(), ct.ID); settled {
+					t.Error("recovery went on to settle the completion trace after the re-park failed")
+				}
+			}},
+		// The re-park succeeds and the orphaned parent's settlement fails: the boot fails and the
+		// parent stays unsettled for the next attempt, never presumed done.
+		// (A settlement wraps its store failure as an internal error, the class the boot reports.)
+		"settle fails": {func(s kernel.Store) kernel.Store { return settleFails{s} }, kernel.ErrInternal,
+			func(t *testing.T, st kernel.Store, step *kernel.Step, _ *kernel.Trace) {
+				if settled, _ := st.TraceHasTransaction(context.Background(), *step.ParentTraceID); settled {
+					t.Error("the parent trace was marked settled by a settlement that failed")
+				}
+			}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := newTestStore(t)
+			k := newTestKernel(st)
+			owner := setupUser(t, st, "rab-owner", 100)
+			step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+			if err := newTestKernel(tc.wrap(st)).Recover(context.Background()); !errors.Is(err, tc.abort) {
+				t.Fatalf("recovery must abort at the failed money step and say so; got %v", err)
+			}
+			tc.check(t, st, step, ct)
+		})
+	}
+}
+
+// TestRecoveredParentChargesWhatChildrenConsumed: a parent interrupted by a crash records no
+// allocation, and what is left on its trace no longer shows what its settled children kept.
+// Recovery must reconstruct the allocation from both, or an inbound call recovered after a crash
+// would sign a charge that omits the work its children were paid for.
+func TestRecoveredParentChargesWhatChildrenConsumed(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	const parentPrice, childPrice = 100, 40
+	owner := setupUser(t, st, "rcc-owner", 0)
+	caller := setupUser(t, st, "rcc-caller", parentPrice)
+	parentAct := setupLocalAction(t, st, owner.ID, "rcc-parent", parentPrice)
+	childAct := setupLocalAction(t, st, owner.ID, "rcc-child", childPrice)
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: childAct.ID,
+		CallerUserID: owner.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginSubcall(ctx, root.ID, child, childPrice); err != nil {
+		t.Fatal(err)
+	}
+	// The child settled successfully before the crash: its price left the parent for good.
+	childTx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: child.ID, ParentTraceID: root.ID,
+		OwnerUserID: caller.ID, CallerUserID: owner.ID, TargetUserID: owner.ID, ActionID: childAct.ID,
+		Status: kernel.TxSuccess, Gross: childPrice, Net: childPrice, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: testIssuerUserID, TxID: childTx.ID, TraceID: child.ID,
+		ActionID: childAct.ID, Status: kernel.TxSuccess, Gross: childPrice, Net: childPrice, Charge: childPrice, CreatedAt: time.Now().UTC()}
+	if err := st.CommitCall(ctx, childTx, rc, child.ID, root.ID, kernel.CallerTrace, owner.ID, testIssuerUserID, childPrice, 0, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := k.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
+	var parentTx *kernel.Transaction
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	for _, tx := range txs {
+		if tx.TraceID == root.ID {
+			parentTx = tx
+		}
+	}
+	if parentTx == nil {
+		t.Fatal("recovery did not settle the interrupted parent")
+	}
+	if parentTx.Gross != parentPrice || parentTx.Refund != parentPrice-childPrice {
+		t.Errorf("recovered parent gross=%d refund=%d, want %d and %d", parentTx.Gross, parentTx.Refund, parentPrice, parentPrice-childPrice)
+	}
+	if receipt, _ := st.ReadReceiptByTxID(ctx, parentTx.ID); receipt == nil || receipt.Charge != childPrice {
+		t.Errorf("recovered parent charges %v, want the %d its child kept", receipt, childPrice)
+	}
+}
 
-	// All unsettled children of root must now be settled.
-	children, err := st.ListDirectUnsettledChildren(ctx, root.ID)
+// TestSettleReadyIsTheSafetyNet: a parent whose outcome is recorded and whose last child has
+// settled without the climb that should have followed — a cancelled request, a crash — is
+// settled by the next sweep, which the retry ticker and startup both run. Nothing depends on
+// the climb having happened.
+func TestSettleReadyIsTheSafetyNet(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{err: errors.New("parent blew up")})
+	ctx := context.Background()
+	const parentPrice, childPrice = 100, 40
+	owner := setupUser(t, st, "srs-owner", 0)
+	caller := setupUser(t, st, "srs-caller", parentPrice)
+	parentAct := setupWasmAction(t, st, owner.ID, "srs-parent", "", parentPrice)
+	childAct := setupLocalAction(t, st, owner.ID, "srs-child", childPrice)
+	p, root := beginTestRun(t, st, caller.ID, parentAct)
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: childAct.ID,
+		CallerUserID: owner.ID, CreatedAt: time.Now().UTC()}
+	if err := st.BeginSubcall(ctx, root.ID, child, childPrice); err != nil {
+		t.Fatal(err)
+	}
+	// The parent fails with the child in flight: its outcome is recorded by the refused commit.
+	if _, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct, Args: map[string]any{}, ExistingTraceID: root.ID}); err == nil {
+		t.Fatal("parent must fail")
+	}
+	if tr, _ := st.ReadTrace(ctx, root.ID); tr.OutcomeJSON == nil {
+		t.Fatal("the refused commit did not record the outcome")
+	}
+	if ready, _ := st.ListReadyTraces(ctx); len(ready) != 0 {
+		t.Fatalf("nothing is ready while the child is in flight, got %d", len(ready))
+	}
+	// The child settles through the store alone — no kernel, no climb — as a lost pass would leave it.
+	settleTrace(t, st, p.ID, child.ID, caller.ID, kernel.CallerTrace, root.ID, childPrice, kernel.TxFailure)
+	if ready, _ := st.ListReadyTraces(ctx); len(ready) != 1 || ready[0].ID != root.ID {
+		t.Fatalf("the parent must be ready once its last child settled, got %v", ready)
+	}
+	k.SettleReady(ctx)
+	if settled, _ := st.TraceHasTransaction(ctx, root.ID); !settled {
+		t.Fatal("the sweep did not settle the ready parent")
+	}
+	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
+		t.Errorf("process %q, want closed", proc.Status)
+	}
+	if u, _ := st.ReadUser(ctx, caller.ID); u.Available != parentPrice || u.Locked != 0 {
+		t.Errorf("caller available=%d locked=%d, want %d and 0", u.Available, u.Locked, parentPrice)
+	}
+}
+
+// settleTrace settles a trace through the store the way the kernel would, for tests that need a
+// child settled with no kernel in the loop.
+func settleTrace(t *testing.T, st kernel.Store, processID, traceID, ownerID, walletKind, walletID string, gross int64, status kernel.TxStatus) {
+	t.Helper()
+	ctx := context.Background()
+	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: processID, TraceID: traceID, OwnerUserID: ownerID,
+		CallerUserID: ownerID, TargetUserID: ownerID, Status: status, Gross: gross, Reason: "test",
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	build := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: testIssuerUserID, TxID: tx.ID, TraceID: traceID,
+			Status: status, Gross: gross, Charge: gross - refund, CreatedAt: time.Now().UTC()}, nil
+	}
+	if err := st.CommitFailedCall(ctx, tx, build, traceID, walletID, walletKind, testIssuerUserID, gross, nil, "", "interrupted", ""); err != nil {
+		t.Fatalf("settleTrace: %v", err)
+	}
+}
+
+// TestRecoveryHonoursARecordedOutcome: a call that succeeded while a child was in flight recorded
+// that success; a restart must not overwrite it with "interrupted" merely because the trace has no
+// transaction yet. When the child settles, the parent settles as the success it was.
+func TestRecoveryHonoursARecordedOutcome(t *testing.T) {
+	st := newTestStore(t)
+	fake := &fakeFederationHTTP{receiptJSON: ""}
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake, Scripts: &fakeScriptExec{result: `{"ok":true}`}})
+	ctx := context.Background()
+	const parentPrice, childPrice = 100, 60
+	caller, p, root, child := stagePendingRemoteChild(t, st, "rho", parentPrice, childPrice, time.Hour)
+	// The parent succeeds while its dispatched child is pending: the commit is refused and the
+	// success is recorded. (stagePendingRemoteChild's parent is a local action; run it as wasm.)
+	parentAct, _ := st.ReadAction(ctx, root.ActionID)
+	parentAct.Kind = kernel.KindWasm
+	if reply, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct, Args: map[string]any{}, ExistingTraceID: root.ID}); err != nil || !reply.Deferred() {
+		t.Fatalf("want a deferred success, got reply=%+v err=%v", reply, err)
+	}
+	// A restart: recovery sees an orphan parent with a child in flight.
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	var o kernel.TraceOutcome
+	tr, _ := st.ReadTrace(ctx, root.ID)
+	if tr.OutcomeJSON == nil || json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil || o.Status != kernel.TxSuccess {
+		t.Fatalf("recovery overwrote the recorded success: %v", tr.OutcomeJSON)
+	}
+	// The child expires; the sweep settles the parent as what it recorded.
+	cfg := testConfig()
+	cfg.RemotePendingMaxAge = time.Minute
+	newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{receiptJSON: ""}}).RetryPendingRemoteDispatches(ctx)
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
+	for _, tx := range txs {
+		if tx.TraceID == root.ID && tx.Status != kernel.TxSuccess {
+			t.Errorf("the parent settled as %q (%s), want the success it recorded", tx.Status, tx.Reason)
+		}
+	}
+	if settled, _ := st.TraceHasTransaction(ctx, root.ID); !settled {
+		t.Fatal("the parent never settled")
+	}
+	_ = child
+}
+
+// TestDeferredParentSettlesAfterItsChild is the other half: once the pending bound expires, the
+// child settles, and its settlement settles the parent whose outcome was waiting on it (D3). The
+// parent's refund then includes what the child gave back, so its receipt charges nothing that was
+// not consumed — and the caller is made whole through the ordinary refund, no rerouting.
+func TestDeferredParentSettlesAfterItsChild(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
+	ctx := context.Background()
+
+	const parentPrice, childPrice = 100, 60
+	caller, p, root, child := stagePendingRemoteChild(t, st, "prr", parentPrice, childPrice, time.Hour)
+
+	// First the parent's outcome is recorded, with the child still dispatched and unanswered.
+	if err := k.Recover(ctx); err != nil {
+		t.Fatalf("Recover (parent defers): %v", err)
+	}
+	if got := unsettledTraces(t, st, p.ID); len(got) != 2 {
+		t.Fatalf("parent and child must both be unsettled while the child is pending, unsettled=%v", got)
+	}
+	// Then the pending bound expires and the child settles, after its parent. A kernel with a
+	// shorter bound is the same running server one hour later.
+	cfg := testConfig()
+	cfg.RemotePendingMaxAge = time.Minute
+	expire := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{receiptJSON: ""}})
+	expire.RetryPendingRemoteDispatches(ctx)
+
+	if got := unsettledTraces(t, st, p.ID); len(got) != 0 {
+		t.Fatalf("unsettled traces after the bound expired: got %v, want none", got)
+	}
+	var rootTx *kernel.Transaction
+	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID}); true {
+		for _, tx := range txs {
+			if tx.TraceID == root.ID {
+				rootTx = tx
+			}
+		}
+	}
+	if rootTx == nil {
+		t.Fatal("the parent must have settled once its child did")
+	}
+	if rootTx.Refund != parentPrice || rootTx.Gross-rootTx.Refund != 0 {
+		t.Errorf("parent refund=%d gross=%d: the child's refund must be in the parent's refund and out of its charge", rootTx.Refund, rootTx.Gross)
+	}
+	proc, err := st.ReadProcess(ctx, p.ID)
 	if err != nil {
-		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+		t.Fatalf("ReadProcess: %v", err)
 	}
-	if len(children) != 0 {
-		t.Errorf("expected 0 unsettled children after Recover, got %d", len(children))
+	if proc.Status != kernel.ProcessClosed {
+		t.Errorf("process status %q, want closed once nothing is outstanding", proc.Status)
 	}
-
-	// Caller must have full parentPrice back (no funds stranded).
 	u, _ := st.ReadUser(ctx, caller.ID)
-	if u.Available+u.Locked != parentPrice {
-		t.Errorf("caller wallet: available=%d locked=%d, want sum=%d", u.Available, u.Locked, parentPrice)
+	if u.Available != parentPrice || u.Locked != 0 {
+		t.Errorf("caller wallet: available=%d locked=%d, want %d and 0", u.Available, u.Locked, parentPrice)
 	}
-	if u.Locked != 0 {
-		t.Errorf("caller.locked=%d after recovery, want 0", u.Locked)
-	}
+	_ = child
 }
 
 // TestStepCompleteRemoteProxyTimeoutLeavesStepRunning verifies Fix 3B: CompleteStep does not

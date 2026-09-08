@@ -118,3 +118,35 @@ func TestDrawIsBoundToItsThreeInputs(t *testing.T) {
 		t.Error("changing the ticket, the secret or the nonce moved nothing")
 	}
 }
+
+// TestRemoteSettlement pins the one calculation both settlement and the offline audit run (P7): a
+// disagreement between them is what the shared function exists to make impossible.
+func TestRemoteSettlement(t *testing.T) {
+	e := Economy{RemoteBPS: 500, ImportBPS: 500}
+	for _, tc := range []struct {
+		name                          string
+		charge, premium               int64
+		success                       bool
+		wantObligation, wantImportFee int64
+		wantOK                        bool
+	}{
+		{"success", 1000, 50, true, 1050, 53, true},
+		{"failure charges the premium but retains no import fee", 1000, 50, false, 1050, 0, true},
+		{"a failure that consumed nothing owes nothing", 0, 0, false, 0, 0, true},
+		{"a premium the rates do not produce is refused", 1000, 60, true, 1060, 53, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obligation, importFee, ok := e.RemoteSettlement(tc.charge, tc.premium, e.RemoteBPS, e.ImportBPS, tc.success)
+			if obligation != tc.wantObligation || importFee != tc.wantImportFee || ok != tc.wantOK {
+				t.Errorf("got (%d, %d, %v), want (%d, %d, %v)",
+					obligation, importFee, ok, tc.wantObligation, tc.wantImportFee, tc.wantOK)
+			}
+		})
+	}
+	// The rates are the call's own, not the live fields: a settlement is audited at what it was sold
+	// at, so a later config change must not move it.
+	moved := Economy{RemoteBPS: 9000, ImportBPS: 9000}
+	if _, fee, ok := moved.RemoteSettlement(1000, 50, 500, 500, true); fee != 53 || !ok {
+		t.Errorf("frozen rates ignored: fee=%d ok=%v, want 53 and true", fee, ok)
+	}
+}

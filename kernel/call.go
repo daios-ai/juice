@@ -83,6 +83,12 @@ type CallReply struct {
 	ProcessID string `json:"process_id,omitempty"`
 }
 
+// Deferred reports a reply whose outcome is known but not yet settled: a trace beneath the call is
+// still in flight, and a trace settles only after every trace beneath it (D3). The result, if any,
+// is real; the transaction and receipt follow when the last child settles, and complete whatever
+// record this call answers.
+func (r *CallReply) Deferred() bool { return r != nil && r.TxID == "" }
+
 // ActionRef is a parsed user[@kernel]/action reference (§13). Kernel is "" for a local action.
 type ActionRef struct {
 	Owner  string // bare owner handle
@@ -319,7 +325,7 @@ func parseActionPath(ref string) (ActionRef, error) {
 	return ActionRef{Owner: owner, Kernel: kernel}, nil
 }
 
-// ensureBasePrice heals a proxy imported before the seller's price was stored (§16). Such a row's
+// ensureBasePrice heals a proxy row whose seller price was never snapshotted (§16). Such a row's
 // total is frozen and its seller price unrecoverable — reversing the rounded total cannot recover it
 // — so it re-resolves once from the signed manifest. Called wherever a row is about to be FUNDED,
 // which includes CreateStep and a resolve by raw action id, not only a call by reference: dispatch
@@ -436,11 +442,8 @@ func (k *Kernel) ResolveUser(ctx context.Context, ident string) (*Account, error
 	return nil, ErrNotFound.Wrapf("user %s not found", ident)
 }
 
-// Call executes the central kernel transition.
-// Preconditions are checked in order per §5.1 of the requirements.
-// For root calls (req.ExistingTraceID), the process and trace must already have been created by Run().
-// For subcalls, the parent trace must have sufficient available funds.
-// For step-completion calls, BeginStepCall must have been called before invoking Call.
+// Call executes the central kernel transition, checking D2's preconditions in their stated order.
+// Each orchestration mode arrives pre-funded: a root call by Run, a step completion by BeginStepCall.
 // SubcallRequest is the only publicly constructible call: a subcall on an existing trace (§6), the
 // HTTP twin of juice.call used by a capability callback (§9). It cannot express an orchestration
 // mode — a pre-funded trace, a step completion, or an inbound idempotency record — so no client can
@@ -643,10 +646,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	default:
 		// Lock the parent trace so a subcall's fund-move cannot interleave with that trace's
 		// settlement taxable-read→commit (§9 capability composition fence).
-		pmu := k.traceLock(req.ParentTraceID)
-		pmu.Lock()
 		err := k.store.BeginSubcall(ctx, req.ParentTraceID, trace, lockPrice)
-		pmu.Unlock()
 		if err != nil {
 			if errors.Is(err, ErrInsufficientFunds) {
 				return nil, err
@@ -697,12 +697,12 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		if ktx.EndedAt.IsZero() {
 			ktx.EndedAt = time.Now().UTC()
 		}
-		receipt, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, cause)
-		if sErr != nil || receipt == nil {
-			if sErr == nil {
-				sErr = cause
-			}
+		receipt, deferred, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, latency, cause)
+		if sErr != nil {
 			return nil, sErr
+		}
+		if deferred {
+			return &CallReply{TraceID: trace.ID}, cause
 		}
 		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, cause
 	}
@@ -765,11 +765,9 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// The taxable read and the commit that zeroes it must be atomic against a concurrent
 	// capability spend (§9), so both run under this trace's lock; error paths release it
 	// before delegating to settleFailedCall (which re-acquires it).
-	mu := k.traceLock(trace.ID)
-	mu.Lock()
+	replyJSON, _ := json.Marshal(reply)
 	postTrace, readErr := k.store.ReadTrace(ctx, trace.ID)
 	if readErr != nil {
-		mu.Unlock()
 		// If we can't read the trace, settle as failure to avoid fund loss. The settlement commits a
 		// transaction and charges for it, so its receipt is reported like every other settled failure:
 		// a nil reply would tell the caller nothing happened while it has in fact been charged, and
@@ -780,9 +778,9 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	taxable := postTrace.Available
 	net, fee := k.econ.Fee(taxable)
 
-	replyJSON, _ := json.Marshal(reply)
 	ktx.ReplyJSON = json.RawMessage(replyJSON)
 	ktx.Status = TxSuccess
+	ktx.EndedAt = time.Now().UTC()
 	ktx.Net = net
 	ktx.Fee = fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
@@ -793,7 +791,6 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	premium := k.econ.Premium(ktx.Gross, soldAt)
 	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo, nonce) // success: charge = gross, value delivered
 	if receiptErr != nil {
-		mu.Unlock()
 		// Same as the post-execution read failure above: the settlement committed, so its receipt is
 		// reported rather than discarded.
 		reply, _ := fail(ErrInternal.Wrap("could not build receipt"), latency)
@@ -804,12 +801,18 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
 	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID)
-	mu.Unlock()
+	if errors.Is(commitErr, ErrSettlementDeferred) {
+		// A trace beneath this call is still in flight (D3): the outcome is recorded with the
+		// refusal, and the settlement that follows the last child's commits it.
+		logger.Info("call.deferred", "action", action.Name, "trace_id", trace.ID)
+		return &CallReply{Result: reply, TraceID: trace.ID}, nil
+	}
 	if commitErr != nil {
 		return nil, ErrInternal.Wrap("could not commit transaction")
 	}
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", latency*1000)
+	k.settleReady(sctx)
 
 	return &CallReply{
 		Result:    reply,
@@ -1119,7 +1122,7 @@ func (k *Kernel) computeStats(_ context.Context, actionID string, tx *Transactio
 // It returns the committed receipt so callers can surface the real charge (e.g. an inbound
 // federation call that failed after settling descendants must return that receipt, not a
 // zero-charge rejection).
-func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, action *Action, latency float64, callErr error) (*Receipt, error) {
+func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, action *Action, latency float64, callErr error) (receipt *Receipt, deferred bool, err error) {
 	traceID := trace.ID
 	// Settlement is a money transition + its audit record (§5); it must commit even
 	// if the call timed out or the client disconnected. Detach from execution-scoped
@@ -1136,17 +1139,6 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	if tx.Reason == "" {
 		tx.Reason = KernelErrorCode(callErr)
 	}
-	// Pre-settle any unsettled direct child traces (e.g. remote subcalls that timed out).
-	// recoverTrace settles each child as a failure, crediting its refund back into this
-	// trace's available and zeroing its locked. CommitFailedCall below then includes those
-	// funds in the refund it returns to the caller, preventing stranded allocations.
-	if children, childErr := k.store.ListDirectUnsettledChildren(ctx, traceID); childErr == nil {
-		for _, child := range children {
-			if err := k.recoverTrace(ctx, logger, child, "parent call failed", ""); err != nil {
-				logger.Error("call.pre_settle_child_failed", "child_trace_id", child.ID, "error", err)
-			}
-		}
-	}
 	stats := k.computeStats(ctx, action.ID, tx, latency)
 	// A failure still charges for whatever settled beneath it, so a foreign buyer can still owe for
 	// one (P7). The charge is only known inside the commit, so the receipt and the obligation that
@@ -1162,11 +1154,57 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		committed = r
 		return r, err
 	}
-	if settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID); settlErr != nil {
-		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
-		return nil, ErrInternal.Wrap("could not record failure transaction")
+	settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID)
+	if errors.Is(settlErr, ErrSettlementDeferred) {
+		// A trace beneath this call is still in flight (D3): its outcome decides this call's
+		// charge — settled descendants stay paid, refunded ones do not — so the outcome is recorded
+		// with the refusal and the settlement that follows the last child's commits it.
+		logger.Info("call.deferred", "action", action.Name, "trace_id", traceID, "reason", tx.Reason)
+		return nil, true, nil
 	}
-	return committed, nil
+	if settlErr != nil {
+		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
+		return nil, false, ErrInternal.Wrap("could not record failure transaction")
+	}
+	k.settleReady(ctx)
+	return committed, false, nil
+}
+
+// SettleReady settles every trace whose recorded outcome can be committed now: no transaction yet,
+// nothing unsettled beneath it (D3). It runs after every settlement — a child's commit is what makes
+// its parent ready — on the retry ticker, and at startup, and is idempotent under settled-once, so a
+// pass lost to a cancelled request or a crash costs one interval, never a stranded process. A
+// recorded outcome means the call's execution has ended, which is what makes it safe at any moment.
+func (k *Kernel) SettleReady(ctx context.Context) {
+	for pass := 0; pass < 64; pass++ { // each settled trace can make its parent ready: climb
+		ready, err := k.store.ListReadyTraces(ctx)
+		if err != nil || len(ready) == 0 {
+			return
+		}
+		progressed := false
+		for _, tr := range ready {
+			var o TraceOutcome
+			if json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil {
+				continue
+			}
+			if err := k.settleTrace(ctx, tr, o); err != nil {
+				k.log.With(ctx).Error("call.deferred_settlement_failed", "trace_id", tr.ID, "error", err)
+				continue
+			}
+			progressed = true
+		}
+		if !progressed {
+			return
+		}
+	}
+}
+
+// settleReady is SettleReady detached from request cancellation: the settlement it may perform is
+// a money transition, and the request that caused it may already be gone.
+func (k *Kernel) settleReady(ctx context.Context) {
+	sctx, cancel := settlementContext(ctx)
+	defer cancel()
+	k.SettleReady(sctx)
 }
 
 // settlementContext derives a context for committing a money transition and its

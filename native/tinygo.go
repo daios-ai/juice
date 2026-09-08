@@ -48,7 +48,7 @@ func TinyGo(deps CompileDeps, sdk string) Spec {
 			"artifact_hash": str("SHA-256 hex of the artifact, present on success"),
 			"diagnostics":   arrayOf(map[string]any{"type": "string"}, "Compile/validation diagnostics"),
 		}, "status", "diagnostics"),
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeTinyGoCompile(ctx, args, deps, sdk)
 			}

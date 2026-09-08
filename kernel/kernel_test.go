@@ -44,7 +44,14 @@ func newRef() string { return "test:" + uuid.NewString() }
 
 func newTestStore(t testing.TB) kernel.Store {
 	t.Helper()
-	db, err := store.Open(t.TempDir() + "/test.db")
+	return newTestStoreAt(t, t.TempDir()+"/test.db")
+}
+
+// newTestStoreAt opens the store at a known path, for a test that must reach the file behind the
+// store — to corrupt a row the way a disk or an operator could, which no store method may do.
+func newTestStoreAt(t testing.TB, path string) kernel.Store {
+	t.Helper()
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
@@ -2289,12 +2296,12 @@ func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.Reveal
 
 // stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
 // every unrelated test see an unreachable peer, which no call path consults.
-func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string) (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string, _ bool) (int, []byte, bool, error) {
 	f.stepInput, f.stepForUserID = string(input), forUserID
 	return f.stepReply()
 }
 
-func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _ string) (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _, _ string) (int, []byte, bool, error) {
 	if f.stepListBody == "" {
 		return 0, nil, true, nil // no listing configured: peer unreachable, so no payment descriptor
 	}
@@ -2665,6 +2672,254 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	if len(procs) != 0 {
 		t.Errorf("expected no process for a denied inbound local call, got %d", len(procs))
 	}
+}
+
+// TestRateInboundForeignCallRefused: a call this kernel served to a peer is funded and therefore
+// owned by the seller (§6 role law), so the plain buyer check would let a provider rate its own
+// work and gossip it as trade evidence. The payer is on the other kernel and rates its own proxy
+// transaction there. A step a peer completes here stays the local payer's to rate.
+func TestRateInboundForeignCallRefused(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	provider := setupUser(t, st, "rate-fed-provider", 0)
+	if err := st.UpsertKernel(ctx, "cmF0ZS1mZWQtcGVlcg", "rate-fed-peer", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer := &kernel.Account{
+		ID: uuid.New().String(), KernelPublicKey: "cmF0ZS1mZWQtcGVlcg",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "rate-fed-act",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		Source:      "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly as the federation handler admits a call: the inbound record exists before it runs.
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "rate-fed-key", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.OwnerUserID != provider.ID {
+		t.Fatalf("inbound call owner: got %q, want the seller %q", tx.OwnerUserID, provider.ID)
+	}
+	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("provider rating its own served call: want ErrUnauthorized, got %v", err)
+	}
+	// Retention purges the peer: its account row loses the kernel key but stays as ledger anchor
+	// (§13). The gate must not reopen for a transaction that has outlived its peer.
+	if err := st.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	if anon, _ := st.ReadUser(ctx, peer.ID); anon == nil || anon.IsPeer() {
+		t.Fatalf("purge did not anonymize the peer account; the test would prove nothing")
+	}
+	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("provider rating a served call after the peer was purged: want ErrUnauthorized, got %v", err)
+	}
+	if ratings, lerr := st.ListRatings(ctx, a.ID, 10, 0); lerr == nil && len(ratings) != 0 {
+		t.Errorf("a refused rating still recorded %d row(s)", len(ratings))
+	}
+}
+
+// TestActionRatingsAdmitTradeBackedPeerRatings: a buyer who paid abroad rates on the kernel that
+// paid, and that rating reaches the provider's public projection only on D16's link — the rater's
+// kernel names one of this kernel's receipts for the action, and that receipt's call was made by
+// that very kernel. A rating attached to someone else's trade, to no trade, or by an equivocating
+// issuer is not admitted; a local rating sits beside the admitted one, each naming its source.
+func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	provider := setupUser(t, st, "prt-provider", 0)
+	const peerKey, strangerKey = "cHJ0LXBlZXI", "cHJ0LXN0cmFuZ2Vy"
+	for _, key := range []string{peerKey, strangerKey} {
+		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", "", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		acct := &kernel.Account{ID: uuid.New().String(), KernelPublicKey: key, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateUser(ctx, acct); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peer, _ := st.ReadAccountByKernelKey(ctx, peerKey)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	// The peer's call, served here: its receipt is what a remote rating must name.
+	rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served, _ := st.ReadReceiptByTxID(ctx, reply.TxID)
+	servedHash, err := kernel.ReceiptHash(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := k.PublicKeyB64()
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []*kernel.EvidenceRow{
+		ratingEvidence(t, peerKey, self, a.ID, "peer-own-1", servedHash, 1, now.Add(-time.Minute)), // admitted
+		ratingEvidence(t, strangerKey, self, a.ID, "str-own-1", servedHash, 0, now),                // not the caller
+		ratingEvidence(t, peerKey, self, a.ID, "peer-own-2", "not-our-receipt", 0, now),            // no trade
+		ratingEvidence(t, peerKey, self, "other-action", "peer-own-3", servedHash, 0, now),         // other action
+	}
+	for _, e := range rows {
+		if err := st.UpsertEvidence(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A local payer's rating, newer, sits beside it.
+	buyer := setupUser(t, st, "prt-buyer", 0)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
+	local, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: buyer.ID, ExistingTraceID: tr.ID, TargetUserID: provider.ID, ActionName: a.Name, Args: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RateTransaction(ctx, buyer.ID, local.TxID, 1.0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := k.ActionRatings(ctx, a.ID, 50, 0)
+	if err != nil {
+		t.Fatalf("ActionRatings: %v", err)
+	}
+	if len(got) != 2 || got[0].Source != "local" || got[1].Source != "peer" || got[1].Value != 1 {
+		t.Fatalf("want [local, peer(1)] newest first, got %+v", got)
+	}
+	if page, _ := k.ActionRatings(ctx, a.ID, 1, 1); len(page) != 1 || page[0].Source != "peer" {
+		t.Errorf("paging over the merged projection: got %+v", page)
+	}
+	// A peer mints its own row keys, so it can gossip any number of rows naming our one receipt:
+	// agreeing rows are one rating.
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, a.ID, "peer-own-5", servedHash, 1, now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	peerRatings := func() int {
+		got, _ := k.ActionRatings(ctx, a.ID, 50, 0)
+		n := 0
+		for _, r := range got {
+			if r.Source == "peer" {
+				n++
+			}
+		}
+		return n
+	}
+	if n := peerRatings(); n != 1 {
+		t.Errorf("two agreeing rows on one trade: want 1 peer rating, got %d", n)
+	}
+	// A trade is judged with all its rows. A stored row outside the contract — a value that is no
+	// rating, or a note over the bound — voids it, as does an equivocated row: the issuer has told
+	// two stories about that trade. The same rule the inspect view applies.
+	long := strings.Repeat("n", 1025)
+	overlong := ratingEvidence(t, peerKey, self, a.ID, "peer-own-6", servedHash, 1, now)
+	overlong.RatingJSON = strings.Replace(overlong.RatingJSON, `"note":null`, `"note":"`+long+`"`, 1)
+	if err := st.UpsertEvidence(ctx, overlong); err != nil {
+		t.Fatal(err)
+	}
+	if n := peerRatings(); n != 0 {
+		t.Errorf("a stored overlong note on the trade: want it void, got %d peer rating(s)", n)
+	}
+	// Equivocation as the store detects it, on a fresh trade of another action so it is judged alone.
+	fresh := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act-2", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-2", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec2); err != nil {
+		t.Fatal(err)
+	}
+	reply2, err := k.RunFederated(ctx, peer.ID, provider.ID, fresh.Name, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served2, _ := st.ReadReceiptByTxID(ctx, reply2.TxID)
+	hash2, _ := kernel.ReceiptHash(served2)
+	// The note bound holds on read, alone: one stored row, agreeing with nothing but itself.
+	tooLong := ratingEvidence(t, peerKey, self, fresh.ID, "peer-own-8", hash2, 1, now)
+	tooLong.RatingJSON = strings.Replace(tooLong.RatingJSON, `"note":null`, `"note":"`+long+`"`, 1)
+	if err := st.UpsertEvidence(ctx, tooLong); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := k.ActionRatings(ctx, fresh.ID, 50, 0); len(got) != 0 {
+		t.Fatalf("a stored overlong note, alone on its trade: want not admitted, got %+v", got)
+	}
+	// Equivocation as the store detects it — two ratings under one row key — voids a trade even
+	// beside an honest row. On a third trade, so it is judged alone.
+	third := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act-3", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	rec3 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-3", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec3); err != nil {
+		t.Fatal(err)
+	}
+	reply3, err := k.RunFederated(ctx, peer.ID, provider.ID, third.Name, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served3, _ := st.ReadReceiptByTxID(ctx, reply3.TxID)
+	hash3, _ := kernel.ReceiptHash(served3)
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, third.ID, "peer-own-9", hash3, 1, now)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 1 || got[0].Source != "peer" {
+		t.Fatalf("third trade: want its one peer rating, got %+v", got)
+	}
+	for _, val := range []float64{1, 0} {
+		if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, third.ID, "peer-own-10", hash3, val, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 0 {
+		t.Errorf("an equivocated row on the trade voids it even beside an honest one, got %+v", got)
+	}
+
 }
 
 // TestCallUsesActionIDNotOwnerName verifies Fix 1: when Call is invoked with ActionID set

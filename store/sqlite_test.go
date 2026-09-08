@@ -208,7 +208,7 @@ func TestValueLedgerBackfill(t *testing.T) {
 			t.Fatal(err)
 		}
 		insTx := `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,started_at,ended_at)
-			VALUES (?,'p','t','','u1',?,'sys','a1',?,?,?)`
+			VALUES (?,'p',?,'','u1',?,'sys','a1',?,?,?)`
 		ins := `INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,args_hash,reply_hash,status,gross,net,fee,charge,premium,value,value_to,started_at,created_at,signature)
 			VALUES (?,'u1',?,?,'a1',?,'ah','rh',?,0,0,0,0,0,?,?,?,?,'sig')`
 		for _, r := range []struct {
@@ -220,7 +220,7 @@ func TestValueLedgerBackfill(t *testing.T) {
 			{"r3", "tx3", "u1", "success", "u2", 0},           // ordinary call, no value
 			{"r4", "tx4", "u1", "success", "gone-abroad", 70}, // beneficiary was never an account here
 		} {
-			if _, err := raw.Exec(insTx, r.txID, r.caller, r.status, now, now); err != nil {
+			if _, err := raw.Exec(insTx, r.txID, r.txID, r.caller, r.status, now, now); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := raw.Exec(ins, r.id, r.txID, r.txID, r.caller, r.status, r.value, r.valueTo, now, now); err != nil {
@@ -1400,11 +1400,15 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// store.EndProcess is called by the kernel after settling traces; here we test it directly
+	settleTrace(t, db, p.ID, root.ID, user.ID, kernel.CallerProcess, p.ID, 500, kernel.TxFailure)
+	// Settling the only trace leaves nothing in flight, so the settlement itself closed the process
+	// and returned the locked funds; the kernel tolerates the store's "not open" in that case.
 	// on a process that still has an in-flight root trace (locked > 0). It must not error.
-	err := db.EndProcess(ctx, p.ID)
-	if err != nil {
-		t.Fatalf("EndProcess should succeed even with locked funds; got: %v", err)
+	if err := db.EndProcess(ctx, p.ID); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("closing an already-closed process: want ErrInvalidState, got %v", err)
+	}
+	if u, _ := db.ReadUser(ctx, user.ID); u.Available != 500 || u.Locked != 0 {
+		t.Fatalf("locked funds not returned: available=%d locked=%d", u.Available, u.Locked)
 	}
 }
 
@@ -1449,6 +1453,7 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	settleTrace(t, db, p.ID, root.ID, user.ID, kernel.CallerProcess, p.ID, 50, kernel.TxSuccess)
 	if err := db.EndProcess(ctx, p.ID); err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
@@ -1521,35 +1526,28 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 
 	// Simulate successful call completion: step is done, tx_id is set, trace is consumed.
-	fakeTxID := uuid.New().String()
-	_, err := db.db.ExecContext(ctx,
-		`UPDATE steps SET status='done', tx_id=? WHERE id=?`, fakeTxID, step.ID)
-	if err != nil {
-		t.Fatalf("mark step done: %v", err)
+	// The step completes for real: its transaction pays the provider (user) net 40 and the fee
+	// recipient (also user here) 10, and marks the step done with that transaction.
+	done := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: ct.ID, OwnerUserID: user.ID,
+		CallerUserID: caller.ID, TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: done.ID, TraceID: ct.ID, ActionID: act.ID,
+		Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10, Charge: 50, CreatedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, done, rc, ct.ID, "", kernel.CallerStep, user.ID, user.ID, 40, 10, nil, "", step.ID); err != nil {
+		t.Fatalf("complete the step: %v", err)
 	}
-	_, err = db.db.ExecContext(ctx,
-		`UPDATE traces SET available=0 WHERE id=?`, ct.ID)
-	if err != nil {
-		t.Fatalf("drain completion trace: %v", err)
-	}
-
-	if err := db.EndProcess(ctx, p.ID); err != nil {
+	// The creating call returned successfully before; settled, its parked step stays untouched.
+	settleTrace(t, db, p.ID, root.ID, user.ID, kernel.CallerProcess, p.ID, 50, kernel.TxSuccess)
+	if err := db.EndProcess(ctx, p.ID); !errors.Is(err, kernel.ErrInvalidState) && err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
-
-	// Step must still be 'done', not re-cancelled by Fix B.
 	s, _ := db.ReadStep(ctx, step.ID)
-	if s.Status != kernel.StepDone {
-		t.Errorf("step.status=%s, want done (Fix B must not re-cancel completed steps)", s.Status)
+	if s.Status != kernel.StepDone || s.TxID == nil || *s.TxID != done.ID {
+		t.Errorf("step %q tx %v, want done with its own transaction: a completed step is never re-cancelled", s.Status, s.TxID)
 	}
-
-	// No negative balances — funds must not be double-counted.
-	u, _ := db.ReadUser(ctx, user.ID)
-	if u.Available < 0 {
-		t.Errorf("user.available=%d, must not go negative (double-counted refund)", u.Available)
-	}
-	if u.Locked < 0 {
-		t.Errorf("user.locked=%d, must not go negative", u.Locked)
+	// 1000 parked 50, earned back 40 net + 10 fee: exactly whole, nothing counted twice.
+	if u, _ := db.ReadUser(ctx, user.ID); u.Available != 1000 || u.Locked != 0 {
+		t.Errorf("user available=%d locked=%d, want 1000 and 0", u.Available, u.Locked)
 	}
 }
 
@@ -2113,6 +2111,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	_ = db.CreateUser(ctx, rater)
 	tx := &kernel.Transaction{
 		ID:           uuid.New().String(),
+		TraceID:      uuid.New().String(),
 		OwnerUserID:  rater.ID,
 		CallerUserID: rater.ID,
 		TargetUserID: owner.ID,
@@ -2160,6 +2159,7 @@ func TestCreateRatingAndUpdateStats(t *testing.T) {
 	_ = db.CreateUser(ctx, rater2)
 	tx2 := &kernel.Transaction{
 		ID:           uuid.New().String(),
+		TraceID:      uuid.New().String(),
 		OwnerUserID:  rater2.ID,
 		CallerUserID: rater2.ID,
 		TargetUserID: owner.ID,
@@ -2203,6 +2203,7 @@ func TestListRatings(t *testing.T) {
 	makeTxAndRating := func(id string, rating float64, offset time.Duration) {
 		tx := &kernel.Transaction{
 			ID:           id,
+			TraceID:      "trace-" + id,
 			OwnerUserID:  rater.ID,
 			CallerUserID: rater.ID,
 			TargetUserID: owner.ID,
@@ -3154,72 +3155,274 @@ func TestListUnsettledTracesChildFirst(t *testing.T) {
 	}
 }
 
-// TestListDirectUnsettledChildren verifies that ListDirectUnsettledChildren returns only
-// direct children of the given parent trace that have no committed transaction, and that
-// a child with a committed transaction is excluded.
-func TestListDirectUnsettledChildren(t *testing.T) {
+// settleTrace settles a trace the way the kernel does before it ever asks the store to close a
+// process: store.EndProcess refuses to close over an unsettled trace. A failure rolls up and
+// cancels the waiting steps beneath it; a success leaves them parked, which is the only state in
+// which a settled root still has steps for a forced close to cancel.
+func settleTrace(t *testing.T, db *DB, processID, traceID, ownerID, walletKind, walletID string, gross int64, status kernel.TxStatus) {
+	t.Helper()
+	ctx := context.Background()
+	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: processID, TraceID: traceID, OwnerUserID: ownerID,
+		CallerUserID: ownerID, TargetUserID: ownerID, Status: status, Gross: gross,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	receipt := func(charge int64) *kernel.Receipt {
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: ownerID, TxID: tx.ID, TraceID: traceID,
+			Status: status, Gross: gross, Charge: charge, CreatedAt: time.Now().UTC()}
+	}
+	var err error
+	if status == kernel.TxSuccess {
+		err = db.CommitCall(ctx, tx, receipt(gross), traceID, walletID, walletKind, ownerID, ownerID, 0, 0, nil, "", "")
+	} else {
+		tx.Reason = "process force-closed"
+		err = db.CommitFailedCall(ctx, tx, func(refund int64) (*kernel.Receipt, error) { return receipt(gross - refund), nil },
+			traceID, walletID, walletKind, ownerID, gross, nil, "", "interrupted", "")
+	}
+	if err != nil {
+		t.Fatalf("settleTrace: %v", err)
+	}
+}
+
+// TestFundingStatementRefusesSettledAndClosed: the rules a spend depends on live in the funding
+// statement (D2). A settled trace, or a trace in a closed process, funds no subcall and parks no
+// step — at price zero, which no balance check alone would refuse.
+func TestFundingStatementRefusesSettledAndClosed(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-
-	user := newUser("unsettled-children", 300)
+	user := newUser("fund-user", 100)
 	_ = db.CreateUser(ctx, user)
-	feeUser := newUser("fee-uc", 0)
-	_ = db.CreateUser(ctx, feeUser)
-	act := newAction(user.ID, "uc-act", 0, true)
+	act := newAction(user.ID, "fund-act", 0, true)
 	_ = db.CreateAction(ctx, act)
-
+	child := func(processID string) *kernel.Trace {
+		return &kernel.Trace{ID: uuid.New().String(), ProcessID: processID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	}
+	step := func(parent string) *kernel.Step {
+		return &kernel.Step{ID: uuid.New().String(), ParentTraceID: &parent, RequiredCallerUserID: user.ID, ActionID: act.ID,
+			PartialArgs: json.RawMessage(`{}`), Status: kernel.StepWaiting, CreatedAt: time.Now().UTC()}
+	}
 	p := newProcess(user.ID)
-	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
-		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, user.ID, 200, 0, 0); err != nil {
-		t.Fatalf("BeginRun: %v", err)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
 	}
+	// A waiting step keeps the process open once the root settles (a trace never settles ahead of
+	// a child, so nothing else could).
+	keeper := step(root.ID)
+	if err := db.CreateStep(ctx, keeper); err != nil {
+		t.Fatalf("fixture step before settlement: %v", err)
+	}
+	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: user.ID, CallerUserID: user.ID,
+		TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID, ActionID: act.ID, Status: kernel.TxSuccess, CreatedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, tx, rc, root.ID, p.ID, kernel.CallerProcess, user.ID, user.ID, 0, 0, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if proc, _ := db.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
+		t.Fatal("fixture: the waiting step must keep the process open")
+	}
+	if err := db.BeginSubcall(ctx, root.ID, child(p.ID), 0); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free subcall on a settled trace: want ErrInvalidState, got %v", err)
+	}
+	if err := db.CreateStep(ctx, step(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free step on a settled trace: want ErrInvalidState, got %v", err)
+	}
+	if err := db.EndProcess(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BeginSubcall(ctx, root.ID, child(p.ID), 0); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free subcall in a closed process: want ErrInvalidState, got %v", err)
+	}
+	if err := db.CreateStep(ctx, step(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free step in a closed process: want ErrInvalidState, got %v", err)
+	}
+	if traces, _ := db.ListTraces(ctx, p.ID); len(traces) != 1 {
+		t.Errorf("a trace was funded past the guard: %d traces", len(traces))
+	}
+}
 
-	// child1: unsettled subcall
-	child1 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
-		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginSubcall(ctx, root.ID, child1, 50); err != nil {
-		t.Fatalf("BeginSubcall child1: %v", err)
+// TestSettlementCommitRefusesOverAnUnsettledChild: every settlement commit carries D3's order in
+// its own transaction — refused while a child is unsettled, and recording the outcome it was
+// handed in that same transaction, so the last child's settlement finds it. The success commit
+// also refuses when the taxable it was handed is no longer the row's.
+func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	user := newUser("guard-user", 300)
+	_ = db.CreateUser(ctx, user)
+	act := newAction(user.ID, "guard-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 100, 0, 0); err != nil {
+		t.Fatal(err)
 	}
+	child := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginSubcall(ctx, root.ID, child, 40); err != nil {
+		t.Fatal(err)
+	}
+	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: user.ID, CallerUserID: user.ID,
+		TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxFailure, Gross: 100, Reason: "execution_failed",
+		ReplyJSON: json.RawMessage(`null`), StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	build := func(refund int64) (*kernel.Receipt, error) {
+		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID,
+			ActionID: act.ID, Status: kernel.TxFailure, Gross: 100, Charge: 100 - refund, CreatedAt: time.Now().UTC()}, nil
+	}
+	err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", "execution_failed", "step-x")
+	if !errors.Is(err, kernel.ErrSettlementDeferred) {
+		t.Fatalf("a failure commit over an unsettled child: want ErrSettlementDeferred, got %v", err)
+	}
+	tr, _ := db.ReadTrace(ctx, root.ID)
+	if tr.OutcomeJSON == nil {
+		t.Fatal("the refusal recorded no outcome")
+	}
+	var o kernel.TraceOutcome
+	if json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil || o.Status != kernel.TxFailure || o.Gross != 100 || o.Reason != "execution_failed" || o.StepID != "step-x" {
+		t.Errorf("recorded outcome %+v, want the failure the caller brought", o)
+	}
+	if settled, _ := db.TraceHasTransaction(ctx, root.ID); settled {
+		t.Fatal("a refused commit wrote a transaction")
+	}
+	if ready, _ := db.ListReadyTraces(ctx); len(ready) != 0 {
+		t.Fatalf("not ready while the child is unsettled, got %d", len(ready))
+	}
+	// A success commit handed a taxable the row no longer holds is refused the same way.
+	stx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: child.ID, ParentTraceID: root.ID, OwnerUserID: user.ID,
+		CallerUserID: user.ID, TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess, Gross: 40, Net: 30, Fee: 0,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	src := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: stx.ID, TraceID: child.ID, ActionID: act.ID, Status: kernel.TxSuccess, Gross: 40, Charge: 40, CreatedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, stx, src, child.ID, root.ID, kernel.CallerTrace, user.ID, user.ID, 30, 0, nil, "", ""); !errors.Is(err, kernel.ErrSettlementDeferred) {
+		t.Fatalf("a success commit with a stale taxable (30 of 40): want ErrSettlementDeferred, got %v", err)
+	}
+	stx.Net = 40
+	if err := db.CommitCall(ctx, stx, src, child.ID, root.ID, kernel.CallerTrace, user.ID, user.ID, 40, 0, nil, "", ""); err != nil {
+		t.Fatalf("the child's commit with the row's taxable: %v", err)
+	}
+	if ready, _ := db.ListReadyTraces(ctx); len(ready) != 1 || ready[0].ID != root.ID {
+		t.Fatalf("the parent is ready once its child settled, got %v", ready)
+	}
+}
 
-	// child2: settled subcall (has a committed transaction)
-	child2 := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
-		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginSubcall(ctx, root.ID, child2, 50); err != nil {
-		t.Fatalf("BeginSubcall child2: %v", err)
+// TestReparkReleasesTheCompletersReserves: claiming a step locks the completer's ticket stake and
+// transfer value on their own account; re-parking deletes the trace that recorded them, so it
+// releases them first — and deletes the completion trace at any price, zero included.
+func TestReparkReleasesTheCompletersReserves(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("rp-owner", 100)
+	_ = db.CreateUser(ctx, owner)
+	completer := newUser("rp-completer", 50)
+	_ = db.CreateUser(ctx, completer)
+	for _, price := range []int64{40, 0} {
+		act := newAction(owner.ID, fmt.Sprintf("rp-act-%d", price), price, true)
+		_ = db.CreateAction(ctx, act)
+		p := newProcess(owner.ID)
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerUserID: owner.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRun(ctx, p, root, owner.ID, price, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		ptID := root.ID
+		step := &kernel.Step{ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: completer.ID, ActionID: act.ID,
+			Price: price, PartialArgs: json.RawMessage(`{}`), Status: kernel.StepWaiting, CreatedAt: time.Now().UTC()}
+		if err := db.CreateStep(ctx, step); err != nil {
+			t.Fatal(err)
+		}
+		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: act.ID, CallerUserID: completer.ID,
+			Ticket: 7, Value: 5, ValueTo: owner.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+			t.Fatal(err)
+		}
+		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 12 {
+			t.Fatalf("fixture: the claim locked %d on the completer, want 12", u.Locked)
+		}
+		if err := db.ResetStepAndRepark(ctx, step.ID); err != nil {
+			t.Fatalf("ResetStepAndRepark at price %d: %v", price, err)
+		}
+		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 0 || u.Available != 50 {
+			t.Errorf("price %d: completer available=%d locked=%d after re-park, want 50 and 0: reserves released", price, u.Available, u.Locked)
+		}
+		if tr, _ := db.ReadTrace(ctx, ct.ID); tr != nil {
+			t.Errorf("price %d: the empty completion trace survived the re-park", price)
+		}
+		if s, _ := db.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
+			t.Errorf("price %d: step %q, want waiting", price, s.Status)
+		}
 	}
-	tx2 := &kernel.Transaction{
-		ID: uuid.New().String(), ProcessID: p.ID, TraceID: child2.ID,
-		OwnerUserID: user.ID, CallerUserID: user.ID, TargetUserID: user.ID,
-		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
-		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
-	}
-	rc2 := &kernel.Receipt{
-		ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx2.ID, TraceID: child2.ID,
-		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := db.CommitCall(ctx, tx2, rc2, child2.ID, root.ID, kernel.CallerTrace, user.ID, feeUser.ID, 40, 10, nil, "", ""); err != nil {
-		t.Fatalf("CommitCall child2: %v", err)
-	}
+}
 
-	// grandchild of child1: should NOT appear (not a direct child of root)
-	grandchild := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID,
-		ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginSubcall(ctx, child1.ID, grandchild, 20); err != nil {
-		t.Fatalf("BeginSubcall grandchild: %v", err)
+// TestTraceSettlesExactlyOnce: the schema, not the paths racing for a trace, enforces G1's
+// settled-once — a second transaction for one trace is refused however it is attempted.
+func TestTraceSettlesExactlyOnce(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	user := newUser("once-user", 100)
+	_ = db.CreateUser(ctx, user)
+	act := newAction(user.ID, "once-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
 	}
+	commit := func() error {
+		tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: user.ID,
+			CallerUserID: user.ID, TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess,
+			StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+		rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID,
+			ActionID: act.ID, Status: kernel.TxSuccess, CreatedAt: time.Now().UTC()}
+		return db.CommitCall(ctx, tx, rc, root.ID, p.ID, kernel.CallerProcess, user.ID, user.ID, 0, 0, nil, "", "")
+	}
+	if err := commit(); err != nil {
+		t.Fatalf("first settlement: %v", err)
+	}
+	if err := commit(); err == nil {
+		t.Fatal("a second settlement of the same trace was accepted")
+	}
+	if txs, _ := db.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID}); len(txs) != 1 {
+		t.Errorf("transactions for one trace: %d, want 1", len(txs))
+	}
+}
 
-	children, err := db.ListDirectUnsettledChildren(ctx, root.ID)
-	if err != nil {
-		t.Fatalf("ListDirectUnsettledChildren: %v", err)
+// TestReceiptHashWrittenAndBackfilled: P9's receipt hash is written with every receipt (the fact
+// each join to it needs), and a receipt that predates the column gets it once at the next open.
+func TestReceiptHashWrittenAndBackfilled(t *testing.T) {
+	path := t.TempDir() + "/rh.db"
+	db := openAt(t, path)
+	ctx := context.Background()
+	user := newUser("rh-user", 100)
+	_ = db.CreateUser(ctx, user)
+	act := newAction(user.ID, "rh-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+	p := newProcess(user.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, user.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
 	}
-	if len(children) != 1 {
-		t.Fatalf("expected 1 unsettled direct child, got %d", len(children))
+	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: user.ID,
+		CallerUserID: user.ID, TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess,
+		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
+	rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID,
+		ActionID: act.ID, Status: kernel.TxSuccess, CreatedAt: time.Now().UTC()}
+	if err := db.CommitCall(ctx, tx, rc, root.ID, p.ID, kernel.CallerProcess, user.ID, user.ID, 0, 0, nil, "", ""); err != nil {
+		t.Fatal(err)
 	}
-	if children[0].ID != child1.ID {
-		t.Errorf("expected child1 %q, got %q", child1.ID, children[0].ID)
+	want, _ := kernel.ReceiptHash(rc)
+	raw := rawDB(t, path)
+	var got *string
+	if err := raw.QueryRow(`SELECT hash FROM receipts WHERE id=?`, rc.ID).Scan(&got); err != nil || got == nil || *got != want {
+		t.Fatalf("hash written with the receipt: got %v, want %s (err %v)", got, want, err)
 	}
+	// A receipt from before the column: hashed once, at open.
+	if _, err := raw.Exec(`UPDATE receipts SET hash=NULL WHERE id=?`, rc.ID); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	db.Close()
+	db = openAt(t, path)
+	raw = rawDB(t, path)
+	defer raw.Close()
+	if err := raw.QueryRow(`SELECT hash FROM receipts WHERE id=?`, rc.ID).Scan(&got); err != nil || got == nil || *got != want {
+		t.Fatalf("hash backfilled at open: got %v, want %s (err %v)", got, want, err)
+	}
+	db.Close()
 }
 
 // TestResetStepAndReparkWithDescendantTransaction verifies that ResetStepAndRepark rejects
@@ -3910,7 +4113,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 		mkStep(assignee.ID, other.ID)
 	}
 
-	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, 200)
+	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, "", 200)
 	if err != nil {
 		t.Fatalf("ListStepsAwaitingCaller: %v", err)
 	}
@@ -3920,7 +4123,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 
 	// Oldest first: the longest-stranded step is what an operator needs to see.
 	second := mkStep(owner.ID, assignee.ID)
-	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, 200)
+	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, "", 200)
 	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
 		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
 	}

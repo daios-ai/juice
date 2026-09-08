@@ -980,6 +980,7 @@ func actionRatingsCmd() *cobra.Command {
 				Value   int     `json:"value"`
 				Note    *string `json:"note"`
 				Created string  `json:"created_at"`
+				Source  string  `json:"source"`
 			}
 			if err := json.Unmarshal(raw, &ratings); err != nil {
 				return err
@@ -1121,14 +1122,40 @@ func stepCreateCmd() *cobra.Command {
 }
 
 func stepListCmd() *cobra.Command {
-	var processID, status string
+	var processID, status, peer string
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List steps",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := url.Values{}
+			// A peer holds the step and answers for it, so the reply carries only what it may
+			// disclose: the id to complete, what is already filled in, and what you may supply.
+			if peer != "" {
+				if cmd.Flags().Changed("process") || cmd.Flags().Changed("status") ||
+					cmd.Flags().Changed("limit") || cmd.Flags().Changed("offset") {
+					return fmt.Errorf("--peer lists the one page of steps a peer holds for you; it takes no filter or paging flag")
+				}
+				q.Set("peer", peer)
+				var held kernel.PeerStepList
+				if err := apiCall(context.Background(), "GET", "/v1/steps?"+q.Encode(), nil, &held); err != nil {
+					return err
+				}
+				if flagJSON {
+					return printJSON(held)
+				}
+				for _, h := range held.Steps {
+					fmt.Printf("%s  price=%d  %s\n", h.ID, h.Price, h.CreatedAt.Format(time.RFC3339))
+					if len(h.PartialArgs) > 0 && string(h.PartialArgs) != "{}" {
+						fmt.Printf("      %s\n", h.PartialArgs)
+					}
+				}
+				if held.Truncated {
+					fmt.Println("more steps are waiting than one page carries; complete some and ask again")
+				}
+				return nil
+			}
 			if processID != "" {
 				q.Set("process_id", processID)
 			}
@@ -1165,6 +1192,7 @@ func stepListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
+	cmd.Flags().StringVar(&peer, "peer", "", "List steps this peer (handle or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1283,7 +1311,7 @@ func txShowCmd() *cobra.Command {
 func txVerifyReceiptCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "verify ID",
-		Short: "Verify a transaction's remote receipt",
+		Short: "Verify a transaction's signed receipt offline",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return apiEmit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil)
@@ -1366,8 +1394,12 @@ func runCmd() *cobra.Command {
 				// A parked remote call: the money is reserved, not spent, and the process is the
 				// handle to follow it by (§13). Say so — a bare "pending" reads as a lost charge.
 				if ke := (*kernel.KernelError)(nil); errors.As(err, &ke) && ke.Meta["process_id"] != "" {
-					fmt.Fprintf(os.Stderr, "\nYour funds are reserved, not spent, on process %s.\nFollow it with:\n  juice process show %s\nIt retries automatically. From %s it becomes eligible for an automatic refund, which a later retry pass applies; `juice process end` refunds it sooner.\n",
-						ke.Meta["process_id"], ke.Meta["process_id"], ke.Meta["refund_eligible_at"])
+					fmt.Fprintf(os.Stderr, "\nYour funds are reserved, not spent, on process %s.\nFollow it with:\n  juice process show %s\n", ke.Meta["process_id"], ke.Meta["process_id"])
+					if at := ke.Meta["refund_eligible_at"]; at != "" {
+						fmt.Fprintf(os.Stderr, "It retries automatically. From %s it becomes eligible for an automatic refund, which a later retry pass applies; `juice process end` refunds it sooner.\n", at)
+					} else {
+						fmt.Fprintln(os.Stderr, "Work is still running beneath the call; the receipt follows when it settles. `juice process end` settles it now.")
+					}
 				}
 				if errors.Is(err, kernel.ErrPeerUnfunded) {
 					fmt.Fprintf(os.Stderr, "\nYour balance is fine; this kernel's credit with peer %s is exhausted.\nOperator remedy: pay the peer out of band and have its operator run `admin deposit`.\n", peerMetaHandle(err))

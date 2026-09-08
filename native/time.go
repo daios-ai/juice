@@ -17,7 +17,7 @@ func Time() Spec {
 			"unix": integer("Seconds since UTC epoch"),
 			"iso":  str("RFC 3339 timestamp"),
 		}),
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeTime()
 			}
