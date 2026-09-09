@@ -38,6 +38,8 @@ func init() {
 		},
 	}
 	serveCmd.Flags().StringVar(&addr, "addr", ":4040", "Listen address")
+	serveCmd.Flags().StringVar(&flagInstance, "instance", defaultInstance,
+		"Name of the kernel to serve; its home is <juice home>/kernels/<name>/")
 	rootCmd.AddCommand(serveCmd)
 
 	rootCmd.AddCommand(healthCmd())
@@ -63,6 +65,15 @@ func holdHome() (func(), error) {
 }
 
 func runServer(addr string) error {
+	if err := validateInstanceName(flagInstance); err != nil {
+		return err
+	}
+	// A kernel made before instances existed lives one directory up. Move it before anything opens
+	// or creates a home, so the first boot after the upgrade continues with the same ledger and
+	// the same identity rather than quietly starting an empty second kernel beside it.
+	if err := migrateLegacyHome(); err != nil {
+		return err
+	}
 	release, err := holdHome()
 	if err != nil {
 		return err

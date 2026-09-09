@@ -267,22 +267,26 @@ func (k *Kernel) Get(actor, path string) string {
 	return k.net.redact(string(b))
 }
 
+// token reads an actor's own login from the client's credential store, where each context's session
+// is its own file (ecosystem-standard.md). The suite reads what the command line wrote rather than
+// logging in a second time, so an actor here is exactly the actor the kernel saw.
+
 func (k *Kernel) token(actor string) string {
-	b, err := os.ReadFile(filepath.Join(k.net.home(actor), ".juice", "client", "profiles.json"))
+	dir := filepath.Join(k.net.home(actor), ".juice", "client", "credentials")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
-	var d struct {
-		Profiles map[string]struct {
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var c struct {
 			Token string `json:"token"`
-		} `json:"profiles"`
-	}
-	if json.Unmarshal(b, &d) != nil {
-		return ""
-	}
-	for _, p := range d.Profiles {
-		if p.Token != "" {
-			return p.Token
+		}
+		if json.Unmarshal(b, &c) == nil && c.Token != "" {
+			return c.Token
 		}
 	}
 	return ""
@@ -303,7 +307,7 @@ type bootOpts struct {
 // how the story kills and revives a provider, so the two paths are one function.
 func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	dir := filepath.Join(n.Root, name)
-	if err := os.MkdirAll(filepath.Join(dir, "kernel"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "kernels", "default"), 0o755); err != nil {
 		return nil, err
 	}
 	if o.Handle == "" {
@@ -326,7 +330,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 		cfg[key] = val
 	}
 	b, _ := json.MarshalIndent(cfg, "", " ")
-	if err := os.WriteFile(filepath.Join(dir, "kernel", "config.json"), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "kernels", "default", "config.json"), b, 0o644); err != nil {
 		return nil, err
 	}
 

@@ -9,7 +9,7 @@
 # Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT.
 _fed_setup() {
     local dir="$1"
-    FED_DBL="$dir/l/kernel/juice.db"; FED_DBR="$dir/r/kernel/juice.db"
+    FED_DBL="$(kdb "$dir/l")"; FED_DBR="$(kdb "$dir/r")"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
@@ -311,7 +311,7 @@ flow_fed_gossip_discovery() {
 
     # Third kernel T joins the network via the seed and must discover R purely from gossip: its
     # discovery loop pulls gossip and indexes R's public action into T's lookup docs.
-    local dbt ht; dbt="$dir/t/kernel/juice.db"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
+    local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
     make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
 
     # Poll T's discovery cache until R's action surfaces in sys/lookup as a kernel-qualified reference.
@@ -375,7 +375,7 @@ flow_fed_gossip_discovery() {
 flow_fed_discovery() {
     echo "=== FLOW fed_discovery ==="
     local dir; dir=$(new_dir)
-    local dbr="$dir/r/kernel/juice.db" hr="$dir/rsys" dbl="$dir/l/kernel/juice.db" hl="$dir/lsys"
+    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l")" hl="$dir/lsys"
     mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
 
     local bport; bport=$(backend_port); start_backend "$bport" 200 '{"greeting":"hi"}'
@@ -447,7 +447,7 @@ print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('act
 flow_fed_peer_sync() {
     echo "=== FLOW fed_peer_sync ==="
     local dir; dir=$(new_dir)
-    local dbr="$dir/r/kernel/juice.db" hr="$dir/rsys" dbl="$dir/l/kernel/juice.db" hl="$dir/lsys"
+    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l")" hl="$dir/lsys"
     mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 \
@@ -486,7 +486,7 @@ flow_fed_peer_sync() {
 flow_fed_inspect_read_only() {
     echo "=== FLOW fed_inspect_read_only ==="
     local dir; dir=$(new_dir)
-    local dbr="$dir/r/kernel/juice.db" hr="$dir/rsys" dbl="$dir/l/kernel/juice.db" hl="$dir/lsys"
+    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l")" hl="$dir/lsys"
     mkdir -p "$dir/r" "$dir/l" "$hr/.juice" "$hl/.juice"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=3600 \
@@ -679,7 +679,7 @@ flow_ticket() {
 flow_transfer() {
     echo "=== FLOW transfer ==="
     local dir; dir=$(new_dir)
-    FED_DBL="$dir/l/kernel/juice.db"; FED_DBR="$dir/r/kernel/juice.db"
+    FED_DBL="$(kdb "$dir/l")"; FED_DBR="$(kdb "$dir/r")"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 

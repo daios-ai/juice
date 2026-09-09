@@ -8,7 +8,7 @@
 
 flow_transaction_access() {
     echo "=== FLOW transaction_access ==="
-    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/kernel/juice.db"
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$(kdb "$dir")"
     hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     make_admin "$db" "$hs" || { fail "tx_access.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -63,7 +63,7 @@ flow_transaction_access() {
 # artifact served to anonymous callers, and full argument/reply bodies in a transaction list.
 flow_list_projections() {
     echo "=== FLOW list_projections ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"
     hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "listproj.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -110,7 +110,7 @@ flow_list_projections() {
 
 flow_admin_supervision() {
     echo "=== FLOW admin_supervision ==="
-    local dir db hs ha bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -169,7 +169,7 @@ flow_admin_supervision() {
 
 flow_time() {
     echo "=== FLOW time ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -189,7 +189,7 @@ except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 
 flow_message() {
     echo "=== FLOW message ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "message.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -212,7 +212,7 @@ flow_message() {
 
 flow_native_orphan_purge() {
     echo "=== FLOW native_orphan_purge ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "orphan.boot" "server did not start"; return; }
 
     # Baseline: a real native is present.

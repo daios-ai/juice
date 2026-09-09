@@ -17,7 +17,7 @@ import (
 )
 
 // stubServer starts an httptest server, points the CLI client at it via flagServer, and
-// isolates token storage in a temp HOME. Everything resets at test end.
+// isolates credential storage in a temp home. Everything resets at test end.
 func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(h)
@@ -25,7 +25,7 @@ func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	old := flagServer
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
-	t.Setenv("HOME", t.TempDir())
+	t.Setenv("JUICE_HOME", t.TempDir())
 	return srv
 }
 

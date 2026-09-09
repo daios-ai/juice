@@ -30,22 +30,32 @@ one-time 12-word recovery phrase for `sys` — **write it down**; it is the only
 reset the superuser password (`juice auth recover sys`). Subsequent boots are
 idempotent.
 
-All state lives under `$JUICE_HOME/kernel/` (default `~/.juice/kernel/`): the database
-(which holds the signing key), `config.json`, and the rail's key and records. A kernel
-*is* its home — set `JUICE_HOME` to run a second one; there is no `--db` and no
-`--config`. The `kernel/cache/` subdirectory is regenerable and safe to delete.
+A kernel's whole state lives in one directory, `$JUICE_HOME/kernels/<name>/` (default
+`~/.juice/kernels/default/`): the database (which holds the signing key), `config.json`,
+and the rail's key and records. `juice serve --instance <name>` picks which one, so a
+second kernel is a sibling of the first rather than a second installation; there is no
+`--db` and no `--config`. The `cache/` subdirectory is regenerable and safe to delete.
+A kernel made before named instances moves itself into `kernels/default/` on first boot.
 
-The CLI is a pure client of the server and keeps its own named profiles under
-`$JUICE_HOME/client/`, each pinning one kernel's endpoint, public key, and network:
+The CLI is a pure client of the server. Under `$JUICE_HOME/client/` it keeps the kernels
+it knows — each one's address, public key and network — and the *contexts* naming one
+kernel and one login on it:
 
 ```bash
 ./juice use work --endpoint http://localhost:4040   # add and switch to a kernel
-./juice use                                         # list profiles
+./juice auth login alice                            # bind this context to a principal
+./juice use                                         # list contexts
+./juice use bot --kernel work                       # a second login on the same kernel
 ```
 
 `juice use` dials the server and refuses one whose key or network is not what the
-profile pinned, so a command never reaches a kernel you did not mean. `--server` sets
-the endpoint for one invocation, `JUICE_PROFILE` the profile.
+context recorded, so a command never reaches a kernel you did not mean. A login travels
+only to the address its context recorded. `--server` sets the endpoint for one invocation
+and carries no login. `--context` or `JUICE_CONTEXT` picks a context for one command
+without switching the current one, which is how an agent or a script names the kernel it
+works on.
+`ecosystem-standard.md` describes the whole layout, including where agents, services and
+the interface keep their own state.
 
 ## Accounts and credits
 
@@ -243,12 +253,14 @@ nothing. `admin identity` shows the position.
 
 ## Configuration
 
-`config.json` sits next to the database; safe defaults apply when a key is absent.
+`config.json` sits next to the database, inside the instance's own directory; safe
+defaults apply when a key is absent.
 The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
+| `fed_listen_addrs` | Where this kernel answers peers; give each instance its own when running more than one (as `--addr` does for clients) |
 | `world` | The network this kernel serves for life: `play` (default, no crypto), `test`, `real`, or a path to a world file |
 | `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |

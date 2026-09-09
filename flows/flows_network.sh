@@ -34,7 +34,7 @@ flow_network_reachability() {
     fi
 
     local dir; dir=$(new_dir)
-    local db="$dir/n/kernel/juice.db" hm="$dir/nsys"
+    local db="$(kdb "$dir/n")" hm="$dir/nsys"
     mkdir -p "$dir/n" "$hm/.juice"
     # allow_local_sources=false: a REAL network run, public addresses only. Only the public bootstrap
     # is configured — the remote peer must be found through routing discovery, never a manual address.

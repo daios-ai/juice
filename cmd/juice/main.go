@@ -59,10 +59,11 @@ var (
 	flagQuiet   bool
 	flagServer  string
 	flagVerbose bool
+	flagContext string
 )
 
-// dbPath is where this kernel keeps its ledger, $JUICE_HOME/kernel/juice.db. A kernel is its home
-// directory, so there is no override: initConfig fills this in for the server side alone.
+// dbPath is where this kernel keeps its ledger, inside its own home (kernelHome). An instance is
+// its directory, so there is no override: initConfig fills this in for the server side alone.
 var dbPath string
 
 // globalCfg is populated from the config file before any command runs.
@@ -76,14 +77,16 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
+	rootCmd.PersistentFlags().StringVar(&flagContext, "context", "", "Client context to address for this command")
 }
 
-// juiceHome is the single root under which every juice-family binary keeps its state:
-// $JUICE_HOME if set, else ~/.juice. It is fixed and absolute — never cwd-relative — so
-// the kernel attaches to the same identity and signing key wherever it is launched, like
-// Geth's ~/.ethereum or IPFS's ~/.ipfs. The fallback used when the home directory cannot
-// be determined stays absolute (system temp) rather than the working directory, preserving
-// that invariant in minimal environments.
+// juiceHome is the installation root every juice-family program shares: $JUICE_HOME if set, else
+// ~/.juice. It holds the kernels this machine runs (kernels/), what this client knows about
+// kernels and logins (client/), and each other component's own state — see ecosystem-standard.md.
+// It is fixed and absolute — never cwd-relative — so a kernel attaches to the same identity and
+// signing key wherever it is launched, like Geth's ~/.ethereum or IPFS's ~/.ipfs. The fallback
+// used when the home directory cannot be determined stays absolute (system temp) rather than the
+// working directory, preserving that invariant in minimal environments.
 func juiceHome() string {
 	if h := os.Getenv("JUICE_HOME"); h != "" {
 		return h
@@ -95,20 +98,15 @@ func juiceHome() string {
 	return filepath.Join(home, ".juice")
 }
 
-// kernelHome is this component's subdirectory under the shared root, $JUICE_HOME/kernel.
-// One subdirectory per component (kernel/, ui/, …) lets the whole suite back up and
-// relocate as a unit while each binary owns its own namespace.
-func kernelHome() string { return filepath.Join(juiceHome(), "kernel") }
-
 // cacheDir is the reserved purgeable subdirectory for regenerable data (indexes, compiled
 // artifacts, scratch). It is safe to delete; writers MkdirAll it on demand.
 func cacheDir() string { return filepath.Join(kernelHome(), "cache") }
 
-// initConfig loads the server's configuration, $JUICE_HOME/kernel/config.json, beside the database
-// it describes. There is no path override: a kernel is its home directory, so `juice serve` attaches
-// to the same identity and signing key wherever it is launched, instead of minting a fresh identity
-// from whatever folder it happens to run in. Only openKernel calls it — no client command reads or
-// creates the kernel's own directory.
+// initConfig loads the server's configuration, config.json inside the instance's own home, beside
+// the database it describes. There is no path override: an instance is its directory, so `juice
+// serve` attaches to the same identity and signing key wherever it is launched, instead of minting
+// a fresh identity from whatever folder it happens to run in. Only openKernel calls it — no client
+// command reads or creates a kernel's directory.
 func initConfig() error {
 	dbPath = filepath.Join(kernelHome(), "juice.db")
 	resolvedConfigPath = filepath.Join(kernelHome(), "config.json")

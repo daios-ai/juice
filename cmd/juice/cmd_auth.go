@@ -129,8 +129,35 @@ func loginPKCE(handle, password, server string) error {
 	if tokenResp.RefreshToken != "" {
 		_ = saveRefreshToken(tokenResp.RefreshToken)
 	}
+	bindPrincipal(handle)
 	fmt.Println("Logged in.")
 	return nil
+}
+
+// bindPrincipal records who this context is logged in as. The handle is for a person reading the
+// context list; the id is what stays the same when a handle is renamed (D15), so it is what other
+// components in the installation key their own memory of this kernel by. Best effort: a login is
+// complete without it, and the next login records it.
+func bindPrincipal(handle string) {
+	cfg, name, c, _ := activeContext()
+	var me struct {
+		ID     string `json:"id"`
+		Handle string `json:"handle"`
+	}
+	if err := apiCall(context.Background(), "GET", "/v1/me", nil, &me); err != nil {
+		me.Handle = handle
+	}
+	if me.Handle == "" {
+		me.Handle = handle
+	}
+	if c.Handle == me.Handle && c.PrincipalID == me.ID {
+		return
+	}
+	c.Handle, c.PrincipalID = me.Handle, me.ID
+	if cfg.Contexts[name] == nil {
+		cfg.Contexts[name] = c
+	}
+	_ = saveClientConfig(cfg)
 }
 
 func logoutCmd() *cobra.Command {
@@ -146,6 +173,11 @@ func logoutCmd() *cobra.Command {
 				return err
 			}
 			_ = removeRefreshToken()
+			if cfg, name, c, _ := activeContext(); c.Handle != "" || c.PrincipalID != "" {
+				c.Handle, c.PrincipalID = "", ""
+				cfg.Contexts[name] = c
+				_ = saveClientConfig(cfg)
+			}
 			fmt.Println("Logged out.")
 			return nil
 		},
@@ -289,9 +321,13 @@ func recoverCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return apiEmit("POST", "/v1/auth/recover/complete", map[string]any{
+			var view json.RawMessage
+			if err := apiCall(ctx, "POST", "/v1/auth/recover/complete", map[string]any{
 				"handle": handle, "nonce": started.Nonce, "signature": sig, "password": newPassword,
-			})
+			}, &view); err != nil {
+				return err
+			}
+			return emitRaw(view)
 		},
 	}
 	cmd.Flags().StringVar(&phrase, "phrase", "", "Recovery phrase (prompted if omitted)")

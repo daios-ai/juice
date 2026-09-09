@@ -47,7 +47,7 @@ flow_rail_onboard() {
 # Money out is the owner's own act, and asking for it twice must not pay twice (U51).
 flow_rail_withdraw() {
     echo "=== FLOW rail_withdraw ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "rail_withdraw.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" >/dev/null 2>&1
@@ -142,8 +142,8 @@ flow_rail_settlement() {
 flow_rail_isolation() {
     echo "=== FLOW rail_isolation ==="
     local dir; dir=$(new_dir)
-    local dbr="$dir/r/kernel/juice.db" hr="$dir/rsys" dbl="$dir/l/kernel/juice.db" hl="$dir/lsys"
-    mkdir -p "$dir/r/kernel" "$dir/l/kernel" "$hr/.juice" "$hl/.juice"
+    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l")" hl="$dir/lsys"
+    mkdir -p "$(dirname "$dbr")" "$(dirname "$dbl")" "$hr/.juice" "$hl/.juice"
 
     # A world of somebody's own: same shape, different name, therefore a different network.
     local other="$dir/other-world.json"
@@ -174,13 +174,13 @@ flow_rail_isolation() {
 # A database belongs to the network it was made for, and says so rather than serving another.
 flow_rail_world_mismatch() {
     echo "=== FLOW rail_world_mismatch ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "rail_world_mismatch.boot" "server did not start"; return; }
     stop_server "$db"
 
     local other="$dir/other-world.json"
     printf '{"name":"otherworld","decimals":0}\n' > "$other"
-    local log="$dir/kernel/mismatch.log"
+    local log="$(dirname "$db")/mismatch.log"
     write_config "$db" world="$other"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
         "$JUICE" serve --addr 127.0.0.1:0 >"$log" 2>&1
@@ -196,10 +196,10 @@ flow_rail_world_mismatch() {
 # One kernel, one server: two would race the same signer and the same workers.
 flow_rail_lock() {
     echo "=== FLOW rail_lock ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "rail_lock.boot" "server did not start"; return; }
 
-    local log="$dir/kernel/second.log"
+    local log="$(dirname "$db")/second.log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
         "$JUICE" serve --addr 127.0.0.1:0 >"$log" 2>&1
     assert_ne "rail_lock.second_refused" 0 "$?"
@@ -214,8 +214,8 @@ flow_rail_lock() {
 flow_rail_profile() {
     echo "=== FLOW rail_profile ==="
     local dir; dir=$(new_dir)
-    local dba="$dir/a/kernel/juice.db" hb="$dir/b/kernel/juice.db" hc="$dir/client"
-    mkdir -p "$dir/a/kernel" "$dir/b/kernel" "$hc/.juice"
+    local dba="$(kdb "$dir/a")" hb="$(kdb "$dir/b")" hc="$dir/client"
+    mkdir -p "$(dirname "$dba")" "$(dirname "$hb")" "$hc/.juice"
     start_server "$dba" "$hc" kernel_handle=kernel-a || { fail "rail_profile.boot_a" "no start"; return; }
     start_server "$hb" "$hc" kernel_handle=kernel-b || { fail "rail_profile.boot_b" "no start"; return; }
 
@@ -225,7 +225,7 @@ flow_rail_profile() {
     assert_contains "rail_profile.lists" "ka" "$(HOME="$hc" "$JUICE" use)"
     HOME="$hc" "$JUICE" auth login sys --password sys-pass >/dev/null 2>&1
     assert_json "rail_profile.logged_in" "$(HOME="$hc" "$JUICE" --json user me)" handle sys
-    assert_json "rail_profile.env_override" "$(JUICE_PROFILE=ka HOME="$hc" "$JUICE" --json user me)" handle sys
+    assert_json "rail_profile.context_override" "$(JUICE_CONTEXT=ka HOME="$hc" "$JUICE" --json user me)" handle sys
 
     # The token belongs to the kernel it was issued by: pointed at another server, the client is
     # anonymous rather than handing its bearer to a stranger.
@@ -247,8 +247,8 @@ flow_rail_economic_loop() {
     _fed_setup "$dir" || { fail "rail_economic_loop.setup" "setup failed"; return; }
 
     # A third kernel, C, bootstrapped to the same node so B can reach it.
-    local dbc="$dir/c/kernel/juice.db" hc="$dir/csys"
-    mkdir -p "$dir/c/kernel" "$hc/.juice"
+    local dbc="$(kdb "$dir/c")" hc="$dir/csys"
+    mkdir -p "$(dirname "$dbc")" "$hc/.juice"
     start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.boot_c" "no start"; return; }
     j "$dbc" "$hc" auth login sys --password sys-pass >/dev/null 2>&1
@@ -319,4 +319,66 @@ flow_rail_economic_loop() {
     # All three sets of books add up.
     assert_jnum "rail_economic_loop.a_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
     assert_jnum "rail_economic_loop.b_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
+}
+
+# Two kernels under one installation: an instance is a named directory, so a second kernel is a
+# sibling of the first — its own ledger, its own key, its own address — and a client names each by
+# its own context rather than by whatever holds a port.
+flow_instances() {
+    echo "=== FLOW instances ==="
+    local dir; dir=$(new_dir)
+    local dba dbb hc; dba="$(kdb "$dir" alpha)"; dbb="$(kdb "$dir" beta)"; hc="$dir/client"
+    mkdir -p "$hc/.juice"
+    start_server "$dba" "$hc" kernel_handle=kernel-alpha || { fail "instances.boot_alpha" "no start"; return; }
+    start_server "$dbb" "$hc" kernel_handle=kernel-beta  || { fail "instances.boot_beta" "no start"; return; }
+
+    assert_eq "instances.alpha_home" "yes" "$([ -f "$dir/kernels/alpha/juice.db" ] && echo yes || echo no)"
+    assert_eq "instances.beta_home" "yes" "$([ -f "$dir/kernels/beta/juice.db" ] && echo yes || echo no)"
+    assert_ne "instances.separate_addresses" "$(url "$dba")" "$(url "$dbb")"
+
+    # One client, two contexts, two kernels. Each context reaches its own.
+    HOME="$hc" "$JUICE" use alpha --endpoint "$(url "$dba")" >/dev/null 2>&1
+    HOME="$hc" "$JUICE" auth login sys --password sys-pass >/dev/null 2>&1
+    HOME="$hc" "$JUICE" use beta --endpoint "$(url "$dbb")" >/dev/null 2>&1
+    HOME="$hc" "$JUICE" auth login sys --password sys-pass >/dev/null 2>&1
+
+    local ka kb
+    ka=$(strfield "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" --json admin identity)" public_key)
+    kb=$(strfield "$(JUICE_CONTEXT=beta  HOME="$hc" "$JUICE" --json admin identity)" public_key)
+    assert_nonempty "instances.alpha_key" "$ka"
+    assert_ne "instances.distinct_identities" "$ka" "$kb"
+    assert_json "instances.alpha_handle" \
+        "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" --json admin identity)" handle kernel-alpha
+    assert_json "instances.beta_handle" \
+        "$(JUICE_CONTEXT=beta HOME="$hc" "$JUICE" --json admin identity)" handle kernel-beta
+
+    # Money is the kernel's own: a deposit on one is invisible on the other.
+    JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" user create onlyhere --password userpass >/dev/null 2>&1
+    assert_contains "instances.local_account" "onlyhere" \
+        "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" admin users)"
+    assert_not_contains "instances.not_on_the_other" "onlyhere" \
+        "$(JUICE_CONTEXT=beta HOME="$hc" "$JUICE" admin users)"
+}
+
+# A kernel made before instances existed keeps its ledger and its identity: the first boot after the
+# upgrade moves its whole home into kernels/default/ and carries on, rather than starting an empty
+# second kernel beside it.
+flow_home_migration() {
+    echo "=== FLOW home_migration ==="
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "home_migration.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 400
+    local key_before; key_before=$(kernel_key "$db" "$hs")
+    stop_server "$db"
+
+    # Put the home back where a pre-instance kernel kept it.
+    mv "$dir/kernels/default" "$dir/kernel" || { fail "home_migration.setup" "could not move home"; return; }
+    rmdir "$dir/kernels"
+
+    start_server "$db" "$hs" keep_config=1 || { fail "home_migration.reboot" "did not start after the move"; return; }
+    assert_eq "home_migration.moved_back" "yes" "$([ -f "$dir/kernels/default/juice.db" ] && echo yes || echo no)"
+    assert_eq "home_migration.old_home_gone" "no" "$([ -d "$dir/kernel" ] && echo yes || echo no)"
+    assert_eq "home_migration.same_identity" "$key_before" "$(kernel_key "$db" "$hs")"
+    assert_jnum "home_migration.ledger_survived" "$(jj "$db" "$ha" user me)" available 400
 }

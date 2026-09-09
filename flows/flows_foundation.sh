@@ -7,7 +7,7 @@
 
 flow_bootstrap() {
     echo "=== FLOW bootstrap ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
@@ -35,7 +35,7 @@ flow_bootstrap() {
 # failure and every flow only ever checked success paths.
 flow_signup_errors() {
     echo "=== FLOW signup_errors ==="
-    local dir db hs ha base; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha base; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "signup_errors.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     base=$(url "$db")
@@ -64,7 +64,7 @@ flow_signup_errors() {
 
 flow_local_auth() {
     echo "=== FLOW local_auth ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
 
     assert_nonempty "local_auth.token_stored" "$(profile_get "$hs" token)"
@@ -97,7 +97,7 @@ flow_local_auth() {
 
 flow_suspension() {
     echo "=== FLOW suspension ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -114,7 +114,7 @@ flow_suspension() {
 
 flow_deposits() {
     echo "=== FLOW deposits ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "deposits.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -131,7 +131,7 @@ flow_deposits() {
 
 flow_transfers() {
     echo "=== FLOW transfers ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -158,7 +158,7 @@ flow_transfers() {
 
 flow_action_lifecycle() {
     echo "=== FLOW action_lifecycle ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "action_lifecycle.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -203,7 +203,7 @@ flow_action_lifecycle() {
 
 flow_action_owner_visibility() {
     echo "=== FLOW action_owner_visibility ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "action_owner_visibility.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -226,7 +226,7 @@ flow_action_owner_visibility() {
 # description is the kernel "about" surfaced by admin identity.
 flow_recovery() {
     echo "=== FLOW recovery ==="
-    local dir db hs uh phrase; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
+    local dir db hs uh phrase; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
     make_admin "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
 
     # sys's description is the kernel "about" (surfaced by admin identity).

@@ -162,7 +162,7 @@ func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, t
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

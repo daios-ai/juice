@@ -4,7 +4,7 @@
 
 flow_wasm_execution() {
     echo "=== FLOW wasm_execution ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     # Short script timeout so the infinite-loop action is killed quickly (echo is instant).
     make_admin "$db" "$hs" script_timeout_ms=200 || { fail "wasm_execution.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -26,7 +26,7 @@ flow_wasm_execution() {
 
 flow_contractor_subcall() {
     echo "=== FLOW contractor_subcall ==="
-    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     make_admin "$db" "$hs" || { fail "contractor_subcall.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -48,7 +48,7 @@ flow_contractor_subcall() {
 
 flow_contractor_failure() {
     echo "=== FLOW contractor_failure ==="
-    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     make_admin "$db" "$hs" || { fail "contractor_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -68,7 +68,7 @@ flow_contractor_failure() {
 
 flow_step_success() {
     echo "=== FLOW step_success ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "step_success.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -94,7 +94,7 @@ flow_step_success() {
 
 flow_step_failure() {
     echo "=== FLOW step_failure ==="
-    local dir db hs ha hb hc; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
+    local dir db hs ha hb hc; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     make_admin "$db" "$hs" || { fail "step_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -112,7 +112,7 @@ flow_step_failure() {
 
 flow_step_restart() {
     echo "=== FLOW step_restart ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "step_restart.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -132,7 +132,7 @@ flow_step_restart() {
 
 flow_locked_funds_recovery() {
     echo "=== FLOW locked_funds_recovery ==="
-    local dir db hs; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
     j "$db" "$hs" admin deposit sys 200 --ref "$(newref)" >/dev/null 2>&1
 
@@ -166,7 +166,7 @@ PYEOF
 
 flow_rating() {
     echo "=== FLOW rating ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     make_admin "$db" "$hs" || { fail "rating.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -198,7 +198,7 @@ flow_rating() {
 # from FILES, never argv (128 KB MAX_ARG_STRLEN).
 flow_tinygo_compile() {
     echo "=== FLOW tinygo_compile ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "tinygo_compile.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 200

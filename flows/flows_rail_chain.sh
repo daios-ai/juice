@@ -94,7 +94,7 @@ flow_rail_chain() {
     rail_contracts >/dev/null \
         || { fail "rail_chain.contracts" "no compiled mocks: run 'forge build' in juice-rail/contracts, or set JUICE_RAIL_CONTRACTS"; return; }
 
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     _chain_world "$dir" rail_chain || return
     local token="$CHAIN_TOKEN"
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.boot" "server did not start"; return; }
@@ -210,7 +210,7 @@ flow_rail_chain_settlement() {
 flow_rail_chain_refill_and_halt() {
     echo "=== FLOW rail_chain_refill_and_halt ==="
     local dir db hs ha akey
-    dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     akey=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 
     _chain_world "$dir" rail_refill || return
@@ -251,7 +251,7 @@ PYEOF
     # domain check and nothing else. This is the control that makes the assertions above mean
     # something rather than just observing a broken kernel.
     local dir2 db2 hs2 ha2 vault2
-    dir2=$(new_dir); db2="$dir2/kernel/juice.db"; hs2=$(home "$dir2" sys2); ha2=$(home "$dir2" alice2)
+    dir2=$(new_dir); db2="$(kdb "$dir2")"; hs2=$(home "$dir2" sys2); ha2=$(home "$dir2" alice2)
     _chain_world "$dir2" rail_refill_ok || return
     make_admin "$db2" "$hs2" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot_ok" "server did not start"; return; }
     make_user "$db2" "$hs2" "$ha2" alice2
@@ -298,7 +298,7 @@ flow_rail_sepolia() {
     fi
     key=$(tr -d '[:space:]' < "$keyfile")
 
-    dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
 
     # The shipped `test` world names Arbitrum Sepolia's mock USDT0. Its fromBlock is where the file
     # was written; move it near the head so the scanner does not replay millions of blocks. That is

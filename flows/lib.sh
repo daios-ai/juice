@@ -111,12 +111,16 @@ write_config() {
 EOF
 }
 
+# server_log db — where start_server captures that kernel's output. It sits in the installation
+# root rather than the kernel's home, so a home that moves does not take its own log with it.
+server_log() { echo "$(khome "$1")/$(basename "$(dirname "$1")")-server.log"; }
+
 # kernel_fed_addr db  — print a running kernel's loopback libp2p multiaddr, scraped from the
 # fed_addrs on its `server.ready` log line. Every kernel now serves as a DHT+relay node, so one
 # kernel can be the bootstrap for the others — there is no separate seed process.
 kernel_fed_addr() {
     local db="$1"
-    local log; log="$(dirname "$db")/server.log"
+    local log; log=$(server_log "$db")
     sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null \
         | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
 }
@@ -135,15 +139,24 @@ kernel_key() {
 # returns 1 (never a silent timeout).
 start_server() {
     local db="$1" home="$2"; shift 2
-    mkdir -p "$(dirname "$db")"
-    write_config "$db" "$@"
-    local log; log="$(dirname "$db")/server.log"
+    # The instance is the directory the database sits in, so serving a second kernel under one
+    # installation root needs nothing but a second path (D20).
+    local inst; inst=$(basename "$(dirname "$db")")
+    # keep_config=1 leaves whatever configuration is already in the home alone — for the boot that
+    # has to find an untouched pre-instance home and move it.
+    local keep=0 a cfg=()
+    for a in "$@"; do case "$a" in keep_config=1) keep=1 ;; *) cfg+=("$a") ;; esac; done
+    if [ "$keep" = 0 ]; then
+        mkdir -p "$(dirname "$db")"
+        write_config "$db" ${cfg[@]+"${cfg[@]}"}
+    fi
+    local log; log=$(server_log "$db")
     # Truncate here, in the parent, before the server is launched: the redirection below truncates
     # only once the background child runs, and on a restart the wait loop could otherwise grep this
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" serve --addr 127.0.0.1:0 >>"$log" 2>&1 &
+        "$JUICE" serve --addr 127.0.0.1:0 --instance "$inst" >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -159,7 +172,7 @@ start_server() {
     done
     SERVER_URL["$db"]="http://$addr"
     SERVER_PID["$db"]="$pid"
-    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_profiles "${SERVER_OLD[$db]}" "http://$addr"
+    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_contexts "${SERVER_OLD[$db]}" "http://$addr"
     return 0
 }
 
@@ -172,22 +185,23 @@ stop_server() {
     unset "SERVER_URL[$1]" "SERVER_PID[$1]" 2>/dev/null
 }
 
-# repoint_profiles old new — a restarted server answers on a new address, and a client's login is
-# sent only to the address it was pinned to. Every client that knew the old address is told the
-# new one, which is what an operator does with `juice use --endpoint` after a restart.
-repoint_profiles() {
+# repoint_contexts old new — a restarted server answers on a new address, and a client's login is
+# sent only to the address recorded for its kernel. Every client that knew the old address is told
+# the new one, which is what an operator does with `juice use --endpoint` after a restart. The
+# recorded key is untouched: a restart changes where a kernel answers, never who it is.
+repoint_contexts() {
     local f
     while IFS= read -r f; do
         python3 -c '
 import json, sys
 path, old, new = sys.argv[1:4]
 d = json.load(open(path))
-for p in d.get("profiles", {}).values():
-    if p.get("endpoint", "").rstrip("/") == old.rstrip("/"):
-        p["endpoint"] = new
+for k in d.get("kernels", {}).values():
+    if k.get("endpoint", "").rstrip("/") == old.rstrip("/"):
+        k["endpoint"] = new
 json.dump(d, open(path, "w"))
 ' "$f" "$1" "$2"
-    done < <(find "$_RUNROOT" -path "*/.juice/client/profiles.json" 2>/dev/null)
+    done < <(find "$_RUNROOT" -path "*/.juice/client/config.json" 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
@@ -199,9 +213,13 @@ _srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s
 j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" "$@" 2>&1; }
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
 
-# khome db — the kernel home a database belongs to. A kernel is its home: $JUICE_HOME/kernel/ holds
-# the ledger, the config, the rail key and the single-server lock (D23).
-khome() { dirname "$(dirname "$1")"; }
+# kdb root — the database of the kernel served under an installation root. One kernel is one named
+# directory, kernels/<instance>/, holding the ledger, the config, the rail key and the single-server
+# lock (D23); the flows serve the default instance.
+kdb() { echo "$1/kernels/${2:-default}/juice.db"; }
+
+# khome db — the installation root a database belongs to, the inverse of kdb.
+khome() { dirname "$(dirname "$(dirname "$1")")"; }
 
 # await_login db home — log in and wait until the server actually answers as that user. A restart
 # under load can bind its port a moment before it is serving, and a flow that reads too early sees
@@ -317,45 +335,61 @@ token() {
         -d "{\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token
 }
 
-# A client keeps the kernels it knows in $HOME/.juice/client/profiles.json: each profile pins a
-# kernel's key and network and holds its tokens (D20). These read and write one field of the active
-# profile, which is how a flow plants a stale token or checks that logout dropped one.
-juice_profile_file() { echo "$1/.juice/client/profiles.json"; }
+# A client keeps what it knows in $HOME/.juice/client/: config.json holds the kernels (address, key,
+# network) and the contexts naming one kernel and one login on it, and credentials/<context>.json
+# holds that session's tokens (D20, ecosystem-standard.md). These read and write one field of the
+# current context, dispatching by field name to whichever of the two files owns it — which is how a
+# flow plants a stale token or checks that logout dropped one.
+juice_client_dir() { echo "$1/.juice/client"; }
 
-profile_get() {
-    python3 -c '
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-p = d.get("profiles", {}).get(d.get("active", ""), {})
-print(p.get(sys.argv[2], ""))
-' "$(juice_profile_file "$1")" "$2"
-}
-
-profile_set() {
+_ctx_py() {
     python3 -c '
 import json, os, sys
-path = sys.argv[1]
-os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+d, field = sys.argv[1], sys.argv[2]
+write = len(sys.argv) > 3
+cfgp = os.path.join(d, "config.json")
 try:
-    d = json.load(open(path))
+    cfg = json.load(open(cfgp))
 except Exception:
-    d = {"active": "default", "profiles": {"default": {}}}
-name = d.get("active") or "default"
-d.setdefault("profiles", {}).setdefault(name, {})[sys.argv[2]] = sys.argv[3]
-d["active"] = name
-json.dump(d, open(path, "w"))
-os.chmod(path, 0o600)
-' "$(juice_profile_file "$1")" "$2" "$3"
+    cfg = {"current": "default", "kernels": {}, "contexts": {}}
+name = cfg.get("current") or "default"
+if field in ("token", "refresh_token"):
+    path = os.path.join(d, "credentials", name + ".json")
+    try:
+        cred = json.load(open(path))
+    except Exception:
+        cred = {}
+    if not write:
+        print(cred.get(field, "")); raise SystemExit
+    cred[field] = sys.argv[3]
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    json.dump(cred, open(path, "w")); os.chmod(path, 0o600)
+    raise SystemExit
+kname = cfg.get("contexts", {}).get(name, {}).get("kernel") or name
+k = cfg.get("kernels", {}).get(kname, {})
+if not write:
+    print(k.get(field, "")); raise SystemExit
+cfg.setdefault("kernels", {}).setdefault(kname, {})[field] = sys.argv[3]
+cfg.setdefault("contexts", {}).setdefault(name, {})["kernel"] = kname
+cfg["current"] = name
+os.makedirs(d, mode=0o700, exist_ok=True)
+json.dump(cfg, open(cfgp, "w"))
+' "$@"
 }
+
+profile_get() { _ctx_py "$(juice_client_dir "$1")" "$2"; }
+profile_set() { _ctx_py "$(juice_client_dir "$1")" "$2" "$3"; }
 
 # ---------------------------------------------------------------------------
 # Fixtures — the repeated preambles, once.
 # ---------------------------------------------------------------------------
-# make_admin db home         — boot a server and log sys in (home is sys's home).
-make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login sys --password sys-pass >/dev/null 2>&1; }
+# make_admin db home         — boot a server, record its kernel, and log sys in (home is sys's home).
+# The client records the kernel before it sends a password, because that is what an operator does
+# and what the kernel requires: no secret leaves for an address whose key is not recorded (D20).
+make_admin() {
+    start_server "$1" "$2" "${@:3}" || return 1
+    j "$1" "$2" auth login sys --password sys-pass >/dev/null 2>&1
+}
 # make_user db admin_home user_home handle [password]  — create handle (as sys) and log it
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {

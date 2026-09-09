@@ -26,15 +26,15 @@ func isTimeoutErr(err error) bool {
 }
 
 // serverBaseURL resolves the Juice server base URL for user-facing (client) commands: --server for
-// one invocation, else the address the profile in use recorded (§14). A second address is not a
+// one invocation, else the address the context in use recorded (§14). A second address is not a
 // second kernel identity — that is a public key, never a URL (§13) — which is why the token that
-// travels there is decided by the pinned key, not by this address (tokenFor).
+// travels there is decided by the recorded address, not by this one (tokenFor).
 func serverBaseURL() string {
 	if flagServer != "" {
 		return strings.TrimRight(flagServer, "/")
 	}
-	_, _, p := activeProfile()
-	return p.Endpoint
+	_, _, _, k := activeContext()
+	return k.Endpoint
 }
 
 // errUnreachable reports that the juice server/peer at url couldn't be reached, retaining
@@ -86,7 +86,7 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	}
 	// The refresh token is a credential too, and goes only where the access token may: an expired
 	// login at home is refreshed, a stranger's 401 is not answered with anything.
-	if status == 401 && retry && atHome(base) && refreshToken(ctx) {
+	if status == 401 && retry && atHome(base) && refreshToken(ctx, tok) {
 		return apiDo(ctx, method, path, body, out, false)
 	}
 	if status == 401 && tokErr != nil {
@@ -120,32 +120,45 @@ func apiEmitCtx(ctx context.Context, method, path string, body any) error {
 	return emitRaw(out)
 }
 
-// refreshToken rotates the stored access token using the stored refresh token, returning
-// true on success so the caller can retry the original request once.
-func refreshToken(ctx context.Context) bool {
-	rt, err := loadRefreshToken()
-	if err != nil {
-		return false
-	}
-	body, _ := json.Marshal(map[string]string{"refresh_token": rt})
-	_, _, p := activeProfile()
-	respBody, status, err := doHTTP(ctx, "POST", strings.TrimRight(p.Endpoint, "/")+"/v1/auth/refresh",
-		map[string]string{"Content-Type": "application/json"}, bytes.NewReader(body), 0, true)
-	if err != nil || status != 200 {
-		return false
-	}
-	var out struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-	}
-	if json.Unmarshal(respBody, &out) != nil || out.AccessToken == "" {
-		return false
-	}
-	_ = saveToken(out.AccessToken)
-	if out.RefreshToken != "" {
-		_ = saveRefreshToken(out.RefreshToken)
-	}
-	return true
+// refreshToken rotates the stored access token using the stored refresh token, returning true on
+// success so the caller can retry the original request once. used is the access token that was
+// just refused, which is what makes this safe for two programs sharing one context: the whole
+// read-rotate-write runs under the session's lock, so the second one to arrive sees that the
+// first already rotated and simply takes what it stored, instead of spending a refresh token that
+// no longer exists.
+func refreshToken(ctx context.Context, used string) bool {
+	_, _, _, k := activeContext()
+	endpoint := strings.TrimRight(k.Endpoint, "/")
+	refreshed := false
+	_ = withCredentials(func(c *credentials) (bool, error) {
+		if c.Token != "" && c.Token != used {
+			refreshed = true // another process rotated while this one was in flight
+			return false, nil
+		}
+		if c.RefreshToken == "" {
+			return false, nil
+		}
+		body, _ := json.Marshal(map[string]string{"refresh_token": c.RefreshToken})
+		respBody, status, err := doHTTP(ctx, "POST", endpoint+"/v1/auth/refresh",
+			map[string]string{"Content-Type": "application/json"}, bytes.NewReader(body), 0, true)
+		if err != nil || status != 200 {
+			return false, nil
+		}
+		var out struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+		}
+		if json.Unmarshal(respBody, &out) != nil || out.AccessToken == "" {
+			return false, nil
+		}
+		c.Token = out.AccessToken
+		if out.RefreshToken != "" {
+			c.RefreshToken = out.RefreshToken
+		}
+		refreshed = true
+		return true, nil
+	})
+	return refreshed
 }
 
 // resolveActionID turns an action reference into an action id by asking the server to resolve it.

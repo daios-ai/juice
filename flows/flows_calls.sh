@@ -4,7 +4,7 @@
 
 flow_process_lifecycle() {
     echo "=== FLOW process_lifecycle ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "process_lifecycle.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 1000
@@ -38,7 +38,7 @@ flow_process_lifecycle() {
 
 flow_acl_public() {
     echo "=== FLOW acl_public ==="
-    local dir db hs ha hb aid; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb aid; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "acl_public.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -65,7 +65,7 @@ flow_acl_public() {
 
 flow_successful_paid_call() {
     echo "=== FLOW successful_paid_call ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     make_admin "$db" "$hs" fee_bps=2000 || { fail "successful_paid_call.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -90,7 +90,7 @@ flow_successful_paid_call() {
 
 flow_http_verbs() {
     echo "=== FLOW http_verbs ==="
-    local dir db hs ha bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_echo_backend "$bport" || { fail "http_verbs.backend" "echo backend failed"; return; }
     make_admin "$db" "$hs" || { fail "http_verbs.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -114,7 +114,7 @@ flow_http_verbs() {
 
 flow_failed_call_refund() {
     echo "=== FLOW failed_call_refund ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     make_admin "$db" "$hs" || { fail "failed_call_refund.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -154,7 +154,7 @@ flow_failed_call_refund() {
 flow_terms_changed_refused() {
     echo "=== FLOW terms_changed_refused ==="
     local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     make_admin "$db" "$hs" || { fail "terms.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -183,7 +183,7 @@ flow_terms_changed_refused() {
 
 flow_input_schema_failure() {
     echo "=== FLOW input_schema_failure ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "input_schema_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -202,7 +202,7 @@ flow_input_schema_failure() {
 
 flow_output_schema_failure() {
     echo "=== FLOW output_schema_failure ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'   # missing required output "id"
     make_admin "$db" "$hs" || { fail "output_schema_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -230,7 +230,7 @@ flow_output_schema_failure() {
 # covered by the Go flow suite (TestFlow_OAuthDelegated); here we assert the CLI gating.
 flow_grant() {
     echo "=== FLOW grant ==="
-    local dir db hs ha aid; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aid; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "grant.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 1000
@@ -256,7 +256,7 @@ flow_grant() {
 # two actions in `user me` (token-free), then disconnects the whole account and is rejected again.
 flow_grant_bearer() {
     echo "=== FLOW grant_bearer ==="
-    local dir db hs ha a1 a2 bport; dir=$(new_dir); db="$dir/kernel/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha a1 a2 bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_header_echo_backend "$bport" "X-Api-Key" || { fail "grant_bearer.backend" "backend failed"; return; }
     make_admin "$db" "$hs" || { fail "grant_bearer.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
