@@ -980,7 +980,11 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.kernel.ImportOpenAPI(r.Context(), caller, caller, req.Name, specURL, specBytes, req.Auth)
-	writeOr(w, result, err)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, enrichImport(s.kernel, r.Context(), result))
 }
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
@@ -1010,9 +1014,6 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
-	}
-	if ratings == nil {
-		ratings = []kernel.PublicRating{}
 	}
 	writeJSON(w, http.StatusOK, ratings)
 }

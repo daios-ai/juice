@@ -890,7 +890,7 @@ func actionImportCmd() *cobra.Command {
 				}
 				body["auth"] = auth
 			}
-			var result kernel.ImportResult
+			var result importResp
 			if err := apiCall(context.Background(), "POST", "/v1/actions/import", body, &result); err != nil {
 				return err
 			}
@@ -900,7 +900,7 @@ func actionImportCmd() *cobra.Command {
 			var counts []string
 			for _, group := range []struct {
 				verb string
-				rows []*kernel.Action
+				rows []actionResp
 			}{
 				{"imported", result.Created},
 				{"updated", result.Updated},

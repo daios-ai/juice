@@ -4353,6 +4353,12 @@ func TestListKernelsRoster(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
+	// An empty roster is an empty list, never nil: a nil slice serialises as null, and every list
+	// a client reads is a plain array (API.md R6). The store decides this once for every list.
+	if empty, err := db.ListKernels(ctx, "SELF", false, 0, 0); err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty roster: got %#v, %v; want a non-nil empty slice", empty, err)
+	}
+
 	newPeer(t, db, "titan", "rosterK1", 5, 0, now)
 	banned := newPeer(t, db, "banned", "rosterK4", 0, 0, now)
 	if err := db.SuspendUser(ctx, banned.ID); err != nil {

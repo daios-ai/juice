@@ -505,6 +505,8 @@ type Store interface {
 	// ListLedgerByUser returns ledger entries where userID is the source or the
 	// destination, most recent first, bounded by limit/offset.
 	ListLedgerByUser(ctx context.Context, userID string, limit, offset int) ([]*LedgerEntry, error)
+	// ReadLedgerByExternalKey returns the entry recorded under an idempotency key, or nil.
+	ReadLedgerByExternalKey(ctx context.Context, externalKey string) (*LedgerEntry, error)
 
 	// ---- Embeddings ----
 

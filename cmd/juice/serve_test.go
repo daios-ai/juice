@@ -2113,12 +2113,38 @@ func TestServeImportOpenAPI(t *testing.T) {
 		t.Fatalf("import: want 200, got %d", resp.StatusCode)
 	}
 
-	var result kernel.ImportResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	raw, _ := io.ReadAll(resp.Body)
+	// The result is the ordinary action projection under snake_case keys (API.md R1): the same
+	// shape an action read returns, never the kernel's own struct serialised raw.
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &shape); err != nil {
 		t.Fatalf("decode import result: %v", err)
 	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	for _, key := range []string{"created", "unchanged", "updated", "deactivated", "rejected"} {
+		if _, ok := shape[key]; !ok {
+			t.Errorf("import result lacks %q: %s", key, raw)
+		}
+	}
+	if _, ok := shape["Created"]; ok {
+		t.Errorf("import result carries a PascalCase key: %s", raw)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(shape["created"], &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("expected 1 created action, got %v (%v)", len(rows), err)
+	}
+	for _, key := range []string{"action", "owner_handle", "http"} {
+		if _, ok := rows[0][key]; !ok {
+			t.Errorf("created row lacks %q: %s", key, shape["created"])
+		}
+	}
+	for _, key := range []string{"owner_user_id", "source"} {
+		if _, ok := rows[0][key]; ok {
+			t.Errorf("created row exposes %q, which no action read does: %s", key, shape["created"])
+		}
+	}
+	var result importResp
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode import result: %v", err)
 	}
 	if result.Created[0].Name != "mail/sayHello" {
 		t.Errorf("name: got %q, want %q", result.Created[0].Name, "mail/sayHello")
@@ -2130,7 +2156,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if again.StatusCode != http.StatusOK {
 		t.Fatalf("re-import by name: want 200, got %d", again.StatusCode)
 	}
-	var second kernel.ImportResult
+	var second importResp
 	if err := json.NewDecoder(again.Body).Decode(&second); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

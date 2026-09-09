@@ -83,6 +83,34 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	if u.Available != 500 {
 		t.Errorf("available after deposit: got %d, want 500", u.Available)
 	}
+	// Recording the same payment again moves nothing and answers with the entry that recorded it —
+	// a reply, not a crash: the handler renders whatever the kernel returns, so the kernel must
+	// return something.
+	body2, status2 := tcpDo(t, suTok, "POST", "/control/deposit",
+		map[string]any{"handle": "rcpt", "amount": 500, "ref": "test-payment"})
+	if status2 != http.StatusOK {
+		t.Fatalf("replayed deposit: status %d: %s", status2, body2)
+	}
+	if strings.TrimSpace(string(body2)) == "" || string(body2) != string(body) {
+		t.Errorf("replay must answer with the same entry:\n first  %s\n second %s", body, body2)
+	}
+	if u, _ := env.k.ReadUser(ctx, recipient.ID); u.Available != 500 {
+		t.Errorf("replay moved money: %d", u.Available)
+	}
+}
+
+// TestPeerRosterIsAPlainArrayWhenEmpty: a list with nothing in it is `[]`, never `null` (API.md
+// R6). The roster was the one list that reached the wire as a nil slice.
+func TestPeerRosterIsAPlainArrayWhenEmpty(t *testing.T) {
+	env := newTestEnv(t)
+	suTok := bootSuperuser(t, env)
+	body, status := tcpDo(t, suTok, "GET", "/control/peers", nil)
+	if status != http.StatusOK {
+		t.Fatalf("peers: status %d: %s", status, body)
+	}
+	if got := strings.TrimSpace(string(body)); got != "[]" {
+		t.Fatalf("empty roster: got %s, want []", got)
+	}
 }
 
 // TestAdminDepositToAPeerIsRefused: a peer account is identity, never a wallet (P10, D14). The only

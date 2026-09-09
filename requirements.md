@@ -375,7 +375,7 @@ script timeout
 script memory limit
 lookup ranking with fake embeddings
 lookup ranks by fused relevance only while stats-based quality weighting is UNDER REVISION (temporarily removed): two identical-relevance actions score equally regardless of success history
-an http action's read carries the decomposed http object and not the encoded source string it is stored as — decided by kind, so a source too malformed to decompose serves neither — while a wasm action's read still carries its source
+an http action's read carries the decomposed http object and not the encoded source string it is stored as — decided by kind, so a source too malformed to decompose serves neither — while a wasm action's read still carries its source; an import result lists its rows in that same projection under snake_case keys
 lookup results include action (owner/name), input_schema, and output_schema
 lookup returns an all-in price for every result: action.price locally, a discovered hit's serving_price marked up by current import_bps, repricing with no re-pull; a manifest with a negative price or out-of-range remote_bps is skipped at ingest and refused at import
 a pinned run succeeds unchanged and is refused — balance, locked, and process count unmoved — when price, effect, description, either schema, or the stable id moved, including when the new schema rejects the args: ErrTermsChanged against an action still active, ErrInvalidState while a terms-changing update holds it deactivated (D4), since liveness is checked before the pin; a re-implementation at unchanged terms moves nothing and keeps the pin valid; a private action refuses on visibility, never disclosing its quote
@@ -388,6 +388,7 @@ stats update
 CLI commands
 CLI primary identifiers are positional natural keys (user=handle, action=owner/name)
 CLI human-readable output exposes the same fields as the corresponding HTTP response
+every list endpoint answers [] when it has nothing to list, the peer roster included; no list serialises as null
 serve --instance serves kernels/<name>/, so two kernels run under one installation root with distinct keys and ports; an empty, dotted, separator-bearing or over-long name is refused
 a pre-instance kernel home moves whole to kernels/default/ in one rename, ledger and rail key together; it is refused while a server holds the old home's lock and refused rather than merged when the destination exists; a second boot moves nothing and disturbs nothing
 a pre-context profiles.json becomes one kernel, one context and one credential file per profile, the old file kept under a new name; an existing config.json is never overwritten by it
@@ -602,7 +603,7 @@ a call whose peer has not proved where it is paid is refused before anything is 
 a peer account holds no money on any path: a foreign call is funded by the seller and the obligation rides on the call's own records, never on a balance
 the reveal payload domain is disjoint from every other, step_auth included; a payload signed for one network never verifies on another
 the world's defining part alone fixes the network digest: the operational fields (endpoint, gas policy) do not move it, and the shipped worlds each validate
-a crossing-in credits its registered sender and is fused with that transfer; an unknown sender is held on sys and listed; the same fact replayed moves money once; the same reference with other terms is refused; a crossing without a fact is refused
+a crossing-in credits its registered sender and is fused with that transfer; an unknown sender is held on sys and listed; the same fact replayed moves money once and answers with the entry that recorded it, naming a credited obligation again included; the same reference with other terms is refused; a crossing without a fact is refused
 registering an address proves control of it, stores the canonical form so a differently-cased duplicate collides, attributes that sender's held deposits retroactively, and binds one address to one account; replacement needs only a new signature, and a withdrawal already in flight keeps its own destination across it and across a restart
 a withdrawal reserves from the owner and holds on sys, finalizes to a crossing-out, and a finalized failure compensates the reserve exactly once, never editing the original entries
 a deposit the rail has recorded but the kernel has not booked is booked on the next pass, since the rail advances its own cursor first; a payment the manual rail made is confirmed by any later process, so a row a crash left submitted finalizes instead of hanging

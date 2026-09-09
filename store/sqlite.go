@@ -2784,7 +2784,18 @@ func (s *DB) ListLedgerByUser(ctx context.Context, userID string, limit, offset 
 	})
 }
 
-func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string) (*kernel.LedgerEntry, error) {
+// ReadLedgerByExternalKey is the out-of-transaction form of readLedgerByExternalKey, for a caller
+// answering a replay rather than committing one.
+func (s *DB) ReadLedgerByExternalKey(ctx context.Context, externalKey string) (*kernel.LedgerEntry, error) {
+	return readLedgerByExternalKey(ctx, s.db, externalKey)
+}
+
+// rowQuerier is what readLedgerByExternalKey needs of a connection or a transaction.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readLedgerByExternalKey(ctx context.Context, tx rowQuerier, externalKey string) (*kernel.LedgerEntry, error) {
 	var e kernel.LedgerEntry
 	var createdAt string
 	err := tx.QueryRowContext(ctx,
@@ -3372,7 +3383,10 @@ func scanID(scan func(...any) error) (string, error) {
 // queryList collects rows into a slice using the provided scan function.
 func queryList[T any](rows *sql.Rows, op string, scan func(func(...any) error) (T, error)) ([]T, error) {
 	defer rows.Close()
-	var out []T
+	// Never nil: a list with no rows is an empty list, and an empty list serialises as [] wherever
+	// it is handed to a client (API.md R6). Deciding that here once is what keeps every list
+	// endpoint from having to remember it.
+	out := make([]T, 0)
 	for rows.Next() {
 		v, err := scan(rows.Scan)
 		if err != nil {

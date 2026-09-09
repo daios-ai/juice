@@ -289,7 +289,21 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	}
 	if owed != nil {
 		if owed.Status == OwedCredited {
-			return nil, nil // already recorded: witnessing the same payment again moves no money
+			// Already recorded: witnessing the same payment again moves no money, and the reply is
+			// the entry that credited it — the replay rule every ledger operation keeps (D4). The
+			// entry is found by the key the credit wrote it under, which is the payment's own fact.
+			fact, ferr := rail.Witness(ctx, owed.TxHash, owed.Amount)
+			if ferr != nil {
+				return nil, ferr
+			}
+			e, rerr := k.store.ReadLedgerByExternalKey(ctx, AttributionKey(fact.Key))
+			if rerr != nil {
+				return nil, rerr
+			}
+			if e == nil {
+				return nil, ErrInvalidState.Wrapf("obligation %s is recorded as credited but its ledger entry is missing", owed.ID)
+			}
+			return e, nil
 		}
 		if owed.Status != OwedAnnounced {
 			return nil, ErrInvalidState.Wrapf("obligation %s is not awaiting a payment", owed.ID)

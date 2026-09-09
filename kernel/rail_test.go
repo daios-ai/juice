@@ -583,8 +583,17 @@ func TestOperatorClosesATicketAgainstItsPayment(t *testing.T) {
 	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
 		t.Fatalf("the seller must be credited 40, got %d", avail)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2"); err != nil {
+	again, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2")
+	if err != nil {
 		t.Fatalf("a repeat must be safe: %v", err)
+	}
+	// The reply to a repeat is the entry that credited the seller, as every ledger replay answers
+	// (D4): an operator recording the same payment twice sees what it did, never nothing.
+	if again == nil {
+		t.Fatal("a repeated record answered with no entry")
+	}
+	if again.ToUserID != seller.ID || again.Amount != 40 {
+		t.Errorf("a repeated record answered with the wrong entry: %+v", again)
 	}
 	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
 		t.Errorf("a repeated record paid twice: %d", avail)

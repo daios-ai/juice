@@ -438,9 +438,6 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	if conns == nil {
-		conns = []*kernel.ConnectionView{}
-	}
 	connByKey := make(map[string]*kernel.ConnectionView, len(conns))
 	for _, c := range conns {
 		connByKey[c.ProviderKey] = c
@@ -676,6 +673,35 @@ func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref strin
 }
 
 // enrichActions projects the rows one mutation touched, in the order they were written.
+// importResp is the wire shape of an import: the same projection every action read uses, grouped by
+// what the reconciliation did to each row. The kernel's ImportResult stays internal, as Action does.
+type importResp struct {
+	Created     []actionResp      `json:"created"`
+	Unchanged   []actionResp      `json:"unchanged"`
+	Updated     []actionResp      `json:"updated"`
+	Deactivated []actionResp      `json:"deactivated"`
+	Rejected    []importRejection `json:"rejected"`
+}
+
+type importRejection struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
+}
+
+func enrichImport(k *kernel.Kernel, ctx context.Context, r *kernel.ImportResult) importResp {
+	out := importResp{
+		Created:     enrichActions(k, ctx, r.Created),
+		Unchanged:   enrichActions(k, ctx, r.Unchanged),
+		Updated:     enrichActions(k, ctx, r.Updated),
+		Deactivated: enrichActions(k, ctx, r.Deactivated),
+		Rejected:    make([]importRejection, 0, len(r.Rejected)),
+	}
+	for _, rj := range r.Rejected {
+		out.Rejected = append(out.Rejected, importRejection{Key: rj.Key, Reason: rj.Reason})
+	}
+	return out
+}
+
 func enrichActions(k *kernel.Kernel, ctx context.Context, as []*kernel.Action) []actionResp {
 	cache := newAccountCache(k, ctx)
 	out := make([]actionResp, 0, len(as))
