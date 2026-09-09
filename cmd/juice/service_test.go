@@ -164,6 +164,22 @@ func TestEnrichStep(t *testing.T) {
 		t.Errorf("enrichStep: RequiredCallerHandle = %q, want @peer", v2.RequiredCallerHandle)
 	}
 
+	// A step parked for a principal on a peer names that principal beneath the peer's local name.
+	// The handle it went by when the step was made is display; the stable id underneath is what
+	// authorises the completion, so a rename there leaves the step addressed and only this stales.
+	remoteID := "u-9f2c"
+	named := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+		RequiredCallerRemoteID: &remoteID, RequiredCallerHandle: "bob"}
+	if got := enrichStep(nil, context.Background(), named, nil, uc).RequiredCallerHandle; got != "bob@peer" {
+		t.Errorf("enrichStep: RequiredCallerHandle = %q, want bob@peer", got)
+	}
+	// A row parked before the handle was kept still renders, by the id it does hold.
+	unnamed := &kernel.Step{ID: "s4", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+		RequiredCallerRemoteID: &remoteID}
+	if got := enrichStep(nil, context.Background(), unnamed, nil, uc).RequiredCallerHandle; got != "u-9f2c@peer" {
+		t.Errorf("enrichStep(no handle): RequiredCallerHandle = %q, want u-9f2c@peer", got)
+	}
+
 	// A waiting step carries allowed_input = input_schema \ keys(partial_args): the target's declared
 	// property `units` is exposed for completion, while the pre-bound `city` is dropped. This lets a
 	// required caller who cannot read a private target action still see what to submit.

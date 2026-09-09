@@ -64,7 +64,7 @@ func listBounds(r *http.Request) (limit, offset int) {
 func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
-	writeOr(w, users, err)
+	writeOr(w, accountViews(users), err)
 }
 
 func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +74,7 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if key == "" {
-		writeOr(w, acct, nil)
+		writeOr(w, accountView{Account: acct}, nil)
 		return
 	}
 	// A kernel target renders one flat record: its naming state, plus what it owes us when it has
@@ -86,7 +86,8 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 		out["last_seen"] = rk.LastSeen
 	}
 	if acct != nil {
-		out["id"], out["suspended_at"], out["created_at"] = acct.ID, acct.SuspendedAt, acct.CreatedAt
+		// No internal id: a peer is named by its key and its petname (D20).
+		out["suspended_at"], out["created_at"] = acct.SuspendedAt, acct.CreatedAt
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -337,7 +338,7 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	if sys, err := s.kernel.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description
 	}
-	var addrs []string
+	addrs := []string{}
 	if s.fed != nil {
 		addrs = s.fed.ListenAddrs()
 	}

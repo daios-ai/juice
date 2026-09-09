@@ -2,6 +2,7 @@ package rail
 
 import (
 	"context"
+	"strings"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -64,6 +65,9 @@ func (m *Manual) ScanDeposits(context.Context, uint64) ([]kernel.RailDeposit, er
 // idempotent: without one, a repeated command would mint money. It is also the payment's only name
 // here, so it is reported as the transaction that carried it.
 func (m *Manual) Witness(_ context.Context, ref string, amount int64) (kernel.RailDeposit, error) {
+	// The key below is what the payment is listed under, so it names the payment too. Without this
+	// the operator handing that key back would mint a second key and record the money twice.
+	ref = strings.TrimPrefix(ref, "rail:ref:")
 	if ref == "" {
 		return kernel.RailDeposit{}, kernel.ErrInvalidInput.Wrap("name the payment being recorded")
 	}

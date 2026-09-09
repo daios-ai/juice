@@ -1500,7 +1500,7 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 		t.Errorf("import with owner_handle=@bob: want ErrInvalidInput, got %v", err)
 	}
 
-	if _, _, err := k.ResolveRequiredCaller(ctx, "@bob"); err == nil {
+	if _, err := k.ResolveRequiredCaller(ctx, "@bob"); err == nil {
 		t.Error("ResolveRequiredCaller(@bob): want error, got nil")
 	}
 }
@@ -1520,12 +1520,12 @@ func TestResolveRequiredCallerRefusesEmptyRemoteID(t *testing.T) {
 	if _, err := k.EnsureKernelAccount(ctx, peerKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("empty resolved id: want ErrInvalidInput, got %v", err)
 	}
 	fake.resolveUserID = "alice-id"
-	if _, remote, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); err != nil || remote != "alice-id" {
-		t.Fatalf("a resolved id addresses the principal: remote=%q err=%v", remote, err)
+	if rc, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); err != nil || rc.RemoteID != "alice-id" {
+		t.Fatalf("a resolved id addresses the principal: remote=%q err=%v", rc.RemoteID, err)
 	}
 }
 
@@ -3211,7 +3211,7 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	if err := k.SuspendUser(ctx, sys.ID, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("suspend a tombstone: want ErrNotFound, got %v", err)
 	}
-	if _, _, err := k.ResolveRequiredCaller(ctx, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.ResolveRequiredCaller(ctx, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("park a step on a tombstone: want ErrNotFound, got %v", err)
 	}
 }

@@ -1947,24 +1947,25 @@ func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,
+			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,
+			                    required_caller_handle,action_id,
 			                    partial_args,price,import_bps,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 			step.ID, step.ParentTraceID, step.RequiredCallerUserID, step.RequiredCallerRemoteID,
-			step.ActionID, rawJSONStr(step.PartialArgs),
+			step.RequiredCallerHandle, step.ActionID, rawJSONStr(step.PartialArgs),
 			step.Price, step.ImportBPS, string(step.Status), timeToStr(step.CreatedAt),
 		)
 		return dbErr(err, "create step: insert")
 	})
 }
 
-const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
+const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	var parentTraceID, txID, completionTraceID, remoteID *string
 	var createdAt, partialArgs, status string
 	var importBPS sql.NullInt64
-	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID,
+	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID, &step.RequiredCallerHandle,
 		&step.ActionID, &partialArgs, &step.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
 	}
@@ -2719,6 +2720,13 @@ func (s *DB) CreateLedgerEntry(ctx context.Context, e *kernel.LedgerEntry) error
 				return err
 			}
 			if existing != nil {
+				// A key names one movement. Answering a request that asks for a different one with
+				// this entry would report money moved that never did, so the mismatch is refused
+				// here — like a withdrawal replayed on other terms, and inside the same transaction
+				// the insert would run in.
+				if existing.FromUserID != e.FromUserID || existing.ToUserID != e.ToUserID || existing.Amount != e.Amount {
+					return kernel.ErrInvalidInput.Wrapf("%s already names a different movement", e.ExternalKey)
+				}
 				*e = *existing
 				return nil
 			}

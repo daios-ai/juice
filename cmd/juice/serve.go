@@ -1100,7 +1100,10 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Note   *string `json:"note"`
 	}) (any, int, error) {
 		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
-		return rating, http.StatusOK, err
+		if err != nil {
+			return nil, 0, err
+		}
+		return ratingView{Rating: rating}, http.StatusOK, nil
 	})(w, r)
 }
 

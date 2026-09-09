@@ -63,7 +63,7 @@ func parkStepForPeerUser(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey, 
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), peer.ID, remoteUserID)
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), kernel.RequiredCaller{UserID: peer.ID, RemoteID: remoteUserID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), peer.ID, "")
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: peer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep parking a local action for a peer: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	action := parkStepAction(t, k)
 	for i := 0; i < 60; i++ {
 		p := setupProcessHTTP(t, db, peer.ID, 0)
-		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), local.ID, ""); err != nil {
+		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: local.ID}); err != nil {
 			t.Fatalf("seed step %d: %v", i, err)
 		}
 	}

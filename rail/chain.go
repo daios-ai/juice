@@ -442,7 +442,10 @@ func (c *Chain) ScanDeposits(ctx context.Context, sinceBlock uint64) ([]kernel.R
 // Witness resolves a transaction the operator named into the payment it carried. A transaction
 // carrying several payments is named with its index, since only one of them is the one meant.
 func (c *Chain) Witness(_ context.Context, ref string, amount int64) (kernel.RailDeposit, error) {
-	hash, idx, hasIdx := strings.Cut(ref, ":")
+	// A held payment is listed under the key toDeposit mints, so that key is a name for it: the
+	// operator hands back what the kernel showed them. It is also the only place the log index is
+	// published, so a transaction carrying two payments is nameable no other way.
+	hash, idx, hasIdx := strings.Cut(strings.TrimPrefix(ref, "rail:"), ":")
 	all, err := c.rail.Deposits()
 	if err != nil {
 		return kernel.RailDeposit{}, err

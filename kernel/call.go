@@ -1068,12 +1068,11 @@ func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte
 	if err != nil {
 		return "", err
 	}
-	callerID, remoteID, err := h.kernel.ResolveRequiredCaller(ctx, requiredCaller)
+	caller, err := h.kernel.ResolveRequiredCaller(ctx, requiredCaller)
 	if err != nil {
 		return "", err
 	}
-	step, err := h.kernel.CreateStep(ctx, h.traceID, act.ID,
-		json.RawMessage(partialArgs), callerID, remoteID)
+	step, err := h.kernel.CreateStep(ctx, h.traceID, act.ID, json.RawMessage(partialArgs), caller)
 	if err != nil {
 		return "", err
 	}

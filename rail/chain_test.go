@@ -464,3 +464,31 @@ func TestChainFinishesAPurchaseWhoseBroadcastFailed(t *testing.T) {
 		t.Fatalf("an unaffordable purchase: %v, want the rail stopped", err)
 	}
 }
+
+// The key a held payment is listed under is the reference that closes it. It is also the only place
+// the log index is published, so a transaction carrying two payments is nameable no other way.
+func TestChainWitnessAcceptsTheKeyItMinted(t *testing.T) {
+	c, l := testChain(t)
+	ctx := context.Background()
+	l.deposits = []jrail.Deposit{
+		{TxHash: common.HexToHash("0x1"), LogIndex: 0, From: common.HexToAddress("0xaa"), Amount: big.NewInt(10), BlockNumber: 3},
+		{TxHash: common.HexToHash("0x1"), LogIndex: 1, From: common.HexToAddress("0xbb"), Amount: big.NewInt(20), BlockNumber: 3},
+	}
+	all, err := c.ScanDeposits(ctx, 0)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("scan: %d %v", len(all), err)
+	}
+	for _, listed := range all {
+		got, werr := c.Witness(ctx, listed.Key, 0)
+		if werr != nil {
+			t.Fatalf("the listed key %q must name its own payment: %v", listed.Key, werr)
+		}
+		if got.Key != listed.Key || got.Amount != listed.Amount {
+			t.Errorf("key %q named a different payment: %+v", listed.Key, got)
+		}
+	}
+	// The bare transaction hash still names one, and is still ambiguous across two.
+	if _, err := c.Witness(ctx, all[0].TxHash, 0); err == nil {
+		t.Error("a hash carrying two payments must still be refused without an index")
+	}
+}

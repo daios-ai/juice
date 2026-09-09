@@ -536,6 +536,32 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	return got
 }
 
+// Both books name the obligation by the same word. The buyer wrote it on the trace it dispatched
+// under; the seller was admitted under the peer's key, which lives on the record its trace points
+// at — so a seller reading its own transaction can still name the payment that closes it.
+func TestASellersTransactionNamesItsObligation(t *testing.T) {
+	k, st, _, _ := railFixture(t)
+	ctx := context.Background()
+	peer := peerWithAddress(t, k, st, "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "0xdebtor")
+	seller := setupUser(t, st, "seller", 0)
+	announcedOwed(t, st, "tk-view", peer.ID, seller.ID, "0xdebtor", "0xpaid-view", 40)
+
+	txs, err := st.ListTransactions(ctx, kernel.TxFilter{PartyUserID: seller.ID})
+	if err != nil || len(txs) == 0 {
+		t.Fatalf("transactions: %d %v", len(txs), err)
+	}
+	v, err := k.ReadTransaction(ctx, seller.ID, txs[0].ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if v.TicketID != "tk-view" {
+		t.Fatalf("the seller must name its obligation: got %q, want tk-view", v.TicketID)
+	}
+	if again, _ := st.ReadOwed(ctx, v.TicketID, peer.ID); again == nil {
+		t.Error("the name the transaction gives must be the name the obligation answers to")
+	}
+}
+
 // An obligation closes only against a payment from the buyer's own proven address. An equal payment
 // from anybody else, even in the very transaction the buyer named, closes nothing.
 func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {

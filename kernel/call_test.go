@@ -2043,7 +2043,7 @@ func TestHostStepCompleteIsTraceConfined(t *testing.T) {
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
 	exec := &stepCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, mallory.ID, "")
+	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, kernel.RequiredCaller{UserID: mallory.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}

@@ -92,6 +92,7 @@ func summaries(resps []actionResp) []actionSummary {
 type actionResp struct {
 	*kernel.Action
 	OwnerUserID   string    `json:"owner_user_id,omitempty"`
+	RemoteOwnerID string    `json:"remote_owner_id,omitempty"` // a proxy's match key (D13), not a read
 	ActionRef     string    `json:"action"`
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
@@ -166,7 +167,13 @@ func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action
 	// hosts them (§13): the completer is who may complete it, and completion already demands their
 	// attested id. Rendered the way every remote reference is, beneath the peer's local name.
 	if step.RequiredCallerRemoteID != nil {
-		v.RequiredCallerHandle = *step.RequiredCallerRemoteID + "@" + uc.reference(step.RequiredCallerUserID)
+		// The principal, beneath the peer's local name — its handle when the step was made, or its
+		// stable id where a row predates that being kept.
+		who := step.RequiredCallerHandle
+		if who == "" {
+			who = *step.RequiredCallerRemoteID
+		}
+		v.RequiredCallerHandle = who + "@" + uc.reference(step.RequiredCallerUserID)
 	}
 	if action != nil {
 		v.Action = actionRef(action, uc)
@@ -202,18 +209,43 @@ func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *accountCac
 }
 
 // ledgerView renders a ledger entry (deposit, withdrawal, or transfer) with the operator,
-// source, and destination @handles instead of raw user UUIDs; the record's own id is dropped
-// too (no command consumes it — external_key is the idempotency handle). from_handle is absent
-// on a deposit (no source) and to_handle on a withdrawal (no destination).
+// source, and destination @handles instead of raw user UUIDs. The record's own id is dropped (no
+// command consumes it), and so is external_key: it is the writer's own idempotency token, which the
+// writer already holds, and publishing it invited a reader to hand back a name that was never
+// theirs. from_handle is absent on a deposit (no source) and to_handle on a withdrawal (no
+// destination).
 type ledgerView struct {
 	*kernel.LedgerEntry
 	ID             string `json:"id,omitempty"`
+	ExternalKey    string `json:"external_key,omitempty"`
 	OperatorUserID string `json:"operator_user_id,omitempty"`
 	FromUserID     string `json:"from_user_id,omitempty"`
 	ToUserID       string `json:"to_user_id,omitempty"`
 	OperatorHandle string `json:"operator_handle"`
 	FromHandle     string `json:"from_handle,omitempty"`
 	ToHandle       string `json:"to_handle,omitempty"`
+}
+
+// ratingView withholds the rater's id: the rater is the caller, and a party is never a raw id
+// (D20). The ratings listing already answers this way.
+type ratingView struct {
+	*kernel.Rating
+	RaterUserID string `json:"rater_user_id,omitempty"`
+}
+
+// accountView withholds an account's own id: a user is addressed by its handle, never by an id, and
+// only GET /v1/me answers with the caller's own (D20). The handle is already on the account.
+type accountView struct {
+	*kernel.Account
+	ID string `json:"id,omitempty"`
+}
+
+func accountViews(as []*kernel.Account) []accountView {
+	out := make([]accountView, 0, len(as))
+	for _, a := range as {
+		out = append(out, accountView{Account: a})
+	}
+	return out
 }
 
 // railTransferView renders one external movement the way a person reads it: the party by name, and
@@ -899,8 +931,8 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 		return nil, err
 	}
 	// RequiredCaller may be a local handle or a remote user@kernel (§13): resolve to the routing
-	// account id plus the completer's stable remote id (empty for a local recipient).
-	requiredCallerID, remoteID, err := k.ResolveRequiredCaller(ctx, p.RequiredCaller)
+	// account, plus the completer's stable remote id and display handle (both empty when local).
+	caller, err := k.ResolveRequiredCaller(ctx, p.RequiredCaller)
 	if err != nil {
 		return nil, fmt.Errorf("required_caller not found: %w", err)
 	}
@@ -911,7 +943,7 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 			return nil, err
 		}
 	}
-	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, requiredCallerID, remoteID)
+	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, caller)
 	if err != nil {
 		return nil, err
 	}

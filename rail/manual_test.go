@@ -97,3 +97,26 @@ func TestManualObservesNothing(t *testing.T) {
 		t.Error("nothing here burns fuel, so there is no cost to read")
 	}
 }
+
+// The key a payment is listed under names that payment. Handing it back is what an operator does
+// when reading it off `admin deposit`, and it must resolve to the same fact — not mint a second
+// name for it, which is what recorded the money twice.
+func TestManualWitnessAcceptsTheKeyItMinted(t *testing.T) {
+	m := rail.NewManual()
+	ctx := context.Background()
+
+	first, err := m.Witness(ctx, "inv-7", 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := m.Witness(ctx, first.Key, 40)
+	if err != nil {
+		t.Fatalf("the published key must name its own payment: %v", err)
+	}
+	if again.Key != first.Key {
+		t.Fatalf("the key nested instead of resolving: %q became %q", first.Key, again.Key)
+	}
+	if again.TxHash != first.TxHash || again.Amount != first.Amount {
+		t.Errorf("the same key named a different fact: %+v vs %+v", again, first)
+	}
+}

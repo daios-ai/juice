@@ -35,9 +35,9 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 		return nil, kernel.ErrInvalidInput.Wrap("message requires message")
 	}
 
-	// `to` may be a local handle or a remote user@kernel (§13): resolve to the routing account id
-	// plus the completer's stable remote id (empty for a local recipient).
-	recipientID, remoteID, err := k.ResolveRequiredCaller(ctx, to)
+	// `to` may be a local handle or a remote user@kernel (§13): resolve to the routing account, plus
+	// the completer's stable remote id and display handle (both empty for a local recipient).
+	recipient, err := k.ResolveRequiredCaller(ctx, to)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("to %q not found", to)
 	}
@@ -49,7 +49,7 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 
 	partialArgs, _ := json.Marshal(map[string]any{"message": msg})
 
-	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipientID, remoteID)
+	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient)
 	if err != nil {
 		return nil, err
 	}

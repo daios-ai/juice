@@ -38,8 +38,8 @@ type Host interface {
 	KernelName(ctx context.Context, publicKey string) string
 	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)
 	ReadCallableAction(ctx context.Context, ref, callerID string) (*kernel.Action, error)
-	ResolveRequiredCaller(ctx context.Context, ref string) (callerID, remoteID string, err error)
-	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, requiredCallerID, requiredCallerRemoteID string) (*kernel.Step, error)
+	ResolveRequiredCaller(ctx context.Context, ref string) (kernel.RequiredCaller, error)
+	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.RequiredCaller) (*kernel.Step, error)
 }
 
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a

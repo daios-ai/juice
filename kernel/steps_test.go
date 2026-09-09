@@ -77,7 +77,7 @@ func TestStepCreateReturnsWaitingStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestStepCompleteMergesArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"from_partial":"A","shared":"partial-val"}`)
-	step, err := k.CreateStep(ctx, trID, action.ID, partialArgs, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, partialArgs, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestStepCompleteInputValidatedAgainstInputSchema(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestStepCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, rightCaller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: rightCaller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestCompleteStepInTraceIsTraceConfined(t *testing.T) {
 
 	// A step in VICTIM's process, addressed to mallory.
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
-	step, err := k.CreateStep(ctx, victimTrace.ID, action.ID, nil, mallory.ID, "")
+	step, err := k.CreateStep(ctx, victimTrace.ID, action.ID, nil, kernel.RequiredCaller{UserID: mallory.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestStepCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestStepTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestStepCompletionTraceParentTraceID(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	parentTraceID := orphan.ID
 
-	step, err := k.CreateStep(ctx, parentTraceID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, parentTraceID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestCanListStepRequiredCallerSeesStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestCanListStepUnrelatedUserDenied(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestCanReadStepSameRulesAsCanListStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, _ := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, _ := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 
 	// Manually claim the step via BeginStepCall to simulate a crash mid-execution (step running, no tx).
 	stepTrace := &kernel.Trace{
@@ -504,7 +504,7 @@ func TestWaitingStepOnClosedProcessIsNonCompletable(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestStepCompletionTraceCrossProcessParentRef(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	foreignTraceID := orphan.ID
 
-	step, err := k.CreateStep(ctx, foreignTraceID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, foreignTraceID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"key":"from-partial","other":"base"}`)
-	step, _ := k.CreateStep(ctx, trID, action.ID, partialArgs, caller.ID, "")
+	step, _ := k.CreateStep(ctx, trID, action.ID, partialArgs, kernel.RequiredCaller{UserID: caller.ID})
 
 	// input's "key" should win over partial's "key"
 	input := json.RawMessage(`{"key":"from-input"}`)
@@ -635,7 +635,7 @@ func TestStepCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestStepCompleteAllowsDisjointInputAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestStepCompleteGrossEqualsStepPriceAcrossPriceChange(t *testing.T) {
 
 	// Fund a root trace with the action's price (100) and snapshot step.price = 100 at creation.
 	_, tr := beginTestRun(t, st, owner.ID, action)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -752,7 +752,7 @@ func TestCreateStepTraceAuthority(t *testing.T) {
 	parentTraceID := orphan.ID
 
 	// Any caller can create a step; service layer enforces trace authority. Kernel just checks action/process.
-	step, err := k.CreateStep(ctx, parentTraceID, nextAction.ID, nil, nextUser.ID, "")
+	step, err := k.CreateStep(ctx, parentTraceID, nextAction.ID, nil, kernel.RequiredCaller{UserID: nextUser.ID})
 	if err != nil {
 		t.Fatalf("CreateStep with trace authority: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 	p1TraceID := reply.TraceID
 
 	// p1 is now closed; CreateStep using p1's trace must fail with ErrInvalidState.
-	_, err = k.CreateStep(ctx, p1TraceID, nextAction.ID, nil, nextUser.ID, "")
+	_, err = k.CreateStep(ctx, p1TraceID, nextAction.ID, nil, kernel.RequiredCaller{UserID: nextUser.ID})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for closed-process trace, got %v", err)
 	}
@@ -808,7 +808,7 @@ func TestCreateStepRejectsNonObjectPartialArgs(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	_, err := k.CreateStep(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), caller.ID, "")
+	_, err := k.CreateStep(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.RequiredCaller{UserID: caller.ID})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-object partial_args, got %v", err)
 	}
@@ -824,7 +824,7 @@ func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	caller := setupUser(t, st, "nil-pt-caller", 0)
 	action := setupLocalAction(t, st, owner.ID, "nil-pt-action", 0)
 
-	_, err := k.CreateStep(ctx, "", action.ID, nil, caller.ID, "")
+	_, err := k.CreateStep(ctx, "", action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty traceID, got %v", err)
 	}
@@ -862,7 +862,7 @@ func TestCreateStepChecksCreatorNotRequiredCaller(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
 	// canCall(customer, action) is false (private, non-owner) — the OLD rule rejected this.
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: customer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep parking a private action for a non-owner: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestCreateStepRejectedWhenCreatorCannotCall(t *testing.T) {
 	// The required caller is the action owner, who could call it: irrelevant under the binding rule.
 	_, tr := setupOrphanTrace(t, st, creator.ID, creator.ID, creator.ID)
 
-	_, err := k.CreateStep(ctx, tr.ID, action.ID, nil, actionOwner.ID, "")
+	_, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: actionOwner.ID})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when the creator cannot call the action, got %v", err)
 	}
@@ -912,7 +912,7 @@ func TestStepCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "narrow-action", "", 0) // public
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: customer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestStepCompletionResetsOnDeactivatedAction(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "deact-action", "", 0)
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, customer.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: customer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -996,7 +996,7 @@ func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		t.Fatalf("setupStepWithCompletionTrace: BeginRun: %v", err)
 	}
 	ptID := root.ID
-	step, err := k.CreateStep(ctx, ptID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, ptID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("setupStepWithCompletionTrace: CreateStep: %v", err)
 	}
@@ -1258,7 +1258,7 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -1309,7 +1309,7 @@ func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 
 	// Fund a root trace with 50 and park step.price=50 from it.
 	_, root := beginTestRun(t, st, procOwner.ID, remoteAct)
-	step, err := k.CreateStep(ctx, root.ID, remoteAct.ID, nil, completer.ID, "")
+	step, err := k.CreateStep(ctx, root.ID, remoteAct.ID, nil, kernel.RequiredCaller{UserID: completer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -1682,7 +1682,7 @@ func TestParentFailureLeavesRunningStepAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
-	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), completer.ID, "")
+	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: completer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -1777,7 +1777,7 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free subcall on a settled trace: want ErrInvalidState, got %v", err)
 	}
-	if _, err := k.CreateStep(ctx, root.ID, free.ID, json.RawMessage(`{}`), owner.ID, ""); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.CreateStep(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: owner.ID}); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free step on a settled trace: want ErrInvalidState, got %v", err)
 	}
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
@@ -1826,7 +1826,7 @@ func TestEndProcessRefusesToCloseOverACallStartedMeanwhile(t *testing.T) {
 	act := setupLocalAction(t, st, owner.ID, "epr-act", price)
 	stepAct := setupLocalAction(t, st, owner.ID, "epr-step", 40)
 	p, root := beginTestRun(t, st, owner.ID, act)
-	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), completer.ID, "")
+	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: completer.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2149,7 +2149,7 @@ func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2183,7 +2183,7 @@ func TestStepCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2218,7 +2218,7 @@ func TestCompleteStepClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "claim-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2262,7 +2262,7 @@ func TestCompleteStepRejectionIsNotAClaimFailure(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "rej-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2300,7 +2300,7 @@ func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
 	if err := db.ExecForTest(ctx, `UPDATE traces SET available=100 WHERE id=?`, tr.ID); err != nil {
 		t.Fatalf("fund trace: %v", err)
 	}
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2406,7 +2406,7 @@ func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "to-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2474,7 +2474,7 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	step, err := k.CreateStep(ctx, root.ID, a.ID, nil, caller.ID, "")
+	step, err := k.CreateStep(ctx, root.ID, a.ID, nil, kernel.RequiredCaller{UserID: caller.ID})
 	if err != nil {
 		t.Fatalf("CreateStep against a legacy proxy: %v", err)
 	}

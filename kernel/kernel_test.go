@@ -1435,6 +1435,60 @@ func TestTransferIdempotent(t *testing.T) {
 	assertUserBalance(t, st, bob.ID, 40, 0)
 }
 
+// An idempotency token a client chose names that client's own movement and nothing else. The kernel
+// prefixes every key it mints; the caller's was the one name in that column nobody owned, so a
+// client could hand back a key it had merely read and be told money moved that never did, or occupy
+// a name the rail would later need for a real payment.
+func TestATransferKeyNamesOnlyItsOwnCallersMovement(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "sys", 0)
+	alice := setupUser(t, st, "alice", 100)
+	bob := setupUser(t, st, "bob", 0)
+	mallory := setupUser(t, st, "mallory", 100)
+
+	// A payment the kernel booked under its own key.
+	if _, err := k.Deposit(ctx, su.ID, bob.ID, 50, "", "pay-1"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := st.ListLedgerByUser(ctx, bob.ID, 0, 0)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("ledger: %d %v", len(entries), err)
+	}
+	kernelKey := entries[0].ExternalKey
+	if kernelKey == "" {
+		t.Fatal("the kernel's own entry carries no key to try")
+	}
+
+	// A stranger naming it is not answered with it, and moves nothing.
+	before, _ := st.ReadUser(ctx, mallory.ID)
+	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 10, "", kernelKey); err != nil {
+		t.Fatalf("a caller's key lives in the caller's namespace, so this is an ordinary transfer: %v", err)
+	}
+	after, _ := st.ReadUser(ctx, mallory.ID)
+	if after.Available != before.Available-10 {
+		t.Errorf("the transfer did not move: %d then %d", before.Available, after.Available)
+	}
+
+	// Two callers may choose one word without naming each other's movement.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 20, "", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 30, "", "shared"); err != nil {
+		t.Fatalf("another caller's key must not be taken: %v", err)
+	}
+	assertUserBalance(t, st, alice.ID, 80, 0)
+	assertUserBalance(t, st, mallory.ID, 60, 0)
+
+	// One caller reusing their own key on other terms is refused, not answered with the old entry.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 25, "", "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("the same key on other terms must be refused, got %v", err)
+	}
+	assertUserBalance(t, st, alice.ID, 80, 0)
+}
+
 func TestListLedger(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

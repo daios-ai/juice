@@ -207,3 +207,40 @@ func TestAdminSuperuserGate(t *testing.T) {
 		t.Errorf("expected superuser-required error, got: %s", body)
 	}
 }
+
+// A user is addressed by handle, never by an id: only GET /v1/me answers with the caller's own
+// (D20). The operator's own routes were writing the account row verbatim.
+func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
+	env := newTestEnv(t)
+	suTok := bootSuperuser(t, env)
+	u, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "shown", Password: "pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/control/users", "/control/users/shown"} {
+		body, status := tcpDo(t, suTok, "GET", path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", path, status, body)
+		}
+		if strings.Contains(string(body), u.ID) {
+			t.Errorf("%s carries the raw account id: %s", path, body)
+		}
+		if !strings.Contains(string(body), "shown") {
+			t.Errorf("%s should still name the account: %s", path, body)
+		}
+	}
+}
+
+// A list with nothing in it is `[]`, never `null` (API.md R6). These two are built outside the
+// store, so the store's guarantee does not reach them.
+func TestListsBuiltOutsideTheStoreAreArrays(t *testing.T) {
+	env := newTestEnv(t)
+	suTok := bootSuperuser(t, env)
+	body, status := tcpDo(t, suTok, "GET", "/control/identity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("identity: status %d: %s", status, body)
+	}
+	if strings.Contains(string(body), `"addrs":null`) {
+		t.Errorf("addrs answered null with no transport: %s", body)
+	}
+}

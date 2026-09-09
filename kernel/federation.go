@@ -1123,38 +1123,48 @@ func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey st
 // the completer beneath its mutable handle, so completion demands a step_auth attestation naming it.
 // A raw-key qualifier is mounted on demand (best-effort alias); the remote user is resolved to its
 // stable id over /juice/fed/resolve/1.
-func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerID, remoteID string, err error) {
+// RequiredCaller is who a step is parked for: the local account that funds and routes it, and, when
+// that account is a peer, the principal on that peer — its stable id, which authorises completion,
+// and the handle it went by when the step was made, which only ever displays it. The two travelled
+// as separate strings that had to agree; one value carries them and the display name for free.
+type RequiredCaller struct {
+	UserID   string // local account: the user, or the peer's proxy account
+	RemoteID string // the completer's stable id on that peer (P8); empty when local
+	Handle   string // that principal's handle when the step was made; display only, may go stale
+}
+
+func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (rc RequiredCaller, err error) {
 	ref = strings.TrimSpace(ref)
 	owner, kernelAlias, hasKernel := strings.Cut(ref, "@")
 	if !hasKernel {
 		u, uerr := k.ResolveUser(ctx, ref)
 		if uerr != nil || !u.IsLive() {
 			// A tombstone resolves but can never complete: the step would park its price forever.
-			return "", "", ErrNotFound.Wrapf("required caller %q not found", ref)
+			return rc, ErrNotFound.Wrapf("required caller %q not found", ref)
 		}
-		return u.ID, "", nil
+		return RequiredCaller{UserID: u.ID}, nil
 	}
 	// A sigil-prefixed "@bob" cuts to an empty owner; reject it rather than treat it as a
 	// kernel-qualified ref with no owner (handles are bare, §14).
 	if owner == "" || kernelAlias == "" {
-		return "", "", ErrInvalidInput.Wrapf("required caller %q must be owner@kernel", ref)
+		return rc, ErrInvalidInput.Wrapf("required caller %q must be owner@kernel", ref)
 	}
 	peerKey, mount, kerr := k.ResolveKernelKey(ctx, kernelAlias)
 	if kerr != nil {
-		return "", "", kerr
+		return rc, kerr
 	}
 	resolver := k.fedClient
 	if resolver == nil {
-		return "", "", ErrNotFound.Wrap("remote resolution unavailable")
+		return rc, ErrNotFound.Wrap("remote resolution unavailable")
 	}
-	remoteUserID, _, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
+	remoteUserID, remoteHandle, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
 	if rerr != nil {
-		return "", "", rerr
+		return rc, rerr
 	}
 	// An empty id is not a principal. Accepted, it would address the step to the peer kernel
 	// itself — operator scope, decided by a remote reply — and strand the user it was meant for.
 	if remoteUserID == "" {
-		return "", "", ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
+		return rc, ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
 	}
 	// First meaningful use (§13): a verified remote-user resolve is our own outbound act, so a
 	// petname is bound here too — on the petname being unbound, not on the account being absent
@@ -1164,10 +1174,10 @@ func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (callerI
 	}
 	if mount == nil {
 		if mount, err = k.EnsureKernelAccount(ctx, peerKey); err != nil {
-			return "", "", err
+			return rc, err
 		}
 	}
-	return mount.ID, remoteUserID, nil
+	return RequiredCaller{UserID: mount.ID, RemoteID: remoteUserID, Handle: NormalizeHandle(remoteHandle)}, nil
 }
 
 // ResolvePrincipal resolves a user reference (bare handle or id) to its stable id and current

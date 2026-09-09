@@ -218,13 +218,17 @@ const (
 // Core invariant: CompleteStep(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
 // The allowed completion input is derived live as action.input_schema \ keys(partial_args).
 type Step struct {
-	ID                     string          `json:"id"`
-	ParentTraceID          *string         `json:"parent_trace_id,omitempty"`
-	RequiredCallerUserID   string          `json:"required_caller_user_id"`
-	RequiredCallerRemoteID *string         `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
-	ActionID               string          `json:"action_id"`
-	PartialArgs            json.RawMessage `json:"partial_args"`
-	Price                  int64           `json:"price"`
+	ID                     string  `json:"id"`
+	ParentTraceID          *string `json:"parent_trace_id,omitempty"`
+	RequiredCallerUserID   string  `json:"required_caller_user_id"`
+	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
+	// RequiredCallerHandle is what that remote principal was called when the step was made. Display
+	// only, exactly like a proxy's owner_handle (P6): the id above stays the identity, so a rename
+	// on the peer leaves the step addressed correctly and only this line goes stale.
+	RequiredCallerHandle string          `json:"required_caller_handle,omitempty"`
+	ActionID             string          `json:"action_id"`
+	PartialArgs          json.RawMessage `json:"partial_args"`
+	Price                int64           `json:"price"`
 	// ImportBPS freezes the origin fee this Step was funded under: CreateStep parks Price and the
 	// Step may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy steps
 	// only; nil = parked before 041, settling from live config as before.

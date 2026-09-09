@@ -191,7 +191,7 @@ func (k *Kernel) recoverTrace(ctx context.Context, _ *log.Logger, trace *Trace, 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
 // The creating authority is derived from Trace(traceID).action_owner_id (implicit for in-execution creation).
 // For external creation (POST /v1/steps) the service layer must enforce precondition-4 before calling this.
-func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, requiredCallerID, requiredCallerRemoteID string) (*Step, error) {
+func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller RequiredCaller) (*Step, error) {
 	if traceID == "" {
 		return nil, ErrInvalidInput.Wrap("trace_id is required")
 	}
@@ -225,7 +225,7 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		return nil, ErrUnauthorized.Wrap("creator cannot call action")
 	}
 	// The required caller must resolve to a real account so the step is completable (§10).
-	rc, err := k.store.ReadUser(ctx, requiredCallerID)
+	rc, err := k.store.ReadUser(ctx, caller.UserID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("required caller not found")
 	}
@@ -233,11 +233,11 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	// the completer's stable user_id on that peer kernel; completion then demands a home-kernel
 	// step_auth attestation naming that id, so a remote handle rename never mis-addresses the step.
 	var remoteID *string
-	if requiredCallerRemoteID != "" {
+	if caller.RemoteID != "" {
 		if !rc.IsPeer() {
 			return nil, ErrInvalidInput.Wrap("a remote required caller must be a peer proxy user")
 		}
-		remoteID = &requiredCallerRemoteID
+		remoteID = &caller.RemoteID
 	}
 	var normErr error
 	partialArgs, normErr = normalizeJSONObject(partialArgs, "partial_args")
@@ -248,8 +248,9 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	step := &Step{
 		ID:                     uuid.New().String(),
 		ParentTraceID:          &traceID,
-		RequiredCallerUserID:   requiredCallerID,
+		RequiredCallerUserID:   caller.UserID,
 		RequiredCallerRemoteID: remoteID,
+		RequiredCallerHandle:   caller.Handle,
 		ActionID:               actionID,
 		PartialArgs:            partialArgs,
 		Price:                  action.Price,

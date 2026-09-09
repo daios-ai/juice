@@ -722,7 +722,7 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 		}
 		byPK[m.providerKey] = append(byPK[m.providerKey], m)
 	}
-	plan := &ConsentPlan{SkippedLoginless: loginless, SkippedUncallable: uncallable}
+	plan := &ConsentPlan{Groups: []ConsentGroup{}, SkippedLoginless: loginless, SkippedUncallable: uncallable}
 	for _, pk := range order {
 		ms := byPK[pk]
 		scopeSet := map[string]bool{}
@@ -1240,6 +1240,19 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 // newLedgerEntry builds the immutable audit record shared by the three direct balance movements
 // (§3): a deposit credits (from nil), a withdrawal debits (to nil), a transfer moves between two
 // local users. The store enforces the debit's sufficient-funds rule atomically.
+// CallerKey namespaces an idempotency token a client chose. Every key the kernel mints already
+// carries its own prefix (AttributionKey, the rail's own, a withdrawal's reserve); the caller's was
+// the one name in that column nobody owned, so a client could hand back a key it had merely read and
+// be answered with someone else's entry, or occupy a key the rail would later need for a real
+// payment. Scoped to the caller, a client can collide only with its own earlier key — which is what
+// an idempotency token means. An empty token stays empty: it asks for no replay at all.
+func CallerKey(callerID, key string) string {
+	if key == "" {
+		return ""
+	}
+	return "u:" + callerID + ":" + key
+}
+
 func newLedgerEntry(operatorID, fromUserID, toUserID string, amount int64, reason, externalKey string) *LedgerEntry {
 	return &LedgerEntry{
 		ID:             uuid.New().String(),
@@ -1285,7 +1298,7 @@ func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amo
 	if recipient.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("recipient is suspended")
 	}
-	e := newLedgerEntry(caller.ID, caller.ID, recipient.ID, amount, reason, externalKey)
+	e := newLedgerEntry(caller.ID, caller.ID, recipient.ID, amount, reason, CallerKey(caller.ID, externalKey))
 	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
 		logger.Warn("transfer.failed", "recipient_user_id", recipientID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
@@ -2672,9 +2685,20 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 		v.Rating = &EmbeddedRating{Value: r.Rating, Note: r.Note}
 	}
 	// A cross-kernel call names the obligation that settles it — the call's own idempotency key,
-	// which both kernels know it by — so an operator can name the payment that closes it (P10).
-	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil && tr.IdempotencyKey != nil {
-		v.TicketID = *tr.IdempotencyKey
+	// which both kernels know it by — so an operator can name the payment that closes it (P10). The
+	// buyer wrote that key on the trace it dispatched under; the seller was admitted under the
+	// peer's key, which lives on the record the trace points at, because the trace's own column
+	// means "what this kernel dispatched" and the retry loop and crash recovery both read it that
+	// way. One string either side: the obligation is the same name on both books.
+	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil {
+		switch {
+		case tr.IdempotencyKey != nil:
+			v.TicketID = *tr.IdempotencyKey
+		case tr.IdempotencyRecordID != nil:
+			if rec, rerr := k.store.ReadIdempotencyRecordByID(ctx, *tr.IdempotencyRecordID); rerr == nil && rec != nil {
+				v.TicketID = rec.IdempotencyKey
+			}
+		}
 	}
 	return v
 }
