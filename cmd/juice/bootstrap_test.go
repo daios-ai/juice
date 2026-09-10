@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,26 +11,46 @@ import (
 	"github.com/daios-ai/juice/native"
 )
 
-// TestFirstBootRequiresKernelName: a headless first boot with no kernel name configured must fail
-// (never silently name the kernel); providing the name via env lets it boot and persists it.
-func TestFirstBootRequiresKernelName(t *testing.T) {
-	saved := globalCfg.KernelHandle
-	t.Cleanup(func() { globalCfg.KernelHandle = saved })
-	t.Setenv("JUICE_BOOTSTRAP_PASSWORD", "pw")
+// TestServeRequiresAKernelName: the kernel is named positionally, so there is no path on which a
+// kernel is created unnamed. Cobra refuses the bare command; what may name one is
+// TestKernelNameValidation's subject.
+func TestServeRequiresAKernelName(t *testing.T) {
+	if _, err := execTestCmd(t, serveCommand()); err == nil {
+		t.Fatal("juice serve with no name was accepted")
+	}
+}
 
-	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil ||
-		!strings.Contains(err.Error(), "kernel name is required") {
-		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
+// TestFirstBootConfigAsksOrRefuses: a kernel joins one network for life, so first boot takes the
+// world from what the operator already wrote, and refuses off a terminal rather than choosing.
+func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
+	home := t.TempDir()
+	if _, err := firstBootConfig("acme", home); err == nil {
+		t.Fatal("a headless first boot with no world configured was accepted")
+	} else if !strings.Contains(err.Error(), "world") {
+		t.Errorf("the refusal must name the key: %v", err)
 	}
 
-	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "acme")
-	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
-		t.Fatalf("boot with name via env: %v", err)
+	// Pre-seeded, as a headless install does it: the answers are taken and written back once.
+	seeded := filepath.Join(home, "config.json")
+	if err := os.WriteFile(seeded, []byte(`{"world":"play"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if globalCfg.KernelHandle != "acme" {
-		t.Errorf("kernel handle = %q, want @acme", globalCfg.KernelHandle)
+	cfg, err := firstBootConfig("acme", home)
+	if err != nil {
+		t.Fatalf("seeded first boot: %v", err)
+	}
+	if cfg.World != "play" || cfg.KernelHandle != "acme" {
+		t.Fatalf("config: world=%q handle=%q", cfg.World, cfg.KernelHandle)
+	}
+	if cfg.CredentialsKey == "" {
+		t.Error("first boot must mint the credentials key, since nothing later may write the file")
+	}
+	if fi, serr := os.Stat(seeded); serr != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("config mode: %v %v", fi.Mode().Perm(), serr)
+	}
+	// Read back through the strict loader: what first boot writes must be loadable.
+	if again, lerr := LoadConfig(seeded); lerr != nil || again.World != "play" {
+		t.Fatalf("reload: %+v %v", again.World, lerr)
 	}
 }
 

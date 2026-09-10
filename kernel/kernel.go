@@ -1229,7 +1229,7 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 		return nil
 	}
 	if k.cfg.FeeRecipientID == "" {
-		return ErrInvalidState.Wrap("fee_bps > 0 requires fee_recipient_id to be set")
+		return ErrInvalidState.Wrap("fees are charged (fee_bps > 0) but this kernel has no sys account to pay them to; the database was not fully created")
 	}
 	if _, err := k.store.ReadUser(ctx, k.cfg.FeeRecipientID); err != nil {
 		return ErrInvalidState.Wrapf("fee recipient %q not found in database", k.cfg.FeeRecipientID)
@@ -2392,7 +2392,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
 		}
 	} else if caller.Available < lockPrice+value {
-		return nil, ErrInsufficientFunds.Wrapf("user has %d credits, call costs %d", caller.Available, lockPrice+value)
+		return nil, ErrInsufficientFunds.Wrapf("your balance is %s and this call costs %s; ask the operator to credit your account",
+			k.cfg.Network.Amount(caller.Available), k.cfg.Network.Amount(lockPrice+value))
 	}
 	now := time.Now().UTC()
 	p := &Process{

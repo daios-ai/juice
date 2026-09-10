@@ -82,70 +82,66 @@ func TestDefaultServerConfig(t *testing.T) {
 	}
 }
 
-func TestLoadOrCreateConfig_CreatesFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	cfg, err := LoadOrCreateConfig(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// LoadConfig never creates: first boot is the only writer of config.json, so an absent file is a
+// first boot and nothing else.
+func TestLoadConfig_AbsentIsNotCreated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if _, err := LoadConfig(path); !os.IsNotExist(err) {
+		t.Fatalf("absent config: got %v, want os.ErrNotExist", err)
 	}
-	if cfg.Native.LLM.URL != DefaultServerConfig().Native.LLM.URL {
-		t.Errorf("expected default Native.LLM.URL, got %q", cfg.Native.LLM.URL)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("config file not created: %v", err)
+	if _, err := os.Stat(path); err == nil {
+		t.Error("reading a config created one")
 	}
 }
 
-func TestLoadOrCreateConfig_ReadsExisting(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	want := DefaultServerConfig()
-	want.Native.LLM.URL = "http://custom:11434"
-	b, _ := json.MarshalIndent(want, "", "  ")
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+func TestLoadConfig_ReadsExistingOntoDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"url":"http://custom:11434"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	cfg, err := LoadOrCreateConfig(path)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.Native.LLM.URL != "http://custom:11434" {
-		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
+		t.Errorf("Native.LLM.URL = %q", cfg.Native.LLM.URL)
+	}
+	if cfg.Native.LLM.ChatModel != DefaultServerConfig().Native.LLM.ChatModel {
+		t.Errorf("an unstated field must keep its default, got %q", cfg.Native.LLM.ChatModel)
 	}
 }
 
-func TestLoadOrCreateConfig_MissingFieldsUseDefaults(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-
-	// Write partial config — only one nested field
-	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"url":"http://custom:11434"}}}`), 0o644); err != nil {
+// A key the operator misspelled reads exactly like a key they never wrote, and the setting they
+// meant to change silently keeps its default — which for `world` is a decision they cannot revisit.
+func TestLoadConfig_UnknownKeyIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"wolrd":"real"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	cfg, err := LoadOrCreateConfig(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("a misspelled key was accepted")
 	}
-	if cfg.Native.LLM.URL != "http://custom:11434" {
-		t.Errorf("expected custom Native.LLM.URL, got %q", cfg.Native.LLM.URL)
-	}
-	if cfg.Native.TinyGo.Price != DefaultServerConfig().Native.TinyGo.Price {
-		t.Errorf("expected default Native.TinyGo.Price, got %d", cfg.Native.TinyGo.Price)
+	if !strings.Contains(err.Error(), "wolrd") {
+		t.Errorf("the refusal must name the key: %v", err)
 	}
 }
 
-func TestLoadOrCreateConfig_BadJSON(t *testing.T) {
+// There is no default world: a kernel joins one network for life, so which one is the operator's
+// to state and first boot asks for it.
+func TestDefaultConfigNamesNoWorld(t *testing.T) {
+	if w := DefaultServerConfig().World; w != "" {
+		t.Errorf("DefaultServerConfig().World = %q, want empty", w)
+	}
+}
+
+func TestLoadConfig_BadJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{bad json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadOrCreateConfig(path)
+	_, err := LoadConfig(path)
 	if err == nil {
 		t.Error("expected error for bad JSON")
 	}
@@ -277,7 +273,7 @@ func TestFedListenAddrsIsReadFromConfig(t *testing.T) {
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadOrCreateConfig(path)
+	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}

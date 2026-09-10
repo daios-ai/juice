@@ -4838,3 +4838,29 @@ func TestIdempotencyRecordKeepsItsArgsAndIsReadableByIDAfterExpiry(t *testing.T)
 		t.Errorf("record read back as args=%q status=%q", got.ArgsJSON, got.Status)
 	}
 }
+
+// A database carrying a migration this build does not ship was written by a newer juice. Running an
+// older binary against it would read a schema it does not know — silently, which is the one outcome
+// a store must never produce.
+func TestANewerDatabaseRefusesAnOlderBinary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "juice.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExecForTest(context.Background(),
+		`INSERT INTO schema_migrations (version, applied_at) VALUES ('099_from_the_future', '2030-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	reopened, rerr := Open(path)
+	err = rerr
+	if err == nil {
+		reopened.Close()
+		t.Fatal("a database from a newer juice was opened")
+	}
+	if !strings.Contains(err.Error(), "099_from_the_future") || !strings.Contains(err.Error(), "newer juice") {
+		t.Errorf("the refusal must name the version and the remedy: %v", err)
+	}
+}

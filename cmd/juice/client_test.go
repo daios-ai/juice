@@ -20,7 +20,18 @@ import (
 // isolates credential storage in a temp home. Everything resets at test end.
 func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	// The identity banner is what a client reads before it trusts a server or scales its money, so
+	// a stub kernel answers it; everything else is the test's own handler.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "handle": "stub", "public_key": "stub-key",
+				"network": "play", "decimals": 0, "symbol": "credits",
+			})
+			return
+		}
+		h(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	old := flagServer
 	flagServer = srv.URL

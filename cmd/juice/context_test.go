@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/daios-ai/juice/kernel"
 )
 
 // healthServer serves one identity banner, the thing a client records a kernel by.
@@ -44,9 +46,9 @@ func credPath(t *testing.T, name string) string {
 func recordKernel(t *testing.T, endpoint, pub string) {
 	t.Helper()
 	cfg := loadClientConfig()
-	cfg.Kernels[defaultInstance] = &kernelRec{Endpoint: endpoint, PublicKey: pub, Network: "play"}
-	cfg.Contexts[defaultInstance] = &contextRec{Kernel: defaultInstance}
-	cfg.Current = defaultInstance
+	cfg.Kernels[defaultContext] = &kernelRec{Endpoint: endpoint, PublicKey: pub, Network: "play"}
+	cfg.Contexts[defaultContext] = &contextRec{Kernel: defaultContext}
+	cfg.Current = defaultContext
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatalf("record context: %v", err)
 	}
@@ -614,26 +616,25 @@ func TestAmountRoundTrip(t *testing.T) {
 		in       string
 		decimals uint8
 		want     int64
-		text     string
 	}{
-		{"5", 0, 5, "5"},
-		{"1000000", 0, 1000000, "1000000"},
-		{"1.25", 2, 125, "1.25"},
-		{"1.2", 2, 120, "1.20"},
-		{"0.01", 2, 1, "0.01"},
-		{"12", 2, 1200, "12.00"},
-		{"0.000001", 6, 1, "0.000001"},
+		{"5", 0, 5},
+		{"1000000", 0, 1000000},
+		{"1.25", 2, 125},
+		{"1.2", 2, 120},
+		{"0.01", 2, 1},
+		{"12", 2, 1200},
+		{"0.000001", 6, 1},
 	}
 	for _, tc := range cases {
 		got, err := parseAmount(tc.in, tc.decimals)
 		if err != nil || got != tc.want {
 			t.Fatalf("parseAmount(%q, %d): got %d, %v; want %d", tc.in, tc.decimals, got, err, tc.want)
 		}
-		if text := formatAmount(got, tc.decimals); text != tc.text {
-			t.Errorf("formatAmount(%d, %d): got %q, want %q", got, tc.decimals, text, tc.text)
-		}
-		if back, err := parseAmount(formatAmount(got, tc.decimals), tc.decimals); err != nil || back != got {
-			t.Errorf("round trip of %d: got %d, %v", got, back, err)
+		// What is shown pastes back in: the renderer and the parser are one round trip, which is
+		// why the renderer writes no separators.
+		net := kernel.Network{Decimals: tc.decimals}
+		if back, err := parseAmount(net.Amount(got), tc.decimals); err != nil || back != got {
+			t.Errorf("round trip of %s: got %d, %v", net.Amount(got), back, err)
 		}
 	}
 

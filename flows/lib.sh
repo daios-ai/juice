@@ -85,6 +85,15 @@ write_config() {
         rail_rpc=*)                      rail_rpc=${a#*=} ;;
         fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
     esac; done
+    # Whatever first boot minted stays minted: read it back before the file is replaced.
+    local prev_key=""
+    [ -f "$(dirname "$db")/config.json" ] && prev_key=$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("credentials_key", ""))
+except Exception:
+    print("")
+' "$(dirname "$db")/config.json")
     local bp_json="[]" fl_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
     [ -n "$fed_listen_addrs" ] && fl_json="[\"$fed_listen_addrs\"]"
@@ -109,6 +118,15 @@ write_config() {
   "discovery_interval_seconds": $discovery_interval_seconds
 }
 EOF
+    # The credentials key is minted once, at first boot, and seals every stored credential. Rewriting
+    # the configuration keeps it, exactly as an operator editing this file by hand would.
+    [ -n "$prev_key" ] && python3 -c '
+import json, sys
+path, key = sys.argv[1:3]
+d = json.load(open(path)); d["credentials_key"] = key
+json.dump(d, open(path, "w"), indent=2)
+' "$(dirname "$db")/config.json" "$prev_key"
+    return 0
 }
 
 # server_log db — where start_server captures that kernel's output. It sits in the installation
@@ -139,11 +157,11 @@ kernel_key() {
 # returns 1 (never a silent timeout).
 start_server() {
     local db="$1" home="$2"; shift 2
-    # The instance is the directory the database sits in, so serving a second kernel under one
-    # installation root needs nothing but a second path (D20).
+    # A kernel is named, and the name is its directory: serving a second one under one installation
+    # root needs nothing but a second name (D20).
     local inst; inst=$(basename "$(dirname "$db")")
     # keep_config=1 leaves whatever configuration is already in the home alone — for the boot that
-    # has to find an untouched pre-instance home and move it.
+    # has to find an untouched legacy home and move it.
     local keep=0 a cfg=()
     for a in "$@"; do case "$a" in keep_config=1) keep=1 ;; *) cfg+=("$a") ;; esac; done
     if [ "$keep" = 0 ]; then
@@ -156,7 +174,7 @@ start_server() {
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" serve --addr 127.0.0.1:0 --instance "$inst" >>"$log" 2>&1 &
+        "$JUICE" serve "$inst" --addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -214,8 +232,8 @@ j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
 
 # kdb root — the database of the kernel served under an installation root. One kernel is one named
-# directory, kernels/<instance>/, holding the ledger, the config, the rail key and the single-server
-# lock (D23); the flows serve the default instance.
+# directory, kernels/<name>/, holding the ledger, the config, the rail key and the single-server
+# lock (D23); the flows name the kernel they serve.
 kdb() { echo "$1/kernels/${2:-default}/juice.db"; }
 
 # khome db — the installation root a database belongs to, the inverse of kdb.
@@ -405,7 +423,7 @@ newref() { echo "flow-$(date +%s%N)-$RANDOM"; }
 
 # deposit db home target amount [ref] — records money that arrived from outside. Every crossing
 # names the payment it stands for, so a reference is minted when the caller does not give one (U3).
-deposit() { j "$1" "$2" admin deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" >/dev/null 2>&1; :; }
+deposit() { j "$1" "$2" admin deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1; :; }
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4

@@ -116,7 +116,7 @@ func connectSelector(selector string, device, yes bool) error {
 		return nil
 	}
 	printDelta(todo)
-	if err := confirmProceed(yes); err != nil {
+	if err := confirm("Proceed?", yes); err != nil {
 		return err
 	}
 	for _, g := range todo {
@@ -177,21 +177,6 @@ func printDelta(todo []kernel.ConsentGroup) {
 			fmt.Printf("    [%s] %s\n", mark, a.Action)
 		}
 	}
-}
-
-// confirmProceed returns nil to proceed. With --yes it always proceeds; on a terminal it asks; off
-// a terminal without --yes it refuses (the shown plan is the consent act — never auto-confirm).
-func confirmProceed(yes bool) error {
-	if yes {
-		return nil
-	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return kernel.ErrInvalidInput.Wrap("re-run with --yes to accept the consent plan (no terminal to confirm)")
-	}
-	if !promptYesNo("Proceed?") {
-		return kernel.ErrInvalidInput.Wrap("aborted")
-	}
-	return nil
 }
 
 // connectToken stores a static token for a delegated_bearer group via POST /v1/grants (§8). An

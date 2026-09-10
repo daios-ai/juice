@@ -103,16 +103,28 @@ func peerMetaHandle(err error) string {
 
 // interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
 // Prompts and progress go to stderr so stdout stays payload-only (§14).
-func interactiveTTY() bool {
+var interactiveTTY = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 }
 
-// promptYesNo asks a yes/no question on stderr (default yes) and reads one line from stdin.
-func promptYesNo(msg string) bool {
-	fmt.Fprintf(os.Stderr, "%s [Y/n] ", msg)
+// confirm gates an act that cannot be undone. The default is no: a bare Enter on a prompt about
+// money should not move it, and the one way to say yes is to say it. Declining is an error, so the
+// exit code says so too and a script does not read silence as success. Off a terminal there is
+// nobody to ask, so --yes is required rather than assumed.
+func confirm(msg string, yes bool) error {
+	if yes {
+		return nil
+	}
+	if !interactiveTTY() {
+		return kernel.ErrInvalidInput.Wrap("re-run with --yes to confirm (no terminal to ask on)")
+	}
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", msg)
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	line = strings.ToLower(strings.TrimSpace(line))
-	return line == "" || line == "y" || line == "yes"
+	if l := strings.ToLower(strings.TrimSpace(line)); l == "y" || l == "yes" {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "cancelled")
+	return kernel.ErrInvalidInput.Wrap("cancelled")
 }
 
 // ---- output helpers ----
@@ -329,15 +341,26 @@ func userUpdateCmd() *cobra.Command {
 
 func userTransferCmd() *cobra.Command {
 	var reason, externalKey string
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "transfer RECIPIENT AMOUNT",
-		Short: "Send credits to another user",
-		Long:  "Send credits to another user, directly and without fee. RECIPIENT is another user's\nhandle on this kernel (a public key also resolves a local account).",
-		Args:  cobra.ExactArgs(2),
+		Short: "Send money to another user",
+		Long: "Send money to another user, directly and without fee. RECIPIENT is another user's\n" +
+			"handle on this kernel (a public key also resolves a local account). AMOUNT is written\n" +
+			"the way this kernel's money is written, for example 1.50.\n\n" +
+			"A transfer cannot be undone: the recipient owns the money once it is sent.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			amount, err := parseAmount(args[1], amountDecimals(ctx))
+			net, err := serverNetwork(ctx)
 			if err != nil {
+				return err
+			}
+			amount, err := parseAmount(args[1], net.Decimals)
+			if err != nil {
+				return err
+			}
+			if err := confirm(fmt.Sprintf("Send %s to %s? This cannot be undone.", net.Amount(amount), args[0]), yes); err != nil {
 				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/v1/transfers", map[string]any{
@@ -347,6 +370,7 @@ func userTransferCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id for this transfer; repeating the command with the same id never moves money twice")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
@@ -372,7 +396,10 @@ func userLedgerCmd() *cobra.Command {
 				}
 				return nil
 			}
-			decimals := amountDecimals(context.Background())
+			net, err := serverNetwork(context.Background())
+			if err != nil {
+				return err
+			}
 			for _, e := range entries {
 				from, to := e.FromHandle, e.ToHandle
 				if from == "" {
@@ -383,7 +410,7 @@ func userLedgerCmd() *cobra.Command {
 				}
 				fmt.Printf("[%s] amount:%-10s  from:%-12s  to:%-12s  %s\n",
 					e.CreatedAt.Format(time.RFC3339),
-					formatAmount(e.Amount, decimals), from, to, e.Reason)
+					net.Amount(e.Amount), from, to, e.Reason)
 			}
 			return nil
 		},
@@ -503,6 +530,7 @@ func userDepositCmd() *cobra.Command {
 // The id is minted here and is the row's own, so a reply lost in transit is safe to ask for again.
 func userWithdrawCmd() *cobra.Command {
 	var reason string
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "withdraw [AMOUNT]",
 		Short: "Withdraw your credits, or list your withdrawals",
@@ -516,35 +544,34 @@ func userWithdrawCmd() *cobra.Command {
 			if len(args) == 0 {
 				return apiEmitCtx(ctx, "GET", "/v1/withdrawals", nil)
 			}
-			decimals := amountDecimals(ctx)
-			amount, err := parseAmount(args[0], decimals)
+			net, err := serverNetwork(ctx)
 			if err != nil {
 				return err
 			}
-			// A human at a terminal is asked before money leaves; an agent driving the CLI with no
-			// terminal is taken at its word, deliberately — agents are first-class callers here.
-			if interactiveTTY() {
-				me, err := readMe(ctx)
-				if err != nil {
-					return err
-				}
-				destination := "your account"
-				if me.RailAddress != "" {
-					destination = me.RailAddress
-				}
-				network := ""
-				if h, err := probeHealth(ctx, serverBaseURL()); err == nil {
-					network = h.Network + " "
-				}
-				if !promptYesNo(fmt.Sprintf("Withdraw %s %sto %s?", formatAmount(amount, decimals), network, destination)) {
-					return nil
-				}
+			amount, err := parseAmount(args[0], net.Decimals)
+			if err != nil {
+				return err
+			}
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
+			}
+			// Name the destination when there is one. Whether this world needs one is the rail's rule,
+			// not the client's, so a withdrawal with nowhere to go is refused by the server that knows.
+			where := ""
+			if me.RailAddress != "" {
+				where = " to " + me.RailAddress
+			}
+			if err := confirm(fmt.Sprintf("Withdraw %s on %s%s? This cannot be undone.",
+				net.Amount(amount), net.Name, where), yes); err != nil {
+				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{
 				"id": uuid.NewString(), "amount": amount, "reason": reason,
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	return cmd
 }
@@ -809,6 +836,10 @@ func actionListCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(actions)
 			}
+			net, err := serverNetwork(context.Background())
+			if err != nil {
+				return err
+			}
 			for _, a := range actions {
 				if flagQuiet {
 					fmt.Println(a.ID) // ids only, one per line: pipeable (§14 C8)
@@ -824,9 +855,9 @@ func actionListCmd() *cobra.Command {
 					if a.Active {
 						active = "*"
 					}
-					fmt.Printf("[%s] %-30s  %d credits%s\n", active, a.ActionRef, a.Price, grant)
+					fmt.Printf("[%s] %-30s  %s%s\n", active, a.ActionRef, net.Amount(a.Price), grant)
 				} else {
-					fmt.Printf("  %-30s  %d credits%s\n", a.ActionRef, a.Price, grant)
+					fmt.Printf("  %-30s  %s%s\n", a.ActionRef, net.Amount(a.Price), grant)
 				}
 			}
 			return nil
@@ -1029,13 +1060,17 @@ func processListCmd() *cobra.Command {
 				}
 				return nil
 			}
+			net, err := serverNetwork(context.Background())
+			if err != nil {
+				return err
+			}
 			for _, p := range processes {
 				awaiting := ""
 				if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
 					awaiting = fmt.Sprintf("  awaiting-receipt since %s", p.AwaitingReceiptSince.Format(time.RFC3339))
 				}
-				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d%s\n",
-					p.ID, p.Status, p.Available, p.Locked, awaiting)
+				fmt.Printf("%s  %-6s  available:%-12s  locked:%-12s%s\n",
+					p.ID, p.Status, net.Amount(p.Available), net.Amount(p.Locked), awaiting)
 			}
 			return nil
 		},
@@ -1284,10 +1319,14 @@ func txListCmd() *cobra.Command {
 				}
 				return nil
 			}
+			net, err := serverNetwork(context.Background())
+			if err != nil {
+				return err
+			}
 			for _, tx := range txs {
-				fmt.Printf("[%s] %s  status:%s  gross:%d\n",
+				fmt.Printf("[%s] %s  status:%s  gross:%s\n",
 					tx.StartedAt.Format(time.RFC3339),
-					tx.ID, tx.Status, tx.Gross)
+					tx.ID, tx.Status, net.Amount(tx.Gross))
 			}
 			return nil
 		},
@@ -1372,7 +1411,7 @@ func runCmd() *cobra.Command {
 			// callers (scripts, agents) get the structured error + hint instead — no browser.
 			if errors.Is(err, kernel.ErrGrantRequired) {
 				action := grantActionRef(err, cmdArgs[0])
-				if interactiveTTY() && promptYesNo(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action)) {
+				if interactiveTTY() && confirm(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action), false) == nil {
 					if cerr := connectSelector(action, false, true); cerr != nil {
 						return cerr
 					}

@@ -178,7 +178,7 @@ flow_fed_denial_underfunded() {
 
     # A paid action on R, whose owner holds nothing to fund the work with.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
 
     local run_out rc
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid-svc '{}' 2>&1); rc=$?
@@ -220,8 +220,8 @@ flow_fed_import_duty() {
     assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1103
 
     # R's provider funds its own work, so it holds working capital; L funds its caller.
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}')" tx_id)
@@ -253,7 +253,7 @@ flow_fed_import_duty() {
     # credit limit bounds the total, and a rule per identity would be bypassed by minting one (D14).
     local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" ticket_id)
     assert_nonempty "fed_pricing.names_its_ticket" "$ticket"
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$FED_LKEY" 1050 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" --yes -- "$FED_LKEY" 1050 >/dev/null 2>&1
 
     # And the price shown is the price charged: gross on the next call is the new total, not the old.
     local ub2; ub2=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -271,8 +271,8 @@ flow_fed_failed_action_refund() {
 
     # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" -- "$FED_LKEY" 5000 >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" --yes -- "$FED_LKEY" 5000 >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     # Remote 500 → remote failure receipt → full refund to L's caller.
@@ -433,8 +433,8 @@ print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('act
     assert_nonempty "fed_discovery.card_quote_hash" "$dhash"
 
     # R's provider funds its own work; L funds its caller.
-    j "$dbr" "$hr" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
-    j "$dbl" "$hl" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    j "$dbr" "$hr" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbl" "$hl" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "fed_discovery.pinned_first_call" \
         "$(strfield "$(jj "$dbl" "$hl" run "sys@$rkey/greet" '{}' --quote-hash "$dhash")" tx_id)"
     assert_eq "fed_discovery.proxy_hash_equals_card" "$dhash" \
@@ -575,7 +575,7 @@ flow_fed_step_complete() {
 
     # On R: sys messages L's proxy user, parking a sys/sink step whose required caller is kernel-l.
     # R must know L as a peer for the address to resolve; a deposit both provisions and funds it.
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" -- "$FED_LKEY" 100 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" --yes -- "$FED_LKEY" 100 >/dev/null 2>&1
     local step_id
     step_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"approve the shipment\"}")" step_id)
     assert_nonempty "fed_step_complete.step_parked" "$step_id"
@@ -647,8 +647,8 @@ flow_ticket() {
     # R's provider funds its own work (a foreign call is served on the seller's money, P10); L funds
     # its caller and its own stake.
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     assert_nonempty "ticket.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
@@ -693,7 +693,7 @@ flow_transfer() {
     # alice and bob are both local users on L; R exists to prove its stdlib is not served abroad.
     j "$FED_DBL" "$FED_HL" user create bob --password userpass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" user create alice --password userpass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit alice 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit alice 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ahome; ahome=$(home "$dir" alice); j "$FED_DBL" "$ahome" auth login alice --password userpass >/dev/null 2>&1
 
     # alice sends 100 to bob on her own kernel: the execution price (0) rides the trace and is taxed,
@@ -757,7 +757,7 @@ flow_fed_provider_crash_recovery() {
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
     deposit "$FED_DBL" "$FED_HL" buyer 1000
-    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
 
     local sport; sport=$(backend_port)
     start_slow_backend "$sport" 8
@@ -768,7 +768,7 @@ flow_fed_provider_crash_recovery() {
     # call owed: R serves nobody who still owes it for work already delivered (P10).
     local warm; warm=$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/slow '{}')" tx_id)
     local wtick; wtick=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$warm")" ticket_id)
-    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin deposit --ref "$wtick" -- "$FED_LKEY" 21 >/dev/null 2>&1
+    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin deposit --ref "$wtick" --yes -- "$FED_LKEY" 21 >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
 
     # Call again and kill the provider while it is still upstream.

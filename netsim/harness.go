@@ -303,17 +303,16 @@ type bootOpts struct {
 	RetrySeconds int
 }
 
-// Boot starts (or restarts) a kernel that outlives the call. Restarting on the same directory is
-// how the story kills and revives a provider, so the two paths are one function.
-func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
-	dir := filepath.Join(n.Root, name)
-	if err := os.MkdirAll(filepath.Join(dir, "kernels", "default"), 0o755); err != nil {
-		return nil, err
+// writeKernelConfig writes one kernel's config.json, for a first boot and for every restart after
+// it. A restart rewrites the file, so it starts from what is already there: first boot mints the
+// credentials key that seals every stored credential, and a kernel whose key has gone refuses to
+// serve rather than hold secrets it cannot read.
+func writeKernelConfig(path string, o bootOpts, railCfg map[string]any) error {
+	cfg := map[string]any{}
+	if prev, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(prev, &cfg)
 	}
-	if o.Handle == "" {
-		o.Handle = name
-	}
-	cfg := map[string]any{
+	for key, val := range map[string]any{
 		"script_timeout_ms": 10000, "script_memory_bytes": 67108864,
 		"fee_bps": o.FeeBps, "remote_bps": o.RemoteBps, "import_bps": o.ImportBps,
 		"credit_limit": o.CreditLimit, "lottery": o.Lottery,
@@ -322,15 +321,30 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 		"bootstrap_peers":               []string{},
 		"remote_retry_interval_seconds": o.RetrySeconds,
 		"discovery_interval_seconds":    2,
+	} {
+		cfg[key] = val
 	}
 	if o.Bootstrap != "" {
 		cfg["bootstrap_peers"] = []string{o.Bootstrap}
 	}
-	for key, val := range n.Rail.Config() {
+	for key, val := range railCfg {
 		cfg[key] = val
 	}
 	b, _ := json.MarshalIndent(cfg, "", " ")
-	if err := os.WriteFile(filepath.Join(dir, "kernels", "default", "config.json"), b, 0o644); err != nil {
+	return os.WriteFile(path, b, 0o600)
+}
+
+// Boot starts (or restarts) a kernel that outlives the call. Restarting on the same directory is
+// how the story kills and revives a provider, so the two paths are one function.
+func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
+	dir := filepath.Join(n.Root, name)
+	if err := os.MkdirAll(filepath.Join(dir, "kernels", name), 0o700); err != nil {
+		return nil, err
+	}
+	if o.Handle == "" {
+		o.Handle = name
+	}
+	if err := writeKernelConfig(filepath.Join(dir, "kernels", name, "config.json"), o, n.Rail.Config()); err != nil {
 		return nil, err
 	}
 
@@ -339,7 +353,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(n.Binary, "serve", "--addr", "127.0.0.1:0")
+	cmd := exec.Command(n.Binary, "serve", name, "--addr", "127.0.0.1:0")
 	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass",
 		"JUICE_HOME="+dir, "HOME="+n.home("sysop-"+name))
 	cmd.Stdout, cmd.Stderr = lf, lf

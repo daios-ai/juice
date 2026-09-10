@@ -29,20 +29,35 @@ import (
 )
 
 func init() {
+	rootCmd.AddCommand(serveCommand())
+	rootCmd.AddCommand(healthCmd())
+}
+
+// serveCommand is built like every other command, so a test can exercise its argument rules
+// without starting a server.
+func serveCommand() *cobra.Command {
 	var addr string
-	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the server",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runServer(addr)
+	cmd := &cobra.Command{
+		Use:   "serve NAME",
+		Short: "Start a kernel",
+		Long: "Start the kernel called NAME, or create it if this is its first boot.\n\n" +
+			"NAME is the kernel's nickname: what it calls itself on the network, and the name of its\n" +
+			"home under ~/.juice/kernels/. A first boot fixes three things for the life of the kernel —\n" +
+			"its nickname, the network it serves, and its signing key — and asks for whatever its\n" +
+			"configuration does not already say.",
+		// Cobra's own arity message names an argument count; an operator needs the name.
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return kernel.ErrInvalidInput.Wrap("name the kernel to serve: juice serve NAME")
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runServer(args[0], addr)
 		},
 	}
-	serveCmd.Flags().StringVar(&addr, "addr", ":4040", "Listen address")
-	serveCmd.Flags().StringVar(&flagInstance, "instance", defaultInstance,
-		"Name of the kernel to serve; its home is <juice home>/kernels/<name>/")
-	rootCmd.AddCommand(serveCmd)
-
-	rootCmd.AddCommand(healthCmd())
+	cmd.Flags().StringVar(&addr, "addr", ":4040", "Address to listen on for clients")
+	return cmd
 }
 
 // holdHome takes the one lock a kernel's home has, for as long as this process serves it. One
@@ -64,11 +79,12 @@ func holdHome() (func(), error) {
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
 
-func runServer(addr string) error {
-	if err := validateInstanceName(flagInstance); err != nil {
+func runServer(name, addr string) error {
+	if err := validateLocalName("kernel", name); err != nil {
 		return err
 	}
-	// A kernel made before instances existed lives one directory up. Move it before anything opens
+	kernelName = name
+	// A kernel made before kernels were named lives one directory up. Move it before anything opens
 	// or creates a home, so the first boot after the upgrade continues with the same ledger and
 	// the same identity rather than quietly starting an empty second kernel beside it.
 	if err := migrateLegacyHome(); err != nil {
@@ -80,22 +96,35 @@ func runServer(addr string) error {
 	}
 	defer release()
 
+	// A kernel with no database has not been created yet: ask for what its configuration does not
+	// already say, and write that configuration once. Nothing else ever writes it.
+	if _, serr := os.Stat(filepath.Join(kernelHome(), "juice.db")); os.IsNotExist(serr) {
+		if _, ferr := firstBootConfig(name, kernelHome()); ferr != nil {
+			return ferr
+		}
+	}
+
 	k, db, logger, httpExec, fedAdapter, specs, world, err := openKernel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
-		return fmt.Errorf("bootstrap: %w", err)
-	}
 	// The rail witnesses external money (D23). A world whose chain or token is wrong refuses the
-	// boot; one whose endpoint is merely down serves, and money verbs wait for it.
+	// boot; one whose endpoint is merely down serves, and money verbs wait for it. It runs before
+	// the network is bound, so a world that is not what it claims binds nothing.
 	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC)
 	if err != nil {
 		return fmt.Errorf("rail: %w", err)
 	}
 	k.SetRail(railway)
+	if err := bindWorld(context.Background(), k, world.Network()); err != nil {
+		return err
+	}
+
+	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
 	// Prune natives the build no longer ships (e.g. after a native action is removed): a
 	// kind=native row with no registered handler is soft-deleted so it stops being listed and
 	// callable on an existing database. Non-fatal — a leftover orphan is not corruption.
@@ -156,45 +185,46 @@ func runServer(addr string) error {
 	// nothing (§14).
 	recordContact := newContactRecorder(k.RecordKernelContact)
 	if ferr != nil {
-		logger.Error("fed.start_failed", "error", ferr)
-	} else {
-		srv.fed = fedTransport
-		fedAdapter.SetTransport(fedTransport)
-		fedAdapter.SetContactRecorder(recordContact)
-		pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-		fedAdapter.SetLocalPubKey(pub)
-		defer fedTransport.Close()
-
-		// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
-		// shutdown first, then settles into the ordinary timer so a peer coming back online settles
-		// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
-		// server. bootstrap's own pass runs before this transport exists, so it can only settle
-		// max-age expiries — this drain is the first attempt that can actually reach a peer.
-		// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
-		// trace, so the drain is exactly the pre-existing work and never a moving target.
-		retryCtx, retryCancel := context.WithCancel(context.Background())
-		defer retryCancel()
-		pending, perr := k.PendingRemoteTraces(retryCtx)
-		if perr != nil {
-			logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
-		}
-		go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, k.SettleReady, globalCfg.remoteRetryInterval())
-
-		// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
-		// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
-		// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
-		// kernels re-advertise every pass, so the network fills in progressively with no home-grown
-		// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
-		// are synced. Best-effort; stops with runServer.
-		discCtx, discCancel := context.WithCancel(context.Background())
-		defer discCancel()
-		disc := fedTransport
-		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
-			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
-			defer cancel()
-			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
-		})
+		// A kernel that cannot reach the network is not serving: it would answer health `ok`, take
+		// local calls, and silently do no discovery, no inbound peer calls and no settlement. The
+		// standard says a listen collision is a startup failure; this is where that is true.
+		return fmt.Errorf("federation transport: %w", ferr)
 	}
+	srv.fed = fedTransport
+	fedAdapter.SetTransport(fedTransport)
+	fedAdapter.SetContactRecorder(recordContact)
+	pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	fedAdapter.SetLocalPubKey(pub)
+	defer fedTransport.Close()
+
+	// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
+	// shutdown first, then settles into the ordinary timer so a peer coming back online settles
+	// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
+	// server. bootstrap's own pass runs before this transport exists, so it can only settle
+	// max-age expiries — this drain is the first attempt that can actually reach a peer.
+	// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
+	// trace, so the drain is exactly the pre-existing work and never a moving target.
+	retryCtx, retryCancel := context.WithCancel(context.Background())
+	defer retryCancel()
+	pending, perr := k.PendingRemoteTraces(retryCtx)
+	if perr != nil {
+		logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
+	}
+	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, k.SettleReady, globalCfg.remoteRetryInterval())
+
+	// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
+	// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
+	// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
+	// kernels re-advertise every pass, so the network fills in progressively with no home-grown
+	// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
+	// are synced. Best-effort; stops with runServer.
+	discCtx, discCancel := context.WithCancel(context.Background())
+	defer discCancel()
+	go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
+		pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
+		defer cancel()
+		discoverOnce(pctx, fedTransport, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
+	})
 
 	// Drive external money (D23): re-present everything still open, observe payments in, close any
 	// settlement whose payment has arrived, and audit. It rides the retry cadence rather than adding
@@ -215,11 +245,8 @@ func runServer(addr string) error {
 	// It carries the kernel's public key and libp2p listen addrs, because federation no longer
 	// exposes them over HTTP (there is no .well-known).
 	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	readyFields := []any{"addr", ln.Addr().String(), "public_key", pubKey}
-	if srv.fed != nil {
-		readyFields = append(readyFields, "fed_addrs", srv.fed.ListenAddrs())
-	}
-	logger.Info("server.ready", readyFields...)
+	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
+		"addr", ln.Addr().String(), "public_key", pubKey, "fed_addrs", srv.fed.ListenAddrs())
 
 	httpSrv := &http.Server{Handler: r}
 
@@ -527,23 +554,27 @@ func (s *server) railAddress(ctx context.Context) string {
 	return addr
 }
 
-func registerRoutes(r chi.Router, srv *server) {
-	// Health (unauthenticated). Doubles as an identity banner so someone can see which kernel
-	// they're pointed at before logging in: the handle and public key are the kernel's advertised
-	// federation identity (§13), not secrets — only the private key is withheld.
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		pub, _ := srv.kernel.GetConfig(r.Context(), configKeySigningPublic)
-		net := srv.kernel.Network()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":         "ok",
-			"handle":         globalCfg.KernelHandle,
-			"public_key":     pub,
-			"network":        net.Name,
-			"network_digest": net.Digest,
-			"decimals":       net.Decimals,
-			"rail_address":   srv.railAddress(r.Context()),
-		})
+// getHealth is the identity banner (unauthenticated) every client reads before it trusts a server:
+// which kernel this is, which network it serves, and how its money is written (D20). The handle and
+// public key are this kernel's advertised federation identity (§13), not secrets — only the private
+// key is withheld.
+func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
+	pub, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
+	net := s.kernel.Network()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "ok",
+		"handle":         globalCfg.KernelHandle,
+		"public_key":     pub,
+		"network":        net.Name,
+		"network_digest": net.Digest,
+		"decimals":       net.Decimals,
+		"symbol":         net.Symbol,
+		"rail_address":   s.railAddress(r.Context()),
 	})
+}
+
+func registerRoutes(r chi.Router, srv *server) {
+	r.Get("/health", srv.getHealth)
 
 	// Federation has no HTTP surface: peer identity, inbound calls, manifests, gossip, and
 	// inspection travel over the libp2p transport (§13), started in runServer. Public action

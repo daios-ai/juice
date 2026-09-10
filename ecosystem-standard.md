@@ -5,7 +5,7 @@ line — are laid out on a machine, how each names the kernel it works on, and h
 released. `requirements.md` governs the kernel and wins on any conflict; this document governs what
 sits beside it, and binds every juice-family program, not only this repository.
 
-It invents nothing. Servers are named instances with their own data directory, as PostgreSQL
+It invents nothing. Servers are named, each with its own data directory, as PostgreSQL
 clusters are. Clients keep kernels, logins and the contexts joining them as separate records, as
 kubeconfig does. Only the terms are ours.
 
@@ -13,8 +13,8 @@ kubeconfig does. Only the terms are ours.
 
 - **Installation** — one machine's Juice state, rooted at `$JUICE_HOME` (default `~/.juice`). One
   per operating-system user. Several people on one machine are several installations.
-- **Instance** — one kernel: its database and signing key, world, rail key, configuration and lock.
-  Named locally by a label.
+- **Kernel** — one server: its database and signing key, world, rail key, configuration and lock,
+  in one directory named for its nickname.
 - **Principal** — an account on one kernel. `sys` is one principal per kernel.
 - **Session** — one login of one principal, holding an access token and a refresh token.
 - **Context** — a name joining one kernel to one session. What every program names.
@@ -25,7 +25,7 @@ kubeconfig does. Only the terms are ours.
 
 ```
 $JUICE_HOME/
-  kernels/<instance>/    one kernel: juice.db, config.json, the rail key and its records,
+  kernels/<name>/        one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, the contexts on them, and the current one
   client/credentials/    one file per context, 0600, holding that session's tokens
@@ -41,20 +41,28 @@ are valid on. It backs up, moves and locks as a unit. `cache/` is regenerable an
 Everything else belongs to the component that owns it and outlives any kernel. Removing a kernel
 never removes an agent's memory, a service's state, or the interface's history.
 
-## 3. Instances
+## 3. Kernels
 
-`juice serve --instance <name>` serves `kernels/<name>/`, defaulting to `default`. The label may
-hold letters, digits, dot, dash and underscore, up to 64 characters, and may not begin with a dot.
+`juice serve <name>` serves `kernels/<name>/`. The name may hold letters, digits, dot, dash and
+underscore, up to 64 characters, may not begin with a dot, and is bare — it is a nickname as well as
+a directory.
 
-The label is a directory name and nothing more. It is not the kernel's advertised handle, not its
-public key, is never signed and never transmitted. A kernel's identity is its key, which does not
-exist until first boot, which is why the directory cannot be named after it.
+It is the kernel's nickname (D15): what the kernel calls itself on the network, and, because it is
+the one name the operator has given by the time a home is created, the name of that home. Neither is
+the kernel's identity, which is its key and does not exist until first boot. The directory may be
+renamed and the network will not notice; a nickname already written in the configuration is kept.
 
-Each instance is started with its own `--addr` and carries its own `fed_listen_addrs` in its own
-`config.json`. Nothing allocates ports for them; a collision is a bind failure at startup. One
-server per instance, enforced by the lock in its home.
+Each kernel is started with its own `--addr` and carries its own `fed_listen_addrs` in its own
+`config.json`. Nothing allocates ports for them; a collision is a bind failure at startup, for the
+client port and the peer transport alike. One server per kernel, enforced by the lock in its home.
 
-Removing an instance is not a lifecycle verb. Its directory holds a ledger, a signing key, a rail
+A kernel is created by its first boot, which asks for what it cannot revise — its network, and the
+chain endpoint where the network has one — and refuses off a terminal, naming the configuration key
+that would have answered. That first boot is the only writer of `config.json`; every later boot reads
+it. Nothing is created before the answers are in hand, and the network is recorded only after the
+rail has verified it, so a boot that cannot be answered leaves no half-made kernel behind.
+
+Removing a kernel is not a lifecycle verb. Its directory holds a ledger, a signing key, a rail
 key and possibly unsettled obligations, so it is archived or destroyed deliberately by the operator,
 never as a step in switching kernels.
 
@@ -88,7 +96,7 @@ the second to arrive uses what the first stored rather than spending a token tha
 
 Names are local aliases. Anything durable — an agent's memory of a kernel, a record of what was
 bought where — is keyed by `(network digest, kernel public key, principal id)`, never by a context
-or instance name, and never by a handle, which can be renamed.
+or kernel name, and never by a handle, which can be renamed.
 
 Commands:
 
@@ -126,7 +134,7 @@ TLS front end, as with any web service.
 Credentials belong to a session, never to an installation. Two components sharing a root share no
 token.
 
-A context name is one path segment, on the same rule as an instance label, because it becomes a file
+A context name is one path segment, on the same rule as a kernel name, because it becomes a file
 under `credentials/` and a name free to hold a separator would address something else.
 
 ## 6. Components
@@ -155,7 +163,7 @@ that dials a port without checking will talk to whichever kernel holds it.
 
 ## 7. Migration
 
-A kernel made before instances existed, at `$JUICE_HOME/kernel/`, moves to `kernels/default/` on the
+A kernel made before kernels were named, at `$JUICE_HOME/kernel/`, moves to `kernels/<name>/` on the
 first boot after the upgrade. It is one rename: both paths are under one root, so the move either
 happened or it did not, and an interrupted boot leaves no half-moved ledger. It refuses, rather than
 merging, when a server still holds the old home or when the destination already exists. Running

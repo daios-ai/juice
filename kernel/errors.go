@@ -173,8 +173,8 @@ func PeerUnreachableError(ref string) *KernelError {
 // TermsChangedError refuses a run whose quote pin no longer matches (§4 precondition 7), before any
 // funds are locked. Meta carries the current hash AND price: the hash alone would let a client
 // blindly re-arm and retry, defeating the pin, while the price is what a human re-consents to.
-func TermsChangedError(currentHash string, currentPrice int64) error {
-	return ErrTermsChanged.Wrapf("the action's terms changed; it now costs %d", currentPrice).
+func TermsChangedError(net Network, currentHash string, currentPrice int64) error {
+	return ErrTermsChanged.Wrapf("the action's terms changed; it now costs %s", net.Amount(currentPrice)).
 		WithMeta("quote_hash", currentHash).WithMeta("price", strconv.FormatInt(currentPrice, 10))
 }
 

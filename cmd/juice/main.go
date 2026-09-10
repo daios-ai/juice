@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -62,7 +61,7 @@ var (
 	flagContext string
 )
 
-// dbPath is where this kernel keeps its ledger, inside its own home (kernelHome). An instance is
+// dbPath is where this kernel keeps its ledger, inside its own home (kernelHome). A kernel is
 // its directory, so there is no override: initConfig fills this in for the server side alone.
 var dbPath string
 
@@ -102,8 +101,8 @@ func juiceHome() string {
 // artifacts, scratch). It is safe to delete; writers MkdirAll it on demand.
 func cacheDir() string { return filepath.Join(kernelHome(), "cache") }
 
-// initConfig loads the server's configuration, config.json inside the instance's own home, beside
-// the database it describes. There is no path override: an instance is its directory, so `juice
+// initConfig loads the server's configuration, config.json inside the kernel's own home, beside
+// the database it describes. There is no path override: a kernel is its directory, so `juice
 // serve` attaches to the same identity and signing key wherever it is launched, instead of minting
 // a fresh identity from whatever folder it happens to run in. Only openKernel calls it — no client
 // command reads or creates a kernel's directory.
@@ -114,7 +113,7 @@ func initConfig() error {
 	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
 		return kernel.ErrInvalidState.Wrapf("create %s: %v", kernelHome(), err)
 	}
-	cfg, err := LoadOrCreateConfig(resolvedConfigPath)
+	cfg, err := LoadConfig(resolvedConfigPath)
 	if err != nil {
 		return kernel.ErrInvalidInput.Wrapf("config: %v", err)
 	}
@@ -235,11 +234,15 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 
-	logger, _ := log.New(log.Config{
+	logger, err := log.New(log.Config{
 		Level:    globalCfg.LogLevel,
 		FilePath: globalCfg.LogFile,
 		Format:   globalCfg.LogFormat,
 	})
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("log_file %s: %w", globalCfg.LogFile, err)
+	}
 
 	exec := script.New(script.Config{
 		TimeoutMS:   cfg.ScriptTimeout.Milliseconds(),
@@ -287,30 +290,25 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	fedAdapter := newFedAdapter("", k.SignFederation, k.RailIdentity)
 	k.SetFederation(fedAdapter)
 
-	// Wire credential encryption. Generate a key on first use and persist it. Fail loudly if the
-	// key cannot be persisted: an in-memory-only key would silently render every credential sealed
-	// this run undecryptable after a restart (availability, not confidentiality).
-	if globalCfg.CredentialsKey == "" {
-		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err != nil {
-			return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("generate credentials key: %w", err)
-		}
-		globalCfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
-		if err := writeConfig(resolvedConfigPath, globalCfg); err != nil {
-			return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("persist generated credentials key to %s: %w", resolvedConfigPath, err)
-		}
+	// Credential encryption. The key is minted at first boot and only read here; one that cannot be
+	// used is refused rather than dropped, since a server without it answers every credentialed call
+	// with "could not be decrypted" and names nothing an operator can act on.
+	keyBytes, err := base64.RawURLEncoding.DecodeString(globalCfg.CredentialsKey)
+	if err != nil || len(keyBytes) != 32 {
+		db.Close()
+		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf(
+			"credentials_key in %s is not a 32-byte base64url key; it seals every stored credential, so restore it from your backup", resolvedConfigPath)
 	}
-	if globalCfg.CredentialsKey != "" {
-		if keyBytes, err := base64.RawURLEncoding.DecodeString(globalCfg.CredentialsKey); err == nil {
-			if box, err := newAESGCMBox(keyBytes); err == nil {
-				k.SetSecretBox(box)
-				// The §9 authenticator shares the box (to open sealed auth configs and grant tokens)
-				// and reads/rotates grants through the store (§8).
-				httpExec.auth = newAuthenticator(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
-				httpExec.auth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
-			}
-		}
+	box, err := newAESGCMBox(keyBytes)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
+	k.SetSecretBox(box)
+	// The §9 authenticator shares the box (to open sealed auth configs and grant tokens)
+	// and reads/rotates grants through the store (§8).
+	httpExec.auth = newAuthenticator(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
+	httpExec.auth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
 
 	// Register the platform stdlib. Each native declares its own contract (native.Spec), so this
 	// wiring names adapters only — never a schema or description. Must happen on every kernel open,

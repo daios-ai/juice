@@ -216,3 +216,45 @@ func TestAMissingPrivacyProjectionFailsTheRun(t *testing.T) {
 		t.Errorf("a run that captured no projection did not say so: %v", rep.Blocking)
 	}
 }
+
+// A restart rewrites config.json, and the key first boot minted is what seals every stored
+// credential. Losing it does not degrade the kernel: it refuses to boot, which in a run reads as a
+// kernel that never came up.
+func TestARestartKeepsWhatFirstBootMinted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	o := bootOpts{Handle: "shop", FeeBps: 2000}
+	if err := writeKernelConfig(path, o, map[string]any{"world": "play"}); err != nil {
+		t.Fatal(err)
+	}
+	// First boot mints the key into the file the harness wrote.
+	first := map[string]any{}
+	readJSON(t, path, &first)
+	first["credentials_key"] = "0123456789abcdef0123456789abcdef0123456789a"
+	b, _ := json.Marshal(first)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeKernelConfig(path, o, map[string]any{"world": "play"}); err != nil {
+		t.Fatal(err)
+	}
+	again := map[string]any{}
+	readJSON(t, path, &again)
+	if again["credentials_key"] != first["credentials_key"] {
+		t.Errorf("credentials_key after restart: got %v, want %v", again["credentials_key"], first["credentials_key"])
+	}
+	if again["kernel_handle"] != "shop" || again["world"] != "play" {
+		t.Errorf("restart lost the harness's own settings: %v", again)
+	}
+}
+
+func readJSON(t *testing.T, path string, into any) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, into); err != nil {
+		t.Fatal(err)
+	}
+}

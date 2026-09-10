@@ -85,7 +85,7 @@ func (playRail) Finish(n *Net) (map[string]any, error) {
 
 func (playRail) Fund(k *Kernel, user string, credits int64) error {
 	ref := fmt.Sprintf("netsim-%s-%d", user, time.Now().UnixNano())
-	_, err := k.Run("sysop-"+k.Name, "admin", "deposit", user, strconv.FormatInt(credits, 10), "--ref", ref)
+	_, err := k.Run("sysop-"+k.Name, "admin", "deposit", "--yes", user, strconv.FormatInt(credits, 10), "--ref", ref)
 	return err
 }
 
@@ -168,7 +168,7 @@ func (c *chainRail) SettleWait() time.Duration { return c.await }
 // closes. Flags first, then a bare `--`: a public key is base64url and may begin with a dash, which
 // is otherwise read as an unknown flag and leaves the obligation silently open.
 func confirmPayment(seller *Kernel, ticketID, buyer string, amount int64) error {
-	_, err := seller.Run("sysop-"+seller.Name, "admin", "deposit", "--ref", ticketID,
+	_, err := seller.Run("sysop-"+seller.Name, "admin", "deposit", "--yes", "--ref", ticketID,
 		"--", buyer, strconv.FormatInt(amount, 10))
 	return err
 }

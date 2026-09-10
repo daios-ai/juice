@@ -897,7 +897,7 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, pr
 	// for a pin nobody supplied is pure waste.
 	if quoteHash != "" {
 		if cur := QuoteHash(action); quoteHash != cur {
-			return TermsChangedError(cur, action.Price)
+			return TermsChangedError(k.cfg.Network, cur, action.Price)
 		}
 	}
 	if err := ValidateInput(action.InputSchema, args); err != nil {

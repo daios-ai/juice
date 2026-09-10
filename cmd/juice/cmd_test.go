@@ -105,6 +105,13 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+	// A real kernel answers /health with its key and its network, and a client reads that banner
+	// before it will scale money or release a credential. A test kernel that cannot is not standing
+	// in for one.
+	if err := db.SetConfig(context.Background(), configKeySigningPublic,
+		base64.RawURLEncoding.EncodeToString(signingKey.Public().(ed25519.PublicKey))); err != nil {
+		t.Fatalf("newTestEnv: signing public key: %v", err)
+	}
 
 	cfg := testConfig("cli-test-secret")
 	cfg.IssuerUserID, cfg.FeeRecipientID, cfg.SigningKey = cmdTestIssuerID, cmdTestIssuerID, signingKey
@@ -1819,4 +1826,51 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	if _, err := execTestCmd(t, actionImportCmd(), "mail", specSrv.URL+"/other.json"); err == nil {
 		t.Error("re-binding a name to another document must be refused")
 	}
+}
+
+// An act that cannot be undone defaults to no. A bare Enter on a prompt about money must not move
+// it, declining must be an error so a script does not read silence as success, and off a terminal
+// there is nobody to ask.
+func TestConfirmDefaultsToNo(t *testing.T) {
+	orig := interactiveTTY
+	interactiveTTY = func() bool { return true }
+	t.Cleanup(func() { interactiveTTY = orig })
+
+	for _, tc := range []struct{ typed, want string }{
+		{"\n", "cancelled"}, {"n\n", "cancelled"}, {"no\n", "cancelled"},
+		{"y\n", ""}, {"YES\n", ""},
+	} {
+		withStdin(t, tc.typed)
+		err := confirm("Send everything?", false)
+		if tc.want == "" && err != nil {
+			t.Errorf("typed %q: got %v, want acceptance", tc.typed, err)
+		}
+		if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("typed %q: got %v, want %q", tc.typed, err, tc.want)
+		}
+	}
+	// --yes is the only way to confirm where nobody can be asked.
+	if err := confirm("Send everything?", true); err != nil {
+		t.Errorf("--yes: %v", err)
+	}
+	interactiveTTY = func() bool { return false }
+	if err := confirm("Send everything?", false); err == nil {
+		t.Error("a confirmation with no terminal to ask on was assumed")
+	}
+}
+
+// withStdin points os.Stdin at the given text for one check.
+func withStdin(t *testing.T, text string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig; r.Close() })
 }

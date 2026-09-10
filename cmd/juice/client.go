@@ -205,6 +205,7 @@ type serverHealth struct {
 	Network     string `json:"network"`
 	Digest      string `json:"network_digest"`
 	Decimals    uint8  `json:"decimals"`
+	Symbol      string `json:"symbol"`
 	RailAddress string `json:"rail_address"`
 }
 
@@ -225,12 +226,15 @@ func health(ctx context.Context, base string) (*serverHealth, error) {
 	return &h, nil
 }
 
-// serverNetwork returns the network of the server this invocation is talking to. Signatures a
-// client produces are bound to it, so it is read from the server rather than assumed.
+// serverNetwork returns the network of the server this invocation is talking to. Signatures are
+// bound to it and money is scaled by it, so it is read from the server rather than assumed, and an
+// error is a refusal at the call site: a guessed zero would move a thousandth of what an operator
+// typed, or a thousand times it.
 func serverNetwork(ctx context.Context) (kernel.Network, error) {
 	h, err := probeHealth(ctx, serverBaseURL())
 	if err != nil {
-		return kernel.Network{}, err
+		return kernel.Network{}, kernel.ErrInvalidState.Wrapf(
+			"cannot read this kernel's money units right now; nothing was sent — retry").Because(err)
 	}
-	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals}, nil
+	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals, Symbol: h.Symbol}, nil
 }

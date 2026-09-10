@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -371,6 +372,35 @@ type Network struct {
 	Name     string `json:"name"`
 	Digest   string `json:"digest"`
 	Decimals uint8  `json:"decimals"`
+	Symbol   string `json:"symbol"`
+}
+
+// Amount renders base units the way a person reads them, and is the only place that decides how:
+// a surface that takes 1.50 and answers 1500000 has two units under one name. The shape is the
+// ledger convention — the currency's minor unit is the floor, so a round amount reads 1.50 and not
+// 1.500000, while extra digits are kept, because rounding money for display is a lie the
+// reconciliation will find. No separators: this text is pasted back into parseAmount.
+func (n Network) Amount(v int64) string {
+	unit := n.Symbol
+	if unit != "" {
+		unit = " " + unit
+	}
+	if n.Decimals == 0 {
+		return strconv.FormatInt(v, 10) + unit
+	}
+	s := strconv.FormatInt(v, 10)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	for len(s) <= int(n.Decimals) {
+		s = "0" + s
+	}
+	whole, frac := s[:len(s)-int(n.Decimals)], s[len(s)-int(n.Decimals):]
+	for len(frac) > 2 && strings.HasSuffix(frac, "0") {
+		frac = frac[:len(frac)-1]
+	}
+	return sign + whole + "." + frac + unit
 }
 
 // DiscoveryNamespace is the rendezvous string kernels of one network advertise and enumerate. It

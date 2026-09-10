@@ -432,7 +432,7 @@ func (s *story) actMoney() error {
 			return fmt.Errorf("%s on %s is to receive money but nobody paid into that kernel", u.handle, u.on)
 		}
 		s.n.MustWork("money.spreads_by_local_transfer", s.k(u.on), src,
-			"user", "transfer", u.handle, strconv.FormatInt(u.receives, 10))
+			"user", "transfer", "--yes", u.handle, strconv.FormatInt(u.receives, 10))
 		if got := s.k(u.on).Balance(u.handle); got < u.receives*s.scale {
 			return fmt.Errorf("%s on %s holds %d after a transfer of %d", u.handle, u.on, got, u.receives*s.scale)
 		}

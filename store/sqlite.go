@@ -98,6 +98,14 @@ func (s *DB) migrate() error {
 	if err != nil {
 		return err
 	}
+	// A database carrying a migration this build does not ship was written by a newer juice. Running
+	// an older binary against it would read a schema it does not know, silently, so it is refused —
+	// the same judgement reconcileBaseline makes one function up about a schema it cannot place.
+	if ahead, aerr := s.migrationAhead(files); aerr != nil {
+		return aerr
+	} else if ahead != "" {
+		return fmt.Errorf("this database is at migration %s, which this juice does not ship; use a newer juice", ahead)
+	}
 	for _, file := range files {
 		version := strings.TrimSuffix(path.Base(file), ".sql")
 		applied, err := s.migrationApplied(version)
@@ -116,6 +124,28 @@ func (s *DB) migrate() error {
 		}
 	}
 	return nil
+}
+
+// migrationAhead names a recorded migration that sorts after every migration this build ships, or
+// "" when the database is at or behind this binary. Versions sort by their numbered prefix, so the
+// folded legacy chain, all of it below the shipped range, is behind rather than ahead.
+func (s *DB) migrationAhead(files []string) (string, error) {
+	newest := ""
+	for _, f := range files {
+		if v := strings.TrimSuffix(path.Base(f), ".sql"); v > newest {
+			newest = v
+		}
+	}
+	var ahead string
+	err := s.db.QueryRow(
+		`SELECT version FROM schema_migrations WHERE version > ? ORDER BY version DESC LIMIT 1`, newest).Scan(&ahead)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", dbErr(err, "read schema_migrations")
+	}
+	return ahead, nil
 }
 
 // reconcileBaseline decides which of the three supported states this database is in, and rejects

@@ -134,7 +134,7 @@ flow_locked_funds_recovery() {
     echo "=== FLOW locked_funds_recovery ==="
     local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
-    j "$db" "$hs" admin deposit sys 200 --ref "$(newref)" >/dev/null 2>&1
+    j "$db" "$hs" admin deposit sys 200 --ref "$(newref)" --yes >/dev/null 2>&1
 
     # Inject (server stopped) an orphan process+trace: a root call for sys/tinygo/compile (price 5)
     # that crashed before settling — 5 parked in user.locked and process.locked, trace has

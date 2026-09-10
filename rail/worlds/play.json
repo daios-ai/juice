@@ -1,5 +1,6 @@
 {
   "name": "play",
   "decimals": 0,
+  "symbol": "credits",
   "lotteryMax": 100
 }

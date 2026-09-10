@@ -10,17 +10,13 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// defaultInstance is the kernel a `juice serve` with no --instance serves. One name means one
-// directory, so the common single-kernel installation needs no flag at all.
-const defaultInstance = "default"
-
-// flagInstance names the kernel instance this process serves. It is a local filesystem label and
-// nothing else: never the kernel's advertised handle, never its public key, never transmitted.
-// Only `serve` sets it — a client reaches a kernel by address and pinned key, not by directory.
-var flagInstance = defaultInstance
+// kernelName is the nickname of the kernel this process serves, given positionally to `serve`: what
+// it calls itself on the network (D15) and, being the one name chosen by the time a home is created,
+// that home's directory name. The directory may be renamed without the network noticing.
+var kernelName string
 
 // validateLocalName accepts the labels this installation may turn into one file or directory name:
-// an instance under kernels/, a context under client/. The rules are the filesystem's, not the
+// a kernel under kernels/, a context under client/. The rules are the filesystem's, not the
 // kernel's — a local label has no relation to a handle, so it borrows no validator from the account
 // namespace — and they are one rule rather than two because both end up as a path segment, where a
 // name free to hold a separator or a dot could address something other than its own.
@@ -46,31 +42,29 @@ func validateLocalName(kind, name string) error {
 	return nil
 }
 
-func validateInstanceName(name string) error { return validateLocalName("instance", name) }
-
-// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<instance>/, holding the database
+// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<name>/, holding the database
 // (and with it the signing key), config.json, the rail key and its records, the single-server lock
 // and the purgeable cache. Everything that binds a kernel to its identity sits in this one
 // directory, so it backs up, moves and locks as a unit, and a second kernel on the machine is a
 // sibling of the first rather than a second installation.
-func kernelHome() string { return filepath.Join(juiceHome(), "kernels", flagInstance) }
+func kernelHome() string { return filepath.Join(juiceHome(), "kernels", kernelName) }
 
-// legacyKernelHome is the layout before instances, where the root held exactly one kernel. It is
+// legacyKernelHome is the layout before kernels were named, where the root held exactly one. It is
 // read only by migrateLegacyHome.
 func legacyKernelHome() string { return filepath.Join(juiceHome(), "kernel") }
 
-// migrateLegacyHome moves a pre-instance kernel into kernels/default/ and is the only writer of
-// that path. Both directories live under one root, so the move is a single rename: it either
-// happened or it did not, and an interrupted boot leaves no half-moved ledger. It refuses rather
-// than merges when a server still holds the old home or when the destination already exists,
-// since either case means two kernels are in play and only the operator can say which is wanted.
-// Running it again finds nothing to move.
+// migrateLegacyHome moves an unnamed legacy kernel into the named home and is the only writer of that
+// path. Both directories live under one root, so the move is a single rename: it either happened or
+// it did not, and an interrupted boot leaves no half-moved ledger. It refuses rather than merges
+// when a server still holds the old home or when the destination already exists, since either case
+// means two kernels are in play and only the operator can say which is wanted. Running it again
+// finds nothing to move.
 func migrateLegacyHome() error {
 	legacy := legacyKernelHome()
 	if _, err := os.Stat(filepath.Join(legacy, "juice.db")); err != nil {
-		return nil // no pre-instance kernel here
+		return nil // no legacy kernel here
 	}
-	dest := filepath.Join(juiceHome(), "kernels", defaultInstance)
+	dest := kernelHome()
 	if _, err := os.Stat(dest); err == nil {
 		return kernel.ErrInvalidState.Wrapf(
 			"both %s and %s hold a kernel; move or remove one, since only you can say which this installation serves", legacy, dest)

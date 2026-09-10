@@ -111,7 +111,10 @@ func identityCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(out)
 			}
-			decimals := amountDecimals(ctx)
+			net, err := serverNetwork(ctx)
+			if err != nil {
+				return err
+			}
 			fmt.Printf("Handle:     %s\n", out.Handle)
 			fmt.Printf("Public key: %s\n", out.PublicKey)
 			if out.About != "" {
@@ -124,35 +127,41 @@ func identityCmd() *cobra.Command {
 				fmt.Printf("Paid at:    %s\n", out.RailAddress)
 			}
 			if out.Finalized != nil {
-				fmt.Printf("Holdings:   %s (fee balance %s) as of block %d\n",
-					formatAmount(out.Finalized.Token, decimals), out.Finalized.Gas, out.Finalized.Block)
+				fmt.Printf("Holdings:   %s (gas %s) as of block %d\n",
+					net.Amount(out.Finalized.Token), out.Finalized.Gas, out.Finalized.Block)
 			}
 			// What the operator's own account holds, split by what it is: money earned and spendable,
 			// versus money merely passing through (owed out, unattributed, or locked for rail fees).
-			fmt.Printf("Operator:   earned=%d paying-out=%d unattributed=%d fee-locks=%d\n",
-				out.Sys.Earnings, out.Sys.PendingPayouts, out.Sys.HeldDeposits, out.Sys.RefillLocks)
+			fmt.Printf("Operator:   earned=%s paying-out=%s unclaimed=%s held-for-gas=%s\n",
+				net.Amount(out.Sys.Earnings), net.Amount(out.Sys.PendingPayouts),
+				net.Amount(out.Sys.HeldDeposits), net.Amount(out.Sys.RefillLocks))
 			// The books add up when what users hold equals what came in: the ledger is backed by cash
 			// alone, so there is nothing else in the identity.
-			fmt.Printf("Solvency:   user-credits=%d money-in=%d difference=%d\n",
-				out.Solvency.Liabilities, out.Solvency.Vault, out.Solvency.Gap)
+			fmt.Printf("Solvency:   user-balances=%s money-in=%s difference=%s\n",
+				net.Amount(out.Solvency.Liabilities), net.Amount(out.Solvency.Vault), net.Amount(out.Solvency.Gap))
 			if out.Solvency.Gap != 0 {
-				fmt.Printf("ALARM: the books do not add up — off by %d\n", out.Solvency.Gap)
+				fmt.Printf("ALARM: the books do not add up — off by %s\n", net.Amount(out.Solvency.Gap))
 			}
 			// An audit that could not run says nothing either way; only a checked mismatch is an alarm.
-			if out.Custody != nil && out.Custody.Checked && !out.Custody.OK {
-				fmt.Printf("ALARM: the money the rail holds differs from the books by %d\n", out.Custody.Difference)
+			if out.Custody != nil && out.Custody.Checked {
+				if out.Custody.OK {
+					fmt.Println("Custody:    the money the rail holds matches the books")
+				} else {
+					fmt.Printf("ALARM: the money the rail holds differs from the books by %s\n", net.Amount(out.Custody.Difference))
+				}
 			}
 			if out.Stop != nil {
 				fmt.Printf("ALARM: outgoing payments are halted since %s: %s\n", out.Stop.Since, out.Stop.Reason)
 			}
 			// What this kernel is owed for work already delivered, and the ceiling it will carry.
-			fmt.Printf("Credit:     owed-to-us=%d limit=%d\n", out.Exposure, out.CreditLimit)
+			fmt.Printf("Credit:     owed-to-us=%s limit=%s\n", net.Amount(out.Exposure), net.Amount(out.CreditLimit))
 			if out.Exposure > out.CreditLimit {
 				fmt.Println("ALARM: more work has been delivered on credit than the limit allows")
 			}
-			// The money rules this kernel serves under. A ticket of 0 pays every obligation exactly.
-			fmt.Printf("Rates:      fee=%d bps serving=%d bps import=%d bps ticket=%d\n",
-				out.FeeBPS, out.RemoteBPS, out.ImportBPS, out.Lottery)
+			// The money rules this kernel serves under, named by their configuration keys so an
+			// operator can find them. A lottery of 0 pays every obligation exactly.
+			fmt.Printf("Rates:      fee_bps=%d remote_bps=%d import_bps=%d lottery=%s\n",
+				out.FeeBPS, out.RemoteBPS, out.ImportBPS, net.Amount(out.Lottery))
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
 				for _, a := range out.Addrs {
@@ -267,6 +276,7 @@ func adminRenameCmd() *cobra.Command {
 // leaves only by its owner's own `user withdraw`.
 func adminDepositCmd() *cobra.Command {
 	var reason, ref string
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "deposit [TARGET [AMOUNT]]",
 		Short: "Credit an account or kernel for a payment received, or list payments awaiting it",
@@ -281,19 +291,32 @@ func adminDepositCmd() *cobra.Command {
 			"  admin deposit PEER [AMOUNT] --ref ID   record the payment closing what a peer owes\n\n" +
 			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
 			"transaction that carried it where it has. Repeating the same fact never moves money\n" +
-			"twice, and the same fact with a different amount is refused.",
+			"twice, and the same fact with a different amount is refused.\n\n" +
+			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n" +
+			"account's once it is recorded.",
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
 			if len(args) == 0 {
 				return apiEmitCtx(ctx, "GET", "/control/deposits", nil)
 			}
+			if ref == "" {
+				return kernel.ErrInvalidInput.Wrap("name the payment this credit records (--ref)")
+			}
 			var amount int64
+			what := fmt.Sprintf("Record payment %s, closing what %s owes?", ref, args[0])
 			if len(args) == 2 {
-				var err error
-				if amount, err = parseAmount(args[1], amountDecimals(ctx)); err != nil {
+				net, err := serverNetwork(ctx)
+				if err != nil {
 					return err
 				}
+				if amount, err = parseAmount(args[1], net.Decimals); err != nil {
+					return err
+				}
+				what = fmt.Sprintf("Credit %s to %s?", net.Amount(amount), args[0])
+			}
+			if err := confirm(what+" This cannot be undone.", yes); err != nil {
+				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/control/deposit", map[string]any{
 				"handle": args[0], "amount": amount, "reason": reason, "ref": ref,
@@ -302,6 +325,7 @@ func adminDepositCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&ref, "ref", "", "The payment this credit records: your own record of it, a transaction hash, or a settlement id")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
@@ -354,6 +378,10 @@ func peerInspectCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(out)
 			}
+			net, err := serverNetwork(context.Background())
+			if err != nil {
+				return err
+			}
 			// Petname is the name that resolves a reference here; the kernel's own label never
 			// does (§13), so they print as separate lines rather than one ambiguous "handle".
 			petname := out.Petname
@@ -393,7 +421,7 @@ func peerInspectCmd() *cobra.Command {
 				}
 				fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
 				for _, a := range out.Actions {
-					fmt.Printf("  %-30s  %d credits\n", a.Name, a.Price)
+					fmt.Printf("  %-30s  %s\n", a.Name, net.Amount(a.Price))
 					if a.Description != "" {
 						fmt.Printf("      %s\n", a.Description)
 					}

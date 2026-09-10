@@ -42,10 +42,11 @@ func TestShippedWorldsLoad(t *testing.T) {
 }
 
 // An empty world name means play, so a kernel with no configured world still joins one network.
-func TestEmptyNameIsPlay(t *testing.T) {
-	w, err := rail.Load("")
-	if err != nil || w.Name != "play" {
-		t.Fatalf("empty name gave %q, %v", w.Name, err)
+// A world must be named. An empty name was play, which made a kernel whose configuration said
+// nothing about its network bind itself to one anyway — the one choice it can never revise.
+func TestEmptyNameIsRefused(t *testing.T) {
+	if w, err := rail.Load(""); err == nil {
+		t.Fatalf("an unnamed world resolved to %q", w.Name)
 	}
 }
 

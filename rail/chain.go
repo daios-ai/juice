@@ -214,7 +214,8 @@ func (c *Chain) Address() string { return strings.ToLower(c.addr.Hex()) }
 // proved they hold is gone, and there is no undo.
 func (c *Chain) Destination(registered string) (string, error) {
 	if registered == "" {
-		return "", kernel.ErrInvalidState.Wrap("no payment address is registered")
+		return "", kernel.ErrInvalidState.Wrap(
+			"no payment address is registered; register the one you control first:  juice user address ADDRESS")
 	}
 	addr, err := jrail.ParseAddress(registered, "destination")
 	if err != nil {

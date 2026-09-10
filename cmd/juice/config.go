@@ -147,9 +147,8 @@ func DefaultServerConfig() ServerConfig {
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
-		// Every kernel joins one network for life. play is the one where the operator's own records
-		// are the finalized facts, so a kernel runs with no chain, no wallet, and no crypto (D23).
-		World:             "play",
+		// World has no default. A kernel joins one network for life, so which one is the operator's
+		// to state (first boot asks); a default here would answer it for them, silently and once.
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
@@ -176,23 +175,22 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
-// LoadOrCreateConfig reads the JSON config file at path.
-// If the file does not exist it is created with defaults and the defaults are returned.
-// Missing fields in an existing file are filled with defaults.
-func LoadOrCreateConfig(path string) (ServerConfig, error) {
+// LoadConfig reads the JSON config file at path onto the defaults. Missing fields keep their
+// default; an absent file returns os.ErrNotExist, which is a first boot and nothing else, since
+// first boot is this file's only writer. An unknown field is refused rather than ignored: a
+// misspelled key reads exactly like one never written, and the setting the operator meant to
+// change silently keeps its default.
+func LoadConfig(path string) (ServerConfig, error) {
 	cfg := DefaultServerConfig()
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			if writeErr := writeConfig(path, cfg); writeErr != nil {
-				return cfg, fmt.Errorf("create default config %q: %w", path, writeErr)
-			}
-			return cfg, nil
-		}
-		return cfg, fmt.Errorf("read config %q: %w", path, err)
+		return cfg, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse config %q: %w", path, err)
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -231,7 +229,8 @@ func writeConfig(path string, cfg ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	// 0600: this file holds credentials_key, which seals every stored upstream credential.
+	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
 // KernelConfig translates the JSON (wire) configuration into the kernel's runtime Config and

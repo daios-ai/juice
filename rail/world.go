@@ -42,6 +42,9 @@ type World struct {
 	ChainID  uint64 `json:"chainId"`
 	Token    string `json:"token"`
 	Decimals uint8  `json:"decimals"`
+	// Symbol is what an amount on this world is called when it is shown to a person. It is display
+	// only: it never enters the digest, so naming the same token differently is not a new network.
+	Symbol string `json:"symbol"`
 
 	RPC       string   `json:"rpc"`
 	Finality  string   `json:"finality"`
@@ -77,7 +80,9 @@ type gasCfg struct {
 func Load(nameOrPath string) (World, error) {
 	var raw []byte
 	switch nameOrPath {
-	case "", "play":
+	case "":
+		return World{}, fmt.Errorf("no world named: use play, test, real, or the path to a world file")
+	case "play":
 		raw = worldPlay
 	case "test":
 		raw = worldTest
@@ -158,7 +163,7 @@ func (w World) Network() kernel.Network {
 		panic("rail: canonicalize world: " + err.Error())
 	}
 	sum := sha256.Sum256(canon)
-	return kernel.Network{Name: w.Name, Digest: hex.EncodeToString(sum[:]), Decimals: w.Decimals}
+	return kernel.Network{Name: w.Name, Digest: hex.EncodeToString(sum[:]), Decimals: w.Decimals, Symbol: w.Symbol}
 }
 
 // Domain converts the world into the rail library's domain. Only a chain world has one.

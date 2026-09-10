@@ -3912,3 +3912,33 @@ func TestAPaidCallIsRefusedWhenThePeerCannotBePaid(t *testing.T) {
 		t.Errorf("a peer that has proved its address must be callable: %v", err)
 	}
 }
+
+// Money is entered in decimals, so it is shown in decimals. A currency's minor unit sets the floor
+// so a round amount is not a wall of zeros; an amount carrying more digits keeps every one, because
+// rounding money for display is a lie the reconciliation finds. No separators: the text is pasted
+// back into the parser, which refuses them.
+func TestNetworkAmountReadsAsMoney(t *testing.T) {
+	token := kernel.Network{Decimals: 6, Symbol: "USDC"}
+	credits := kernel.Network{Decimals: 0, Symbol: "credits"}
+	for _, tc := range []struct {
+		net  kernel.Network
+		in   int64
+		want string
+	}{
+		{token, 1500000, "1.50 USDC"},
+		{token, 1000001, "1.000001 USDC"},
+		{token, 1500, "0.0015 USDC"},
+		{token, 0, "0.00 USDC"},
+		{token, -1500000, "-1.50 USDC"},
+		{credits, 1500, "1500 credits"},
+		{credits, 0, "0 credits"},
+		{kernel.Network{Decimals: 6}, 1500000, "1.50"},
+	} {
+		if got := tc.net.Amount(tc.in); got != tc.want {
+			t.Errorf("Amount(%d) on %d decimals = %q, want %q", tc.in, tc.net.Decimals, got, tc.want)
+		}
+	}
+	if got := token.Amount(1500000); strings.ContainsAny(got, ",_ ") && !strings.HasSuffix(got, " USDC") {
+		t.Errorf("an amount must paste back into the parser: %q", got)
+	}
+}

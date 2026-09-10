@@ -29,6 +29,10 @@ import (
 // defaultEndpoint is where a kernel listens when nothing says otherwise.
 const defaultEndpoint = "http://localhost:4040"
 
+// defaultContext names the context a client addresses when it has been told no other. It is the
+// client's own label for "the one I use", and has nothing to do with any kernel's directory.
+const defaultContext = "default"
+
 // kernelRec is one kernel this client knows: where it answers, and the identity it reported there.
 // The key and network are what `juice use` checks before switching, so a command never lands on a
 // kernel other than the one this record was made for.
@@ -94,7 +98,7 @@ func loadClientConfig() *clientConfig {
 		cfg.Contexts = map[string]*contextRec{}
 	}
 	if cfg.Current == "" {
-		cfg.Current = defaultInstance
+		cfg.Current = defaultContext
 	}
 	return cfg
 }
@@ -361,35 +365,6 @@ func allDigits(s string) bool {
 	return true
 }
 
-// formatAmount renders base units the way a person reads them, exactly: the inverse of parseAmount.
-func formatAmount(v int64, decimals uint8) string {
-	s := strconv.FormatInt(v, 10)
-	if decimals == 0 {
-		return s
-	}
-	sign := ""
-	if strings.HasPrefix(s, "-") {
-		sign, s = "-", s[1:]
-	}
-	for len(s) <= int(decimals) {
-		s = "0" + s
-	}
-	return sign + s[:len(s)-int(decimals)] + "." + s[len(s)-int(decimals):]
-}
-
-// amountDecimals reports how many decimal places this world's money is written with: the recorded
-// kernel when it has one, else the server itself. Zero decimals — whole credits — is both the
-// unrecorded answer and a real one, and the same either way.
-func amountDecimals(ctx context.Context) uint8 {
-	if _, _, _, k := activeContext(); k.Decimals > 0 {
-		return k.Decimals
-	}
-	if h, err := probeHealth(ctx, serverBaseURL()); err == nil {
-		return h.Decimals
-	}
-	return 0
-}
-
 // ---- migration from the pre-context layout ----
 
 // migrateLegacyProfiles converts a profiles.json — one record that was a kernel, a login and a
@@ -445,7 +420,7 @@ func migrateLegacyProfiles() *clientConfig {
 		_ = os.WriteFile(path, append(blob, '\n'), 0o600)
 	}
 	if cfg.Current == "" {
-		cfg.Current = defaultInstance
+		cfg.Current = defaultContext
 	}
 	if saveClientConfig(cfg) != nil {
 		return nil

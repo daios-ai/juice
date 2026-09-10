@@ -21,21 +21,45 @@ network — you are never charged more than the price you saw.
 git clone https://github.com/daios-ai/juice.git
 cd juice
 make build          # or: go build -o juice ./cmd/juice/
-./juice serve --addr :4040
+./juice serve acme --addr :4040
 ```
 
-Requires Go 1.25+. The first boot prompts for a kernel name and a superuser password,
-then creates the `sys` account, its signing keypair, and a JWT secret. It also prints a
-one-time 12-word recovery phrase for `sys` — **write it down**; it is the only way to
-reset the superuser password (`juice auth recover sys`). Subsequent boots are
-idempotent.
+Requires Go 1.25+. `acme` is the kernel's nickname: what it calls itself on the network,
+and the name of its directory. A kernel is created by its first boot, which asks for the
+three things it can never revise afterwards:
 
-A kernel's whole state lives in one directory, `$JUICE_HOME/kernels/<name>/` (default
-`~/.juice/kernels/default/`): the database (which holds the signing key), `config.json`,
-and the rail's key and records. `juice serve --instance <name>` picks which one, so a
-second kernel is a sibling of the first rather than a second installation; there is no
-`--db` and no `--config`. The `cache/` subdirectory is regenerable and safe to delete.
-A kernel made before named instances moves itself into `kernels/default/` on first boot.
+```
+First boot of kernel acme at /home/you/.juice/kernels/acme.
+A new signing key is minted here; its nickname, its network and that key are fixed for the life of the kernel.
+World — play, test, real, or a world file: play
+Superuser password:
+Confirm password:
+sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+  bomb buffalo march shock slim obvious stairs time usage grace habit wear
+Press Enter once you have written it down:
+Superuser "sys" created.
+INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…
+```
+
+**Write the phrase down**: it is the only way to reset the superuser password
+(`juice auth recover sys`). Later boots read what that one wrote and are idempotent;
+each one repeats the ready line, which is where the kernel says which nickname, which
+network and which key answered.
+
+To boot without a terminal, write the answers first and set the password in the
+environment — no prompt then has anything to ask:
+
+```bash
+mkdir -p ~/.juice/kernels/acme
+echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
+JUICE_BOOTSTRAP_PASSWORD=… ./juice serve acme
+```
+
+A kernel's whole state lives in that one directory: the database (which holds the signing
+key), `config.json`, and the rail's key and records. A second kernel is a second name, so
+it is a sibling of the first rather than a second installation; there is no `--db` and no
+`--config`. The `cache/` subdirectory is regenerable and safe to delete. A kernel made
+before kernels were named moves itself into `kernels/<its name>/` on first boot.
 
 The CLI is a pure client of the server. Under `$JUICE_HOME/client/` it keeps the kernels
 it knows — each one's address, public key and network — and the *contexts* naming one
@@ -43,7 +67,8 @@ kernel and one login on it:
 
 ```bash
 ./juice use work --endpoint http://localhost:4040   # add and switch to a kernel
-./juice auth login alice                            # bind this context to a principal
+./juice user create alice                           # create an account on it
+./juice auth login alice                            # bind this context to that account
 ./juice use                                         # list contexts
 ./juice use bot --kernel work                       # a second login on the same kernel
 ```
@@ -77,16 +102,20 @@ by the fact that witnesses it, and then move freely between local users:
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
 
-Money leaves only by its owner's withdrawal:
+On `play` no crypto is involved at all: the operator records the payments they receive
+and make, `--ref` is whatever names one in their own books, and amounts are whole credits.
+
+On a world with a chain (`test`, `real`), money arrives and leaves over that chain, and
+amounts are written the way that token is written — `1.50`, not `1500000`:
 
 ```bash
 ./juice user deposit               # where to send money, and whether you are registered
 ./juice user address 0xAbC...      # register a payout address, proving you control it
-./juice user withdraw 100          # pays out to that address
+./juice user withdraw 100 --yes    # pays out to that address
 ```
 
-On the default `play` world no crypto is involved at all: the operator records the
-payments they receive and make, and `--ref` is whatever names one in their own books.
+Every command that moves money asks before it does, since none of them can be undone.
+`--yes` answers in advance, which is how a script says it meant it.
 
 If you lose your password, `juice auth recover <user>` restores the account from the
 recovery phrase. There is no email anywhere in the system.
@@ -253,15 +282,16 @@ nothing. `admin identity` shows the position.
 
 ## Configuration
 
-`config.json` sits next to the database, inside the instance's own directory; safe
-defaults apply when a key is absent.
+`config.json` sits next to the database, inside the kernel's own directory, and is written
+once by first boot; nothing rewrites it afterwards. Safe defaults apply when a key is
+absent, and a key that is not a key is a startup error rather than a silent default.
 The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
-| `fed_listen_addrs` | Where this kernel answers peers; give each instance its own when running more than one (as `--addr` does for clients) |
-| `world` | The network this kernel serves for life: `play` (default, no crypto), `test`, `real`, or a path to a world file |
+| `fed_listen_addrs` | Where this kernel answers peers; give each kernel its own when running more than one (as `--addr` does for clients) |
+| `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
 | `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
@@ -272,7 +302,7 @@ The ones you are most likely to touch:
 
 Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
 `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_BOOTSTRAP_KERNEL_HANDLE`, `JUICE_ALLOW_LOCAL_SOURCES`.
+`JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_CONTEXT` for the client.
 
 ## HTTP API
 

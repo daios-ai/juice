@@ -12,7 +12,7 @@ flow_rail_onboard() {
     # The selling kernel serves strangers on credit, which is what makes the first call possible
     # without anyone prefunding anything (U29). Serving is funded by the seller's own money.
     _fed_setup "$dir" || { fail "rail_onboard.setup" "setup failed"; return; }
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" alice)
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
 
@@ -25,13 +25,13 @@ flow_rail_onboard() {
     # Every crossing names the payment it records: without one, a repeated command would mint money.
     assert_fails "rail_onboard.ref_required" "ref\|payment" -- j "$FED_DBL" "$FED_HL" admin deposit alice 500
     local ref="invoice-77"
-    j "$FED_DBL" "$FED_HL" admin deposit alice 500 --ref "$ref" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit alice 500 --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.funded" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # Recording the same payment again moves money once.
-    j "$FED_DBL" "$FED_HL" admin deposit alice 500 --ref "$ref" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit alice 500 --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.recorded_once" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # The same payment on other terms is a different intention and is refused.
-    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin deposit alice 900 --ref "$ref"
+    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin deposit alice 900 --ref "$ref" --yes
     # Nothing is waiting on the operator: every payment so far had an owner.
     assert_not_contains "rail_onboard.nothing_held" "$ref" "$(j "$FED_DBL" "$FED_HL" admin deposit)"
 
@@ -50,10 +50,10 @@ flow_rail_withdraw() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "rail_withdraw.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
-    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" >/dev/null 2>&1
+    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
 
     # No prompt without a terminal: agents are first-class.
-    local out; out=$(j "$db" "$ha" user withdraw 200)
+    local out; out=$(j "$db" "$ha" user withdraw 200 --yes)
     assert_contains "rail_withdraw.confirmed" "confirmed" "$out"
     assert_jnum "rail_withdraw.balance" "$(jj "$db" "$ha" user me)" available 300
     # Both legs are in her own ledger: out of her account, then out of the kernel.
@@ -61,7 +61,7 @@ flow_rail_withdraw() {
     # The row is listed with its outcome.
     assert_contains "rail_withdraw.listed" "confirmed" "$(j "$db" "$ha" user withdraw)"
     # More than she holds is refused, and nothing moves.
-    assert_fails "rail_withdraw.over_balance" "insufficient\|error" -- j "$db" "$ha" user withdraw 9000
+    assert_fails "rail_withdraw.over_balance" "insufficient\|error" -- j "$db" "$ha" user withdraw 9000 --yes
     assert_jnum "rail_withdraw.unchanged_after_refusal" "$(jj "$db" "$ha" user me)" available 300
 
     # A reply lost in transit is safe to ask for again: the same request id returns the same row.
@@ -91,8 +91,8 @@ flow_rail_settlement() {
     local lkey="$FED_LKEY"
 
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     assert_nonempty "rail_settlement.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
@@ -126,10 +126,10 @@ flow_rail_settlement() {
 
     # On a rail with no addresses the operator's own record is what makes the payment final, and it
     # names the obligation it closes. Recording it twice moves money once.
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$lkey" 11 >/dev/null 2>&1 || { fail "rail_settlement.record" "failed"; return; }
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" --yes -- "$lkey" 11 >/dev/null 2>&1 || { fail "rail_settlement.record" "failed"; return; }
     assert_eq "rail_settlement.nothing_owed" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$lkey")"
     local after; after=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$lkey" 11 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" --yes -- "$lkey" 11 >/dev/null 2>&1
     assert_eq "rail_settlement.record_idempotent" "$after" "$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)"
 
     # Both sets of books add up, and the cash discharged what was delivered.
@@ -183,7 +183,7 @@ flow_rail_world_mismatch() {
     local log="$(dirname "$db")/mismatch.log"
     write_config "$db" world="$other"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" serve --addr 127.0.0.1:0 >"$log" 2>&1
+        "$JUICE" serve "$(basename "$(dirname "$db")")" --addr 127.0.0.1:0 >"$log" 2>&1
     local code=$?
     assert_ne "rail_world_mismatch.refused" 0 "$code"
     assert_contains "rail_world_mismatch.says_why" "network" "$(cat "$log")"
@@ -201,7 +201,7 @@ flow_rail_lock() {
 
     local log="$(dirname "$db")/second.log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" serve --addr 127.0.0.1:0 >"$log" 2>&1
+        "$JUICE" serve "$(basename "$(dirname "$db")")" --addr 127.0.0.1:0 >"$log" 2>&1
     assert_ne "rail_lock.second_refused" 0 "$?"
     assert_contains "rail_lock.says_why" "another server" "$(cat "$log")"
 
@@ -254,20 +254,20 @@ flow_rail_economic_loop() {
     j "$dbc" "$hc" auth login sys --password sys-pass >/dev/null 2>&1
     local ckey; ckey=$(kernel_key "$dbc" "$hc")
     publish "$dbc" "$hc" tooling --kind http --source "http://127.0.0.1:$FED_BPORT" --description "tooling" --price 20 >/dev/null 2>&1
-    j "$dbc" "$hc" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$dbc" "$hc" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
 
     # B sells, funding its own work; A's buyer pays for it.
     publish "$FED_DBR" "$FED_HR" service --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a service" --price 200 >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
-    j "$FED_DBL" "$FED_HL" admin deposit buyer 1000 --ref "$(newref)" >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin deposit buyer 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "rail_economic_loop.buyer_pays_b" "$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/service '{}')" tx_id)"
 
     # A owes B for the work; B records the payment that settles it and is credited what it is owed.
     local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$(find_id "$(jj "$FED_DBL" "$ha" tx list)" action_name sys/service)")" ticket_id)
     assert_nonempty "rail_economic_loop.names_its_ticket" "$ticket"
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" -- "$FED_LKEY" 210 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" --yes -- "$FED_LKEY" 210 >/dev/null 2>&1
     assert_eq "rail_economic_loop.b_books_clear" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY")"
 
     # B has earned: its operator's balance grew by the charge plus its serving markup.
@@ -307,7 +307,7 @@ flow_rail_economic_loop() {
         sleep 1
     done
     assert_eq "rail_economic_loop.c_is_owed" 1 "$cowed"
-    j "$dbc" "$hc" admin deposit --ref "$ctick" -- "$FED_RKEY" 21 >/dev/null 2>&1
+    j "$dbc" "$hc" admin deposit --ref "$ctick" --yes -- "$FED_RKEY" 21 >/dev/null 2>&1
     local bought=""
     for _ in $(seq 15); do
         bought=$(strfield "$(jj "$FED_DBR" "$FED_HR" run "sys@$ckey/tooling" '{}')" tx_id)
@@ -321,20 +321,20 @@ flow_rail_economic_loop() {
     assert_jnum "rail_economic_loop.b_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
 }
 
-# Two kernels under one installation: an instance is a named directory, so a second kernel is a
+# Two kernels under one installation: a kernel is a named directory, so a second kernel is a
 # sibling of the first — its own ledger, its own key, its own address — and a client names each by
 # its own context rather than by whatever holds a port.
-flow_instances() {
-    echo "=== FLOW instances ==="
+flow_two_kernels() {
+    echo "=== FLOW two_kernels ==="
     local dir; dir=$(new_dir)
     local dba dbb hc; dba="$(kdb "$dir" alpha)"; dbb="$(kdb "$dir" beta)"; hc="$dir/client"
     mkdir -p "$hc/.juice"
-    start_server "$dba" "$hc" kernel_handle=kernel-alpha || { fail "instances.boot_alpha" "no start"; return; }
-    start_server "$dbb" "$hc" kernel_handle=kernel-beta  || { fail "instances.boot_beta" "no start"; return; }
+    start_server "$dba" "$hc" kernel_handle=kernel-alpha || { fail "two_kernels.boot_alpha" "no start"; return; }
+    start_server "$dbb" "$hc" kernel_handle=kernel-beta  || { fail "two_kernels.boot_beta" "no start"; return; }
 
-    assert_eq "instances.alpha_home" "yes" "$([ -f "$dir/kernels/alpha/juice.db" ] && echo yes || echo no)"
-    assert_eq "instances.beta_home" "yes" "$([ -f "$dir/kernels/beta/juice.db" ] && echo yes || echo no)"
-    assert_ne "instances.separate_addresses" "$(url "$dba")" "$(url "$dbb")"
+    assert_eq "two_kernels.alpha_home" "yes" "$([ -f "$dir/kernels/alpha/juice.db" ] && echo yes || echo no)"
+    assert_eq "two_kernels.beta_home" "yes" "$([ -f "$dir/kernels/beta/juice.db" ] && echo yes || echo no)"
+    assert_ne "two_kernels.separate_addresses" "$(url "$dba")" "$(url "$dbb")"
 
     # One client, two contexts, two kernels. Each context reaches its own.
     HOME="$hc" "$JUICE" use alpha --endpoint "$(url "$dba")" >/dev/null 2>&1
@@ -345,22 +345,22 @@ flow_instances() {
     local ka kb
     ka=$(strfield "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" --json admin identity)" public_key)
     kb=$(strfield "$(JUICE_CONTEXT=beta  HOME="$hc" "$JUICE" --json admin identity)" public_key)
-    assert_nonempty "instances.alpha_key" "$ka"
-    assert_ne "instances.distinct_identities" "$ka" "$kb"
-    assert_json "instances.alpha_handle" \
+    assert_nonempty "two_kernels.alpha_key" "$ka"
+    assert_ne "two_kernels.distinct_identities" "$ka" "$kb"
+    assert_json "two_kernels.alpha_handle" \
         "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" --json admin identity)" handle kernel-alpha
-    assert_json "instances.beta_handle" \
+    assert_json "two_kernels.beta_handle" \
         "$(JUICE_CONTEXT=beta HOME="$hc" "$JUICE" --json admin identity)" handle kernel-beta
 
     # Money is the kernel's own: a deposit on one is invisible on the other.
     JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" user create onlyhere --password userpass >/dev/null 2>&1
-    assert_contains "instances.local_account" "onlyhere" \
+    assert_contains "two_kernels.local_account" "onlyhere" \
         "$(JUICE_CONTEXT=alpha HOME="$hc" "$JUICE" admin users)"
-    assert_not_contains "instances.not_on_the_other" "onlyhere" \
+    assert_not_contains "two_kernels.not_on_the_other" "onlyhere" \
         "$(JUICE_CONTEXT=beta HOME="$hc" "$JUICE" admin users)"
 }
 
-# A kernel made before instances existed keeps its ledger and its identity: the first boot after the
+# A kernel made before kernels were named keeps its ledger and its identity: the first boot after the
 # upgrade moves its whole home into kernels/default/ and carries on, rather than starting an empty
 # second kernel beside it.
 flow_home_migration() {
@@ -372,7 +372,7 @@ flow_home_migration() {
     local key_before; key_before=$(kernel_key "$db" "$hs")
     stop_server "$db"
 
-    # Put the home back where a pre-instance kernel kept it.
+    # Put the home back where a legacy kernel kept it.
     mv "$dir/kernels/default" "$dir/kernel" || { fail "home_migration.setup" "could not move home"; return; }
     rmdir "$dir/kernels"
 
@@ -381,4 +381,61 @@ flow_home_migration() {
     assert_eq "home_migration.old_home_gone" "no" "$([ -d "$dir/kernel" ] && echo yes || echo no)"
     assert_eq "home_migration.same_identity" "$key_before" "$(kernel_key "$db" "$hs")"
     assert_jnum "home_migration.ledger_survived" "$(jj "$db" "$ha" user me)" available 400
+}
+
+# A kernel is created once, and the three things it can never revise are asked for rather than
+# defaulted: its nickname on the command line, its network and its key at first boot.
+flow_first_boot() {
+    echo "=== FLOW first_boot ==="
+    local dir; dir=$(new_dir); local root="$dir/root"
+    mkdir -p "$root"
+
+    # No name: there is no kernel to serve, so nothing is created.
+    local out; out=$(JUICE_HOME="$root" "$JUICE" serve 2>&1)
+    assert_contains "first_boot.name_required" "juice serve NAME" "$out"
+    assert_eq "first_boot.nothing_created" "no" "$([ -d "$root/kernels" ] && echo yes || echo no)"
+
+    # A name but no world, with nobody to ask: refused, naming the key that would have said.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" serve acme --addr 127.0.0.1:0 2>&1)
+    assert_contains "first_boot.world_required" "world" "$out"
+    assert_eq "first_boot.no_database" "no" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
+
+    # A misspelled key is not a key: the setting the operator meant keeps its default otherwise.
+    mkdir -p "$root/kernels/acme"
+    echo '{"wolrd":"play"}' > "$root/kernels/acme/config.json"
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" serve acme --addr 127.0.0.1:0 2>&1)
+    assert_contains "first_boot.unknown_key_refused" "wolrd" "$out"
+
+    # Named world, named kernel: it boots, and says which kernel on which network.
+    echo '{"world":"play","bootstrap_peers":[],"log_format":"json"}' > "$root/kernels/acme/config.json"
+    local log="$dir/first.log"
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
+        "$JUICE" serve acme --addr 127.0.0.1:0 >"$log" 2>&1 &
+    local pid=$!; track_pid "$pid"
+    local i
+    for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log" 2>/dev/null && break; sleep 0.1; done
+    assert_contains "first_boot.ready_names_the_kernel" '"handle":"acme"' "$(cat "$log")"
+    assert_contains "first_boot.ready_names_the_network" '"network":"play"' "$(cat "$log")"
+    assert_eq "first_boot.database_created" "yes" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
+    # The key it minted is in the file it wrote, which nothing later rewrites.
+    assert_contains "first_boot.key_minted" "credentials_key" "$(cat "$root/kernels/acme/config.json")"
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+}
+
+# Money is written one way. What a command takes is what it shows, and an amount is never rendered
+# in the base units a person did not type.
+flow_money_reads_as_money() {
+    echo "=== FLOW money_reads_as_money ==="
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "money.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 500
+
+    # play counts in whole credits and says so, rather than printing a bare number.
+    assert_contains "money.ledger_names_the_unit" "credits" "$(j "$db" "$ha" user ledger)"
+    assert_contains "money.identity_names_the_unit" "credits" "$(j "$db" "$hs" admin identity)"
+
+    # An irreversible movement is confirmed, and a script that has not said --yes moves nothing.
+    assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys 10
+    assert_jnum "money.nothing_moved" "$(jj "$db" "$ha" user me)" available 500
 }
