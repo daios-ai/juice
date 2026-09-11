@@ -833,3 +833,347 @@ print(sum(1 for t in rows if (t.get('action_name') or '').endswith('slow')))" "$
     assert_eq "fed_crash.nothing_left_locked" 0 "$locked"
     assert_eq "fed_crash.one_transaction_per_attempt" 2 "$ntx"
 }
+
+# ---------------------------------------------------------------------------
+# Composition across a kernel boundary. Composition and federation are each
+# covered on their own; these are the calls where one happens inside the other.
+# ---------------------------------------------------------------------------
+# An execution makes an outbound call. The composite is local to the caller and its child is on
+# another kernel, so the caller pays a local price while the work crosses a boundary. What the
+# caller agreed to is the price, whatever the subtree spent inside it (§13).
+flow_compose_remote_child() {
+    echo "=== FLOW compose_remote_child ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "compose_child.setup" "setup failed"; return; }
+    local ha hc; ha=$(home "$dir" alice); hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$ha" alice
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+
+    # R sells a leaf at 1000. L quotes it at 1103: sr = 1000 + 5% serving = 1050, then 5% import.
+    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    # Warm the proxy with one direct call, so what the composed call is measured against is the
+    # composition and not the cold resolve (§8).
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/leaf '{}' >/dev/null 2>&1
+    assert_jnum "compose_child.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/leaf)" price 1103
+
+    # alice composes it at 2000, which must cover the 1103 the child costs her.
+    make_contractor_wasm "$dir/wrap.wasm" "sys@kernel-r/leaf"
+    publish "$FED_DBL" "$ha" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price 2000 >/dev/null
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+
+    local cb ab sb eb
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    ab=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
+    sb=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
+    eb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+
+    local out tx_id; out=$(jj "$FED_DBL" "$hc" run alice/wrap '{}'); tx_id=$(strfield "$out" tx_id)
+    assert_nonempty "compose_child.call_succeeded" "$tx_id"
+
+    # The caller pays the advertised price and nothing else; the subtree is alice's cost, not hers.
+    assert_eq "compose_child.caller_paid_the_price" 2000 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+    assert_eq "compose_child.composer_keeps_the_rest" 897 \
+        "$(( $(numfield "$(jj "$FED_DBL" "$ha" user me)" available) - ab ))"
+    # The import fee on the inner leg stays on the kernel that imported it.
+    assert_eq "compose_child.import_fee_retained" 53 \
+        "$(( $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) - sb ))"
+    # The seller has delivered one more obligation of 1050 and has not been paid for it.
+    assert_eq "compose_child.seller_owed" 1050 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - eb ))"
+
+    # The inner call is a transaction of its own, hanging off the outer trace, with the receipt the
+    # seller signed for it.
+    local trace inner; trace=$(strfield "$out" trace_id)
+    inner=$(jj "$FED_DBL" "$hc" tx list --limit 20 | python3 -c "
+import sys, json
+print(next((t['id'] for t in json.load(sys.stdin) if t.get('parent_trace_id') == sys.argv[1]), ''))" "$trace" 2>/dev/null)
+    assert_nonempty "compose_child.inner_tx_recorded" "$inner"
+    assert_nonempty "compose_child.inner_receipt" "$(strfield "$(jj "$FED_DBL" "$hc" tx show "$inner")" remote_receipt_hash)"
+    assert_contains "compose_child.inner_receipt_verifies" "valid" "$(j "$FED_DBL" "$hc" tx verify "$inner")"
+
+    assert_jnum "compose_child.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_child.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+}
+
+# A composed call that fails after part of it has already been bought abroad. The caller is refunded
+# what the tree did not spend, and not a credit more: a descendant that settled stays paid, because
+# the kernel that served it has already done the work and holds a signed receipt for it (§13).
+flow_compose_partial_refund() {
+    echo "=== FLOW compose_partial_refund ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "compose_refund.setup" "setup failed"; return; }
+    local ha hc; ha=$(home "$dir" alice); hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$ha" alice
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+
+    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    # A leaf that fails its own output schema: the backend answers, the check refuses the answer.
+    publish "$FED_DBR" "$FED_HR" badleaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "bad leaf" --price 1000 \
+        --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}' >/dev/null
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/leaf '{}' >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/badleaf '{}' >/dev/null 2>&1
+
+    # A composite that buys the good leaf and then fails itself: its reply cannot satisfy the output
+    # schema it declared, and that check runs after the child has been called and settled.
+    make_contractor_wasm "$dir/half.wasm" "sys@kernel-r/leaf"
+    publish "$FED_DBL" "$ha" half --kind wasm --source "$dir/half.wasm" --description "half" --price 2000 \
+        --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}' >/dev/null
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+
+    local cb ab eb
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    ab=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
+    eb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    assert_fails "compose_refund.parent_failed" "schema\|invalid\|error" -- j "$FED_DBL" "$hc" run alice/half '{}'
+
+    # Charged exactly what the settled child consumed (1103), refunded the rest of the 2000.
+    assert_eq "compose_refund.caller_charged_what_was_spent" 1103 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+    assert_eq "compose_refund.composer_credited_nothing" 0 \
+        "$(( $(numfield "$(jj "$FED_DBL" "$ha" user me)" available) - ab ))"
+    # The obligation for the settled child stands: the seller did the work and holds the receipt.
+    assert_eq "compose_refund.settled_child_still_owed" 1050 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - eb ))"
+    local tx_id; tx_id=$(jj "$FED_DBL" "$hc" tx list --limit 5 | python3 -c "
+import sys, json
+rows = [t for t in json.load(sys.stdin) if t.get('status') == 'failure']
+print(rows[0]['id'] if rows else '')" 2>/dev/null)
+    assert_nonempty "compose_refund.failure_tx_recorded" "$tx_id"
+
+    # The other end of the same rule: a child that fails commits nothing, so the caller keeps it all.
+    make_contractor_wasm "$dir/none.wasm" "sys@kernel-r/badleaf"
+    publish "$FED_DBL" "$ha" none --kind wasm --source "$dir/none.wasm" --description "none" --price 2000 >/dev/null
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    eb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    assert_fails "compose_refund.child_failed" "schema\|invalid\|error\|failed" -- j "$FED_DBL" "$hc" run alice/none '{}'
+    assert_eq "compose_refund.nothing_committed_nothing_charged" 0 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+    assert_eq "compose_refund.failed_child_owes_nothing" 0 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - eb ))"
+
+    assert_jnum "compose_refund.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_refund.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+}
+
+# A chain through a kernel: a user on L buys R's composite, which buys T's action. R is seller and
+# buyer inside one trace — it funds the inner call on its own money while owing a receipt for the
+# outer one — so two obligations exist at once, in opposite directions, on two different peers.
+flow_compose_through_kernel() {
+    echo "=== FLOW compose_through_kernel ==="
+    local dir; dir=$(new_dir)
+    # A buyer tells its seller which payment settles an obligation on the retry cadence, and both
+    # buyers here are kernels: L owes R, and R owes T for the leg it bought inside the same call.
+    FED_LCFG=(remote_retry_interval_seconds=2)
+    FED_RCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "compose_chain.setup" "setup failed"; return; }
+
+    # A third kernel joins through the same seed and sells the leaf.
+    local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
+    make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 remote_retry_interval_seconds=2 \
+        || { fail "compose_chain.boot_t" "T did not start"; return; }
+    local tkey; tkey=$(kernel_key "$dbt" "$ht")
+    [ -n "$tkey" ] || { fail "compose_chain.tkey" "no T key"; return; }
+    publish "$dbt" "$ht" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    j "$dbt" "$ht" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+
+    # R resolves T's leaf (1000 → 1050 on the wire → 1103 for R) and composes it at 2000.
+    local i
+    for i in $(seq 1 20); do
+        j "$FED_DBR" "$FED_HR" run "sys@$tkey/leaf" '{}' >/dev/null 2>&1 && break
+        sleep 1
+    done
+    j "$FED_DBR" "$FED_HR" admin peer rename -- "$tkey" kernel-t >/dev/null 2>&1 || { fail "compose_chain.link_rt" "R never resolved T"; return; }
+    make_contractor_wasm "$dir/wrap.wasm" "sys@kernel-t/leaf"
+    publish "$FED_DBR" "$FED_HR" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price 2000 >/dev/null
+
+    # L imports R's composite: 2000 → 2100 on the wire → 2205 for L's caller.
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/wrap '{}' >/dev/null 2>&1
+    assert_jnum "compose_chain.quoted_through_two_hops" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/wrap)" price 2205
+
+    local hc; hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+    local cb sb er et
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    sb=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
+    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    et=$(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure)
+
+    local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$hc" run sys@kernel-r/wrap '{}')" tx_id)
+    assert_nonempty "compose_chain.call_succeeded" "$tx_id"
+    assert_eq "compose_chain.caller_paid_the_quote" 2205 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+    assert_eq "compose_chain.import_fee_retained" 105 \
+        "$(( $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) - sb ))"
+    # Both obligations exist at once, each on its own creditor.
+    assert_eq "compose_chain.middle_is_owed" 2100 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - er ))"
+    assert_eq "compose_chain.middle_also_owes" 1050 \
+        "$(( $(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure) - et ))"
+    assert_contains "compose_chain.receipt_verifies" "valid" "$(j "$FED_DBL" "$hc" tx verify "$tx_id")"
+    assert_jnum "compose_chain.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_chain.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+    assert_jnum "compose_chain.t_books" "$(jj "$dbt" "$ht" admin kernel show)" gap 0
+
+    # An obligation born inside a composed call is settleable like any other: each obligation names
+    # the ticket it rides on, and the creditor records the payment against that name (P10). Both
+    # debts are cleared here, each by the kernel that is owed, and each debt names its own buyer.
+    local outer inner
+    outer=$(strfield "$(jj "$FED_DBL" "$hc" tx show "$tx_id")" ticket_id)
+    inner=$(strfield "$(jj "$FED_DBR" "$FED_HR" tx show "$(find_id "$(jj "$FED_DBR" "$FED_HR" tx list)" action_name sys/leaf)")" ticket_id)
+    assert_nonempty "compose_chain.outer_names_its_ticket" "$outer"
+    assert_nonempty "compose_chain.inner_names_its_ticket" "$inner"
+
+    # A creditor learns what it is owed when the buyer tells it, so each waits to hear before it can
+    # record anything (§13).
+    # Wait for the obligation this call made, by name. Waiting for any obligation would be satisfied
+    # by the one the warm-up call left, and the payment would then name a ticket its creditor has
+    # not heard of yet.
+    local i
+    for i in $(seq 1 30); do jj "$FED_DBR" "$FED_HR" admin kernel deposits | grep -q "$outer" && break; sleep 1; done
+    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$outer" --yes -- "$FED_LKEY" 2100 >/dev/null 2>&1
+    assert_eq "compose_chain.middle_debt_cleared" 2100 \
+        "$(( er - $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) ))"
+
+    for i in $(seq 1 30); do jj "$dbt" "$ht" admin kernel deposits | grep -q "$inner" && break; sleep 1; done
+    et=$(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure)
+    j "$dbt" "$ht" admin peer settle --ref "$inner" --yes -- "$FED_RKEY" 1050 >/dev/null 2>&1
+    assert_eq "compose_chain.leaf_debt_cleared" 1050 \
+        "$(( et - $(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure) ))"
+
+    assert_jnum "compose_chain.r_books_after" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+    assert_jnum "compose_chain.t_books_after" "$(jj "$dbt" "$ht" admin kernel show)" gap 0
+}
+
+# The call comes home. L buys R's composite, which buys an action back on L, so L must serve an
+# inbound call while a trace of its own is still waiting on R. A kernel that held anything across
+# its outbound call would deadlock here and nowhere else, so the call runs under a clock.
+flow_compose_returns_home() {
+    echo "=== FLOW compose_returns_home ==="
+    local dir; dir=$(new_dir)
+    FED_LCFG=(remote_retry_interval_seconds=2)
+    FED_RCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "compose_home.setup" "setup failed"; return; }
+    local hc; hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$FED_DBL" "$FED_HL" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+
+    # R resolves the leaf back on L and composes it, so the inner call returns to where it started.
+    local i
+    for i in $(seq 1 20); do
+        j "$FED_DBR" "$FED_HR" run "sys@$FED_LKEY/leaf" '{}' >/dev/null 2>&1 && break
+        sleep 1
+    done
+    j "$FED_DBR" "$FED_HR" admin peer rename -- "$FED_LKEY" kernel-l >/dev/null 2>&1 || { fail "compose_home.link_back" "R never resolved L"; return; }
+    make_contractor_wasm "$dir/loop.wasm" "sys@kernel-l/leaf"
+    publish "$FED_DBR" "$FED_HR" loop --kind wasm --source "$dir/loop.wasm" --description "loop" --price 2000 >/dev/null
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/loop '{}' >/dev/null 2>&1   # cold-resolve the proxy
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+
+    local cb el er
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    el=$(numfield "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" exposure)
+    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+
+    # Under a clock: a deadlock here would hang the suite rather than fail this check.
+    local out; out=$(timeout 60 env HOME="$hc" "$JUICE" --server "$(url "$FED_DBL")" --json run sys@kernel-r/loop '{}' 2>/dev/null)
+    assert_eq "compose_home.completed_without_deadlock" 0 "$?"
+    assert_nonempty "compose_home.call_succeeded" "$(strfield "$out" tx_id)"
+    assert_eq "compose_home.caller_paid_the_quote" 2205 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+
+    # Each kernel is owed for what it served, in its own direction, at the same time.
+    assert_eq "compose_home.r_owed_for_the_outer_call" 2100 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - er ))"
+    assert_eq "compose_home.l_owed_for_the_inner_call" 1050 \
+        "$(( $(numfield "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" exposure) - el ))"
+    # L served that inner call for R: the transaction is on L's books with R's key as its caller.
+    assert_contains "compose_home.l_served_its_own_buyer" "$FED_RKEY" \
+        "$(jj "$FED_DBL" "$FED_HL" tx list --limit 20)"
+
+    assert_jnum "compose_home.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_home.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+}
+
+# The same chain under the standard settlement: a per-call ticket, not an exact payment. Both buyers
+# in the chain stake one — L for the composite it buys, R for the leg it buys inside the same call —
+# so two independent draws decide what actually moves, in opposite directions, on one kernel. What is
+# asserted is what must hold whichever way each falls (P10).
+flow_compose_ticket() {
+    echo "=== FLOW compose_ticket ==="
+    local dir; dir=$(new_dir)
+    # A draw happens only while the obligation is under the face value, so the prices here are small
+    # and the face value is the world's ceiling.
+    FED_LCFG=(lottery=100 remote_retry_interval_seconds=2)
+    FED_RCFG=(lottery=100 remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "compose_ticket.setup" "setup failed"; return; }
+
+    local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
+    make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 remote_retry_interval_seconds=2 \
+        || { fail "compose_ticket.boot_t" "T did not start"; return; }
+    local tkey; tkey=$(kernel_key "$dbt" "$ht")
+    [ -n "$tkey" ] || { fail "compose_ticket.tkey" "no T key"; return; }
+    publish "$dbt" "$ht" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 10 >/dev/null
+    j "$dbt" "$ht" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+
+    local i
+    for i in $(seq 1 20); do
+        j "$FED_DBR" "$FED_HR" run "sys@$tkey/leaf" '{}' >/dev/null 2>&1 && break
+        sleep 1
+    done
+    j "$FED_DBR" "$FED_HR" admin peer rename -- "$tkey" kernel-t >/dev/null 2>&1 || { fail "compose_ticket.link_rt" "R never resolved T"; return; }
+    make_contractor_wasm "$dir/wrap.wasm" "sys@kernel-t/leaf"
+    publish "$FED_DBR" "$FED_HR" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price 20 >/dev/null
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/wrap '{}' >/dev/null 2>&1
+
+    local hc; hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+
+    # Every call must charge one of exactly two amounts: the import fee alone when the draw pays
+    # nothing, and that fee plus the face value it staked when the draw pays. Nothing in between is a
+    # valid settlement. Six calls, because a run that happens to see no win still asserts the rule —
+    # an obligation of 21 against a face of 100 pays roughly one call in five (observed 6 of 30 while
+    # this was written), so both arms are reached often, and neither is required for the check to
+    # mean something.
+    local er et n charged bad=0
+    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    et=$(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure)
+    for n in $(seq 1 6); do
+        local cb; cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+        jj "$FED_DBL" "$hc" run sys@kernel-r/wrap '{}' >/dev/null 2>&1
+        charged=$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))
+        case "$charged" in
+            2 | 102) ;;
+            *) bad=$charged ;;
+        esac
+    done
+    assert_eq "compose_ticket.every_charge_is_a_draw" 0 "$bad"
+
+    # Whatever the draws decided, each kernel delivered what it delivered, and exposure is the work
+    # done and not yet paid for: six obligations of 21 owed to R, and the six of 11 that R itself
+    # incurred buying the leg inside them. A draw changes what cash moves, never what was delivered.
+    assert_eq "compose_ticket.middle_is_owed" 126 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - er ))"
+    assert_eq "compose_ticket.leaf_is_owed" 66 \
+        "$(( $(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure) - et ))"
+
+    # And every set of books balances at every outcome — including the middle kernel's, which staked
+    # a ticket as a buyer while holding one as a seller.
+    assert_jnum "compose_ticket.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_ticket.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+    assert_jnum "compose_ticket.t_books" "$(jj "$dbt" "$ht" admin kernel show)" gap 0
+}
