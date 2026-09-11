@@ -90,17 +90,29 @@ func runServer(name, addr string) error {
 	if err := migrateLegacyHome(); err != nil {
 		return err
 	}
+	// A kernel with no database has not been created yet. Ask before taking the lock, so declining
+	// leaves not even a directory behind; write the answers after taking it, so two `serve` of one
+	// name cannot each mint a different credentials key for the same home.
+	dbFile := filepath.Join(kernelHome(), "juice.db")
+	fresh := !exists(dbFile)
+	var cfg ServerConfig
+	if fresh {
+		var err error
+		if cfg, err = firstBootConfig(name, kernelHome()); err != nil {
+			return err
+		}
+	}
 	release, err := holdHome()
 	if err != nil {
 		return err
 	}
 	defer release()
-
-	// A kernel with no database has not been created yet: ask for what its configuration does not
-	// already say, and write that configuration once. Nothing else ever writes it.
-	if _, serr := os.Stat(filepath.Join(kernelHome(), "juice.db")); os.IsNotExist(serr) {
-		if _, ferr := firstBootConfig(name, kernelHome()); ferr != nil {
-			return ferr
+	if fresh {
+		if exists(dbFile) {
+			return kernel.ErrInvalidState.Wrapf("kernel %s was created while this boot was being answered; run it again", name)
+		}
+		if err := writeConfig(filepath.Join(kernelHome(), "config.json"), cfg); err != nil {
+			return err
 		}
 	}
 
@@ -118,7 +130,10 @@ func runServer(name, addr string) error {
 		return fmt.Errorf("rail: %w", err)
 	}
 	k.SetRail(railway)
-	if err := bindWorld(context.Background(), k, world.Network()); err != nil {
+	// Record the network once the rail has verified it, so the digest a kernel is bound to for life
+	// names a network that was checked rather than one that was merely configured. Every later boot
+	// writes the same value it read (D23).
+	if err := k.SetConfig(context.Background(), configKeyWorldDigest, world.Network().Digest); err != nil {
 		return err
 	}
 

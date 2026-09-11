@@ -260,9 +260,11 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	chatter := kernel.Chatter(ollamaChatter)
 
 	// The world this kernel serves fixes its network, whose digest binds every signature it makes
-	// and the namespace it discovers on (D23).
-	world, err := rail.Load(globalCfg.World)
+	// and the namespace it discovers on (D23). A kernel that already has one is not asked again:
+	// the database is where that answer lives.
+	world, err := worldFor(context.Background(), db, globalCfg.World, resolvedConfigPath)
 	if err != nil {
+		db.Close()
 		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 	cfg.Network = world.Network()

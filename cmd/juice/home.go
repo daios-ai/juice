@@ -49,6 +49,31 @@ func validateLocalName(kind, name string) error {
 // sibling of the first rather than a second installation.
 func kernelHome() string { return filepath.Join(juiceHome(), "kernels", kernelName) }
 
+// exists reports whether a path is there, which for a kernel's database is the whole of "has this
+// kernel been created".
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// kernelsHere names the kernels of this installation: the directories under kernels/ that hold a
+// database. A directory without one is a boot that was answered and then abandoned, and naming it
+// as a kernel would be a lie.
+func kernelsHere() []string {
+	root := filepath.Join(juiceHome(), "kernels")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && exists(filepath.Join(root, e.Name(), "juice.db")) {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 // legacyKernelHome is the layout before kernels were named, where the root held exactly one. It is
 // read only by migrateLegacyHome.
 func legacyKernelHome() string { return filepath.Join(juiceHome(), "kernel") }

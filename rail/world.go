@@ -22,9 +22,9 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// Shipped worlds. A world file is the juice-rail domain document plus a name: the operator may write
-// their own and get an isolated economy, isolated rather than private, since anyone holding the file
-// can join.
+// The shipped worlds. A world file is the juice-rail domain document plus a name: the operator may
+// write their own and get an isolated economy, isolated rather than private, since anyone holding
+// the file can join.
 var (
 	//go:embed worlds/play.json
 	worldPlay []byte
@@ -34,6 +34,14 @@ var (
 	worldReal []byte
 )
 
+// Shipped names the worlds this build carries, in the order they are offered to an operator: no
+// money, then money that is not real, then money that is. It is the one list — Load reads it, and
+// anything that offers a choice or names a digest walks it rather than repeating the names.
+var Shipped = []string{"play", "test", "real"}
+
+// worldFile is what each of those names embeds.
+var worldFile = map[string][]byte{"play": worldPlay, "test": worldTest, "real": worldReal}
+
 // World is one network's definition. The defining part — name, chain, token — is identical for every
 // member and fixes the network digest; everything else is operational and belongs to whoever runs
 // the kernel, so changing an endpoint or a gas policy never changes the network.
@@ -42,9 +50,11 @@ type World struct {
 	ChainID  uint64 `json:"chainId"`
 	Token    string `json:"token"`
 	Decimals uint8  `json:"decimals"`
-	// Symbol is what an amount on this world is called when it is shown to a person. It is display
-	// only: it never enters the digest, so naming the same token differently is not a new network.
-	Symbol string `json:"symbol"`
+	// Symbol is what an amount on this world is called when it is shown to a person, and Description
+	// is the one line that tells an operator choosing a network what this one means. Both are display
+	// only: neither enters the digest, so renaming a token or rewording a line is not a new network.
+	Symbol      string `json:"symbol"`
+	Description string `json:"description"`
 
 	RPC       string   `json:"rpc"`
 	Finality  string   `json:"finality"`
@@ -78,19 +88,14 @@ type gasCfg struct {
 // Load resolves a shipped world by name, or reads one from a file path. An unknown bare name is an
 // error rather than a path attempt, so a typo never silently becomes "file not found".
 func Load(nameOrPath string) (World, error) {
-	var raw []byte
-	switch nameOrPath {
-	case "":
-		return World{}, fmt.Errorf("no world named: use play, test, real, or the path to a world file")
-	case "play":
-		raw = worldPlay
-	case "test":
-		raw = worldTest
-	case "real":
-		raw = worldReal
-	default:
+	raw, ok := worldFile[nameOrPath]
+	if !ok {
+		if nameOrPath == "" {
+			return World{}, fmt.Errorf("world name is empty")
+		}
 		if !strings.ContainsAny(nameOrPath, "/.") {
-			return World{}, fmt.Errorf("unknown world %q: use play, test, real, or the path to a world file", nameOrPath)
+			return World{}, fmt.Errorf("unknown world %q: use %s, or the path to a world file",
+				nameOrPath, strings.Join(Shipped, ", "))
 		}
 		b, err := os.ReadFile(nameOrPath)
 		if err != nil {

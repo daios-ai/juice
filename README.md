@@ -25,13 +25,18 @@ make build          # or: go build -o juice ./cmd/juice/
 ```
 
 Requires Go 1.25+. `acme` is the kernel's nickname: what it calls itself on the network,
-and the name of its directory. A kernel is created by its first boot, which asks for the
-three things it can never revise afterwards:
+and the name of its directory. There is no kernel of that name yet, so `serve` says what
+is here, asks whether to create one, and asks the two things it can never revise:
 
 ```
-First boot of kernel acme at /home/you/.juice/kernels/acme.
-A new signing key is minted here; its nickname, its network and that key are fixed for the life of the kernel.
-World — play, test, real, or a world file: play
+There is no kernel named acme. No kernels here yet.
+Create acme as a new kernel? [y/N] y
+
+Which money will acme use? This cannot be changed later.
+  play  no real money: you credit accounts yourself and keep the records
+  test  fake USDC on the Arbitrum Sepolia test chain
+  real  USDC on Arbitrum One
+Choice [play/test/real]: play
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
@@ -41,13 +46,17 @@ Superuser "sys" created.
 INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…
 ```
 
-**Write the phrase down**: it is the only way to reset the superuser password
-(`juice auth recover sys`). Later boots read what that one wrote and are idempotent;
-each one repeats the ready line, which is where the kernel says which nickname, which
-network and which key answered.
+Declining, or interrupting before the money is chosen, leaves nothing behind. On a chain
+world one more question follows, for the endpoint that reaches it.
 
-To boot without a terminal, write the answers first and set the password in the
-environment — no prompt then has anything to ask:
+**Write the phrase down**: it is the only way to reset the superuser password
+(`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
+the kernel's own database — and each repeats the ready line, which is where the kernel
+says which nickname, which network and which key answered.
+
+To boot without a terminal, write the configuration first and set the password in the
+environment. That file is the consent a machine with no terminal can give, so `serve`
+creates the kernel without asking:
 
 ```bash
 mkdir -p ~/.juice/kernels/acme

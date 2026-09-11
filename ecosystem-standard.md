@@ -56,11 +56,13 @@ Each kernel is started with its own `--addr` and carries its own `fed_listen_add
 `config.json`. Nothing allocates ports for them; a collision is a bind failure at startup, for the
 client port and the peer transport alike. One server per kernel, enforced by the lock in its home.
 
-A kernel is created by its first boot, which asks for what it cannot revise — its network, and the
-chain endpoint where the network has one — and refuses off a terminal, naming the configuration key
-that would have answered. That first boot is the only writer of `config.json`; every later boot reads
-it. Nothing is created before the answers are in hand, and the network is recorded only after the
-rail has verified it, so a boot that cannot be answered leaves no half-made kernel behind.
+A kernel is created by its first boot, and only on the operator's word: a `config.json` written in
+advance, or an answer given at a terminal after they are told which kernels are here. It then asks
+for what the kernel cannot revise — its network, and the chain endpoint where the network has one —
+and refuses off a terminal, naming the key and the file that would have answered. That first boot is
+the only writer of `config.json`, and it writes nothing until the answers are in hand, so a boot that
+is declined or unanswered leaves nothing behind. The network is recorded once the rail has verified
+it, and from then on that record is the kernel's network: later boots read it rather than the file.
 
 Removing a kernel is not a lifecycle verb. Its directory holds a ledger, a signing key, a rail
 key and possibly unsettled obligations, so it is archived or destroyed deliberately by the operator,

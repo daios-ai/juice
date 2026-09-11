@@ -118,6 +118,13 @@ func confirm(msg string, yes bool) error {
 	if !interactiveTTY() {
 		return kernel.ErrInvalidInput.Wrap("re-run with --yes to confirm (no terminal to ask on)")
 	}
+	return askYesNo(msg)
+}
+
+// askYesNo puts the question to whoever is at the terminal. Callers that have no --yes flag to
+// offer — first boot, where consent is a written configuration file rather than a flag — ask with
+// this after their own check that somebody is there.
+func askYesNo(msg string) error {
 	fmt.Fprintf(os.Stderr, "%s [y/N] ", msg)
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	if l := strings.ToLower(strings.TrimSpace(line)); l == "y" || l == "yes" {

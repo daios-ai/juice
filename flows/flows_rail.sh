@@ -395,13 +395,21 @@ flow_first_boot() {
     assert_contains "first_boot.name_required" "juice serve NAME" "$out"
     assert_eq "first_boot.nothing_created" "no" "$([ -d "$root/kernels" ] && echo yes || echo no)"
 
-    # A name but no world, with nobody to ask: refused, naming the key that would have said.
+    # A name nothing here answers to, with nobody to ask: creating a kernel is the operator's act,
+    # so it is refused, it says what exists, and it leaves not even a directory behind.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" serve acme --addr 127.0.0.1:0 2>&1)
+    assert_contains "first_boot.unknown_kernel_refused" "no kernel named acme" "$out"
+    assert_contains "first_boot.refusal_says_what_to_write" '"world"' "$out"
+    assert_eq "first_boot.nothing_written" "no" "$([ -d "$root/kernels/acme" ] && echo yes || echo no)"
+
+    # A written configuration is consent, but not an answer to the question a kernel cannot revise.
+    mkdir -p "$root/kernels/acme"
+    echo '{"kernel_handle":"acme"}' > "$root/kernels/acme/config.json"
     out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" serve acme --addr 127.0.0.1:0 2>&1)
     assert_contains "first_boot.world_required" "world" "$out"
     assert_eq "first_boot.no_database" "no" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
 
     # A misspelled key is not a key: the setting the operator meant keeps its default otherwise.
-    mkdir -p "$root/kernels/acme"
     echo '{"wolrd":"play"}' > "$root/kernels/acme/config.json"
     out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" serve acme --addr 127.0.0.1:0 2>&1)
     assert_contains "first_boot.unknown_key_refused" "wolrd" "$out"
@@ -420,6 +428,24 @@ flow_first_boot() {
     # The key it minted is in the file it wrote, which nothing later rewrites.
     assert_contains "first_boot.key_minted" "credentials_key" "$(cat "$root/kernels/acme/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+    # A kernel's network is its database's record. Take the key out of the file — as every kernel
+    # made before the key existed has it — and it still serves the network it was created on.
+    python3 - "$root/kernels/acme/config.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+c = json.load(open(p)); c.pop("world", None); json.dump(c, open(p, "w"))
+PY
+    local log2="$dir/second.log"
+    JUICE_HOME="$root" HOME="$dir" "$JUICE" serve acme --addr 127.0.0.1:0 >"$log2" 2>&1 &
+    pid=$!; track_pid "$pid"
+    for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log2" 2>/dev/null && break; sleep 0.1; done
+    assert_contains "first_boot.network_from_the_record" '"network":"play"' "$(cat "$log2")"
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+    # A second kernel is named, and a name this installation does not know is told what it does.
+    out=$(JUICE_HOME="$root" "$JUICE" serve second 2>&1)
+    assert_contains "first_boot.lists_what_exists" "Kernels here: acme" "$out"
 }
 
 # Money is written one way. What a command takes is what it shows, and an amount is never rendered

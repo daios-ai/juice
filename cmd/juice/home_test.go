@@ -157,3 +157,24 @@ func TestNoLegacyHomeIsNotAMigration(t *testing.T) {
 		t.Error("a migration that had nothing to do still created a home")
 	}
 }
+
+// TestKernelsHereNamesOnlyRealKernels: the list an operator is shown when a name is not recognised
+// must be true, so a directory holding no database — a first boot that was answered and then
+// abandoned — is not one of this installation's kernels.
+func TestKernelsHereNamesOnlyRealKernels(t *testing.T) {
+	root := testHome(t)
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(root, "kernels", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "kernels", "alpha", "juice.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "kernels", "stray"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := kernelsHere(); len(got) != 1 || got[0] != "alpha" {
+		t.Errorf("kernels here: got %v, want [alpha]", got)
+	}
+}

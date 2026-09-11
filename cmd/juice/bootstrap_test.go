@@ -9,6 +9,8 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/native"
+	"github.com/daios-ai/juice/rail"
+	"github.com/daios-ai/juice/store"
 )
 
 // TestServeRequiresAKernelName: the kernel is named positionally, so there is no path on which a
@@ -24,14 +26,29 @@ func TestServeRequiresAKernelName(t *testing.T) {
 // world from what the operator already wrote, and refuses off a terminal rather than choosing.
 func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
 	home := t.TempDir()
-	if _, err := firstBootConfig("acme", home); err == nil {
-		t.Fatal("a headless first boot with no world configured was accepted")
-	} else if !strings.Contains(err.Error(), "world") {
-		t.Errorf("the refusal must name the key: %v", err)
+	// No file and nobody to ask: creating a kernel is the operator's act, so it is refused, and the
+	// refusal says what to write and where.
+	_, err := firstBootConfig("acme", home)
+	if err == nil {
+		t.Fatal("a headless first boot with no configuration was accepted")
+	}
+	for _, want := range []string{"no kernel named acme", "no terminal", `"world"`, filepath.Join(home, "config.json")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %s: %v", want, err)
+		}
 	}
 
-	// Pre-seeded, as a headless install does it: the answers are taken and written back once.
+	// A file with no world is consent to create, but not an answer to the one question that cannot
+	// be revised.
 	seeded := filepath.Join(home, "config.json")
+	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"acme"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstBootConfig("acme", home); err == nil || !strings.Contains(err.Error(), `"world"`) {
+		t.Errorf("a seeded file with no world must be refused, naming the key: %v", err)
+	}
+
+	// Pre-seeded in full, as a headless install does it: the answers are taken and nothing is asked.
 	if err := os.WriteFile(seeded, []byte(`{"world":"play"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,12 +62,78 @@ func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
 	if cfg.CredentialsKey == "" {
 		t.Error("first boot must mint the credentials key, since nothing later may write the file")
 	}
-	if fi, serr := os.Stat(seeded); serr != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("config mode: %v %v", fi.Mode().Perm(), serr)
+	// Asking writes nothing: the caller writes, under the lock that makes one kernel one server.
+	if entries, rerr := os.ReadDir(home); rerr != nil || len(entries) != 1 {
+		t.Errorf("first boot must leave only the file it was given: %v %v", entries, rerr)
 	}
-	// Read back through the strict loader: what first boot writes must be loadable.
+	// What it produces must survive the strict loader, since that is what every later boot reads.
+	if err := writeConfig(seeded, cfg); err != nil {
+		t.Fatal(err)
+	}
 	if again, lerr := LoadConfig(seeded); lerr != nil || again.World != "play" {
 		t.Fatalf("reload: %+v %v", again.World, lerr)
+	}
+}
+
+// TestWorldForReadsTheRecord: a kernel's network is fixed the first time and read from its own
+// database ever after, so one made before `world` was written into config.json goes on serving.
+func TestWorldForReadsTheRecord(t *testing.T) {
+	ctx := context.Background()
+	play, err := rail.Load("play")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	fresh := func() *store.DB {
+		db, derr := store.Open(filepath.Join(t.TempDir(), "juice.db"))
+		if derr != nil {
+			t.Fatal(derr)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	recorded := func(digest string) *store.DB {
+		db := fresh()
+		if serr := db.SetConfig(ctx, configKeyWorldDigest, digest); serr != nil {
+			t.Fatal(serr)
+		}
+		return db
+	}
+
+	// The record answers, with nothing in the configuration to ask.
+	if w, werr := worldFor(ctx, recorded(play.Network().Digest), "", cfgPath); werr != nil || w.Name != "play" {
+		t.Errorf("recorded network: %q %v", w.Name, werr)
+	}
+	// A configuration that disagrees with the record is refused, naming both.
+	test, err := rail.Load("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = worldFor(ctx, recorded(test.Network().Digest), "play", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "test") || !strings.Contains(err.Error(), "play") {
+		t.Errorf("a configuration against the record must be refused, naming both: %v", err)
+	}
+	// A digest this build cannot place needs the world file named, and says so.
+	_, err = worldFor(ctx, recorded("00ff"), "", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "does not ship") {
+		t.Errorf("an unplaceable digest must be refused: %v", err)
+	}
+	// A database that predates the rail belongs to play, and may not be moved onto a token world.
+	made := fresh()
+	if serr := made.SetConfig(ctx, configKeySuperuser, "sys"); serr != nil {
+		t.Fatal(serr)
+	}
+	if w, werr := worldFor(ctx, made, "", cfgPath); werr != nil || w.Name != "play" {
+		t.Errorf("pre-rail database: %q %v", w.Name, werr)
+	}
+	if _, werr := worldFor(ctx, made, "test", cfgPath); werr == nil {
+		t.Error("a pre-rail database must not be bound to a token world")
+	}
+	// Nothing recorded and nothing configured is a first boot with no answer: refused, naming key
+	// and file rather than falling back to a network nobody chose.
+	_, err = worldFor(ctx, fresh(), "", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), `"world"`) || !strings.Contains(err.Error(), cfgPath) {
+		t.Errorf("an unanswered first boot must be refused, naming the key and the file: %v", err)
 	}
 }
 
