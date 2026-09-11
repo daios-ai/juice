@@ -85,7 +85,7 @@ func (playRail) Finish(n *Net) (map[string]any, error) {
 
 func (playRail) Fund(k *Kernel, user string, credits int64) error {
 	ref := fmt.Sprintf("netsim-%s-%d", user, time.Now().UnixNano())
-	_, err := k.Run("sysop-"+k.Name, "admin", "deposit", "--yes", user, strconv.FormatInt(credits, 10), "--ref", ref)
+	_, err := k.Run("sysop-"+k.Name, "admin", "user", "deposit", "--yes", user, strconv.FormatInt(credits, 10), "--ref", ref)
 	return err
 }
 
@@ -118,7 +118,7 @@ func (c *chainRail) Config() map[string]any {
 func (c *chainRail) Scale() int64 { return c.scale }
 
 func (c *chainRail) GasUp(k *Kernel, payments int) error {
-	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "identity")
+	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "kernel", "show")
 	if vault == "" {
 		return fmt.Errorf("kernel %s serves no rail address", k.Name)
 	}
@@ -142,7 +142,7 @@ func (c *chainRail) Fund(k *Kernel, user string, credits int64) error {
 		"mint(address,uint256)", w.addr, strconv.FormatInt(base, 10)); err != nil {
 		return fmt.Errorf("minting %d for %s: %w", base, user, err)
 	}
-	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "identity")
+	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "kernel", "show")
 	uid := k.Field(user, "id", "user", "me")
 	msg := fmt.Sprintf("juice address registration\nkernel: %s\nuser: %s\naddress: %s", k.Key, uid, w.addr)
 	sig := castOut("wallet", "sign", "--private-key", w.key, msg)
@@ -168,7 +168,7 @@ func (c *chainRail) SettleWait() time.Duration { return c.await }
 // closes. Flags first, then a bare `--`: a public key is base64url and may begin with a dash, which
 // is otherwise read as an unknown flag and leaves the obligation silently open.
 func confirmPayment(seller *Kernel, ticketID, buyer string, amount int64) error {
-	_, err := seller.Run("sysop-"+seller.Name, "admin", "deposit", "--yes", "--ref", ticketID,
+	_, err := seller.Run("sysop-"+seller.Name, "admin", "peer", "settle", "--yes", "--ref", ticketID,
 		"--", buyer, strconv.FormatInt(amount, 10))
 	return err
 }

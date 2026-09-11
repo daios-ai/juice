@@ -24,8 +24,11 @@ _fed_setup() {
     [ -n "$FED_BOOT" ] || return 1
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 "${FED_LCFG[@]:-}" || return 1
     unset FED_RCFG FED_LCFG
-    j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$FED_DBR" "$FED_HR"; know "$FED_DBL" "$FED_HL"
+    know "$FED_DBR" "$FED_HR"
+    j "$FED_DBR" "$FED_HR" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
+    know "$FED_DBL" "$FED_HL"
+    j "$FED_DBL" "$FED_HL" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
 
     # Learn each kernel's own public key (federation identity; no .well-known anymore).
     FED_RKEY=$(kernel_key "$FED_DBR" "$FED_HR")
@@ -39,14 +42,14 @@ _fed_setup() {
 
     # L cold-resolves R's action by raw key — the sole cache-fill path (§8): a call resolves the signed
     # manifest on first use and caches a local proxy under an auto-alias. Retry until the freshly-booted
-    # L has connected to R through the DHT/relay. Then bind the friendly kernel-r alias with admin rename
+    # L has connected to R through the DHT/relay. Then bind the friendly kernel-r alias with admin user rename
     # so the rest of the flows address sys@kernel-r/greet.
     local i
     for i in $(seq 1 15); do
         j "$FED_DBL" "$FED_HL" run "sys@$FED_RKEY/greet" '{}' >/dev/null 2>&1 && break
         sleep 1
     done
-    j "$FED_DBL" "$FED_HL" admin rename -- "$FED_RKEY" kernel-r >/dev/null 2>&1 || return 1
+    j "$FED_DBL" "$FED_HL" admin peer rename -- "$FED_RKEY" kernel-r >/dev/null 2>&1 || return 1
     FED_PROXY=$(strfield "$(jj "$FED_DBL" "$FED_HL" action show "sys@kernel-r/greet")" id)
     [ -n "$FED_PROXY" ] || return 1
     return 0
@@ -57,9 +60,9 @@ flow_fed_rename() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_rename.setup" "setup failed"; return; }
 
-    # The local mount handle is chosen with admin rename (by peer key). After renaming kernel-r to
+    # The local mount handle is chosen with admin peer rename (by peer key). After renaming kernel-r to
     # myremote, R's action is addressable and callable under the new handle.
-    j "$FED_DBL" "$FED_HL" admin rename -- "$FED_RKEY" myremote >/dev/null 2>&1 || { fail "fed_rename.rename" "rename failed"; return; }
+    j "$FED_DBL" "$FED_HL" admin peer rename -- "$FED_RKEY" myremote >/dev/null 2>&1 || { fail "fed_rename.rename" "rename failed"; return; }
     assert_json "fed_rename.proxy_remounted" "$(jj "$FED_DBL" "$FED_HL" action show sys@myremote/greet)" id "$FED_PROXY"
     assert_nonempty "fed_rename.callable_under_new" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@myremote/greet '{}')" tx_id)"
 }
@@ -160,7 +163,7 @@ flow_fed_suspend_blocks() {
     # key; L's proxy is still active locally, so the next call goes out and comes back as a signed
     # rejection receipt (failure tx, all checks pass).
     assert_nonempty "fed_suspend_blocks.first_call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)"
-    assert_contains "fed_suspend_blocks.suspend" "uspended" "$(j "$FED_DBR" "$FED_HR" admin suspend -- "$FED_LKEY" 2>&1)"
+    assert_contains "fed_suspend_blocks.suspend" "uspended" "$(j "$FED_DBR" "$FED_HR" admin peer suspend -- "$FED_LKEY" 2>&1)"
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}' >/dev/null 2>&1 || true
     local tx_id; tx_id=$(python3 -c "import sys,json;t=json.loads(sys.argv[1]);print(t[0]['id'] if t else '')" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_suspend_blocks.tx_recorded" "$tx_id"
@@ -178,7 +181,7 @@ flow_fed_denial_underfunded() {
 
     # A paid action on R, whose owner holds nothing to fund the work with.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
 
     local run_out rc
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid-svc '{}' 2>&1); rc=$?
@@ -220,8 +223,8 @@ flow_fed_import_duty() {
     assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1103
 
     # R's provider funds its own work, so it holds working capital; L funds its caller.
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}')" tx_id)
@@ -231,7 +234,7 @@ flow_fed_import_duty() {
     # lottery off, the obligation of 1050 is paid exactly, so the caller is out exactly that.
     assert_eq "fed_pricing.user_charged" 1050 "$(( ub - ua ))"
     # A peer row holds no money at all: what L owes rides on an obligation, not on a balance (P10).
-    assert_eq "fed_pricing.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$FED_LKEY")" available)"
+    assert_eq "fed_pricing.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin peer show -- "$FED_LKEY")" available)"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_jnum "fed_pricing.tx_gross" "$tx" gross 1103
     assert_jnum "fed_pricing.tx_net"   "$tx" net 1050
@@ -245,7 +248,8 @@ flow_fed_import_duty() {
     stop_server "$FED_DBL"
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l import_bps=2000 bootstrap_peers="$FED_BOOT" \
         || { fail "fed_pricing.restart_l" "L did not restart"; return; }
-    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$FED_DBL" "$FED_HL"
+    j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     assert_jnum "fed_pricing.reprices_on_policy_change" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1260
 
     # The obligation from that call is settled before the next one, so what the next call is charged
@@ -253,7 +257,7 @@ flow_fed_import_duty() {
     # credit limit bounds the total, and a rule per identity would be bypassed by minting one (D14).
     local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" ticket_id)
     assert_nonempty "fed_pricing.names_its_ticket" "$ticket"
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$ticket" --yes -- "$FED_LKEY" 1050 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$ticket" --yes -- "$FED_LKEY" 1050 >/dev/null 2>&1
 
     # And the price shown is the price charged: gross on the next call is the new total, not the old.
     local ub2; ub2=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -271,8 +275,8 @@ flow_fed_failed_action_refund() {
 
     # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" --yes -- "$FED_LKEY" 5000 >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$(newref)" --yes -- "$FED_LKEY" 5000 >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     # Remote 500 → remote failure receipt → full refund to L's caller.
@@ -328,12 +332,12 @@ flow_fed_gossip_discovery() {
     # membership comes from the DHT namespace, not a gossip-carried hint.
     local lfound=no
     for _ in $(seq 1 45); do
-        if jj "$dbt" "$ht" admin peers | grep -q -- "$FED_LKEY"; then lfound=yes; break; fi
+        if jj "$dbt" "$ht" admin peer list | grep -q -- "$FED_LKEY"; then lfound=yes; break; fi
         sleep 1
     done
     assert_eq "fed_gossip.l_discovered_via_routing" yes "$lfound"
 
-    # T cold-resolves R's action by key with its FIRST call. No `admin rename` here on purpose:
+    # T cold-resolves R's action by key with its FIRST call. No `admin peer rename` here on purpose:
     # first meaningful use must bind the petname itself (§13), seeded from R's nickname kernel-r.
     assert_nonempty "fed_gossip.t_resolves_and_calls" "$(strfield "$(jj "$dbt" "$ht" run "sys@$rkey/greet" '{}')" tx_id)"
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show sys@kernel-r/greet)" id)
@@ -355,14 +359,14 @@ flow_fed_gossip_discovery() {
     # §13 leg-(b) evidence propagation + corroboration: T's call to R above was UNRATED, yet T now gossips
     # receipt-backed execution evidence about R (subject=R, issuer=T) — every admitted execution, not only
     # rated calls. L, a third kernel, discovers T through routing discovery and pulls BOTH T's leg-(b)
-    # evidence and R's own leg-(a) execution evidence (which names T as counterparty). `admin inspect` on L
+    # evidence and R's own leg-(a) execution evidence (which names T as counterparty). `admin peer inspect` on L
     # then shows T's interaction under T as issuer (counterparty-experience view, never folded into R's own
     # execution summary) AND marks it CORROBORATED — the two-kernel receipt link holds, so the claim is
     # verified, not taken on faith. Proves an unrated call becomes visible, attributed, and trade-backed.
     local tkey; tkey=$(kernel_key "$dbt" "$ht")
     local tevi=no
     for _ in $(seq 1 40); do
-        if python3 -c "import sys,json;e=json.loads(sys.argv[1]).get('evidence',[]);r=next((x for x in e if x.get('issuer_public_key')==sys.argv[2]),None);sys.exit(0 if r and r.get('corroborated_uses',0)>=1 else 1)" "$(jj "$FED_DBL" "$FED_HL" admin inspect -- "$rkey")" "$tkey" 2>/dev/null; then tevi=yes; break; fi
+        if python3 -c "import sys,json;e=json.loads(sys.argv[1]).get('evidence',[]);r=next((x for x in e if x.get('issuer_public_key')==sys.argv[2]),None);sys.exit(0 if r and r.get('corroborated_uses',0)>=1 else 1)" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$rkey")" "$tkey" 2>/dev/null; then tevi=yes; break; fi
         sleep 1
     done
     assert_eq "fed_gossip.unrated_call_propagates_as_verified_evidence" yes "$tevi"
@@ -383,7 +387,8 @@ flow_fed_discovery() {
         || { fail "fed_discovery.setup" "R did not start"; return; }
     local boot; boot=$(kernel_fed_addr "$dbr")
     [ -n "$boot" ] || { fail "fed_discovery.boot" "no R fed addr"; return; }
-    j "$dbr" "$hr" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     [ -n "$rkey" ] || { fail "fed_discovery.rkey" "no R key"; return; }
 
@@ -395,7 +400,8 @@ flow_fed_discovery() {
     # L joins with R as its ONLY bootstrap peer; it must discover R without subscribing to it.
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "fed_discovery.l" "L did not start"; return; }
-    j "$dbl" "$hl" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$dbl" "$hl"
+    j "$dbl" "$hl" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
 
     # Poll L's discovery cache (§13): a discovery pass runs at startup then every 2s, pulling R's
     # gossip and indexing R's public action into L's lookup docs. sys/lookup then surfaces it as a
@@ -419,7 +425,7 @@ print(next((x.get('price') for x in res if sys.argv[2] in str(x.get('action','')
     # L discovered R but never resolved or called it: R appears in the MERGED roster (§14) as a
     # discovery-only kernel — present, but with NO account (has_account=false). Discovery creates no
     # billing account.
-    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('account' if e.get('has_account') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peers)" "$rkey" 2>/dev/null)
+    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('account' if e.get('has_account') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peer list)" "$rkey" 2>/dev/null)
     assert_eq "fed_discovery.r_is_discovery_only" discovery-only "$rentry"
 
     # The discovery/proxy quote equality (§4 precondition 7): the hash on a catalog card, computed
@@ -433,8 +439,8 @@ print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('act
     assert_nonempty "fed_discovery.card_quote_hash" "$dhash"
 
     # R's provider funds its own work; L funds its caller.
-    j "$dbr" "$hr" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$dbl" "$hl" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbr" "$hr" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbl" "$hl" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "fed_discovery.pinned_first_call" \
         "$(strfield "$(jj "$dbl" "$hl" run "sys@$rkey/greet" '{}' --quote-hash "$dhash")" tx_id)"
     assert_eq "fed_discovery.proxy_hash_equals_card" "$dhash" \
@@ -456,8 +462,10 @@ flow_fed_peer_sync() {
     [ -n "$boot" ] || { fail "fed_peer_sync.boot" "no R fed addr"; return; }
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "fed_peer_sync.l" "L did not start"; return; }
-    j "$dbr" "$hr" auth login sys --password sys-pass >/dev/null 2>&1
-    j "$dbl" "$hl" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    know "$dbl" "$hl"
+    j "$dbl" "$hl" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     local lkey; lkey=$(kernel_key "$dbl" "$hl")
     [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_peer_sync.rkey" "no R/L key"; return; }
@@ -466,20 +474,20 @@ flow_fed_peer_sync() {
     # only, no backend call) and binds the kernel-r alias. R then funds L's proxy on R by key.
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
-    j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_peer_sync.resolve" "resolve/rename failed"; return; }
+    j "$dbl" "$hl" admin peer rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_peer_sync.resolve" "resolve/rename failed"; return; }
     # A peer-sync pass runs at startup, then every 2s. Poll L's own peer list until it has recorded
     # reaching R — no call to R involved.
     local seen=""
     local i
     for i in $(seq 1 20); do
-        seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+        seen=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get('petname')=='kernel-r'),{});print(p.get('last_seen') or '')" "$(jj "$dbl" "$hl" admin peer list)" 2>/dev/null)
         [ -n "$seen" ] && break
         sleep 1
     done
     assert_nonempty "fed_peer_sync.last_seen_cached" "$seen"
 }
 
-# flow_fed_inspect_read_only — `admin inspect` writes nothing (§14). Its reply is live — it does do
+# flow_fed_inspect_read_only — `admin peer inspect` writes nothing (§14). Its reply is live — it does do
 # the gossip pull — but it must not persist what it saw: the discovery loop owns the peer-sync cache,
 # so retention and display state never depend on an operator having looked. Proven with the timer
 # parked at 3600s, so the only thing that could refresh the cache is the inspect itself.
@@ -495,8 +503,10 @@ flow_fed_inspect_read_only() {
     [ -n "$boot" ] || { fail "fed_inspect_read_only.boot" "no R fed addr"; return; }
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=3600 \
         || { fail "fed_inspect_read_only.l" "L did not start"; return; }
-    j "$dbr" "$hr" auth login sys --password sys-pass >/dev/null 2>&1
-    j "$dbl" "$hl" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    know "$dbl" "$hl"
+    j "$dbl" "$hl" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
     local lkey; lkey=$(kernel_key "$dbl" "$hl")
     [ -n "$rkey" ] && [ -n "$lkey" ] || { fail "fed_inspect_read_only.rkey" "no R/L key"; return; }
@@ -505,21 +515,21 @@ flow_fed_inspect_read_only() {
     # kernel-r alias.
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
-    j "$dbl" "$hl" admin rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_read_only.resolve" "resolve/rename failed"; return; }
+    j "$dbl" "$hl" admin peer rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_read_only.resolve" "resolve/rename failed"; return; }
 
     # The cold resolve above was a real outbound contact, so it dated the peer. Inspect is not:
     # whatever that left, inspect must leave exactly as it found it.
     local ps='import sys,json;ps=json.loads(sys.argv[1]);p=next((x for x in ps if x.get("petname")=="kernel-r"),{});print(p.get("last_seen") or "")'
-    local seen_before; seen_before=$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)
+    local seen_before; seen_before=$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peer list)" 2>/dev/null)
 
     # The inspect itself is live: it reaches R and reports what R says right now.
-    local doc; doc=$(jj "$dbl" "$hl" admin inspect kernel-r)
+    local doc; doc=$(jj "$dbl" "$hl" admin peer inspect kernel-r)
     assert_json "fed_inspect_read_only.inspect_live"   "$doc" source live
     assert_json "fed_inspect_read_only.inspect_online" "$doc" online True
 
     # ...and it left nothing behind: the cache is exactly as it was.
     assert_eq "fed_inspect_read_only.last_seen_unchanged" "$seen_before" \
-        "$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peers)" 2>/dev/null)"
+        "$(python3 -c "$ps" "$(jj "$dbl" "$hl" admin peer list)" 2>/dev/null)"
 }
 
 # flow_fed_offline — every federation command has defined behavior when the peer is DOWN (§13):
@@ -536,7 +546,7 @@ flow_fed_offline() {
     # inspect: still works, degrades to last-known local data and marks the peer offline. (The specific
     # action list comes from the discovery cache, populated by the background discovery loop, not by a
     # cold resolve — so this offline flow asserts the degrade, not the catalog contents.)
-    local doc; doc=$(jj "$FED_DBL" "$FED_HL" admin inspect kernel-r)
+    local doc; doc=$(jj "$FED_DBL" "$FED_HL" admin peer inspect kernel-r)
     assert_json "fed_offline.inspect_source_local" "$doc" source local
     assert_json "fed_offline.inspect_offline" "$doc" online False
 
@@ -552,13 +562,13 @@ flow_fed_offline() {
     assert_json "fed_offline.run_tx_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
 
     # peers and identity are local: succeed with the peer down.
-    assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peers    >/dev/null 2>&1; echo $?)"
-    assert_eq "fed_offline.identity_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin identity >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_offline.peers_ok"    0 "$(j "$FED_DBL" "$FED_HL" admin peer list    >/dev/null 2>&1; echo $?)"
+    assert_eq "fed_offline.identity_ok" 0 "$(j "$FED_DBL" "$FED_HL" admin kernel show >/dev/null 2>&1; echo $?)"
 
     # The failed call TAUGHT this kernel something: the peer's row now carries when contact last
     # failed, so the catalog can say "unreachable since" instead of presenting R's actions as fresh.
     # Retention (90 idle days) is a different question and is untouched — R stays listed either way.
-    local peer_row; peer_row=$(jj "$FED_DBL" "$FED_HL" admin peers | python3 -c \
+    local peer_row; peer_row=$(jj "$FED_DBL" "$FED_HL" admin peer list | python3 -c \
         'import sys,json;print(json.dumps(next((p for p in json.load(sys.stdin) if p.get("petname")=="kernel-r"), {})))')
     assert_nonempty "fed_offline.peer_still_listed" "$(strfield "$peer_row" public_key)"
     assert_nonempty "fed_offline.contact_failure_recorded" "$(strfield "$peer_row" last_contact_failed_at)"
@@ -575,7 +585,7 @@ flow_fed_step_complete() {
 
     # On R: sys messages L's proxy user, parking a sys/sink step whose required caller is kernel-l.
     # R must know L as a peer for the address to resolve; a deposit both provisions and funds it.
-    j "$FED_DBR" "$FED_HR" admin deposit --ref "$(newref)" --yes -- "$FED_LKEY" 100 >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$(newref)" --yes -- "$FED_LKEY" 100 >/dev/null 2>&1
     local step_id
     step_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"approve the shipment\"}")" step_id)
     assert_nonempty "fed_step_complete.step_parked" "$step_id"
@@ -586,7 +596,7 @@ flow_fed_step_complete() {
 
     # On L: the step is visible over the wire through the window that already exists — no second
     # command — carrying its derived completion schema.
-    local listed; listed=$(jj "$FED_DBL" "$FED_HL" admin inspect -- "$FED_RKEY")
+    local listed; listed=$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$FED_RKEY")
     assert_contains "fed_step_complete.peer_lists_step" "$step_id" "$listed"
     assert_contains "fed_step_complete.allowed_input" "allowed_input" "$listed"
     assert_contains "fed_step_complete.partial_args_visible" "approve the shipment" "$listed"
@@ -607,7 +617,7 @@ flow_fed_step_complete() {
     first_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" step complete "$step_id" --peer="$FED_RKEY" '{}')" tx_id)
     assert_nonempty "fed_step_complete.completed" "$first_tx"
     assert_json "fed_step_complete.step_done" "$(jj "$FED_DBR" "$FED_HR" step show "$step_id")" status done
-    assert_not_contains "fed_step_complete.queue_drained" "$step_id" "$(jj "$FED_DBL" "$FED_HL" admin inspect -- "$FED_RKEY")"
+    assert_not_contains "fed_step_complete.queue_drained" "$step_id" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$FED_RKEY")"
 
     # Repeating the SAME completion derives the same idempotency key, so R returns its STORED
     # result instead of re-executing — this is how a completion that timed out on the wire but
@@ -624,10 +634,10 @@ flow_fed_step_complete() {
     # A suspended peer cannot complete: suspension is the one moderation axis for peers too (§13).
     local step2
     step2=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"second\"}")" step_id)
-    j "$FED_DBR" "$FED_HR" admin suspend -- "$FED_LKEY" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin peer suspend -- "$FED_LKEY" >/dev/null 2>&1
     assert_fails "fed_step_complete.suspended_refused" "suspend\|unauth" -- \
         j "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}'
-    j "$FED_DBR" "$FED_HR" admin unsuspend -- "$FED_LKEY" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin peer unsuspend -- "$FED_LKEY" >/dev/null 2>&1
     assert_contains "fed_step_complete.unsuspend_restores" tx_id \
         "$(jj "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}')"
 }
@@ -647,14 +657,14 @@ flow_ticket() {
     # R's provider funds its own work (a foreign call is served on the seller's money, P10); L funds
     # its caller and its own stake.
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBR" "$FED_HR" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     assert_nonempty "ticket.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
 
     # Whatever the draw, a peer row holds nothing: what is owed rides on the obligation, never a balance.
-    assert_eq "ticket.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin show -- "$lkey")" available)"
+    assert_eq "ticket.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin peer show -- "$lkey")" available)"
 
     # mp 10 → sr 11 → q 12, of which the import fee of 1 returns to this kernel's own sys — the
     # caller here. So a losing draw costs the caller nothing at all, and a winning one costs exactly
@@ -665,11 +675,11 @@ flow_ticket() {
         "$(case "$paid" in 0) echo ok;; 100) echo ok;; *) echo "bad:$paid";; esac)"
 
     # Both kernels agree what the draw decided, and both sets of books add up.
-    assert_jnum "ticket.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
-    assert_jnum "ticket.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
+    assert_jnum "ticket.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "ticket.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
     # The seller has delivered the whole obligation of 11 unpaid, whatever the draw said: only cash
     # reduces the exposure, and no cash has arrived yet either way.
-    assert_jnum "ticket.exposure_recorded" "$(jj "$FED_DBR" "$FED_HR" admin identity)" exposure 11
+    assert_jnum "ticket.exposure_recorded" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure 11
 }
 
 # flow_transfer exercises the value channel across a federated pair (§13). Value is LOCAL to a kernel:
@@ -686,15 +696,19 @@ flow_transfer() {
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r || { fail "transfer.setup_r" "boot"; return; }
     local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
-    j "$FED_DBR" "$FED_HR" auth login sys --password sys-pass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$FED_DBR" "$FED_HR"
+    j "$FED_DBR" "$FED_HR" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    know "$FED_DBL" "$FED_HL"
+    j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
 
     # alice and bob are both local users on L; R exists to prove its stdlib is not served abroad.
-    j "$FED_DBL" "$FED_HL" user create bob --password userpass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" user create alice --password userpass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin deposit alice 1000 --ref "$(newref)" --yes >/dev/null 2>&1
-    local ahome; ahome=$(home "$dir" alice); j "$FED_DBL" "$ahome" auth login alice --password userpass >/dev/null 2>&1
+    know "$FED_DBL" "$FED_HL"
+    j "$FED_DBL" "$FED_HL" user create bob@$KERNEL_NAME --password userpass >/dev/null 2>&1
+    know "$FED_DBL" "$FED_HL"
+    j "$FED_DBL" "$FED_HL" user create alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    local ahome; ahome=$(home "$dir" alice); know "$FED_DBL" "$ahome"; j "$FED_DBL" "$ahome" auth login alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
 
     # alice sends 100 to bob on her own kernel: the execution price (0) rides the trace and is taxed,
     # while the value moves untaxed from alice's own balance to the beneficiary — two channels (§13).
@@ -704,11 +718,11 @@ flow_transfer() {
 
     # The beneficiary receives exactly the amount and the sender pays exactly it (price 0, no markup).
     assert_eq "transfer.alice_charged" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
-    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin show bob)" available)"
+    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin user show bob)" available)"
 
     # Both parties can read the movement. The transaction records the execution (price 0), so without
     # a ledger entry bob — no party to it — would see 100 credits arrive with nothing to read.
-    local bhome; bhome=$(home "$dir" bob); j "$FED_DBL" "$bhome" auth login bob --password userpass >/dev/null 2>&1
+    local bhome; bhome=$(home "$dir" bob); know "$FED_DBL" "$bhome"; j "$FED_DBL" "$bhome" auth login bob@$KERNEL_NAME --password userpass >/dev/null 2>&1
     assert_contains "transfer.sender_ledger" "bob" "$(jj "$FED_DBL" "$ahome" user ledger)"
     assert_contains "transfer.recipient_ledger" "alice" "$(jj "$FED_DBL" "$bhome" user ledger)"
     assert_eq "transfer.ledger_amount" 100 \
@@ -757,7 +771,7 @@ flow_fed_provider_crash_recovery() {
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
     deposit "$FED_DBL" "$FED_HL" buyer 1000
-    j "$FED_DBR" "$FED_HR" admin deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
 
     local sport; sport=$(backend_port)
     start_slow_backend "$sport" 8
@@ -768,7 +782,7 @@ flow_fed_provider_crash_recovery() {
     # call owed: R serves nobody who still owes it for work already delivered (P10).
     local warm; warm=$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/slow '{}')" tx_id)
     local wtick; wtick=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$warm")" ticket_id)
-    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin deposit --ref "$wtick" --yes -- "$FED_LKEY" 21 >/dev/null 2>&1
+    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin peer settle --ref "$wtick" --yes -- "$FED_LKEY" 21 >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
 
     # Call again and kill the provider while it is still upstream.

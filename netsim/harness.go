@@ -353,7 +353,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(n.Binary, "serve", name, "--addr", "127.0.0.1:0")
+	cmd := exec.Command(n.Binary, "kernel", "serve", name, "--addr", "127.0.0.1:0")
 	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass",
 		"JUICE_HOME="+dir, "HOME="+n.home("sysop-"+name))
 	cmd.Stdout, cmd.Stderr = lf, lf
@@ -390,7 +390,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	// restarts the story uses to kill and revive a provider, and a kernel whose operator is not
 	// signed in fails every administrative command with a message about logging in.
 	k.Login()
-	k.Key = k.Field("sysop-"+name, "public_key", "admin", "identity")
+	k.Key = k.Field("sysop-"+name, "public_key", "admin", "kernel", "show")
 	if k.Key == "" {
 		return nil, fmt.Errorf("kernel %s came up but would not report its own key", name)
 	}
@@ -448,18 +448,28 @@ func waitFor(path, pattern string, within time.Duration) (string, error) {
 	return "", fmt.Errorf("%s did not appear in %s within %s", pattern, filepath.Base(path), within)
 }
 
+// know registers this kernel with one actor's client, under the kernel's own name. A login names
+// the account and the kernel it is on, so the client has to know the kernel first; re-registering
+// the same one at the same address does nothing, so this is safe before every login.
+func (k *Kernel) know(actor string) {
+	_, _ = k.Run(actor, "kernel", "add", k.URL, k.Name)
+}
+
 // MakeUser creates an account, captures its recovery phrase for redaction, and logs it in.
 func (k *Kernel) MakeUser(handle string) {
-	out, _ := k.Run("sysop-"+k.Name, "user", "create", handle, "--password", "userpass")
+	k.know("sysop-" + k.Name)
+	out, _ := k.Run("sysop-"+k.Name, "user", "create", handle+"@"+k.Name, "--password", "userpass")
 	if m := rePhrase.FindString(out); m != "" {
 		k.net.Secret(m, "<phrase:"+handle+">")
 	}
-	_, _ = k.Run(handle, "auth", "login", handle, "--password", "userpass")
+	k.know(handle)
+	_, _ = k.Run(handle, "auth", "login", handle+"@"+k.Name, "--password", "userpass")
 }
 
 // Login signs the superuser in after a restart.
 func (k *Kernel) Login() {
-	_, _ = k.Run("sysop-"+k.Name, "auth", "login", "sys", "--password", "sys-pass")
+	k.know("sysop-" + k.Name)
+	_, _ = k.Run("sysop-"+k.Name, "auth", "login", "sys@"+k.Name, "--password", "sys-pass")
 }
 
 // ---- checks -----------------------------------------------------------------

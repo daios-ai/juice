@@ -21,7 +21,7 @@ network — you are never charged more than the price you saw.
 git clone https://github.com/daios-ai/juice.git
 cd juice
 make build          # or: go build -o juice ./cmd/juice/
-./juice serve acme --addr :4040
+./juice kernel serve acme --addr :4040
 ```
 
 Requires Go 1.25+. `acme` is the kernel's nickname: what it calls itself on the network,
@@ -61,7 +61,7 @@ creates the kernel without asking:
 ```bash
 mkdir -p ~/.juice/kernels/acme
 echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
-JUICE_BOOTSTRAP_PASSWORD=… ./juice serve acme
+JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve acme
 ```
 
 A kernel's whole state lives in that one directory: the database (which holds the signing
@@ -70,33 +70,36 @@ it is a sibling of the first rather than a second installation; there is no `--d
 `--config`. The `cache/` subdirectory is regenerable and safe to delete. A kernel made
 before kernels were named moves itself into `kernels/<its name>/` on first boot.
 
-The CLI is a pure client of the server. Under `$JUICE_HOME/client/` it keeps the kernels
-it knows — each one's address, public key and network — and the *contexts* naming one
-kernel and one login on it:
+Every command is `juice [admin] <noun> <verb>`, with `juice run` the one exception. The
+CLI is a pure client of the server: under `$JUICE_HOME/client/` it keeps the kernels it
+knows — each one's address, public key and network — and one file per *login*, written
+`handle@kernel`, which says both who a command acts as and which kernel it acts through.
 
 ```bash
-./juice use work --endpoint http://localhost:4040   # add and switch to a kernel
-./juice user create alice                           # create an account on it
-./juice auth login alice                            # bind this context to that account
-./juice use                                         # list contexts
-./juice use bot --kernel work                       # a second login on the same kernel
+./juice kernel add http://localhost:4040 work   # register it under the name "work"
+./juice user create alice@work                  # create an account on it
+./juice auth login alice@work                   # log in, and act as alice@work
+./juice kernel list                             # the kernels known, current one marked
+./juice auth list                               # the logins held, current one marked
+./juice auth use bot@work                       # switch to another login already held
 ```
 
-`juice use` dials the server and refuses one whose key or network is not what the
-context recorded, so a command never reaches a kernel you did not mean. A login travels
-only to the address its context recorded. `--server` sets the endpoint for one invocation
-and carries no login. `--context` or `JUICE_CONTEXT` picks a context for one command
-without switching the current one, which is how an agent or a script names the kernel it
-works on.
+Registering dials the server and records the key and network it presents; logging in and
+switching refuse a server that no longer presents them, so a command never reaches a
+kernel you did not mean, and a login travels only to the address recorded for its kernel.
+`--server` sets the endpoint for one invocation and carries no login. `--as alice@work`
+or `JUICE_AS` names a login for one command without switching, which is how an agent or a
+script says who it is; a name that is not a login here is refused rather than replaced by
+whoever happens to be logged in.
 `ecosystem-standard.md` describes the whole layout, including where agents, services and
 the interface keep their own state.
 
 ## Accounts and credits
 
 ```bash
-./juice user create alice        # prints alice's one-time recovery phrase
-./juice user create bob
-./juice auth login alice
+./juice user create alice@work   # prints alice's one-time recovery phrase
+./juice user create bob@work
+./juice auth login alice@work
 ./juice user me                  # handle, balance, locked funds
 ```
 
@@ -104,9 +107,9 @@ Credits enter only by operator deposit against a payment made outside the system
 by the fact that witnesses it, and then move freely between local users:
 
 ```bash
-./juice auth login sys
-./juice admin deposit alice 1000 --ref wire-8823   # operator only
-./juice auth login alice
+./juice auth login sys@work
+./juice admin user deposit alice 1000 --ref wire-8823   # operator only
+./juice auth use alice@work
 ./juice user transfer bob 250      # alice pays bob directly, no fee
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
@@ -271,13 +274,13 @@ and trust verbs:
 
 ```bash
 ./juice admin users                    # all local accounts
-./juice admin deposit carol 500 --ref wire-4471   # credit against a payment received
-./juice admin deposit                  # payments held for a sender nobody has registered
+./juice admin user deposit carol 500 --ref wire-4471  # credit against a payment received
+./juice admin kernel deposits          # payments held for a sender nobody has registered
 ./juice admin suspend carol            # one reversible lever, humans and kernels alike
 ./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
-./juice admin peers                    # counterparties and discovered kernels, last seen
-./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
-./juice admin identity                 # own key, addresses, rail position, money rules and credit
+./juice admin peer list                # counterparties and discovered kernels, last seen
+./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
+./juice admin kernel show              # own key, addresses, rail position, money rules and credit
 ./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
 ```
 
@@ -287,7 +290,7 @@ makes the average payment the charge, so a stream of small calls costs a handful
 payments rather than one apiece, and neither side can pick the outcome. Serving
 strangers is bounded-risk by construction: one credit limit bounds all the work this
 kernel has delivered and not been paid for, so minting identities buys an attacker
-nothing. `admin identity` shows the position.
+nothing. `admin kernel show` shows the position.
 
 ## Configuration
 
@@ -311,7 +314,7 @@ The ones you are most likely to touch:
 
 Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
 `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_CONTEXT` for the client.
+`JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
 
 ## HTTP API
 

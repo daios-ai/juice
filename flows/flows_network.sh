@@ -40,7 +40,8 @@ flow_network_reachability() {
     # is configured — the remote peer must be found through routing discovery, never a manual address.
     start_server "$db" "$hm" kernel_handle=net-node bootstrap_peers="$boot" discovery_interval_seconds=5 || {
         fail "net.boot" "kernel did not start"; return; }
-    j "$db" "$hm" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$db" "$hm"
+    j "$db" "$hm" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
 
     # Self-identity is reachable and announced.
     local mykey; mykey=$(kernel_key "$db" "$hm")
@@ -51,18 +52,18 @@ flow_network_reachability() {
     # gossip are pulled — the address-bearing discovery the key-only PEX path could not do.
     local found=no
     for _ in $(seq 1 30); do
-        if jj "$db" "$hm" admin peers | grep -q -- "$peer"; then found=yes; break; fi
+        if jj "$db" "$hm" admin peer list | grep -q -- "$peer"; then found=yes; break; fi
         sleep 2
     done
     assert_eq "net.peer_discovered" yes "$found"
 
     # And the live connection is hole-punched (direct) or relayed — the path loopback cannot reproduce.
-    local path; path=$(pathf "$(jj "$db" "$hm" admin inspect -- "$peer")" reachability.path)
+    local path; path=$(pathf "$(jj "$db" "$hm" admin peer inspect -- "$peer")" reachability.path)
     echo "  reachability to remote peer: $path"
     assert_eq "net.reachable" yes "$([ "$path" = "direct" ] || [ "$path" = "relayed" ] && echo yes || echo no)"
 
     # §8's conformance line asks for more than reachability: "resolve a remote peer's action by key,
-    # call it both directions with the path hole-punched (asserted via `admin inspect`), then force a
+    # call it both directions with the path hole-punched (asserted via `admin peer inspect`), then force a
     # relay fallback and a restart-mid-call recovery". Discovery alone does not establish that a
     # NAT-bound kernel can trade, which is what U34 actually promises.
     assert_eq "net.path_is_hole_punched" direct "$path"
@@ -109,7 +110,7 @@ flow_network_reachability() {
     # this flow must not impose on the machine it runs on. It is therefore a required, separate
     # invocation, and its absence is a gap in the gate rather than a pass.
     if [ "${JUICE_NETWORK_FORCE_RELAY:-0}" = "1" ]; then
-        local rpath; rpath=$(pathf "$(jj "$db" "$hm" admin inspect -- "$peer")" reachability.path)
+        local rpath; rpath=$(pathf "$(jj "$db" "$hm" admin peer inspect -- "$peer")" reachability.path)
         assert_eq "net.relay_fallback_is_relayed" relayed "$rpath"
         if [ -n "${JUICE_NETWORK_ACTION:-}" ]; then
             local ha2; ha2=$(home "$dir" relaybuyer)

@@ -385,17 +385,40 @@ func userView(u *kernel.Account) map[string]any {
 
 // ---- Resolution helpers ----
 
-// resolveMixed resolves a target that may name either namespace — the only commands that need it are
-// show, rename, suspend/unsuspend, and deposit/withdraw (§14). It returns an account for a local
-// user and a public key for a kernel; the shapes are self-identifying, so only a bare name can be
-// ambiguous, and a bare name matching both a handle and a petname is refused rather than guessed:
-// money and moderation must never pick a target silently. Kernel-only commands (settle, inspect,
-// step --peer) call the kernel resolver directly instead.
-func resolveMixed(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, string, error) {
+// resolveMixed resolves a target that may name either namespace, returning an account for a local
+// user and a public key for a kernel. `want` is the kind the caller asked for — "user", "peer", or
+// "" for either: a command that names its noun gets what it named, so a petname that happens to
+// equal a handle can no longer decide whose account is suspended. Within "" the shapes are
+// self-identifying, so only a bare name can be ambiguous, and one matching both is refused rather
+// than guessed: money and moderation must never pick a target silently.
+func resolveMixed(k *kernel.Kernel, ctx context.Context, ident, want string) (*kernel.Account, string, error) {
 	ident = strings.TrimSpace(ident)
 	if ident == "" {
 		return nil, "", kernel.ErrInvalidInput.Wrap("a user handle, kernel petname, or public key is required")
 	}
+	if want == "user" {
+		// A user is named by handle alone, so a key never resolves here however well it would.
+		acct, err := k.ResolveUser(ctx, ident)
+		if err != nil {
+			return nil, "", err
+		}
+		if !acct.IsLiveUser() {
+			return nil, "", kernel.ErrNotFound.Wrapf("%s is not a user here", ident)
+		}
+		return acct, "", nil
+	}
+	acctOf, keyOf, err := resolveAny(k, ctx, ident)
+	if err != nil {
+		return nil, "", err
+	}
+	if want == "peer" && keyOf == "" {
+		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or public key", ident)
+	}
+	return acctOf, keyOf, nil
+}
+
+// resolveAny takes an identifier that may name either kind — what a caller that did not say gets.
+func resolveAny(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, string, error) {
 	if kernel.IsPublicKey(ident) {
 		key, acct, err := k.ResolveKernelKey(ctx, ident)
 		if err != nil {

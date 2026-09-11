@@ -114,29 +114,30 @@ flow_admin_supervision() {
     make_admin "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    # admin users lists sys and alice; admin show returns alice.
-    assert_contains "admin.user_list" "alice" "$(jj "$db" "$hs" admin users)"
-    assert_contains "admin.user_list_sys" "sys" "$(jj "$db" "$hs" admin users)"
-    assert_json "admin.user_show" "$(jj "$db" "$hs" admin show alice)" handle alice
+    # admin user list lists sys and alice; admin user show returns alice.
+    assert_contains "admin.user_list" "alice" "$(jj "$db" "$hs" admin user list)"
+    assert_contains "admin.user_list_sys" "sys" "$(jj "$db" "$hs" admin user list)"
+    assert_json "admin.user_show" "$(jj "$db" "$hs" admin user show alice)" handle alice
 
     # Suspend blocks alice's session; unsuspend restores it.
-    j "$db" "$hs" admin suspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user suspend alice >/dev/null 2>&1
     assert_fails "admin.suspend_blocks_alice" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
-    j "$db" "$hs" admin unsuspend alice >/dev/null 2>&1
-    j "$db" "$ha" auth login alice --password userpass >/dev/null 2>&1
+    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
+    know "$db" "$ha"
+    j "$db" "$ha" auth login alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
     assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" handle alice
 
     # Superuser rename vacates the old handle; the freed name is reusable by a distinct account,
     # and sys's own handle cannot be renamed.
     local hb; hb=$(home "$dir" bob)
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin rename bob bob-retired >/dev/null 2>&1
-    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin show bob-retired)" handle bob-retired
-    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin show bob
+    j "$db" "$hs" admin user rename bob bob-retired >/dev/null 2>&1
+    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin user show bob-retired)" handle bob-retired
+    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin user show bob
     # The freed handle is reusable by a fresh account.
     make_user "$db" "$hs" "$hb" bob
-    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin show bob)" handle bob
-    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin rename sys root
+    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin user show bob)" handle bob
+    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin user rename sys root
 
     # Supervision is scope on the normal commands: sys sees any owner's actions/processes/txs
     # and may disable any action, all over the standard TCP API (no separate admin surface).
@@ -164,7 +165,7 @@ flow_admin_supervision() {
         "$([ "$(list_len "$(jj "$db" "$hs" tx list)")" -ge 1 ] && echo yes || echo no)"
 
     # A non-superuser is rejected from the operator commands.
-    assert_fails "admin.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$ha" admin users
+    assert_fails "admin.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$ha" admin user list
 }
 
 flow_time() {

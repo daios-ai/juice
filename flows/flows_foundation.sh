@@ -11,7 +11,8 @@ flow_bootstrap() {
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
     ok "bootstrap.first_boot"
-    j "$db" "$hs" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$db" "$hs"
+    j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
 
     assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" handle sys
 
@@ -103,12 +104,12 @@ flow_suspension() {
 
     assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle alice
 
-    j "$db" "$hs" admin suspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user suspend alice >/dev/null 2>&1
     assert_fails "suspension.suspended_rejected" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
     # Data preserved: sys can still see alice.
-    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin show alice)" handle alice
+    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin user show alice)" handle alice
 
-    j "$db" "$hs" admin unsuspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
     assert_json "suspension.unsuspend_restores" "$(jj "$db" "$ha" user me)" handle alice
 }
 
@@ -120,12 +121,12 @@ flow_deposits() {
     make_user "$db" "$hs" "$hb" bob
 
     assert_jnum "deposits.initial_zero" "$(jj "$db" "$ha" user me)" available 0
-    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.balance_updated" "$(jj "$db" "$ha" user me)" available 500
-    j "$db" "$hs" admin deposit alice 200 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice 200 --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.accumulates" "$(jj "$db" "$ha" user me)" available 700
 
-    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin deposit alice 10
+    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin user deposit alice 10
     assert_jnum "deposits.other_user_unaffected" "$(jj "$db" "$hb" user me)" available 0
 }
 
@@ -135,7 +136,7 @@ flow_transfers() {
     make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
 
     # Alice transfers 200 to bob by handle; balances move by exactly the amount.
     j "$db" "$ha" user transfer bob 200 --reason gift --yes >/dev/null 2>&1
@@ -223,29 +224,32 @@ flow_action_owner_visibility() {
 # flow_recovery: seed-phrase password recovery (§12), plus user/kernel descriptions (§13).
 # A created account prints a one-time recovery phrase; losing the password, the user recovers it by
 # signing the server challenge with that phrase. Also: a user sets its own description, and sys's
-# description is the kernel "about" surfaced by admin identity.
+# description is the kernel "about" surfaced by admin kernel show.
 flow_recovery() {
     echo "=== FLOW recovery ==="
     local dir db hs uh phrase; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); uh=$(home "$dir" rec)
     make_admin "$db" "$hs" || { fail "recovery.boot" "server did not start"; return; }
 
-    # sys's description is the kernel "about" (surfaced by admin identity).
+    # sys's description is the kernel "about" (surfaced by admin kernel show).
     j "$db" "$hs" user update --description "the neighbourhood kernel" >/dev/null 2>&1
-    assert_contains "recovery.kernel_about" "neighbourhood" "$(j "$db" "$hs" admin identity)"
+    assert_contains "recovery.kernel_about" "neighbourhood" "$(j "$db" "$hs" admin kernel show)"
 
     # Create a user and capture the one-time recovery phrase (printed to stderr, merged by j()).
-    phrase=$(j "$db" "$uh" user create recuser --password origpass | grep -oE '([a-z]+ ){11}[a-z]+' | head -1)
+    know "$db" "$uh"
+    phrase=$(j "$db" "$uh" user create recuser@$KERNEL_NAME --password origpass | grep -oE '([a-z]+ ){11}[a-z]+' | head -1)
     assert_ne "recovery.phrase_printed" "" "$phrase"
 
     # A user sets and reads back its own description.
-    j "$db" "$uh" auth login recuser --password origpass >/dev/null 2>&1
+    know "$db" "$uh"
+    j "$db" "$uh" auth login recuser@$KERNEL_NAME --password origpass >/dev/null 2>&1
     j "$db" "$uh" user update --description "weather tools" >/dev/null 2>&1
     assert_json "recovery.user_description" "$(jj "$db" "$uh" user me)" description "weather tools"
     j "$db" "$uh" auth logout >/dev/null 2>&1
 
     # Recover a lost password with the phrase; the old password is then rejected and the new works.
-    j "$db" "$uh" auth recover recuser --phrase "$phrase" --password newpass1 >/dev/null 2>&1
-    assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login recuser --password origpass
-    j "$db" "$uh" auth login recuser --password newpass1 >/dev/null 2>&1
+    j "$db" "$uh" auth recover recuser@$KERNEL_NAME --phrase "$phrase" --password newpass1 >/dev/null 2>&1
+    assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login "recuser@$KERNEL_NAME" --password origpass
+    know "$db" "$uh"
+    j "$db" "$uh" auth login recuser@$KERNEL_NAME --password newpass1 >/dev/null 2>&1
     assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle recuser
 }

@@ -68,7 +68,7 @@ func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
-	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"), r.URL.Query().Get("kind"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -95,7 +95,7 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ident := chi.URLParam(r, "handle")
-		acct, key, err := resolveMixed(s.kernel, r.Context(), ident)
+		acct, key, err := resolveMixed(s.kernel, r.Context(), ident, r.URL.Query().Get("kind"))
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -123,7 +123,7 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"))
+	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"), r.URL.Query().Get("kind"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -154,11 +154,12 @@ func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 		Amount int64  `json:"amount"`
 		Reason string `json:"reason"`
 		Ref    string `json:"ref"`
+		Kind   string `json:"kind"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle)
+	u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle, req.Kind)
 	if err != nil {
 		writeErr(w, err)
 		return

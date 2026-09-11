@@ -28,14 +28,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func init() {
-	rootCmd.AddCommand(serveCommand())
-	rootCmd.AddCommand(healthCmd())
-}
-
-// serveCommand is built like every other command, so a test can exercise its argument rules
-// without starting a server.
-func serveCommand() *cobra.Command {
+// kernelServeCmd is built like every other command, so a test can exercise its argument rules
+// without starting a server. It is registered under the kernel noun (see kernel.go).
+func kernelServeCmd() *cobra.Command {
 	var addr string
 	cmd := &cobra.Command{
 		Use:   "serve NAME",
@@ -48,7 +43,7 @@ func serveCommand() *cobra.Command {
 		// Cobra's own arity message names an argument count; an operator needs the name.
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return kernel.ErrInvalidInput.Wrap("name the kernel to serve: juice serve NAME")
+				return kernel.ErrInvalidInput.Wrap("name the kernel to serve: juice kernel serve NAME")
 			}
 			return nil
 		},
@@ -1541,39 +1536,6 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- health command ----
-
-func healthCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "health",
-		Short: "Check server health",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// Resolve the target through the single client resolver (§14: --server), like every
-			// other command — no bespoke URL that could hit another kernel.
-			base := serverBaseURL()
-			resp, err := http.Get(base + "/health") //nolint:noctx
-			if err != nil {
-				return errUnreachable(base, err)
-			}
-			defer resp.Body.Close()
-			var body map[string]any
-			_ = json.NewDecoder(resp.Body).Decode(&body)
-			if resp.StatusCode != http.StatusOK {
-				return kernel.ErrExecutionFailed.Wrapf("server returned status %d", resp.StatusCode)
-			}
-			if flagJSON {
-				return printJSON(body)
-			}
-			h, _ := body["handle"].(string)
-			pk, _ := body["public_key"].(string)
-			net, _ := body["network"].(string)
-			// The network comes first after the name: a kernel serves one for life, and it decides
-			// what every balance and every signature here means (D23).
-			fmt.Printf("ok  %s  network %s  %s\n", h, net, pk)
-			return nil
-		},
-	}
-	return cmd
-}
 
 // ---- response helpers ----
 

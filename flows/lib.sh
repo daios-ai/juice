@@ -143,9 +143,9 @@ kernel_fed_addr() {
         | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
 }
 
-# kernel_key db home  — print a kernel's own federation public key (via admin identity).
+# kernel_key db home  — print a kernel's own federation public key (via admin kernel show).
 kernel_key() {
-    strfield "$(jj "$1" "$2" admin identity)" public_key
+    strfield "$(jj "$1" "$2" admin kernel show)" public_key
 }
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ start_server() {
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" serve "$inst" --addr 127.0.0.1:0 >>"$log" 2>&1 &
+        "$JUICE" kernel serve "$inst" --addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -190,7 +190,7 @@ start_server() {
     done
     SERVER_URL["$db"]="http://$addr"
     SERVER_PID["$db"]="$pid"
-    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_contexts "${SERVER_OLD[$db]}" "http://$addr"
+    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_kernels "${SERVER_OLD[$db]}" "http://$addr"
     return 0
 }
 
@@ -203,11 +203,11 @@ stop_server() {
     unset "SERVER_URL[$1]" "SERVER_PID[$1]" 2>/dev/null
 }
 
-# repoint_contexts old new — a restarted server answers on a new address, and a client's login is
+# repoint_kernels old new — a restarted server answers on a new address, and a client's login is
 # sent only to the address recorded for its kernel. Every client that knew the old address is told
-# the new one, which is what an operator does with `juice use --endpoint` after a restart. The
+# the new one, which is what an operator does with `juice kernel update` after a restart. The
 # recorded key is untouched: a restart changes where a kernel answers, never who it is.
-repoint_contexts() {
+repoint_kernels() {
     local f
     while IFS= read -r f; do
         python3 -c '
@@ -245,12 +245,18 @@ khome() { dirname "$(dirname "$(dirname "$1")")"; }
 await_login() {
     local db="$1" home="$2" i
     for i in $(seq 20); do
-        j "$db" "$home" auth login sys --password sys-pass >/dev/null 2>&1
+        know "$db" "$home" && j "$db" "$home" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
         [ -n "$(strfield "$(jj "$db" "$home" user me)" handle)" ] && return 0
         sleep 0.5
     done
     return 1
 }
+
+# know db home — register db's server with the client under one name, which is what a login names
+# after the @. Re-registering the same kernel at the same address is a no-op, so this is safe to
+# call before every login.
+KERNEL_NAME=k
+know() { j "$1" "$2" kernel add "$(url "$1")" "$KERNEL_NAME" >/dev/null 2>&1; }
 
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }
@@ -299,7 +305,7 @@ import sys,json
 rows=json.loads(sys.argv[1] or '{}').get('owed') or []
 peer=sys.argv[2]
 print(sum(1 for r in rows if r.get('peer') in (peer, peer[:8]) or peer.startswith(r.get('peer',''))))" \
-        "$(jj "$db" "$home" admin deposit)" "$peer" 2>/dev/null || echo 0
+        "$(jj "$db" "$home" admin kernel deposits)" "$peer" 2>/dev/null || echo 0
 }
 
 # pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.
@@ -354,10 +360,10 @@ token() {
 }
 
 # A client keeps what it knows in $HOME/.juice/client/: config.json holds the kernels (address, key,
-# network) and the contexts naming one kernel and one login on it, and credentials/<context>.json
-# holds that session's tokens (D20, ecosystem-standard.md). These read and write one field of the
-# current context, dispatching by field name to whichever of the two files owns it — which is how a
-# flow plants a stale token or checks that logout dropped one.
+# network) and which login is selected, and credentials/<handle@kernel>.json holds that login's
+# tokens (D20, ecosystem-standard.md). These read and write one field of the selected login,
+# dispatching by field name to whichever of the two files owns it — which is how a flow plants a
+# stale token or checks that logout dropped one.
 juice_client_dir() { echo "$1/.juice/client"; }
 
 _ctx_py() {
@@ -369,8 +375,8 @@ cfgp = os.path.join(d, "config.json")
 try:
     cfg = json.load(open(cfgp))
 except Exception:
-    cfg = {"current": "default", "kernels": {}, "contexts": {}}
-name = cfg.get("current") or "default"
+    cfg = {"current": "", "kernels": {}}
+name = cfg.get("current") or "sys@k"
 if field in ("token", "refresh_token"):
     path = os.path.join(d, "credentials", name + ".json")
     try:
@@ -382,13 +388,17 @@ if field in ("token", "refresh_token"):
     cred[field] = sys.argv[3]
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     json.dump(cred, open(path, "w")); os.chmod(path, 0o600)
+    # Planting a session implies the login it belongs to, so a home that has never logged in
+    # still addresses it — which is how a flow plants a stale or rotated-away token.
+    cfg["current"] = name
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    json.dump(cfg, open(cfgp, "w"))
     raise SystemExit
-kname = cfg.get("contexts", {}).get(name, {}).get("kernel") or name
+kname = name.split("@")[-1]
 k = cfg.get("kernels", {}).get(kname, {})
 if not write:
     print(k.get(field, "")); raise SystemExit
 cfg.setdefault("kernels", {}).setdefault(kname, {})[field] = sys.argv[3]
-cfg.setdefault("contexts", {}).setdefault(name, {})["kernel"] = kname
 cfg["current"] = name
 os.makedirs(d, mode=0o700, exist_ok=True)
 json.dump(cfg, open(cfgp, "w"))
@@ -406,14 +416,16 @@ profile_set() { _ctx_py "$(juice_client_dir "$1")" "$2" "$3"; }
 # and what the kernel requires: no secret leaves for an address whose key is not recorded (D20).
 make_admin() {
     start_server "$1" "$2" "${@:3}" || return 1
-    j "$1" "$2" auth login sys --password sys-pass >/dev/null 2>&1
+    know "$1" "$2"
+    j "$1" "$2" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
 }
 # make_user db admin_home user_home handle [password]  — create handle (as sys) and log it
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
     local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"
-    j "$db" "$ah" user create "$h" --password "$pw" >/dev/null 2>&1
-    j "$db" "$uh" auth login "$h" --password "$pw" >/dev/null 2>&1
+    j "$db" "$ah" user create "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
+    know "$db" "$uh"
+    j "$db" "$uh" auth login "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
 }
 # deposit db sys_home handle amount
 # newref — a distinct name for one payment. Every crossing names the payment it records, so two
@@ -423,7 +435,7 @@ newref() { echo "flow-$(date +%s%N)-$RANDOM"; }
 
 # deposit db home target amount [ref] — records money that arrived from outside. Every crossing
 # names the payment it stands for, so a reference is minted when the caller does not give one (U3).
-deposit() { j "$1" "$2" admin deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1; :; }
+deposit() { j "$1" "$2" admin user deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1; :; }
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4

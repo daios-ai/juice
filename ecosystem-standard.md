@@ -6,8 +6,8 @@ released. `requirements.md` governs the kernel and wins on any conflict; this do
 sits beside it, and binds every juice-family program, not only this repository.
 
 It invents nothing. Servers are named, each with its own data directory, as PostgreSQL
-clusters are. Clients keep kernels, logins and the contexts joining them as separate records, as
-kubeconfig does. Only the terms are ours.
+clusters are. Clients keep the kernels they know apart from the logins they hold, as kubeconfig
+keeps clusters apart from users. Only the terms are ours.
 
 ## 1. Terms
 
@@ -15,9 +15,9 @@ kubeconfig does. Only the terms are ours.
   per operating-system user. Several people on one machine are several installations.
 - **Kernel** — one server: its database and signing key, world, rail key, configuration and lock,
   in one directory named for its nickname.
-- **Principal** — an account on one kernel. `sys` is one principal per kernel.
-- **Session** — one login of one principal, holding an access token and a refresh token.
-- **Context** — a name joining one kernel to one session. What every program names.
+- **Account** — a principal on one kernel. `sys` is one account per kernel.
+- **Login** — one account at one kernel, written `handle@kernel`, holding that session's access and
+  refresh tokens. What every program names, and what says both who a command acts as and where.
 - **Component** — a program in the installation: the interface, an agent, a service, the command
   line.
 
@@ -27,8 +27,8 @@ kubeconfig does. Only the terms are ours.
 $JUICE_HOME/
   kernels/<name>/        one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
-  client/config.json     the kernels this client knows, the contexts on them, and the current one
-  client/credentials/    one file per context, 0600, holding that session's tokens
+  client/config.json     the kernels this client knows, and which login is selected
+  client/credentials/    one file per login, named handle@kernel, 0600, holding its tokens
   agents/<name>/         one agent: its configuration, persona, knowledge, memory, conversations
   services/<name>/       one installed service: its executable state and private configuration
   ui/                    the interface's own state
@@ -43,7 +43,7 @@ never removes an agent's memory, a service's state, or the interface's history.
 
 ## 3. Kernels
 
-`juice serve <name>` serves `kernels/<name>/`. The name may hold letters, digits, dot, dash and
+`juice kernel serve <name>` serves `kernels/<name>/`. The name may hold letters, digits, dot, dash and
 underscore, up to 64 characters, may not begin with a dot, and is bare — it is a nickname as well as
 a directory.
 
@@ -74,59 +74,65 @@ never as a step in switching kernels.
 
 ```json
 {
-  "current": "default",
+  "current": "alice@work",
   "kernels": {
-    "default": {
+    "work": {
       "endpoint": "http://localhost:4040",
       "public_key": "<43-char base64url Ed25519 key>",
       "world_digest": "…", "network": "play", "decimals": 0
     }
-  },
-  "contexts": {
-    "default": { "kernel": "default", "handle": "alice", "principal_id": "<uuid>" }
   }
 }
 ```
 
-`client/credentials/<context>.json`, mode 0600: `{"token": "…", "refresh_token": "…"}`.
+`client/credentials/alice@work.json`, mode 0600:
+`{"token": "…", "refresh_token": "…", "principal_id": "<uuid>"}`.
 
-One kernel, many contexts. One principal may hold several contexts on one kernel, which is how the
-interface, an agent and the command line authenticate as the same account without sharing a session.
-Rotating one session's refresh token leaves the others untouched. Two processes on one context are
-safe as well: the whole read-rotate-write runs under an exclusive lock on that credential file, and
-the second to arrive uses what the first stored rather than spending a token that no longer exists.
+One kernel, many logins. Each account holds its own file, so an agent and a person working on one
+kernel never share a session and rotating one leaves the others untouched. Two processes on one
+login are safe as well: the whole read-rotate-write runs under an exclusive lock on that credential
+file, and the second to arrive uses what the first stored rather than spending a token that no
+longer exists. Two programs logged in as the *same* account on one kernel share that one session,
+which is what "logged out" means: ending it ends it for both.
 
-Names are local aliases. Anything durable — an agent's memory of a kernel, a record of what was
-bought where — is keyed by `(network digest, kernel public key, principal id)`, never by a context
-or kernel name, and never by a handle, which can be renamed.
+The file name is a label. A handle can be renamed, and its old name taken by someone else, so the
+account is recorded inside as `principal_id`, and it is the token — never the name — that
+authenticates. Anything durable an agent remembers is keyed by
+`(network digest, kernel public key, principal id)`, never by a login or kernel name, and never by
+a handle.
 
 Commands:
 
 | Command | Effect |
 |---|---|
-| `juice use` | list the contexts, marking the current one |
-| `juice use NAME --endpoint URL` | add or repoint kernel NAME and a context on it, record its identity, and strand every login on that kernel |
-| `juice use NAME --kernel K` | add context NAME as a second login on a kernel already known |
-| `juice use NAME` | switch, refusing a server that is no longer the recorded kernel or network |
-| `juice auth login USER` | bind the current context to that principal and store its session |
-| `--context NAME`, `JUICE_CONTEXT=NAME` | address one context for one command, without switching |
+| `juice kernel add URL [NAME]` | register the kernel answering there, under its advertised nickname unless NAME is given; selects nothing |
+| `juice kernel list` | the kernels known, marking the one in use |
+| `juice kernel update NAME URL` | repoint it, and log out every login on it |
+| `juice kernel forget NAME` | drop the record and those logins' credentials |
+| `juice auth login USER@KERNEL` | authenticate there, and act as that login |
+| `juice auth use USER@KERNEL` | switch to a login already held, verifying the kernel first |
+| `juice auth list` | the logins held, marking the one in use |
+| `juice auth logout [USER@KERNEL]` | end it; if it was in use, nothing is in use afterwards |
+| `--as USER@KERNEL`, `JUICE_AS=USER@KERNEL` | act as one login for one command, without switching |
 
 `current` is a convenience for a person at a terminal. An unattended program — an agent, a service,
-a scheduled job — names its context explicitly and never reads `current`, so `juice use` in a
-terminal can never move an agent's spending onto another kernel. An interface selects a context per
-session or window and does not follow `current` while open.
+a scheduled job — names its login explicitly and never reads `current`, so `juice auth use` in a
+terminal can never move an agent's spending onto another kernel. An interface selects a login per
+session or window and does not follow `current` while open. A selector naming no login here is an
+error rather than a fallback: a misspelled `--as` must not act as somebody else.
 
-A component finds its kernel in `client/config.json` by context name and its tokens in
-`client/credentials/<context>.json`. A refresh is read, exchange, write under an exclusive lock on
-that file. `config.json` is written by temp file and rename. A session is obtained with the `juice`
-command line or by writing those two files. Executables go to `$PREFIX/bin`, default `~/.local`.
+A component finds its kernel in `client/config.json` by the kernel half of its login, and its
+tokens in `client/credentials/<login>.json`. A refresh is read, exchange, write under an exclusive
+lock on that file. `config.json` is written by temp file and rename. A session is obtained with the
+`juice` command line or by writing those two files. Executables go to `$PREFIX/bin`, default
+`~/.local`.
 
 ## 5. Releasing a credential
 
 The kernel listens on plain HTTP on its own machine, as Ollama, Jupyter, MySQL and PostgreSQL over
-TCP do. A client sends a stored credential only to the address its context recorded, and `juice use`
-refuses to switch to a server that no longer reports the recorded key or network. That is the whole
-rule.
+TCP do. A client sends a stored credential only to the address recorded for that login's kernel, and
+`juice auth login` and `juice auth use` refuse a server that no longer reports the recorded key or
+network. That is the whole rule.
 
 It is not a defence against another user account on the same machine taking the port before the
 kernel does. A personal installation has no such user, and a machine shared with people the operator
@@ -136,20 +142,20 @@ TLS front end, as with any web service.
 Credentials belong to a session, never to an installation. Two components sharing a root share no
 token.
 
-A context name is one path segment, on the same rule as a kernel name, because it becomes a file
-under `credentials/` and a name free to hold a separator would address something else.
+A login is two ordinary local names with an `@` between them, because it becomes a file under
+`credentials/` and a name free to hold a separator would address something else.
 
 ## 6. Components
 
 **Agents** are users. An agent holds its own principal on every kernel it works on, created and
-funded like any other, and never the operator's. It names a context explicitly. Its persona,
+funded like any other, and never the operator's. It names its login explicitly. Its persona,
 knowledge, memory, conversations and tasks live under `agents/<name>/` and survive any kernel it
 used; what it remembers about a kernel is keyed by the tuple in §4, so a stale memory is detectable
 rather than silently wrong.
 
 **Services** are ordinary HTTP servers, installed once under `services/<name>/` and listening on a
 port of their own. Installation and registration are separate acts: a service is installed once, and
-registered on each kernel that should sell it, by a provider principal naming a context. A service
+registered on each kernel that should sell it, by a provider naming its login. A service
 holds no kernel credential. It composes using the capability and callback address carried on each
 dispatched request, which is how one service can serve several kernels with nothing kernel-specific
 in its configuration. Upstream credentials belong to the provider and are sealed on the action, not
@@ -159,7 +165,7 @@ Registration is by adapter. An OpenAPI document installed with `action import` i
 gets identity-preserving reconciliation across upgrades. A service that is not representable that
 way is registered by ordinary action creation. Neither is a requirement of being a service.
 
-**The interface** is a client like any other. It reads the same contexts, shows which one is in use,
+**The interface** is a client like any other. It reads the same logins, shows which one is in use,
 and checks `/health` before it trusts. A port number is a default, never an identity: an interface
 that dials a port without checking will talk to whichever kernel holds it.
 
@@ -171,9 +177,12 @@ happened or it did not, and an interrupted boot leaves no half-moved ledger. It 
 merging, when a server still holds the old home or when the destination already exists. Running
 again finds nothing to move.
 
-A `client/profiles.json` written before contexts existed becomes `client/config.json` plus one
-credential file per profile, on the client's first run. The old file is kept as
-`profiles.json.migrated`. An existing `config.json` is never overwritten.
+A client written before logins converts once, on its first run. A context that recorded which
+account it held becomes that login and keeps its session; one that did not holds tokens nobody can
+name, so its file is kept aside with `.unmigrated` rather than guessed at or deleted; and two
+contexts that would become one login never merge — the selected one keeps the name. A
+`client/profiles.json`, older still, yields its kernels and their pinned keys the same way, and is
+kept as `profiles.json.migrated`. An existing `config.json` is never overwritten.
 
 The kernel and the command line migrate themselves; nothing here moves another component's files.
 An interface, agent or service still keeping its own address or its own token moves to the layout

@@ -73,7 +73,7 @@ flow_successful_paid_call() {
     deposit "$db" "$hs" bob 500
 
     local aid; aid=$(publish "$db" "$ha" pay --kind http --source "http://127.0.0.1:${bport}/pay" --price 100 --description "paid")
-    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show sys)" available)
+    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin user show sys)" available)
 
     # fee_bps=2000 → on gross=100: fee=20, net=80.
     local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/pay '{}')" tx_id)
@@ -85,7 +85,7 @@ flow_successful_paid_call() {
     assert_json "successful_paid_call.tx_status" "$tx" status success
     assert_jnum "successful_paid_call.bob_debited"     "$(jj "$db" "$hb" user me)" available 400
     assert_jnum "successful_paid_call.target_credited" "$(jj "$db" "$ha" user me)" available 80
-    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin show sys)" available)"
+    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin user show sys)" available)"
 }
 
 flow_http_verbs() {

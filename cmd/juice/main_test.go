@@ -140,6 +140,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	selectTestLogin(t, "tester@k", "http://kernel:4040")
 
 	if err := saveToken("tok123"); err != nil {
 		t.Fatal(err)
@@ -275,6 +276,7 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	selectTestLogin(t, "tester@k", "http://kernel:4040")
 
 	if err := saveRefreshToken("rt456"); err != nil {
 		t.Fatal(err)

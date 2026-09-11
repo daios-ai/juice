@@ -37,6 +37,7 @@ func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
 	t.Setenv("JUICE_HOME", t.TempDir())
+	selectTestLogin(t, "tester@stub", srv.URL)
 	return srv
 }
 
@@ -46,11 +47,13 @@ func TestServerBaseURL(t *testing.T) {
 	oldServer := flagServer
 	t.Cleanup(func() { flagServer = oldServer })
 
-	// --server is the only override: no env var, no config key (§14).
+	// --server is the only override: no env var, no config key (§14). With nothing selected there
+	// is no address at all — a client that has not been told where to go says so rather than
+	// dialling localhost, which could be a kernel its caller never named.
 	flagServer = ""
 	t.Setenv("JUICE_SERVER", "http://env:2")
-	if got := serverBaseURL(); got != "http://localhost:4040" {
-		t.Fatalf("default: got %q", got)
+	if got := serverBaseURL(); got != "" {
+		t.Fatalf("no login selected: got %q, want no address", got)
 	}
 	flagServer = "http://flag:3/"
 	if got := serverBaseURL(); got != "http://flag:3" {

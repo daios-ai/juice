@@ -266,12 +266,20 @@ func init() {
 func userCreateCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "create USER",
-		Short: "Create a user account",
-		Long:  "Create a user account. USER is a bare handle — letters and digits, no @ or /.\n\nPrints a one-time recovery phrase; write it down. It is the only way to reset a lost\npassword (`juice auth recover`).",
-		Args:  cobra.ExactArgs(1),
+		Use:   "create USER@KERNEL",
+		Short: "Create a user account on a kernel",
+		Long: "Create the account USER on KERNEL, which is a kernel this client knows (`juice kernel\n" +
+			"list` shows them). Creating an account does not log you in: `juice auth login USER@KERNEL`\n" +
+			"does that.\n\n" +
+			"Prints a one-time recovery phrase; write it down. It is the only way to reset a lost\n" +
+			"password (`juice auth recover`).",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			user := args[0]
+			l, err := namedLogin(args[0])
+			if err != nil {
+				return err
+			}
+			user := l.Handle
 			if password == "" {
 				p, err := promptNewPassword("Password: ")
 				if err != nil {
@@ -367,7 +375,14 @@ func userTransferCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := confirm(fmt.Sprintf("Send %s to %s? This cannot be undone.", net.Amount(amount), args[0]), yes); err != nil {
+			// The confirmation names both parties in full: it is read out of the context that made
+			// it obvious which kernel and which account are meant.
+			me, _, merr := selected()
+			if merr != nil {
+				return merr
+			}
+			if err := confirm(fmt.Sprintf("Send %s from %s to %s@%s? This cannot be undone.",
+				net.Amount(amount), me, args[0], me.Kernel), yes); err != nil {
 				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/v1/transfers", map[string]any{
@@ -569,8 +584,12 @@ func userWithdrawCmd() *cobra.Command {
 			if me.RailAddress != "" {
 				where = " to " + me.RailAddress
 			}
-			if err := confirm(fmt.Sprintf("Withdraw %s on %s%s? This cannot be undone.",
-				net.Amount(amount), net.Name, where), yes); err != nil {
+			who, _, merr := selected()
+			if merr != nil {
+				return merr
+			}
+			if err := confirm(fmt.Sprintf("Withdraw %s from %s on %s%s? This cannot be undone.",
+				net.Amount(amount), who, net.Name, where), yes); err != nil {
 				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{

@@ -46,13 +46,13 @@ func collect(n *Net) (map[string]Snapshot, []string) {
 		}
 		op := "sysop-" + name
 		var err error
-		if s.Identity, err = read[map[string]any](k, op, "admin", "identity"); err != nil {
+		if s.Identity, err = read[map[string]any](k, op, "admin", "kernel", "show"); err != nil {
 			bad("the kernel's own position", err)
 		}
-		if s.Peers, err = read[[]map[string]any](k, op, "admin", "peers", "--all"); err != nil {
+		if s.Peers, err = read[[]map[string]any](k, op, "admin", "peer", "list", "--all"); err != nil {
 			bad("the peer rows", err)
 		}
-		if s.Users, err = read[[]map[string]any](k, op, "admin", "users"); err != nil {
+		if s.Users, err = read[[]map[string]any](k, op, "admin", "user", "list"); err != nil {
 			bad("the accounts", err)
 		}
 		if s.Actions, err = read[[]map[string]any](k, op, "action", "list", "--all", "--limit", "200"); err != nil {
@@ -69,7 +69,7 @@ func collect(n *Net) (map[string]Snapshot, []string) {
 		}
 		if awaiting, aerr := read[struct {
 			Owed []map[string]any `json:"owed"`
-		}](k, op, "admin", "deposit"); aerr != nil {
+		}](k, op, "admin", "kernel", "deposits"); aerr != nil {
 			bad("what it is still owed", aerr)
 		} else {
 			s.Owed = awaiting.Owed
@@ -613,6 +613,11 @@ func owedBy(s Snapshot, of *Kernel) int {
 	}
 	n := 0
 	for _, r := range s.Owed {
+		// A kernel whose key could not be read names nothing: matching on an empty prefix would
+		// count every row, and slicing one would panic while reporting a run that already failed.
+		if of.Key == "" {
+			return 0
+		}
 		if peer := str(r, "peer"); peer == of.Handle || peer == of.Key || strings.HasSuffix(peer, of.Key[:8]) {
 			n++
 		}

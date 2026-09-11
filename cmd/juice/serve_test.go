@@ -2066,7 +2066,7 @@ func TestHealthCmd(t *testing.T) {
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
 
-	if _, err := execTestCmd(t, healthCmd()); err != nil {
+	if _, err := execTestCmd(t, kernelHealthCmd()); err != nil {
 		t.Fatalf("health: unexpected error: %v", err)
 	}
 }
@@ -2085,7 +2085,7 @@ func TestHealthCmdHonorsServer(t *testing.T) {
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
 
-	if _, err := execTestCmd(t, healthCmd()); err != nil {
+	if _, err := execTestCmd(t, kernelHealthCmd()); err != nil {
 		t.Fatalf("health: %v", err)
 	}
 	if hit != "/health" {

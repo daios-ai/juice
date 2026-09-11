@@ -17,7 +17,7 @@ import (
 // kernel is created unnamed. Cobra refuses the bare command; what may name one is
 // TestKernelNameValidation's subject.
 func TestServeRequiresAKernelName(t *testing.T) {
-	if _, err := execTestCmd(t, serveCommand()); err == nil {
+	if _, err := execTestCmd(t, kernelServeCmd()); err == nil {
 		t.Fatal("juice serve with no name was accepted")
 	}
 }

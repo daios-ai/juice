@@ -58,7 +58,7 @@ var (
 	flagQuiet   bool
 	flagServer  string
 	flagVerbose bool
-	flagContext string
+	flagAs      string
 )
 
 // dbPath is where this kernel keeps its ledger, inside its own home (kernelHome). A kernel is
@@ -76,7 +76,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
-	rootCmd.PersistentFlags().StringVar(&flagContext, "context", "", "Client context to address for this command")
+	rootCmd.PersistentFlags().StringVar(&flagAs, "as", "", "Login to act as for this command, as USER@KERNEL")
 }
 
 // juiceHome is the installation root every juice-family program shares: $JUICE_HOME if set, else

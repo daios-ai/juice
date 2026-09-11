@@ -786,15 +786,34 @@ func TestResolveMixedNamespaces(t *testing.T) {
 	}
 
 	// Unambiguous: the local handle resolves to the account, the petname to the kernel.
-	if acct, gotKey, err := resolveMixed(k, ctx, "shared"); err != nil || acct == nil || acct.ID != local.ID || gotKey != "" {
+	if acct, gotKey, err := resolveMixed(k, ctx, "shared", ""); err != nil || acct == nil || acct.ID != local.ID || gotKey != "" {
 		t.Errorf("handle: got acct=%v key=%q err=%v", acct, gotKey, err)
 	}
-	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly"); err != nil || gotKey != key {
+	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly", ""); err != nil || gotKey != key {
 		t.Errorf("petname: got key=%q err=%v, want %s", gotKey, err, key)
 	}
 	// A raw key is self-identifying and always names the kernel.
-	if _, gotKey, err := resolveMixed(k, ctx, key); err != nil || gotKey != key {
+	if _, gotKey, err := resolveMixed(k, ctx, key, ""); err != nil || gotKey != key {
 		t.Errorf("raw key: got key=%q err=%v", gotKey, err)
+	}
+
+	// A caller that says which kind it means gets that kind or nothing: `admin user suspend` on a
+	// peer, or `admin peer settle` on a user, is a refusal rather than a guess — which is what makes
+	// the noun in the command mean something.
+	if _, _, err := resolveMixed(k, ctx, "kernelonly", "user"); err == nil {
+		t.Error("a peer answered a command that named a user")
+	}
+	if _, _, err := resolveMixed(k, ctx, key, "user"); err == nil {
+		t.Error("a public key answered a command that named a user")
+	}
+	if _, _, err := resolveMixed(k, ctx, "shared", "peer"); err == nil {
+		t.Error("a user answered a command that named a peer")
+	}
+	if acct, gotKey, err := resolveMixed(k, ctx, "shared", "user"); err != nil || acct.ID != local.ID || gotKey != "" {
+		t.Errorf("a user named as a user: acct=%v key=%q err=%v", acct, gotKey, err)
+	}
+	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly", "peer"); err != nil || gotKey != key {
+		t.Errorf("a peer named as a peer: key=%q err=%v", gotKey, err)
 	}
 
 	// Now make the name ambiguous by binding the same string in the kernel namespace.
@@ -803,10 +822,10 @@ func TestResolveMixedNamespaces(t *testing.T) {
 	if _, err := k.BindPetname(ctx, key2, "shared", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, _, err := resolveMixed(k, ctx, "shared", ""); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("ambiguous bare name: want ErrInvalidInput, got %v", err)
 	}
-	if _, _, err := resolveMixed(k, ctx, "nobody"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, _, err := resolveMixed(k, ctx, "nobody", ""); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("unknown name: want ErrNotFound, got %v", err)
 	}
 }
@@ -848,7 +867,7 @@ func TestResolveMixedRefusesTombstones(t *testing.T) {
 	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, _, err := resolveMixed(k, ctx, acct.ID, ""); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
 	}
 }

@@ -299,8 +299,8 @@ func (s *story) join(name string, cap int64, handle string) (*Kernel, error) {
 		if other == name || ok.URL == "" {
 			continue
 		}
-		_, _ = ok.Run("sysop-"+other, "admin", "rename", "--", k.Key, handleOf(name))
-		_, _ = k.Run("sysop-"+name, "admin", "rename", "--", ok.Key, handleOf(other))
+		_, _ = ok.Run("sysop-"+other, "admin", "peer", "rename", "--", k.Key, handleOf(name))
+		_, _ = k.Run("sysop-"+name, "admin", "peer", "rename", "--", ok.Key, handleOf(other))
 	}
 	return k, nil
 }
@@ -441,11 +441,11 @@ func (s *story) actMoney() error {
 	// Submitting one three times must credit it once, on every rail.
 	k1 := s.k("k1")
 	before := k1.Balance("ana")
-	_, _ = k1.Run("sysop-k1", "admin", "deposit", "ana", "100", "--ref", "netsim-replay")
+	_, _ = k1.Run("sysop-k1", "admin", "user", "deposit", "--yes", "ana", "100", "--ref", "netsim-replay")
 	afterFirst := k1.Balance("ana")
 	s.deposited("k1", (afterFirst-before)/s.scale)
 	for i := 0; i < 2; i++ {
-		_, _ = k1.Run("sysop-k1", "admin", "deposit", "ana", "100", "--ref", "netsim-replay")
+		_, _ = k1.Run("sysop-k1", "admin", "user", "deposit", "--yes", "ana", "100", "--ref", "netsim-replay")
 	}
 	// Whether the first submission credits anything is the rail's business: where the operator's
 	// record is the fact it credits, and where a chain is the fact it is refused until the chain
@@ -604,7 +604,7 @@ func (s *story) isDebtor(buyer, debtor string) bool {
 // outstanding is what a seller is waiting to be paid for, as the operator sees it: each obligation a
 // buyer has said it paid, named by the fact that closes it.
 func (s *story) outstanding(seller string) []settlement {
-	out, _ := s.k(seller).Run("sysop-"+seller, "--json", "admin", "deposit")
+	out, _ := s.k(seller).Run("sysop-"+seller, "--json", "admin", "kernel", "deposits")
 	var body struct {
 		Owed []struct {
 			ID         string `json:"id"`
@@ -867,7 +867,7 @@ func (s *story) actEvidence() error {
 	s.n.MustWork("evidence.stats_readable", s.k("k1"), "ana", "action", "stats", "ana/echo")
 	for _, pair := range [][2]string{{"k1", "k2"}, {"k2", "k1"}, {"k3", "k1"}} {
 		s.n.MustWork("evidence.peer_inspectable", s.k(pair[0]), "sysop-"+pair[0],
-			"admin", "inspect", "--", s.k(pair[1]).Key)
+			"admin", "peer", "inspect", "--", s.k(pair[1]).Key)
 	}
 	// The privacy check is made on what actually crosses the wire, not on what the command line
 	// chose to print.
@@ -1088,7 +1088,7 @@ func (s *story) exposureOf(name string) int64 {
 	if s.k(name) == nil {
 		return 0
 	}
-	m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "identity")
+	m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "kernel", "show")
 	return num(m, "exposure")
 }
 
@@ -1205,7 +1205,7 @@ func (s *story) attackSquatting() {
 		return
 	}
 	time.Sleep(5 * time.Second)
-	out, _ := s.k("k1").Run("sysop-k1", "--json", "admin", "peers", "--all")
+	out, _ := s.k("k1").Run("sysop-k1", "--json", "admin", "peer", "list", "--all")
 	var rows []map[string]any
 	_ = json.Unmarshal([]byte(out), &rows)
 	pointsAt := ""
@@ -1248,7 +1248,7 @@ func (s *story) actSettleAll() error {
 			if s.k(name) == nil {
 				continue
 			}
-			m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "identity")
+			m, _ := read[map[string]any](s.k(name), "sysop-"+name, "admin", "kernel", "show")
 			sys, _ := m["sys"].(map[string]any)
 			if num(sys, "pending_payouts") != 0 {
 				return false

@@ -41,18 +41,84 @@ func lastSeenStr(t *time.Time) string {
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
 	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser commands"}
-	adminCmd.AddCommand(
-		adminUsersCmd(),
-		adminShowCmd(),
-		adminSuspendCmd(),
-		adminUnsuspendCmd(),
-		adminRenameCmd(),
-		adminDepositCmd(),
-		peerListCmd(),
-		peerInspectCmd(),
-		identityCmd(),
-	)
+	userCmd := &cobra.Command{Use: "user", Short: "Accounts on this kernel"}
+	userCmd.AddCommand(append(rosterCmds("user"), adminUserListCmd(), adminUserDepositCmd())...)
+	peerCmd := &cobra.Command{Use: "peer", Short: "Kernels this one trades with"}
+	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd(), peerSettleCmd())...)
+	kernelCmd := &cobra.Command{Use: "kernel", Short: "This kernel itself"}
+	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd())
+	adminCmd.AddCommand(userCmd, peerCmd, kernelCmd)
 	rootCmd.AddCommand(adminCmd)
+}
+
+// roster is what the two nouns an operator supervises have in common: an account here, named its
+// own way, that can be read, suspended, restored and renamed. The verbs are identical but the
+// nouns are not, so the kind travels to the server and a target of the other kind is refused
+// there — which is the whole point of naming the noun rather than letting one command guess.
+type roster struct {
+	noun, target, named, renamed string
+}
+
+var rosters = map[string]roster{
+	"user": {noun: "user", target: "USER", named: "a user's handle, as `admin user list` shows it",
+		renamed: "NEW_NAME becomes the account's handle, and the old handle is freed"},
+	"peer": {noun: "peer", target: "PEER", named: "a peer kernel's petname or public key, as `admin peer list` shows it",
+		renamed: "NEW_NAME becomes the peer's petname — the local name your commands use for it"},
+}
+
+// rosterCmds builds those four verbs for one noun. One constructor rather than eight commands: the
+// difference between them is a word and a kind, and writing it once is what keeps them identical
+// where they should be.
+func rosterCmds(noun string) []*cobra.Command {
+	r := rosters[noun]
+	path := func(target, verb string) string {
+		return "/control/users/" + url.PathEscape(target) + verb + "?kind=" + r.noun
+	}
+	// Suspending and restoring are one act and its undo: the same target, the same route, and a
+	// word apart, so they are written once.
+	flip := func(verb, done, short, long string) *cobra.Command {
+		return &cobra.Command{
+			Use:   verb + " " + r.target,
+			Short: short,
+			Long:  long + "\n\n" + r.target + " is " + r.named + ".",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(_ *cobra.Command, args []string) error {
+				if err := apiCall(context.Background(), "POST", path(args[0], "/"+verb), nil, nil); err != nil {
+					return err
+				}
+				fmt.Printf("%s %s.\n", args[0], done)
+				return nil
+			},
+		}
+	}
+	show := &cobra.Command{
+		Use:   "show " + r.target,
+		Short: "Show one " + r.noun + "'s account here",
+		Long:  "Show one " + r.noun + "'s account on this kernel.\n\n" + r.target + " is " + r.named + ".",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return apiEmit("GET", path(args[0], ""), nil)
+		},
+	}
+	rename := &cobra.Command{
+		Use:   "rename " + r.target + " NEW_NAME",
+		Short: "Rename a " + r.noun,
+		Long:  "Rename a " + r.noun + ". " + r.renamed + ". A name already in use is refused.",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			body := map[string]any{"new_name": args[1]}
+			if err := apiCall(context.Background(), "POST", path(args[0], "/rename"), body, nil); err != nil {
+				return err
+			}
+			fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
+			return nil
+		},
+	}
+	return []*cobra.Command{show, rename,
+		flip("suspend", "suspended", "Suspend a "+r.noun,
+			"Suspend a "+r.noun+": a suspended user cannot log in, and a suspended peer's calls are\nrefused. Reversible with `admin "+r.noun+" unsuspend`."),
+		flip("unsuspend", "unsuspended", "Restore a suspended "+r.noun,
+			"Restore a suspended "+r.noun+", lifting every refusal the suspension caused.")}
 }
 
 // identityCmd prints who this kernel is and where it stands. Federation exposes no .well-known
@@ -61,7 +127,7 @@ func init() {
 // disagreement here rather than in a user's failed withdrawal.
 func identityCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "identity",
+		Use:   "show",
 		Short: "Show this kernel's identity, money position, and federation standing",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -173,11 +239,11 @@ func identityCmd() *cobra.Command {
 	}
 }
 
-func adminUsersCmd() *cobra.Command {
+func adminUserListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "users",
-		Short: "List users",
+		Use:   "list",
+		Short: "List the accounts on this kernel",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			var users []*kernel.Account
@@ -204,107 +270,53 @@ func adminUsersCmd() *cobra.Command {
 }
 
 // targetHelp defines the shared TARGET placeholder of the mixed account/kernel admin commands.
-const targetHelp = "TARGET is a local user's handle, or a peer kernel's local name (petname) or\npublic key; names are shown by `admin users` and `admin peers`."
 
-func adminShowCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "show TARGET",
-		Short: "Show a local account or a remote kernel",
-		Long:  "Show a local account or a remote kernel.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
-		},
-	}
+// Money arriving from outside is recorded once, against the fact that caused it. Who it is recorded
+// for decides what it means: a user is credited, and a peer's obligation is settled to whoever it
+// was owed to. They were one command guessing from its argument; they are two, each saying which.
+func adminUserDepositCmd() *cobra.Command {
+	return creditCmd("user", "deposit USER [AMOUNT]",
+		"Credit an account for a payment received from outside",
+		"Credit USER for a payment received from outside this kernel.\n\n"+
+			"Two forms:\n"+
+			"  admin user deposit USER AMOUNT --ref FACT   record a payment made outside the system\n"+
+			"  admin user deposit USER --ref TXHASH        assign a received payment to its sender\n\n"+
+			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n"+
+			"account's once it is recorded.")
 }
 
-func adminSuspendCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "suspend TARGET",
-		Short: "Suspend a local account or a remote kernel",
-		Long:  "Suspend a local account or a remote kernel: a suspended user cannot log in, and a\nsuspended peer's calls are refused. Reversible with `admin unsuspend`.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s suspended.\n", kernel.NormalizeHandle(args[0]))
-			return nil
-		},
-	}
+func peerSettleCmd() *cobra.Command {
+	return creditCmd("peer", "settle PEER [AMOUNT]",
+		"Record the payment that closes what a peer owes",
+		"Record the payment closing what PEER owes for work this kernel delivered. A peer account\n"+
+			"holds no money of its own: the money goes to the provider it is owed to.\n\n"+
+			"  admin peer settle PEER [AMOUNT] --ref ID\n\n"+
+			"Recording cannot be undone.")
 }
 
-func adminUnsuspendCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "unsuspend TARGET",
-		Short: "Unsuspend a local account or a remote kernel",
-		Long:  "Unsuspend a local account or a remote kernel, restoring it fully.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s unsuspended.\n", kernel.NormalizeHandle(args[0]))
-			return nil
-		},
-	}
-}
-
-func adminRenameCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "rename TARGET NEW_NAME",
-		Short: "Rename a local account, or bind a kernel's petname",
-		Long: "Rename a local account, or bind a kernel's petname.\n\n" + targetHelp + "\n\n" +
-			"For a user target, NEW_NAME becomes its handle and the old handle is freed. For a\n" +
-			"kernel target, NEW_NAME becomes its petname — the local name your commands use for\n" +
-			"that peer. A name already in use is refused.",
-		Args: cobra.ExactArgs(2),
-		RunE: func(_ *cobra.Command, args []string) error {
-			body := map[string]any{"new_name": args[1]}
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
-			return nil
-		},
-	}
-}
-
-// adminDepositCmd records money that came in from outside, and bare lists what is waiting to be
-// recorded. Money is credited against a fact the rail witnesses, never on the operator's say-so
-// alone, which is why --ref is required to credit anything. There is no matching withdraw: money
-// leaves only by its owner's own `user withdraw`.
-func adminDepositCmd() *cobra.Command {
+// creditCmd is the shape both of those share: a target, an optional amount, and the fact that
+// names the payment. Repeating the same fact never moves money twice, and the same fact with a
+// different amount is refused — by the kernel, which is where idempotency belongs (D23).
+func creditCmd(kind, use, short, long string) *cobra.Command {
 	var reason, ref string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "deposit [TARGET [AMOUNT]]",
-		Short: "Credit an account or kernel for a payment received, or list payments awaiting it",
-		Long: "Credit an account for a payment received from outside, or record the payment that\n" +
-			"closes what a peer owes. A peer account holds no money of its own, so a peer can only be\n" +
-			"named in that last form, and the money goes to the provider it is owed to.\n\n" + targetHelp + "\n\n" +
-			"With no arguments, lists the money waiting to be recorded: payments whose sender nobody\n" +
-			"has registered, and settlements a peer says it has paid.\n\n" +
-			"Three forms:\n" +
-			"  admin deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
-			"  admin deposit USER --ref TXHASH        assign a received payment to its sender\n" +
-			"  admin deposit PEER [AMOUNT] --ref ID   record the payment closing what a peer owes\n\n" +
-			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
-			"transaction that carried it where it has. Repeating the same fact never moves money\n" +
-			"twice, and the same fact with a different amount is refused.\n\n" +
-			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n" +
-			"account's once it is recorded.",
-		Args: cobra.MaximumNArgs(2),
+		Use:   use,
+		Short: short,
+		Long: long + "\n\nFACT names the payment: your own record of it where this world has no chain, or the\n" +
+			"transaction that carried it where it has.",
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			if len(args) == 0 {
-				return apiEmitCtx(ctx, "GET", "/control/deposits", nil)
-			}
 			if ref == "" {
-				return kernel.ErrInvalidInput.Wrap("name the payment this credit records (--ref)")
+				return kernel.ErrInvalidInput.Wrap("name the payment this records (--ref)")
+			}
+			me, _, merr := selected()
+			if merr != nil {
+				return merr
 			}
 			var amount int64
-			what := fmt.Sprintf("Record payment %s, closing what %s owes?", ref, args[0])
+			what := fmt.Sprintf("Record payment %s on %s, closing what %s owes?", ref, me.Kernel, args[0])
 			if len(args) == 2 {
 				net, err := serverNetwork(ctx)
 				if err != nil {
@@ -313,25 +325,39 @@ func adminDepositCmd() *cobra.Command {
 				if amount, err = parseAmount(args[1], net.Decimals); err != nil {
 					return err
 				}
-				what = fmt.Sprintf("Credit %s to %s?", net.Amount(amount), args[0])
+				what = fmt.Sprintf("Credit %s to %s@%s?", net.Amount(amount), args[0], me.Kernel)
 			}
 			if err := confirm(what+" This cannot be undone.", yes); err != nil {
 				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/control/deposit", map[string]any{
-				"handle": args[0], "amount": amount, "reason": reason, "ref": ref,
+				"handle": args[0], "amount": amount, "reason": reason, "ref": ref, "kind": kind,
 			})
 		},
 	}
-	cmd.Flags().StringVar(&ref, "ref", "", "The payment this credit records: your own record of it, a transaction hash, or a settlement id")
+	cmd.Flags().StringVar(&ref, "ref", "", "The payment this records: your own record of it, a transaction hash, or a settlement id")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
+// adminDepositsCmd is the money this kernel has received that nobody has claimed: payments whose
+// sender nobody has registered, and settlements a peer says it has paid. It reads; the two credit
+// commands above are what act on it.
+func adminDepositsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "deposits",
+		Short: "List the money waiting to be recorded",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return apiEmit("GET", "/control/deposits", nil)
+		},
+	}
+}
+
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect KEY|PETNAME",
+		Use:   "inspect PEER",
 		Short: "Inspect a remote kernel (by public key or bound petname)",
 		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and\n" +
 			"reachability. The petname is the local name this kernel gave the peer (`admin rename`);\n" +
@@ -506,7 +532,7 @@ func peerListCmd() *cobra.Command {
 	var showAll bool
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "peers",
+		Use:   "list",
 		Short: "List known kernels (counterparties and discovery-only), merged by key",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

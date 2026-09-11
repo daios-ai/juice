@@ -234,3 +234,59 @@ func TestRevokeRefreshToken(t *testing.T) {
 
 // Token verification for authenticated commands is enforced server-side (authMiddleware)
 // and covered in serve_test.go / control_test.go.
+
+// TestLoginSelectsAndLogoutUnselects drives the commands an operator actually types: logging in
+// names the account and its kernel in one word, stores the session under that name, and acts as it
+// from then on; logging out ends it and leaves nothing selected, so the next command says so rather
+// than acting as whoever else is logged in.
+func TestLoginSelectsAndLogoutUnselects(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice", Password: "alicepass"}); err != nil {
+		t.Fatal(err)
+	}
+	// newTestEnv selects tester@test; the kernel record is what `kernel add` would have written.
+	if _, err := execTestCmd(t, loginCmd(), "alice@test", "--password", "alicepass"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if got := loadClientConfig().Current; got != "alice@test" {
+		t.Fatalf("login did not select what it authenticated: %q", got)
+	}
+	if tok, err := loadToken(); err != nil || tok == "" {
+		t.Fatalf("no session stored: %q %v", tok, err)
+	}
+	if c := readCredentials(login{Handle: "alice", Kernel: "test"}); c.PrincipalID == "" {
+		t.Error("the login did not record which account it holds")
+	}
+
+	// A login this client does not hold cannot be switched to, and a password is not asked for.
+	if _, err := execTestCmd(t, authUseCmd(), "bob@test"); err == nil {
+		t.Error("switching to a login not held was accepted")
+	}
+
+	if _, err := execTestCmd(t, logoutCmd()); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if got := loadClientConfig().Current; got != "" {
+		t.Errorf("logout left %q selected", got)
+	}
+	if held := logins(); len(held) != 0 {
+		t.Errorf("logout kept credentials: %v", held)
+	}
+	if _, _, err := selected(); err == nil {
+		t.Error("a command after logout must say there is no login")
+	}
+}
+
+// TestLoginNeedsItsKernelNamed: a login is an account at a kernel, so the kernel is named every
+// time — there is no bare form that would depend on whatever was selected before, and no kernel
+// this client has not registered.
+func TestLoginNeedsItsKernelNamed(t *testing.T) {
+	newTestEnv(t)
+	if _, err := execTestCmd(t, loginCmd(), "alice", "--password", "x"); err == nil {
+		t.Error("a bare handle was accepted")
+	}
+	if _, err := execTestCmd(t, loginCmd(), "alice@nosuch", "--password", "x"); err == nil {
+		t.Error("an unregistered kernel was accepted")
+	}
+}

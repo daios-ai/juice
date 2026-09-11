@@ -33,8 +33,38 @@ func serverBaseURL() string {
 	if flagServer != "" {
 		return strings.TrimRight(flagServer, "/")
 	}
-	_, _, _, k := activeContext()
-	return k.Endpoint
+	if _, k, err := selected(); err == nil {
+		return k.Endpoint
+	}
+	return "" // nothing selected: the caller says so, rather than dialling a guess
+}
+
+// addressKernel points this invocation at a named kernel, so a command that says where it acts —
+// creating an account, logging in, recovering one — needs no login to have been selected first. It
+// writes the same override --server does, because one invocation has one address and there should
+// be one place that decides it; naming both, differently, is refused rather than resolved.
+func addressKernel(name string) error {
+	k := loadClientConfig().Kernels[name]
+	if k == nil {
+		return kernel.ErrNotFound.Wrapf("no kernel named %s; add it with: juice kernel add URL %s", name, name)
+	}
+	if flagServer != "" && strings.TrimRight(flagServer, "/") != strings.TrimRight(k.Endpoint, "/") {
+		return kernel.ErrInvalidInput.Wrapf(
+			"--server %s names a different address than kernel %s (%s); give one or the other", flagServer, name, k.Endpoint)
+	}
+	flagServer = k.Endpoint
+	return nil
+}
+
+// namedLogin reads handle@kernel and points this invocation at that kernel: the two steps every
+// command that says where it acts — creating an account, logging in, recovering one — takes before
+// it acts, so they are written once and refuse the same way.
+func namedLogin(s string) (login, error) {
+	l, err := parseLogin(s)
+	if err != nil {
+		return login{}, err
+	}
+	return l, addressKernel(l.Kernel)
 }
 
 // errUnreachable reports that the juice server/peer at url couldn't be reached, retaining
@@ -64,6 +94,12 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
 	base := serverBaseURL()
+	if base == "" {
+		// No login and no --server: there is no address to send this to, and localhost is a guess
+		// that could reach a kernel the caller never named.
+		_, _, err := selected()
+		return err
+	}
 	// Remember why no token was attached: the server can only answer "missing bearer token", which
 	// tells the user nothing about what to do. Whether they are not logged in or are addressing a
 	// server their login does not belong to, the actionable answer is local, so it replaces the 401
@@ -122,15 +158,18 @@ func apiEmitCtx(ctx context.Context, method, path string, body any) error {
 
 // refreshToken rotates the stored access token using the stored refresh token, returning true on
 // success so the caller can retry the original request once. used is the access token that was
-// just refused, which is what makes this safe for two programs sharing one context: the whole
+// just refused, which is what makes this safe for two programs sharing one login: the whole
 // read-rotate-write runs under the session's lock, so the second one to arrive sees that the
 // first already rotated and simply takes what it stored, instead of spending a refresh token that
 // no longer exists.
 func refreshToken(ctx context.Context, used string) bool {
-	_, _, _, k := activeContext()
+	l, k, err := selected()
+	if err != nil {
+		return false
+	}
 	endpoint := strings.TrimRight(k.Endpoint, "/")
 	refreshed := false
-	_ = withCredentials(func(c *credentials) (bool, error) {
+	_ = withCredentials(l, func(c *credentials) (bool, error) {
 		if c.Token != "" && c.Token != used {
 			refreshed = true // another process rotated while this one was in flight
 			return false, nil

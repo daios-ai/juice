@@ -142,7 +142,7 @@ print(rows[0]['status'], rows[0].get('tx_hash', '-')) if rows else print('- -')"
     # has reached the block the holdings were read at, so give the worker a pass after the mining.
     local ident deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        ident=$(jj "$db" "$hs" admin identity)
+        ident=$(jj "$db" "$hs" admin kernel show)
         [ "$(pathf "$ident" custody.checked)" = True ] && break
         sleep 0.5
     done
@@ -196,8 +196,8 @@ flow_rail_chain_settlement() {
     # R's books close by themselves once the money is observed: the scan matches the payment to the
     # obligation by the sender L proved, the amount drawn, and the transaction L named.
     assert_eq "rail_chain_settlement.seller_paid" 0 "$(await_owed "$FED_DBR" "$FED_HR" "$lkey" 0)"
-    assert_jnum "rail_chain_settlement.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin identity)" gap 0
-    assert_jnum "rail_chain_settlement.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin identity)" gap 0
+    assert_jnum "rail_chain_settlement.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "rail_chain_settlement.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
 }
 
 # Fuel, and what happens when it cannot be bought. A kernel pays for its own gas out of `sys`
@@ -243,9 +243,9 @@ PYEOF
 
     # Reads keep working while money is refused — an operator must be able to see why.
     assert_nonempty "rail_refill.reads_continue"    "$(jj "$db" "$ha" user me)"
-    assert_nonempty "rail_refill.identity_readable" "$(jj "$db" "$hs" admin identity)"
+    assert_nonempty "rail_refill.identity_readable" "$(jj "$db" "$hs" admin kernel show)"
     assert_eq "rail_refill.books_still_balance" 0 \
-        "$(pathf "$(jj "$db" "$hs" admin identity)" solvency.gap)"
+        "$(pathf "$(jj "$db" "$hs" admin kernel show)" solvency.gap)"
 
     # The same kernel, over a working venue, is immediately able to move money: the refusal is the
     # domain check and nothing else. This is the control that makes the assertions above mean
@@ -363,7 +363,7 @@ PYEOF
 
     # The books agree with the chain, read independently.
     local ident onchain
-    ident=$(jj "$db" "$hs" admin identity)
+    ident=$(jj "$db" "$hs" admin kernel show)
     onchain=$(cast call "$token" 'balanceOf(address)(uint256)' "$vault" --rpc-url "$rpc" | awk '{print $1}')
     assert_eq "sepolia.books_balance" 0 "$(pathf "$ident" solvency.gap)"
     assert_eq "sepolia.vault_matches_the_chain" "$onchain" "$(pathf "$ident" solvency.vault)"

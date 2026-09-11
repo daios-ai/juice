@@ -134,13 +134,36 @@ func newTestEnv(t *testing.T) *testEnv {
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
 
-	// User-facing CLI commands are HTTP clients now: point them at a server backed by env.k.
+	// User-facing CLI commands are HTTP clients now: point them at a server backed by env.k, and
+	// select a login on it, since every command acts as one.
 	ts := mountTestServer(t, k)
 	origServer := flagServer
 	flagServer = ts.URL
 	t.Cleanup(func() { flagServer = origServer })
+	selectTestLogin(t, "tester@test", ts.URL)
 
 	return &testEnv{db: db, k: k, dir: dir}
+}
+
+// selectTestLogin records a kernel at endpoint and selects a login on it, which is what `kernel
+// add` and `auth login` do between them. Tests that store a token need one, because a token is
+// stored under the login that holds it.
+func selectTestLogin(t *testing.T, name, endpoint string) {
+	t.Helper()
+	l, err := parseLogin(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := flagAs
+	flagAs = ""
+	t.Setenv("JUICE_AS", "")
+	t.Cleanup(func() { flagAs = old })
+	cfg := loadClientConfig()
+	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: strings.TrimRight(endpoint, "/"), Network: "play"}
+	cfg.Current = l.String()
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatalf("select test login: %v", err)
+	}
 }
 
 // mountTestServer starts an httptest server exposing the full route set backed by k, for
