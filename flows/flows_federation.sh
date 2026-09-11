@@ -1177,3 +1177,68 @@ flow_compose_ticket() {
     assert_jnum "compose_ticket.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
     assert_jnum "compose_ticket.t_books" "$(jj "$dbt" "$ht" admin kernel show)" gap 0
 }
+
+# A chain that cannot pay for itself. R's composite is advertised below what its own child costs R,
+# so the inner call is refused for want of funds before it is made. The failure is R's own pricing
+# mistake, and the question is who pays for it: nobody downstream was asked to do anything, and
+# nobody upstream agreed to more than the quote.
+flow_compose_underfunded() {
+    echo "=== FLOW compose_underfunded ==="
+    local dir; dir=$(new_dir)
+    FED_LCFG=(remote_retry_interval_seconds=2)
+    FED_RCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "compose_short.setup" "setup failed"; return; }
+
+    local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
+    make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 remote_retry_interval_seconds=2 \
+        || { fail "compose_short.boot_t" "T did not start"; return; }
+    local tkey; tkey=$(kernel_key "$dbt" "$ht")
+    [ -n "$tkey" ] || { fail "compose_short.tkey" "no T key"; return; }
+    publish "$dbt" "$ht" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    j "$dbt" "$ht" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+
+    local i
+    for i in $(seq 1 20); do
+        j "$FED_DBR" "$FED_HR" run "sys@$tkey/leaf" '{}' >/dev/null 2>&1 && break
+        sleep 1
+    done
+    j "$FED_DBR" "$FED_HR" admin peer rename -- "$tkey" kernel-t >/dev/null 2>&1 || { fail "compose_short.link_rt" "R never resolved T"; return; }
+
+    # The leaf costs R 1103 all in. R advertises a composite around it for 100.
+    make_contractor_wasm "$dir/short.wasm" "sys@kernel-t/leaf"
+    publish "$FED_DBR" "$FED_HR" short --kind wasm --source "$dir/short.wasm" --description "short" --price 100 >/dev/null
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/short '{}' >/dev/null 2>&1   # cold-resolve the proxy
+
+    local hc; hc=$(home "$dir" carol)
+    make_user "$FED_DBL" "$FED_HL" "$hc" carol
+    deposit "$FED_DBL" "$FED_HL" carol 5000
+
+    local cb rb er et tt
+    cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
+    rb=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
+    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
+    et=$(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure)
+    tt=$(list_len "$(jj "$dbt" "$ht" tx list --limit 50)")
+
+    assert_fails "compose_short.call_refused" "fund\|balance\|credits\|cost\|error" -- j "$FED_DBL" "$hc" run sys@kernel-r/short '{}'
+
+    # Nothing was delivered, so nothing is owed and nothing is charged, at either boundary.
+    assert_eq "compose_short.caller_charged_nothing" 0 \
+        "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
+    assert_eq "compose_short.middle_owed_nothing" 0 \
+        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - er ))"
+    assert_eq "compose_short.leaf_owed_nothing" 0 \
+        "$(( $(numfield "$(jj "$dbt" "$ht" admin kernel show)" exposure) - et ))"
+    # The leaf was never asked to do anything: a call refused for want of funds is refused before
+    # anyone downstream hears of it.
+    assert_eq "compose_short.leaf_never_called" "$tt" "$(list_len "$(jj "$dbt" "$ht" tx list --limit 50)")"
+    # The middle kernel funded an execution it could not complete, and is left exactly as it was:
+    # the allocation it locked comes back, so a mispriced action costs its operator nothing but the
+    # work already done.
+    assert_eq "compose_short.middle_whole_again" "$rb" "$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)"
+    assert_jnum "compose_short.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "compose_short.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+    assert_jnum "compose_short.t_books" "$(jj "$dbt" "$ht" admin kernel show)" gap 0
+}
