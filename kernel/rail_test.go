@@ -529,7 +529,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	if err := st.CommitCall(ctx, tx, receipt, tr.ID, p.ID, kernel.CallerProcess, sellerID, "", 0, 0, nil, rec.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApplyReveal(ctx, tr.ID, amount, txHash); err != nil {
+	if err := st.ApplyReveal(ctx, "", tr.ID, amount, txHash, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.ReadOwed(ctx, id, peerID)
@@ -591,40 +591,6 @@ func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {
 	_ = sys
 }
 
-// On a rail with no addresses the operator's own record is what makes the payment final, and it
-// names the obligation it closes. Recording it twice moves money once.
-func TestOperatorClosesATicketAgainstItsPayment(t *testing.T) {
-	k, st, _, sys := railFixture(t)
-	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "0xdebtor")
-	seller := setupUser(t, st, "seller", 0)
-	announcedOwed(t, st, "tk-2", peer.ID, seller.ID, "", "0xpaid2", 40)
-
-	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2"); err != nil {
-		t.Fatalf("operator record: %v", err)
-	}
-	if got, _ := st.ReadOwed(ctx, "tk-2", peer.ID); got.Status != kernel.OwedCredited {
-		t.Fatalf("ticket: %s", got.Status)
-	}
-	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
-		t.Fatalf("the seller must be credited 40, got %d", avail)
-	}
-	again, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-2")
-	if err != nil {
-		t.Fatalf("a repeat must be safe: %v", err)
-	}
-	// The reply to a repeat is the entry that credited the seller, as every ledger replay answers
-	// (D4): an operator recording the same payment twice sees what it did, never nothing.
-	if again == nil {
-		t.Fatal("a repeated record answered with no entry")
-	}
-	if again.ToUserID != seller.ID || again.Amount != 40 {
-		t.Errorf("a repeated record answered with the wrong entry: %+v", again)
-	}
-	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
-		t.Errorf("a repeated record paid twice: %d", avail)
-	}
-}
 
 // A payment from an unknown sender waits held; the operator names its transaction and its owner,
 // and it is delivered once — with no second delivery on a repeat and no crash on the reply.
@@ -1105,26 +1071,6 @@ func TestARevertedObligationPaymentIsPresentedAgainUnderAFreshName(t *testing.T)
 	}
 }
 
-// A payment is booked from the fact the rail witnessed, never from what anybody claimed about it: a
-// buyer that announces someone else's transaction must not have it rewritten as its own.
-func TestAnObligationClosesOnlyAgainstItsBuyersOwnWitnessedPayment(t *testing.T) {
-	k, st, _, sys := railFixture(t)
-	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG", "0xdebtor")
-	seller := setupUser(t, st, "seller", 0)
-	// The obligation names a payment that a stranger, not this buyer, actually made.
-	announcedOwed(t, st, "tk-9", peer.ID, seller.ID, "0xstranger", "0xpaid", 40)
-
-	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-9"); err == nil {
-		t.Fatal("a payment from another sender was booked as the buyer's own")
-	}
-	if got, _ := st.ReadOwed(ctx, "tk-9", peer.ID); got.Status != kernel.OwedAnnounced {
-		t.Errorf("the obligation must stay open: %s", got.Status)
-	}
-	if avail, _ := balanceOf(t, st, seller.ID); avail != 0 {
-		t.Errorf("the seller was credited a stranger's payment: %d", avail)
-	}
-}
 
 // Where a buyer pays from is proven and frozen when its call is admitted, not learned later: an
 // unproven address is refused, a priced call from a buyer proving none is refused on a world with
@@ -1192,27 +1138,3 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	_ = sys
 }
 
-// Recording the payment for one obligation reports success only if that obligation closed.
-// Reconciliation is global: with two obligations naming the same payment, the older takes it, and
-// the one the operator named stays open — which must be reported as such, not as success.
-func TestRecordingAPaymentReportsOnTheObligationNamed(t *testing.T) {
-	k, st, _, sys := railFixture(t)
-	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", "0xdebtor")
-	seller := setupUser(t, st, "seller", 0)
-	announcedOwed(t, st, "tk-older", peer.ID, seller.ID, "", "0xsame", 40)
-	announcedOwed(t, st, "tk-named", peer.ID, seller.ID, "", "0xsame", 40)
-
-	if _, err := k.Deposit(ctx, sys.ID, peer.ID, 40, "", "tk-named"); err == nil {
-		t.Fatal("reported success while the obligation named stayed open")
-	}
-	if got, _ := st.ReadOwed(ctx, "tk-named", peer.ID); got.Status != kernel.OwedAnnounced {
-		t.Errorf("the obligation named = %s, want still announced", got.Status)
-	}
-	if got, _ := st.ReadOwed(ctx, "tk-older", peer.ID); got.Status != kernel.OwedCredited {
-		t.Errorf("the older obligation took the payment: %s", got.Status)
-	}
-	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
-		t.Errorf("one payment credited %d, want 40 once", avail)
-	}
-}

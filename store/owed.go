@@ -15,19 +15,26 @@ import (
 // idempotency record names it for the peer. One number, exposure, is what this kernel has
 // delivered and not been paid for. Every state change is one compound commit.
 
-// unresolvedTrace is the condition under which an admitted foreign call still has something coming:
+// unresolved is the condition under which an admitted foreign call still has something coming:
 // unrevealed with an obligation (or not yet committed, so it may have one), or revealed and unpaid.
-// Callers bind it to a payer or a peer. It is the one definition of "reserved" for reconciliation,
-// operator attribution and peer retention alike.
-const unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
+// It is the one definition of an open obligation — what reconciliation reserves, what keeps a peer
+// from being purged, and what the operator is shown — bound to whatever the query around it named
+// the trace, its transaction and its receipt.
+func unresolved(trace, tx, receipt string) string {
+	return `(` + trace + `.owed_status = 'announced'
+	        OR (` + trace + `.owed_status = '' AND (` + tx + `.id IS NULL
+	            OR COALESCE(` + receipt + `.charge + ` + receipt + `.premium, 0) > 0)))`
+}
+
+// unresolvedTrace binds that condition for a query reading `FROM traces ot`, joining what it needs.
+var unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
 	  LEFT JOIN receipts orc ON orc.trace_id = ot.id
-	 WHERE (ot.owed_status = 'announced'
-	        OR (ot.owed_status = '' AND (ox.id IS NULL OR COALESCE(orc.charge + orc.premium, 0) > 0)))`
+	 WHERE ` + unresolved("ot", "ox", "orc")
 
 // reservedDeposit says a deposit d comes from an address some unresolved foreign call named as its
 // payer, so it may be that call's money and is nobody else's to take yet. A world with no addresses
-// reserves nothing: there the operator's record is the payment, and it names its obligation.
-const reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_rail_address = d.party)`
+// reserves nothing: there the payment is the reveal that names its own obligation (D23).
+var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_rail_address = d.party)`
 
 // owedSelect is the projection, from the peer's name for the call to the reveal on its trace. The
 // obligation is what the receipt charged plus the markup, so it is zero until the call commits.
@@ -88,15 +95,29 @@ func nullStrPtr(s sql.NullString) *string {
 // payment that will carry it. Nothing owed closes the obligation for good and leaves no payment to
 // wait for; anything else waits for that payment to arrive. Guarded on the reveal not having been
 // applied, so a buyer resending because our reply was lost changes nothing.
-func (s *DB) ApplyReveal(ctx context.Context, traceID string, amount int64, txHash string) error {
+//
+// Where the world has no addresses the reveal is itself the finalized payment (D23), and the caller
+// hands that payment in: it is booked in this same statement, so the fact and the money it makes
+// final are one commit and no pass can ever find one without the other.
+func (s *DB) ApplyReveal(ctx context.Context, sys, traceID string, amount int64, txHash string, payment *kernel.RailTransfer) error {
 	status := kernel.OwedAnnounced
 	if amount <= 0 {
-		amount, status, txHash = 0, kernel.OwedCancelled, ""
+		amount, status, txHash, payment = 0, kernel.OwedCancelled, "", nil
 	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE traces SET owed_status=?, owed_amount=?, owed_tx_hash=? WHERE id=? AND owed_status=''`,
-		status, amount, txHash, traceID)
-	return dbErr(err, "apply reveal")
+	return s.withTx(ctx, "apply reveal", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE traces SET owed_status=?, owed_amount=?, owed_tx_hash=? WHERE id=? AND owed_status=''`,
+			status, amount, txHash, traceID)
+		if err != nil {
+			return dbErr(err, "apply reveal")
+		}
+		// The guard above is what makes a resend change nothing; booking the payment under it means
+		// a resend cannot book a second one either, however often the buyer repeats itself.
+		if n, _ := res.RowsAffected(); n == 0 || payment == nil {
+			return nil
+		}
+		return bookDeposit(ctx, tx, sys, payment)
+	})
 }
 
 // ReconcileDeposits is the one path every payment this kernel observes takes, in one transaction,
@@ -203,14 +224,16 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 	return closed, err
 }
 
-// ListOwed is what a seller is still waiting to be paid for, oldest first — the operator's view of
-// obligations whose money has not arrived.
+// ListOwed is every obligation this kernel is still waiting to be paid for, oldest first: the work
+// its exposure is made of, itemised. A buyer that has not yet said how the draw came out is on it
+// with an empty status, since what bounds such a buyer is the credit limit and what acts on one is
+// the operator.
 func (s *DB) ListOwed(ctx context.Context, limit int) ([]*kernel.Owed, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		owedSelect+` WHERE t.owed_status=? ORDER BY t.created_at LIMIT ?`, kernel.OwedAnnounced, limit)
+		owedSelect+` WHERE `+unresolved("t", "x", "r")+` ORDER BY t.created_at LIMIT ?`, limit)
 	if err != nil {
 		return nil, dbErr(err, "list what is owed")
 	}

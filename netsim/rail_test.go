@@ -146,14 +146,29 @@ func TestNoRailWritesAKeyIntoTheRunDirectory(t *testing.T) {
 	}
 }
 
-// The manual rail's money verbs are the ones the story depends on; their shape is easy to get
-// wrong and the failure is silent. A public key is base64url and may begin with a dash, so the
-// positional arguments must come after a bare `--` or the key is read as an unknown flag.
-func TestTheManualRailPassesKeysAfterADoubleDash(t *testing.T) {
-	src, _ := os.ReadFile("rail.go")
-	confirm := between(string(src), "func confirmPayment", "\n}")
-	if !strings.Contains(confirm, `"--"`) {
-		t.Error("confirming a payment passes a public key positionally; without a bare -- a key " +
-			"beginning with a dash is read as a flag and the obligation is silently left open")
+// A public key is base64url and may begin with a dash, so wherever the simulation hands one to a
+// command as a positional argument it must come after a bare `--`. Without it the key is read as an
+// unknown flag and the command fails in a way the simulation reports as the kernel's fault.
+func TestEveryKeyIsPassedAfterADoubleDash(t *testing.T) {
+	for _, name := range []string{"rail.go", "story.go", "harness.go"} {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			open := strings.Index(line, "(")
+			if open < 0 {
+				continue
+			}
+			// Only a key handed to a command counts; one being read back into a field does not.
+			args := line[open:]
+			if !strings.Contains(args, ".Key") || !strings.Contains(args, `"admin"`) {
+				continue
+			}
+			if !strings.Contains(args, `"--"`) {
+				t.Errorf("%s:%d passes a public key with no bare -- before it: %s",
+					name, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

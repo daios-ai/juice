@@ -803,10 +803,12 @@ func receiptDraw(t map[string]any) (charge, premium int64, ok bool) {
 	return num(r, "charge"), num(r, "premium"), true
 }
 
-// settlementFidelity checks each obligation the story saw settled: it closed, and the payment that
-// closed it was not short. A draw pays either exactly what is owed or the whole face value, which is
-// larger — never less, since a seller settled for less than it delivered is a seller robbed by the
-// mechanism meant to pay it.
+// settlementFidelity checks each obligation the story saw: it closed, and where the story caught the
+// draw, the payment that closed it was not short. A paying draw pays either exactly what is owed or
+// the whole face value, which is larger — never less, since a seller settled for less than it
+// delivered is a seller robbed by the mechanism meant to pay it. An obligation whose draw the story
+// never saw says nothing about the amount: it closed too quickly to read, or it lost and paid
+// nothing, and neither is a break.
 func settlementFidelity(opened []settlement) []string {
 	var breaks []string
 	for _, st := range opened {
@@ -815,7 +817,7 @@ func settlementFidelity(opened []settlement) []string {
 				"the obligation of %d from %s to %s never closed", st.Obligation, st.Debtor, st.Creditor))
 			continue
 		}
-		if st.Amount < st.Obligation {
+		if st.Status == "announced" && st.Amount < st.Obligation {
 			breaks = append(breaks, fmt.Sprintf(
 				"an obligation of %d from %s to %s was settled by a payment of only %d",
 				st.Obligation, st.Debtor, st.Creditor, st.Amount))

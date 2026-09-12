@@ -210,8 +210,22 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 	if amount > 0 && p.TxHash == "" {
 		return nil, ErrInvalidInput.Wrap("a paying reveal must name its payment")
 	}
-	if err := k.store.ApplyReveal(ctx, r.TraceID, amount, p.TxHash); err != nil {
+	// Where the world has no addresses there is nothing outside to observe, so this signed reveal is
+	// itself the finalized payment (D23): it is recorded with the reveal that names it, and the
+	// ordinary reconciliation then closes the obligation exactly as it closes a scanned one.
+	var payment *RailTransfer
+	if amount > 0 && k.rail != nil && k.rail.Address() == "" {
+		fact, ferr := k.rail.Witness(ctx, p.TxHash, amount)
+		if ferr != nil {
+			return nil, ferr
+		}
+		payment = heldDeposit(fact, "obligation "+r.ID)
+	}
+	if err := k.store.ApplyReveal(ctx, k.cfg.FeeRecipientID, r.TraceID, amount, p.TxHash, payment); err != nil {
 		return nil, err
+	}
+	if payment != nil {
+		k.reconcileDeposits(ctx)
 	}
 	r.Amount, r.TxHash = amount, p.TxHash
 	r.Status = OwedAnnounced

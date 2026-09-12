@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -137,6 +140,21 @@ func TestAdminDeposit(t *testing.T) {
 	// Unknown user rejected.
 	if _, err := k.Deposit(ctx, admin.ID, "nonexistent", 100, "", newRef()); err == nil {
 		t.Error("expected error for unknown target user")
+	}
+
+	// A peer is refused here, at the money boundary itself. The route above resolves users alone, so
+	// nothing reaches this with a peer today — which is exactly why it is checked here: a peer holds
+	// no money on any path, and what it owes closes when it pays (D14, P10).
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peer, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Deposit(ctx, admin.ID, peer.ID, 100, "", newRef()); err == nil {
+		t.Error("a peer account was credited")
+	}
+	if p, _ := k.ReadUser(ctx, peer.ID); p.Available != 0 || p.Locked != 0 {
+		t.Errorf("peer row after the refusal: %d/%d, want 0/0", p.Available, p.Locked)
 	}
 }
 

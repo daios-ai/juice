@@ -3,7 +3,6 @@ package kernel
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -244,9 +243,9 @@ func (k *Kernel) requireRailRunning(ctx context.Context) error {
 // ---- Deposits: money in (U3) ----
 
 // Deposit credits a user against a finalized payment from outside. ref names that payment — the
-// operator's own record of one where the world has no chain, a transaction where it has, or a peer's
-// settlement. Nothing is credited without it: a crossing that named no fact could not be checked
-// against anything, and a repeat of it would mint money. Superuser only.
+// operator's own record of one where the world has no chain, a transaction where it has. Nothing is
+// credited without it: a crossing that named no fact could not be checked against anything, and a
+// repeat of it would mint money. Superuser only.
 func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, amount int64, reason, ref string) (*LedgerEntry, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
@@ -258,9 +257,6 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if ref == "" {
 		return nil, ErrInvalidInput.Wrap("a deposit must name the payment it records (--ref)")
 	}
-	if err := k.requireLiveAccount(ctx, targetUserID); err != nil {
-		return nil, err
-	}
 	rail, err := k.railOrFail(ctx)
 	if err != nil {
 		return nil, err
@@ -269,49 +265,17 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if err != nil {
 		return nil, err
 	}
-
-	// One ingestion path, whatever the operator named. An obligation is not a fresh crossing: naming
-	// one means "the payment this buyer announced has arrived", so the reference resolves to the
-	// payment that obligation named and the money reaches the seller through the ordinary matcher —
-	// which is what makes the rules that decide whose payment it is the same however it was noticed.
-	// Naming a payment directly credits the account given.
-	owed, err := k.store.ReadOwed(ctx, ref, targetUserID)
-	if err != nil {
-		return nil, err
-	}
-	// A peer account is identity, never a wallet (D14). The only money that may reach one is the
-	// payment closing an obligation it owes, and that money goes to the seller rather than to the
-	// peer's own row — so naming a peer with anything else is refused here rather than quietly
-	// preloading a balance no path would ever spend.
-	if target.IsPeer() && owed == nil {
-		return nil, ErrInvalidInput.Wrapf("%s is a peer: name the obligation its payment closes, not the peer itself",
+	// Only a live user is ever credited. A peer account is identity, never a wallet (D14), and what
+	// a peer owes closes when it pays: the payment observed on a chain, or the buyer's own signed
+	// reveal where the world has no addresses (P10, D23). The next line would refuse a peer anyway,
+	// since a peer holds no handle — this one exists to say why, and to keep the refusal here at the
+	// money boundary rather than resting on whatever resolved the name.
+	if target.IsPeer() {
+		return nil, ErrInvalidInput.Wrapf("%s is a peer: a peer holds no money here, and what it owes closes when it pays",
 			k.KernelName(ctx, target.KernelPublicKey))
 	}
-	if owed != nil {
-		if owed.Status == OwedCredited {
-			// Already recorded: witnessing the same payment again moves no money, and the reply is
-			// the entry that credited it — the replay rule every ledger operation keeps (D4). The
-			// entry is found by the key the credit wrote it under, which is the payment's own fact.
-			fact, ferr := rail.Witness(ctx, owed.TxHash, owed.Amount)
-			if ferr != nil {
-				return nil, ferr
-			}
-			e, rerr := k.store.ReadLedgerByExternalKey(ctx, AttributionKey(fact.Key))
-			if rerr != nil {
-				return nil, rerr
-			}
-			if e == nil {
-				return nil, ErrInvalidState.Wrapf("obligation %s is recorded as credited but its ledger entry is missing", owed.ID)
-			}
-			return e, nil
-		}
-		if owed.Status != OwedAnnounced {
-			return nil, ErrInvalidState.Wrapf("obligation %s is not awaiting a payment", owed.ID)
-		}
-		if amount > 0 && amount != owed.Amount {
-			return nil, ErrInvalidInput.Wrapf("obligation %s is for %d, not %d", owed.ID, owed.Amount, amount)
-		}
-		ref, amount, targetUserID = owed.TxHash, owed.Amount, ""
+	if !target.IsLiveUser() {
+		return nil, ErrNotFound.Wrapf("account %s is not a live user here", targetUserID)
 	}
 
 	fact, err := rail.Witness(ctx, ref, amount)
@@ -321,42 +285,21 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if amount > 0 && fact.Amount != amount {
 		return nil, ErrInvalidInput.Wrapf("payment %s is %d, not %d", ref, fact.Amount, amount)
 	}
-	// The deposit is built from the witnessed fact alone — never from what anybody claimed about it.
-	// Its sender is the one thing an obligation cannot supply for itself: a buyer that named someone
-	// else's payment must not have it rewritten as its own.
-	if owed != nil && !sameAddress(fact.From, owed.RailAddr) {
-		return nil, ErrInvalidInput.Wrapf("payment %s came from %s, not from %s", ref, fact.From, owed.RailAddr)
-	}
 	// Every payment enters held and is reconciled — obligations first — before anyone is handed it
 	// by name, so an operator's attribution is the fallback for money no obligation claims, never a
-	// way past the rules that decide whose it is.
-	row := &RailTransfer{ID: fact.Key, Kind: RailKindDeposit, Party: fact.From,
-		Amount: fact.Amount, Credit: fact.Amount, TxHash: fact.TxHash,
-		Status: RailStatusHeld, Reason: reason, CreatedAt: time.Now().UTC()}
+	// way past the rules that decide whose it is. The deposit is built from the witnessed fact
+	// alone, never from what anybody claimed about it.
+	row := heldDeposit(fact, reason)
 	if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, ""); err != nil {
 		logger.Warn("deposit.failed", "target_user_id", targetUserID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return nil, err
 	}
-	credited, err := k.store.ReconcileDeposits(ctx, k.cfg.FeeRecipientID, 100)
-	if err != nil {
+	if _, err := k.store.ReconcileDeposits(ctx, k.cfg.FeeRecipientID, 100); err != nil {
 		return nil, err
 	}
-	var e *LedgerEntry
-	if owed == nil {
-		if e, err = k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, targetUserID); err != nil {
-			return nil, err
-		}
-	} else {
-		// Reconciliation is global, so success means the obligation the operator named closed — not
-		// that something did — and what is reported is this payment's own credit.
-		if now, rerr := k.store.ReadOwed(ctx, owed.ID, owed.PeerUserID); rerr != nil || now == nil || now.Status != OwedCredited {
-			return nil, ErrInvalidState.Wrapf("payment %s does not close obligation %s", fact.TxHash, owed.ID)
-		}
-		for _, c := range credited {
-			if c.ExternalKey == AttributionKey(row.ID) {
-				e = c
-			}
-		}
+	e, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, targetUserID)
+	if err != nil {
+		return nil, err
 	}
 	logger.Info("deposit.created", "deposit_id", row.ID, "target_user_id", targetUserID, "amount", amount,
 		"status", "success", "duration_ms", time.Since(start).Milliseconds())
@@ -367,9 +310,14 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 // fact, prefixed. One definition, so the store writes it and the kernel can find it exactly.
 func AttributionKey(depositID string) string { return "attr:" + depositID }
 
-// sameAddress compares two rail senders. A world with no addresses proves nothing about who paid, so
-// both sides are empty there and the comparison is trivially true.
-func sameAddress(a, b string) bool { return strings.EqualFold(a, b) }
+// heldDeposit is one witnessed payment as a row. Every payment enters held, whoever noticed it —
+// the operator, the deposit scan, or a reveal that is itself the payment (D23) — because what
+// decides whose it is is reconciliation and nothing else.
+func heldDeposit(fact RailDeposit, reason string) *RailTransfer {
+	return &RailTransfer{ID: fact.Key, Kind: RailKindDeposit, Party: fact.From, Amount: fact.Amount,
+		Credit: fact.Amount, TxHash: fact.TxHash, Status: RailStatusHeld, Reason: reason,
+		CreatedAt: time.Now().UTC()}
+}
 
 // ListHeldDeposits is money that has arrived and nobody has claimed: waiting on the one decision
 // only the ledger authority can make, which sender it belongs to.
@@ -782,9 +730,7 @@ func (k *Kernel) scanRailDeposits(ctx context.Context) {
 	}
 	var highest uint64 = since
 	for _, d := range deposits {
-		row := &RailTransfer{ID: d.Key, Kind: RailKindDeposit, Party: d.From, Amount: d.Amount,
-			Credit: d.Amount, TxHash: d.TxHash, Status: RailStatusHeld, CreatedAt: time.Now().UTC()}
-		if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, row, ""); err != nil {
+		if _, err := k.store.CreateRailDeposit(ctx, k.cfg.FeeRecipientID, heldDeposit(d, ""), ""); err != nil {
 			logger.Warn("rail.deposit.failed", "key", d.Key, "error", err.Error())
 			return
 		}

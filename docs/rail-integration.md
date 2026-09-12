@@ -38,7 +38,8 @@ refuses missing keys).
 
 `kernel` owns the interface, imports no chain code; `juice-rail` is the first adaptor. One set
 of money rules runs everywhere; the defining part selects only the witness: no chain/token → the
-**manual** adaptor, whose finalized facts are the operator's own records (`Pay` confirms at
+**manual** adaptor, whose finalized facts are the operator's own records of what people pay and
+the buyer's own signed reveal of what a peer pays (`Pay` confirms at
 once, `Refills` is empty); present → a chain adaptor. Never `if world == real`, and never
 `if railed`.
 
@@ -246,9 +247,10 @@ pre-confirmed (agents are first-class). No per-command `--profile`.
 
 `admin identity` gains rail address, finalized holdings, the split of `sys` into earnings and in-transit
 (unattributed deposits, pending payouts), the solvency identity with its named terms, and the
-stop signal with its reason and age. `admin deposit` bare lists the unattributed money on
-`sys`; `--tx <hash>` attributes one deposit by transfer; on the manual rail `admin deposit
-<user> <amount> --ref <fact>` is the crossing-in fused with its transfer. There is no
+stop signal with its reason and age. `admin kernel deposits` lists the unattributed money on `sys`
+and every obligation still open; `admin user deposit <user> --ref <txhash>` attributes one
+received payment, and `admin user deposit <user> <amount> --ref <fact>` is the crossing-in fused
+with its transfer. There is no
 `admin withdraw`: money out is always the owner's `user withdraw`, `sys`'s profit included.
 Alarms: identity gap beyond active refill locks, custody-audit mismatch, stop signal set.
 Refill shows as a network cost; shortage shows as pending payout/settlement with age.

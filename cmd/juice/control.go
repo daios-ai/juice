@@ -146,36 +146,29 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // ctlDeposit records money that arrived from outside (U3). ref names the payment: the operator's own
-// record of one where the world has no chain, the transaction that carried it where it has, or the
-// settlement a peer says it has paid. Nothing is credited without it (D23).
+// record of one where the world has no chain, or the transaction that carried it where it has.
+// Nothing is credited without it, and only a user is ever credited (D23).
 func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Handle string `json:"handle"`
 		Amount int64  `json:"amount"`
 		Reason string `json:"reason"`
 		Ref    string `json:"ref"`
-		Kind   string `json:"kind"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, key, err := resolveMixed(s.kernel, r.Context(), req.Handle, req.Kind)
+	// The command's noun says which namespace it means, so this resolves users and nothing else: a
+	// peer whose petname happens to equal a handle can no more take a deposit than be mistaken for
+	// the account that owns it (D15, D20).
+	u, _, err := resolveMixed(s.kernel, r.Context(), req.Handle, "user")
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	if u == nil {
-		// Deposit-by-kernel opens the billing account (§13): the provider's single deposit both
-		// provisions and funds a not-yet-known kernel. Provisioning only — a deposit is not our
-		// act of naming, so no petname is bound; the operator binds one with `admin rename`.
-		if key == "" {
-			writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
-			return
-		}
-		if u, err = s.kernel.EnsureKernelAccount(r.Context(), key); err != nil {
-			writeErr(w, err)
-			return
-		}
+		writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
+		return
 	}
 	e, err := s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.Ref)
 	if err != nil {
@@ -185,9 +178,9 @@ func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
 }
 
-// ctlListDeposits shows what is waiting on the operator, in one list: money that has arrived whose
-// sender nobody has claimed, and obligations a buyer says it has paid whose money this kernel has
-// not yet seen. Both wait on the same decision, so both belong in the same view.
+// ctlListDeposits shows what this kernel is waiting on, in one list: money that has arrived whose
+// sender nobody has claimed, which the operator attributes, and the work delivered to foreign buyers
+// that has not been paid for, which closes when they pay. Both are money owned by nobody yet.
 func (s *server) ctlListDeposits(w http.ResponseWriter, r *http.Request) {
 	ctx, caller := r.Context(), callerFrom(r)
 	held, err := s.kernel.ListHeldDeposits(ctx, caller)

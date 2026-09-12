@@ -13,12 +13,18 @@ import (
 )
 
 // owedStore is the slice of the store a reveal touches: the peer it came from, the obligation it
-// names, and the one write that closes it. The rest of the interface stays nil, so any accidental
-// use of it fails loudly.
+// names, the one write that closes it, and the payment that write was handed. The rest of the
+// interface stays nil, so any accidental use of it fails loudly.
 type owedStore struct {
 	Store
-	peer *Account
-	row  *Owed
+	peer    *Account
+	row     *Owed
+	payment *RailTransfer
+}
+
+// ReconcileDeposits is what a recorded payment is followed by; it writes nothing here.
+func (s *owedStore) ReconcileDeposits(context.Context, string, int) ([]*LedgerEntry, error) {
+	return nil, nil
 }
 
 func (s *owedStore) ReadAccountByKernelKey(context.Context, string) (*Account, error) {
@@ -29,12 +35,26 @@ func (s *owedStore) ReadOwed(context.Context, string, string) (*Owed, error) {
 	return s.row, nil
 }
 
-func (s *owedStore) ApplyReveal(_ context.Context, _ string, amount int64, txHash string) error {
+func (s *owedStore) ApplyReveal(_ context.Context, _, _ string, amount int64, txHash string, payment *RailTransfer) error {
+	s.payment = payment
 	s.row.Amount, s.row.TxHash, s.row.Status = amount, txHash, OwedAnnounced
 	if amount == 0 {
 		s.row.TxHash, s.row.Status = "", OwedCancelled
 	}
 	return nil
+}
+
+// stubRail is the slice of the rail a reveal touches: whether this world has addresses at all, and
+// what a named payment turns out to be. Everything else fails loudly if a reveal reaches for it.
+type stubRail struct {
+	Rail
+	addr string
+}
+
+func (r stubRail) Address() string { return r.addr }
+
+func (stubRail) Witness(_ context.Context, ref string, amount int64) (RailDeposit, error) {
+	return RailDeposit{Key: "rail:ref:" + ref, TxHash: ref, Amount: amount}, nil
 }
 
 // revealFixture builds a seller holding one obligation, and the buyer's key to sign with. The terms
@@ -207,5 +227,49 @@ func TestACommitmentBindsItsSecretAndTheAmountNamesTheOutcome(t *testing.T) {
 		if got := (&Owed{Amount: c.amount, Obligation: c.obligation}).Outcome(); got != c.want {
 			t.Errorf("amount %d against %d = %q, want %q", c.amount, c.obligation, got, c.want)
 		}
+	}
+}
+
+// Where the world has no addresses the buyer's signed reveal is the finalized payment (D23), so the
+// seller records it with the reveal that names it and nothing waits on an operator. Where there are
+// addresses it records nothing: the money is observed on the chain, and a buyer's word is not a
+// payment however well signed.
+func TestARevealIsThePaymentOnlyWhereTheWorldHasNoAddresses(t *testing.T) {
+	losing := losingSecret(t, "call-1", "0a0b", 1, 1000)
+	for _, c := range []struct {
+		name       string
+		addr       string
+		obligation int64
+		lottery    int64
+		secret     string
+		txHash     string
+		wantPaid   int64 // zero means no payment may be recorded at all
+	}{
+		{"no addresses, a draw that pays", "", 40, 0, "aabb", "manual:call-1", 40},
+		{"no addresses, a draw that pays nothing", "", 1, 1000, losing, "", 0},
+		{"addresses, where the chain is the witness", "0xvault", 40, 0, "aabb", "0xpaid", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k, st, priv, peerKey := revealFixture(t, c.obligation, c.lottery, c.secret, "", true)
+			k.rail = stubRail{addr: c.addr}
+			p := payload(peerKey, c.secret)
+			p.TxHash = c.txHash
+			if _, err := reveal(t, k, priv, peerKey, p); err != nil {
+				t.Fatalf("the reveal was refused: %v", err)
+			}
+			if c.wantPaid == 0 {
+				if st.payment != nil {
+					t.Fatalf("a payment was recorded on a buyer's word alone: %+v", st.payment)
+				}
+				return
+			}
+			if st.payment == nil {
+				t.Fatal("no payment was recorded, so nothing could ever close the obligation")
+			}
+			if st.payment.Amount != c.wantPaid || st.payment.TxHash != c.txHash ||
+				st.payment.Status != RailStatusHeld || st.payment.Party != "" {
+				t.Errorf("recorded %+v, want %d held under %s from no sender", st.payment, c.wantPaid, c.txHash)
+			}
+		})
 	}
 }

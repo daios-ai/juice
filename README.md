@@ -114,8 +114,11 @@ by the fact that witnesses it, and then move freely between local users:
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
 
-On `play` no crypto is involved at all: the operator records the payments they receive
-and make, `--ref` is whatever names one in their own books, and amounts are whole credits.
+On `play` no crypto is involved at all. The operator records the payments they receive from
+people, `--ref` is whatever names one in their own books, and amounts are whole credits. What
+another kernel owes needs no such record: its own signed message saying it paid is the payment
+here, so those debts close by themselves. `play` money is play money — it is backed by nothing,
+and is meant for trying the system out.
 
 On a world with a chain (`test`, `real`), money arrives and leaves over that chain, and
 amounts are written the way that token is written — `1.50`, not `1500000`:

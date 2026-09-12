@@ -261,21 +261,27 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 // An obligation must be settled by a payment that is not short: a draw pays what is owed or the
 // whole face value, never less. One that never closed is a break whatever it was for.
 func TestSettlementFidelityChecksWhatWasPaid(t *testing.T) {
-	exact := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500, Obligation: 500, Closed: true}}
-	if b := settlementFidelity(exact); len(b) != 0 {
+	said := func(amount int64, closed bool) []settlement {
+		return []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: amount,
+			Obligation: 500, Status: "announced", Closed: closed}}
+	}
+	if b := settlementFidelity(said(500, true)); len(b) != 0 {
 		t.Errorf("an exact settlement was reported as a violation: %v", b)
 	}
-	won := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 10000, Obligation: 500, Closed: true}}
-	if b := settlementFidelity(won); len(b) != 0 {
+	if b := settlementFidelity(said(10000, true)); len(b) != 0 {
 		t.Errorf("a won draw paying the whole face value was reported as a violation: %v", b)
 	}
-	short := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 400, Obligation: 500, Closed: true}}
-	if len(settlementFidelity(short)) == 0 {
+	if len(settlementFidelity(said(400, true))) == 0 {
 		t.Error("an obligation of 500 settled by a payment of 400 was accepted")
 	}
-	never := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 500, Obligation: 500}}
-	if len(settlementFidelity(never)) == 0 {
+	if len(settlementFidelity(said(500, false))) == 0 {
 		t.Error("an obligation that never closed was accepted")
+	}
+	// An obligation the story never saw the draw of says nothing about what was paid: it closed
+	// before the poll read it, or it lost and paid nothing, and neither is a seller being robbed.
+	quiet := []settlement{{ID: "s1", Debtor: "k3", Creditor: "k2", Amount: 0, Obligation: 500, Closed: true}}
+	if b := settlementFidelity(quiet); len(b) != 0 {
+		t.Errorf("an obligation whose draw was never seen was reported as short: %v", b)
 	}
 }
 

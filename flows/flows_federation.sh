@@ -252,12 +252,12 @@ flow_fed_import_duty() {
     j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     assert_jnum "fed_pricing.reprices_on_policy_change" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1260
 
-    # The obligation from that call is settled before the next one, so what the next call is charged
-    # is about the new price and nothing else. Trade is not gated on any one buyer's record: the
-    # credit limit bounds the total, and a rule per identity would be bypassed by minting one (D14).
+    # The obligation from that call closes before the next one, so what the next call is charged is
+    # about the new price and nothing else. It closes by itself: L's first pass after restarting
+    # sends the payment it committed and tells R, which is the whole of settlement here.
     local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" ticket_id)
     assert_nonempty "fed_pricing.names_its_ticket" "$ticket"
-    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$ticket" --yes -- "$FED_LKEY" 1050 >/dev/null 2>&1
+    await_eq "fed_pricing.obligation_closed" 0 owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY"
 
     # And the price shown is the price charged: gross on the next call is the new total, not the old.
     local ub2; ub2=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
@@ -275,7 +275,6 @@ flow_fed_failed_action_refund() {
 
     # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
     local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)
-    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$(newref)" --yes -- "$FED_LKEY" 5000 >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
@@ -584,8 +583,11 @@ flow_fed_step_complete() {
     _fed_setup "$dir" || { fail "fed_step_complete.setup" "setup failed"; return; }
 
     # On R: sys messages L's proxy user, parking a sys/sink step whose required caller is kernel-l.
-    # R must know L as a peer for the address to resolve; a deposit both provisions and funds it.
-    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$(newref)" --yes -- "$FED_LKEY" 100 >/dev/null 2>&1
+    # R must know L as a peer for the address to resolve, and it learns one the only way a peer is
+    # ever learned: L makes a signed call, and that call provisions the account (P4).
+    publish "$FED_DBR" "$FED_HR" hello --kind http --source "http://127.0.0.1:$FED_BPORT" --description "hello" --price 0 >/dev/null
+    assert_nonempty "fed_step_complete.peer_known_by_its_call" \
+        "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/hello '{}')" tx_id)"
     local step_id
     step_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys/message "{\"to\":\"$FED_LKEY\",\"message\":\"approve the shipment\"}")" step_id)
     assert_nonempty "fed_step_complete.step_parked" "$step_id"
@@ -680,6 +682,16 @@ flow_ticket() {
     # The seller has delivered the whole obligation of 11 unpaid, whatever the draw said: only cash
     # reduces the exposure, and no cash has arrived yet either way.
     assert_jnum "ticket.exposure_recorded" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure 11
+
+    # And the operator can see what that number is made of, itemised: the obligation is listed
+    # against the buyer that owes it and named by the ticket that will close it — before that buyer
+    # has said anything at all, which is exactly when an operator needs to see a peer going quiet.
+    local awaiting ticket
+    awaiting=$(jj "$FED_DBR" "$FED_HR" admin kernel deposits)
+    ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/paid)")" ticket_id)
+    assert_eq "ticket.listed_by_its_id" "$ticket" "$(rowfield "$awaiting" owed id)"
+    assert_eq "ticket.listed_with_what_is_owed" 11 "$(rowfield "$awaiting" owed obligation)"
+    assert_eq "ticket.listed_against_its_buyer" "$lkey" "$(rowfield "$awaiting" owed peer)"
 }
 
 # flow_transfer exercises the value channel across a federated pair (§13). Value is LOCAL to a kernel:
@@ -778,11 +790,10 @@ flow_fed_provider_crash_recovery() {
     publish "$FED_DBR" "$FED_HR" slow --kind http --source "http://127.0.0.1:${sport}/slow" \
         --description "a service slow enough to interrupt" --price 20 >/dev/null 2>&1
 
-    # Warm the proxy so the crash lands on the call rather than on the resolve, and settle what that
-    # call owed: R serves nobody who still owes it for work already delivered (P10).
-    local warm; warm=$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/slow '{}')" tx_id)
-    local wtick; wtick=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$warm")" ticket_id)
-    [ -n "$wtick" ] && j "$FED_DBR" "$FED_HR" admin peer settle --ref "$wtick" --yes -- "$FED_LKEY" 21 >/dev/null 2>&1
+    # Warm the proxy so the crash lands on the call rather than on the resolve. What that call owes
+    # is left standing: the credit limit bounds the total a buyer may run up, and one obligation is
+    # nowhere near it, so nothing here waits on a payment.
+    j "$FED_DBL" "$ha" run sys@kernel-r/slow '{}' >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
 
     # Call again and kill the provider while it is still upstream.
@@ -966,10 +977,12 @@ print(rows[0]['id'] if rows else '')" 2>/dev/null)
 flow_compose_through_kernel() {
     echo "=== FLOW compose_through_kernel ==="
     local dir; dir=$(new_dir)
-    # A buyer tells its seller which payment settles an obligation on the retry cadence, and both
-    # buyers here are kernels: L owes R, and R owes T for the leg it bought inside the same call.
-    FED_LCFG=(remote_retry_interval_seconds=2)
-    FED_RCFG=(remote_retry_interval_seconds=2)
+    # A buyer pays and reveals on its own cadence, and both buyers here are kernels: L owes R, and R
+    # owes T for the leg it bought inside the same call. The cadence is long enough that the flow can
+    # see both debts standing before either is paid, and short enough that both are paid while it
+    # watches — there is nobody to prod, because nobody records a payment here.
+    FED_LCFG=(remote_retry_interval_seconds=10)
+    FED_RCFG=(remote_retry_interval_seconds=10)
     _fed_setup "$dir" || { fail "compose_chain.setup" "setup failed"; return; }
 
     # T sells a leaf at 1000, which costs R 1103 all in; R composes it at 2000, which L imports at
@@ -980,11 +993,9 @@ flow_compose_through_kernel() {
     local hc; hc=$(home "$dir" carol)
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
     deposit "$FED_DBL" "$FED_HL" carol 5000
-    local cb sb er et
+    local cb sb
     cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
     sb=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
-    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
-    et=$(numfield "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" exposure)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$hc" run sys@kernel-r/wrap '{}')" tx_id)
     assert_nonempty "compose_chain.call_succeeded" "$tx_id"
@@ -992,42 +1003,31 @@ flow_compose_through_kernel() {
         "$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))"
     assert_eq "compose_chain.import_fee_retained" 105 \
         "$(( $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) - sb ))"
-    # Both obligations exist at once, each on its own creditor.
-    assert_eq "compose_chain.middle_is_owed" 2100 \
-        "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - er ))"
-    assert_eq "compose_chain.middle_also_owes" 1050 \
-        "$(( $(numfield "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" exposure) - et ))"
     assert_contains "compose_chain.receipt_verifies" "valid" "$(j "$FED_DBL" "$hc" tx verify "$tx_id")"
     assert_jnum "compose_chain.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
     assert_jnum "compose_chain.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
     assert_jnum "compose_chain.t_books" "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" gap 0
 
-    # An obligation born inside a composed call is settleable like any other: each obligation names
-    # the ticket it rides on, and the creditor records the payment against that name (P10). Both
-    # debts are cleared here, each by the kernel that is owed, and each debt names its own buyer.
+    # Two obligations, one per creditor, each named by the ticket its own call rides on (P10): the
+    # middle kernel is owed and owes at the same moment, for the same work.
     local outer inner
     outer=$(strfield "$(jj "$FED_DBL" "$hc" tx show "$tx_id")" ticket_id)
     inner=$(strfield "$(jj "$FED_DBR" "$FED_HR" tx show "$(find_id "$(jj "$FED_DBR" "$FED_HR" tx list)" action_name sys/leaf)")" ticket_id)
     assert_nonempty "compose_chain.outer_names_its_ticket" "$outer"
     assert_nonempty "compose_chain.inner_names_its_ticket" "$inner"
+    assert_ne "compose_chain.two_debts_not_one" "$outer" "$inner"
 
-    # A creditor learns what it is owed when the buyer tells it, so each waits to hear before it can
-    # record anything (§13).
-    # Wait for the obligation this call made, by name. Waiting for any obligation would be satisfied
-    # by the one the warm-up call left, and the payment would then name a ticket its creditor has
-    # not heard of yet.
-    local i
-    for i in $(seq 1 30); do jj "$FED_DBR" "$FED_HR" admin kernel deposits | grep -q "$outer" && break; sleep 1; done
-    er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
-    j "$FED_DBR" "$FED_HR" admin peer settle --ref "$outer" --yes -- "$FED_LKEY" 2100 >/dev/null 2>&1
-    assert_eq "compose_chain.middle_debt_cleared" 2100 \
-        "$(( er - $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) ))"
-
-    for i in $(seq 1 30); do jj "$FED3_DBT" "$FED3_HT" admin kernel deposits | grep -q "$inner" && break; sleep 1; done
-    et=$(numfield "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" exposure)
-    j "$FED3_DBT" "$FED3_HT" admin peer settle --ref "$inner" --yes -- "$FED_RKEY" 1050 >/dev/null 2>&1
-    assert_eq "compose_chain.leaf_debt_cleared" 1050 \
-        "$(( et - $(numfield "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" exposure) ))"
+    # An obligation born inside a composed call closes like any other, and nobody acts: each buyer
+    # pays what its own draw decided and tells its seller, whose books then clear. Both creditors
+    # end owed nothing, and the leaf's provider is up exactly the cash that discharged it — only
+    # cash moves that counter, so the two numbers are the same fact read twice.
+    local towed tbal
+    towed=$(exposure_of "$FED3_DBT" "$FED3_HT")
+    tbal=$(balance_of "$FED3_DBT" "$FED3_HT")
+    await_eq "compose_chain.middle_debt_cleared" 0 exposure_of "$FED_DBR" "$FED_HR"
+    await_eq "compose_chain.leaf_debt_cleared" 0 exposure_of "$FED3_DBT" "$FED3_HT"
+    assert_eq "compose_chain.leaf_provider_paid" "$towed" \
+        "$(( $(balance_of "$FED3_DBT" "$FED3_HT") - tbal ))"
 
     assert_jnum "compose_chain.r_books_after" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
     assert_jnum "compose_chain.t_books_after" "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" gap 0
@@ -1039,8 +1039,6 @@ flow_compose_through_kernel() {
 flow_compose_returns_home() {
     echo "=== FLOW compose_returns_home ==="
     local dir; dir=$(new_dir)
-    FED_LCFG=(remote_retry_interval_seconds=2)
-    FED_RCFG=(remote_retry_interval_seconds=2)
     _fed_setup "$dir" || { fail "compose_home.setup" "setup failed"; return; }
     local hc; hc=$(home "$dir" carol)
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
@@ -1095,8 +1093,8 @@ flow_compose_ticket() {
     local dir; dir=$(new_dir)
     # A draw happens only while the obligation is under the face value, so the prices here are small
     # and the face value is the world's ceiling.
-    FED_LCFG=(lottery=100 remote_retry_interval_seconds=2)
-    FED_RCFG=(lottery=100 remote_retry_interval_seconds=2)
+    FED_LCFG=(lottery=100)
+    FED_RCFG=(lottery=100)
     _fed_setup "$dir" || { fail "compose_ticket.setup" "setup failed"; return; }
 
     _fed_chain "$dir" 10 20 lottery=100 || { fail "compose_ticket.chain" "chain setup failed"; return; }
@@ -1147,8 +1145,6 @@ flow_compose_ticket() {
 flow_compose_underfunded() {
     echo "=== FLOW compose_underfunded ==="
     local dir; dir=$(new_dir)
-    FED_LCFG=(remote_retry_interval_seconds=2)
-    FED_RCFG=(remote_retry_interval_seconds=2)
     _fed_setup "$dir" || { fail "compose_short.setup" "setup failed"; return; }
 
     # The leaf costs R 1103 all in, and R advertises a composite around it for 100.
@@ -1221,8 +1217,6 @@ _fed_chain() {
 flow_compose_inner_unreachable() {
     echo "=== FLOW compose_inner_unreachable ==="
     local dir; dir=$(new_dir)
-    FED_LCFG=(remote_retry_interval_seconds=2)
-    FED_RCFG=(remote_retry_interval_seconds=2)
     _fed_setup "$dir" || { fail "compose_gone.setup" "setup failed"; return; }
     _fed_chain "$dir" || { fail "compose_gone.chain" "chain setup failed"; return; }
 
@@ -1257,8 +1251,7 @@ flow_compose_inner_unreachable() {
 flow_compose_middle_cannot_stake() {
     echo "=== FLOW compose_middle_cannot_stake ==="
     local dir; dir=$(new_dir)
-    FED_LCFG=(remote_retry_interval_seconds=2)
-    FED_RCFG=(lottery=100 remote_retry_interval_seconds=2)
+    FED_RCFG=(lottery=100)
     _fed_setup "$dir" || { fail "compose_stake.setup" "setup failed"; return; }
     _fed_chain "$dir" 10 20 lottery=100 || { fail "compose_stake.chain" "chain setup failed"; return; }
 

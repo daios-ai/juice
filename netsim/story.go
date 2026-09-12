@@ -158,7 +158,7 @@ const sybilVictimHeadroom = 60
 
 // StoryVersion changes whenever the economy does, so two reports are never compared as if they
 // measured the same thing.
-const StoryVersion = "2"
+const StoryVersion = "3"
 
 const (
 	schemaIn  = `{"type":"object","properties":{"msg":{"type":"string","description":"text to send"}}}`
@@ -207,8 +207,9 @@ type settlement struct {
 	ID         string `json:"id"`
 	Debtor     string `json:"debtor"`
 	Creditor   string `json:"creditor"`
-	Amount     int64  `json:"amount"`     // what moved on the rail
+	Amount     int64  `json:"amount"`     // what moved on the rail, once the buyer has said
 	Obligation int64  `json:"obligation"` // what the buyer owed
+	Status     string `json:"status"`     // empty until the buyer says how its draw came out
 	Closed     bool   `json:"closed"`
 	WallMs     int64  `json:"wall_ms"`
 }
@@ -583,15 +584,21 @@ func (s *story) burst() {
 }
 
 // owed is how many obligations a buyer still owes a seller: what the seller has delivered and not
-// been paid for. Zero means nothing is outstanding between them.
-func (s *story) owed(seller, buyer string) int {
+// been paid for. Zero means nothing is outstanding between them — which is why a read that failed
+// must say so rather than answer zero: nothing is now the whole evidence that a debt was paid, and
+// a kernel that cannot be read has told us nothing at all.
+func (s *story) owed(seller, buyer string) (int, error) {
+	rows, err := s.outstanding(seller)
+	if err != nil {
+		return 0, err
+	}
 	n := 0
-	for _, st := range s.outstanding(seller) {
+	for _, st := range rows {
 		if s.isDebtor(buyer, st.Debtor) {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // isDebtor reports whether an obligation's named debtor is this kernel, however the seller renders
@@ -601,63 +608,95 @@ func (s *story) isDebtor(buyer, debtor string) bool {
 	return k != nil && (debtor == k.Handle || debtor == k.Key || strings.HasSuffix(debtor, k.Key[:8]))
 }
 
-// outstanding is what a seller is waiting to be paid for, as the operator sees it: each obligation a
-// buyer has said it paid, named by the fact that closes it.
-func (s *story) outstanding(seller string) []settlement {
-	out, _ := s.k(seller).Run("sysop-"+seller, "--json", "admin", "kernel", "deposits")
+// outstanding is what a seller is waiting to be paid for, as the operator sees it: every obligation
+// still open, named by the fact that will close it.
+func (s *story) outstanding(seller string) ([]settlement, error) {
+	out, err := s.k(seller).Run("sysop-"+seller, "--json", "admin", "kernel", "deposits")
+	if err != nil {
+		return nil, fmt.Errorf("reading what %s is owed: %w", seller, err)
+	}
 	var body struct {
 		Owed []struct {
 			ID         string `json:"id"`
 			Peer       string `json:"peer"`
 			Obligation int64  `json:"obligation"`
 			Amount     int64  `json:"amount"`
+			Status     string `json:"status"`
 		} `json:"owed"`
 	}
-	if json.Unmarshal([]byte(out), &body) != nil {
-		return nil
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		return nil, fmt.Errorf("reading what %s is owed: %w", seller, err)
 	}
 	found := make([]settlement, 0, len(body.Owed))
 	for _, r := range body.Owed {
 		found = append(found, settlement{ID: r.ID, Creditor: seller, Debtor: r.Peer,
-			Amount: r.Amount, Obligation: r.Obligation})
+			Amount: r.Amount, Obligation: r.Obligation, Status: r.Status})
 	}
-	return found
+	return found, nil
 }
 
-// settle closes what a buyer owes a seller. The buyer commits its payment when it settles the call
-// and the rail sends it; what remains is the seller confirming the money arrived, which on a world
-// whose facts are the operator's own records is the operator's act, and on a chain is the deposit
-// scan's. Either way the story waits for the seller's books to say nothing is outstanding.
+// settle waits for what a buyer owes a seller to be paid. Nobody is asked: the buyer commits its
+// payment when it settles the call, its rail sends it, and the seller's books close against the
+// finalized fact — the chain's own record where there is a chain, the buyer's signed reveal where
+// there is none. So this watches, it does not act, and it records each obligation it saw so the
+// report can say what was owed and what actually moved.
 func (s *story) settle(buyer, seller string) error {
 	if s.k(buyer) == nil || s.k(seller) == nil {
 		return fmt.Errorf("no such kernel")
 	}
+	seen := map[string]settlement{}
+	record := func(closed bool) {
+		for _, st := range seen {
+			st.Closed = closed
+			s.opened = append(s.opened, st)
+		}
+	}
 	deadline := time.Now().Add(s.n.Rail.SettleWait())
 	for {
-		rows := s.outstanding(seller)
+		// One reading answers both questions, so what is counted is what was looked at.
+		rows, err := s.outstanding(seller)
+		if err != nil {
+			record(false)
+			return err
+		}
+		open := 0
 		for _, st := range rows {
-			if st.Debtor != "" && !s.isDebtor(buyer, st.Debtor) {
+			if st.Debtor == "" || !s.isDebtor(buyer, st.Debtor) {
 				continue
 			}
-			if err := s.n.Rail.Credit(s.k(seller), st.ID, st.Debtor, st.Amount); err == nil {
-				st.Closed = true
-				s.opened = append(s.opened, st)
+			open++
+			// The same obligation is seen on every pass, and what the draw decided is known only
+			// once its buyer has said: keep the latest reading, and never lose one that did.
+			if was, ok := seen[st.ID]; !ok || st.Status != "" || was.Status == "" {
+				seen[st.ID] = st
 			}
 		}
-		if s.owed(seller, buyer) == 0 {
+		if open == 0 {
+			record(true)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s still owes %s for %d calls", buyer, seller, s.owed(seller, buyer))
+			record(false)
+			return fmt.Errorf("%s still owes %s for %d calls", buyer, seller, open)
 		}
 		time.Sleep(time.Second)
 	}
 }
 
-// settleAll closes every obligation in a set of ordered pairs.
+// settleAll waits for every obligation in a set of ordered pairs to be paid. A pair whose books
+// cannot be read is not a pair with nothing outstanding: it is counted as failed, so a kernel that
+// has stopped answering can never read as an economy that settled.
 func (s *story) settleAll(pairs [][2]string) (done, failed int) {
 	for _, p := range pairs {
-		if s.k(p[0]) == nil || s.k(p[1]) == nil || s.owed(p[1], p[0]) == 0 {
+		if s.k(p[0]) == nil || s.k(p[1]) == nil {
+			continue
+		}
+		n, err := s.owed(p[1], p[0])
+		if err != nil {
+			failed++
+			continue
+		}
+		if n == 0 {
 			continue
 		}
 		if s.settle(p[0], p[1]) == nil {
@@ -820,13 +859,22 @@ func (s *story) actDelegated() error {
 		"--description", "Reads the caller's own upstream account", "--auth", auth)
 	_, _ = k2.Run("cara", "action", "enable", "cara/vault/read")
 
-	before := k2.Balance("cara")
+	// A refusal for want of consent must cost nothing and count for nothing (U28), read off the
+	// action rather than off its owner's balance: she is a seller and a buyer besides, and her
+	// earlier trades are still being paid while this runs, so her balance moves for reasons that
+	// have nothing to do with this call. Her action's record does not. Money moves only with a
+	// transaction and a use is what a reputation is made of, so one number covers both — and the
+	// call that follows, once consent exists, is what proves the number counts at all.
 	s.n.MustRefuse("auth.refused_without_consent", "grant|connect|consent|authoriz",
 		k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
-	s.n.Check("auth.nothing_locked_before_consent", k2.Balance("cara") == before,
-		"the balance moved on a call refused for want of consent")
+	used := k2.Num("cara", "uses", "action", "stats", "cara/vault/read")
+	s.n.Check("auth.nothing_charged_before_consent", used == 0,
+		fmt.Sprintf("a call refused for want of consent was recorded against the action (%d uses)", used))
 	s.n.MustWork("auth.connected", k2, "cara", "user", "connect", "cara/vault", "--token", "netsim-delegated-token")
 	s.n.MustWork("auth.works_with_consent", k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
+	s.n.Check("auth.consented_call_is_counted",
+		k2.Num("cara", "uses", "action", "stats", "cara/vault/read") == 1,
+		"the call that consent allowed was not recorded, so the check above counted nothing")
 	host := strings.TrimPrefix(s.n.Backend, "http://")
 	s.n.MustWork("auth.disconnected", k2, "cara", "user", "disconnect", "--account", "bearer:"+host)
 	s.n.MustRefuse("auth.refused_after_revoking", "grant|connect|consent|authoriz",
@@ -1049,19 +1097,20 @@ func (s *story) attackSybil() {
 	if cap < 0 {
 		cap = 0
 	}
-	s.k("k2").Stop()
 	victim := s.opts("k2", sybilVictimHeadroom)
 	victim.CreditLimit = cap
-	if _, err := s.n.Boot("k2", victim); err != nil {
+	if err := s.reboot("k2", victim); err != nil {
 		fail("the victim would not restart: " + err.Error())
 		return
 	}
 	defer s.restoreVictim()
 
-	// Both identities take delivery and never pay, alongside an honest kernel, until the shop
-	// refuses someone. The limit governs the total the shop has delivered and not been paid for, not
-	// any one identity's share, and the refusal must be the credit engine's — a refusal for want of
-	// the caller's own money would let an unfunded attack look like a defended one.
+	// Both identities borrow as fast as they can, alongside an honest kernel, until the shop refuses
+	// someone. Nobody has to withhold anything: a debt is paid only once the buyer's own worker has
+	// sent the money and said so, and a burst of calls outruns that, which is the ordinary way an
+	// attacker reaches a limit. The limit governs the total the shop has delivered and not been paid
+	// for, not any one identity's share, and the refusal must be the credit engine's — a refusal for
+	// want of the caller's own money would let an unfunded attack look like a defended one.
 	//
 	// What the attack is measured against is the absolute ceiling, not what it added. The guarantee
 	// is that the shop's unpaid delivered work never passes its limit however many identities
@@ -1101,11 +1150,18 @@ func mustMap(m map[string]any, _ error) map[string]any {
 	return m
 }
 
+// reboot restarts one kernel on new options over its own durable store, which is how the story
+// changes a policy a kernel reads only at startup.
+func (s *story) reboot(name string, o bootOpts) error {
+	s.k(name).Stop()
+	_, err := s.n.Boot(name, o)
+	return err
+}
+
 // restoreVictim puts the shop back on the economy's own cap, so the acts that follow trade under
 // the same terms as the acts before.
 func (s *story) restoreVictim() {
-	s.k("k2").Stop()
-	if _, err := s.n.Boot("k2", s.opts("k2", kernelPlan[1].creditLimit)); err != nil {
+	if err := s.reboot("k2", s.opts("k2", kernelPlan[1].creditLimit)); err != nil {
 		s.n.Check("attack.sybil_victim_restored", false, err.Error())
 		return
 	}
@@ -1273,7 +1329,12 @@ func (s *story) actSettleAll() error {
 		}
 		for _, c := range names {
 			for _, b := range names {
-				if b != c && s.k(c) != nil && s.k(b) != nil && s.owed(c, b) > 0 {
+				if b == c || s.k(c) == nil || s.k(b) == nil {
+					continue
+				}
+				// A failed read is not an absence of debt, so it keeps the poll going and, if it
+				// never succeeds, leaves the run saying obligations are still open.
+				if n, err := s.owed(c, b); err != nil || n > 0 {
 					return false
 				}
 			}

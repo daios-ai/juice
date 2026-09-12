@@ -31,8 +31,8 @@ func lastSeenStr(t *time.Time) string {
 }
 
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
-// performs: money (deposit, settle), access (suspend/unsuspend), federation trust
-// (peers/inspect/settle), and the global roster (users/show). They are ordinary TCP
+// performs: money (deposit), access (suspend/unsuspend), federation trust
+// (peers/inspect), and the global roster (users/show). They are ordinary TCP
 // clients like every other command (apiCall/apiEmit); the server gates the routes with
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
@@ -44,7 +44,7 @@ func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Accounts on this kernel"}
 	userCmd.AddCommand(append(rosterCmds("user"), adminUserListCmd(), adminUserDepositCmd())...)
 	peerCmd := &cobra.Command{Use: "peer", Short: "Kernels this one trades with"}
-	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd(), peerSettleCmd())...)
+	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd())...)
 	kernelCmd := &cobra.Command{Use: "kernel", Short: "This kernel itself"}
 	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd())
 	adminCmd.AddCommand(userCmd, peerCmd, kernelCmd)
@@ -269,41 +269,23 @@ func adminUserListCmd() *cobra.Command {
 	return cmd
 }
 
-// targetHelp defines the shared TARGET placeholder of the mixed account/kernel admin commands.
-
-// Money arriving from outside is recorded once, against the fact that caused it. Who it is recorded
-// for decides what it means: a user is credited, and a peer's obligation is settled to whoever it
-// was owed to. They were one command guessing from its argument; they are two, each saying which.
+// adminUserDepositCmd records money arriving from outside, once, against the fact that caused it.
+// Only a user is ever credited: what a peer owes closes when it pays, which nobody records by hand.
+// Repeating the same fact never moves money twice, and the same fact with a different amount is
+// refused — by the kernel, which is where idempotency belongs (D23).
 func adminUserDepositCmd() *cobra.Command {
-	return creditCmd("user", "deposit USER [AMOUNT]",
-		"Credit an account for a payment received from outside",
-		"Credit USER for a payment received from outside this kernel.\n\n"+
-			"Two forms:\n"+
-			"  admin user deposit USER AMOUNT --ref FACT   record a payment made outside the system\n"+
-			"  admin user deposit USER --ref TXHASH        assign a received payment to its sender\n\n"+
-			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n"+
-			"account's once it is recorded.")
-}
-
-func peerSettleCmd() *cobra.Command {
-	return creditCmd("peer", "settle PEER [AMOUNT]",
-		"Record the payment that closes what a peer owes",
-		"Record the payment closing what PEER owes for work this kernel delivered. A peer account\n"+
-			"holds no money of its own: the money goes to the provider it is owed to.\n\n"+
-			"  admin peer settle PEER [AMOUNT] --ref ID\n\n"+
-			"Recording cannot be undone.")
-}
-
-// creditCmd is the shape both of those share: a target, an optional amount, and the fact that
-// names the payment. Repeating the same fact never moves money twice, and the same fact with a
-// different amount is refused — by the kernel, which is where idempotency belongs (D23).
-func creditCmd(kind, use, short, long string) *cobra.Command {
 	var reason, ref string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: short,
-		Long: long + "\n\nFACT names the payment: your own record of it where this world has no chain, or the\n" +
+		Use:   "deposit USER [AMOUNT]",
+		Short: "Credit an account for a payment received from outside",
+		Long: "Credit USER for a payment received from outside this kernel.\n\n" +
+			"Two forms:\n" +
+			"  admin user deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
+			"  admin user deposit USER --ref TXHASH        assign a received payment to its sender\n\n" +
+			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n" +
+			"account's once it is recorded.\n\n" +
+			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
 			"transaction that carried it where it has.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -316,7 +298,7 @@ func creditCmd(kind, use, short, long string) *cobra.Command {
 				return merr
 			}
 			var amount int64
-			what := fmt.Sprintf("Record payment %s on %s, closing what %s owes?", ref, me.Kernel, args[0])
+			what := fmt.Sprintf("Credit %s@%s with payment %s?", args[0], me.Kernel, ref)
 			if len(args) == 2 {
 				net, err := serverNetwork(ctx)
 				if err != nil {
@@ -331,23 +313,23 @@ func creditCmd(kind, use, short, long string) *cobra.Command {
 				return err
 			}
 			return apiEmitCtx(ctx, "POST", "/control/deposit", map[string]any{
-				"handle": args[0], "amount": amount, "reason": reason, "ref": ref, "kind": kind,
+				"handle": args[0], "amount": amount, "reason": reason, "ref": ref,
 			})
 		},
 	}
-	cmd.Flags().StringVar(&ref, "ref", "", "The payment this records: your own record of it, a transaction hash, or a settlement id")
+	cmd.Flags().StringVar(&ref, "ref", "", "The payment this records: your own record of it, or the transaction that carried it")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
-// adminDepositsCmd is the money this kernel has received that nobody has claimed: payments whose
-// sender nobody has registered, and settlements a peer says it has paid. It reads; the two credit
-// commands above are what act on it.
+// adminDepositsCmd is what this kernel is waiting on: payments received whose sender nobody has
+// registered, and the work it has delivered to foreign buyers and not been paid for. It reads —
+// a payment is credited by `admin user deposit`, and an obligation closes when its buyer pays.
 func adminDepositsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "deposits",
-		Short: "List the money waiting to be recorded",
+		Short: "List money received that nobody has claimed, and work delivered unpaid",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return apiEmit("GET", "/control/deposits", nil)

@@ -1240,73 +1240,106 @@ func TestSimStoreFaultOnFailureCommitLeavesNoMoneyBehind(t *testing.T) {
 // Scenario: the lottery settles a cross-kernel obligation
 // ---------------------------------------------------------------------------
 
-// TestSimTicketSettlesEitherWay drives a real cross-kernel call under a lottery large enough that
-// the draw genuinely applies, and checks the money on both sides for whichever way it falls.
+// TestSimTicketSettlesEitherWay drives a real cross-kernel call and follows the money all the way
+// through the draw: the buyer pays, reveals, and the seller's own books close against that reveal.
 //
-// The invariants are the same either way. The buyer is charged the advertised price from its budget
-// no matter what, because the obligation is a separate channel: it comes back to the caller, whose
-// own stake then carries the draw. A losing draw leaves the caller exactly the obligation better off
-// than the price alone; a winning one takes the face value from it. The seller learns the outcome
-// from the reveal and never has to trust the buyer's word for it, because it recomputes the draw.
+// Two face values, because the draw has two regimes and both must be reached deliberately rather
+// than by whichever way today's randomness happens to fall. One above the obligation, where the
+// draw genuinely applies and either outcome is valid; one the obligation covers, which is paid
+// exactly, so the paying half is exercised on every run.
+//
+// The invariants are the same throughout. The buyer is charged the advertised price from its budget
+// however the draw falls, because the obligation is a separate channel: it comes back to the caller,
+// whose own stake then carries the draw. The seller learns the outcome from the reveal and never has
+// to trust the buyer's word for it, because it recomputes the draw from what it committed to.
 func TestSimTicketSettlesEitherWay(t *testing.T) {
-	net := newSimNet(t)
+	// mp 25 → sr = 27 → q = 30 at the rates below.
+	const q, obligation, capital = int64(30), int64(27), int64(5000)
+	for _, c := range []struct {
+		name string
+		face int64 // the face value the buyer dispatches under
+		pays int64 // what a paying draw moves
+		sure bool  // a face value the obligation covers is paid exactly, so it cannot lose
+	}{
+		{"a face value far above the obligation", 1000, 1000, false},
+		{"a face value the obligation covers", 10, obligation, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			net := newSimNet(t)
+			sellCfg := defaultSimConfig()
+			sellCfg.FeeBPS, sellCfg.RemoteBPS = 1000, 700
+			buyCfg := defaultSimConfig()
+			buyCfg.ImportBPS = 1000
+			buyCfg.Lottery = c.face
 
-	sellCfg := defaultSimConfig()
-	sellCfg.FeeBPS, sellCfg.RemoteBPS = 1000, 700
-	buyCfg := defaultSimConfig()
-	buyCfg.ImportBPS = 1000
-	buyCfg.Lottery = 1000 // far above the obligation, so the draw is real
+			seller := net.addNode("seller", sellCfg)
+			buyer := net.addNode("buyer", buyCfg)
 
-	seller := net.addNode("seller", sellCfg)
-	buyer := net.addNode("buyer", buyCfg)
+			cara := seller.user(t, "cara", sellerCapital)
+			seller.publish(t, cara, "quote", 25)
+			dan := buyer.user(t, "dan", capital)
 
-	cara := seller.user(t, "cara", sellerCapital)
-	seller.publish(t, cara, "quote", 25)
-	dan := buyer.user(t, "dan", 5000)
+			if _, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote")); err != nil {
+				net.dump()
+				t.Fatalf("run: %v", err)
+			}
 
-	if _, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote")); err != nil {
-		net.dump()
-		t.Fatalf("run: %v", err)
-	}
+			sold := seller.owedBy(t, buyer.key)
+			if sold == nil || sold.Obligation != obligation {
+				net.dump()
+				t.Fatalf("seller's obligation = %+v, want %d", sold, obligation)
+			}
+			if _, lottery, _ := kernel.ServingTerms(&sold.Terms); lottery != c.face {
+				t.Errorf("the obligation was agreed under a face value of %d, want %d", lottery, c.face)
+			}
 
-	// mp 25 → sr = 27 → q = 30. The obligation is 27; the stake is the whole face value, 1000.
-	const q, obligation, face = int64(30), int64(27), int64(1000)
+			// The buyer keeps no obligation of its own: what it paid is the payment row, and what it
+			// drew is re-derivable from the trace and the receipt. That the two kernels agree is
+			// exactly the check that the money moved matches what the seller says was decided.
+			paid := buyer.paidFor(t, sold.ID)
+			if paid != c.pays && !(paid == 0 && !c.sure) {
+				t.Fatalf("the buyer paid %d, which is neither nothing nor the %d its draw could owe", paid, c.pays)
+			}
+			// One formula covers both outcomes: the price is charged, the obligation returns to the
+			// caller, and the caller's own balance carries whatever the draw decided.
+			if want := capital - q + obligation - paid; buyer.balance(t, dan.ID) != want {
+				t.Errorf("after a draw paying %d the caller has %d, want %d", paid, buyer.balance(t, dan.ID), want)
+			}
 
-	sold := seller.owedBy(t, buyer.key)
-	if sold == nil || sold.Obligation != obligation {
-		net.dump()
-		t.Fatalf("seller's obligation = %+v, want %d", sold, obligation)
-	}
-	if _, lottery, _ := kernel.ServingTerms(&sold.Terms); lottery != face {
-		t.Errorf("the obligation was agreed under a face value of %d, want %d", lottery, face)
-	}
+			// Whatever the draw, a peer row holds no money at all.
+			if got := seller.peerBalance(t, buyer.key); got != 0 {
+				t.Errorf("the seller's row for the buyer holds %d, want 0", got)
+			}
+			if got := buyer.peerBalance(t, seller.key); got != 0 {
+				t.Errorf("the buyer's row for the seller holds %d, want 0", got)
+			}
 
-	// The buyer keeps no obligation of its own: what it paid is the payment row, and what it drew is
-	// re-derivable from the trace and the receipt. That the two kernels agree is exactly the check
-	// that the money moved matches what the seller says was decided.
-	paid := buyer.paidFor(t, sold.ID)
-	balance := buyer.balance(t, dan.ID)
-	switch {
-	case paid == 0:
-		// Nothing is owed: the price was charged and the obligation returned, so the caller is out
-		// only the import fee, which its own kernel keeps.
-		if want := 5000 - q + obligation; balance != want {
-			t.Errorf("after a losing draw the caller has %d, want %d", balance, want)
-		}
-	case paid == face:
-		if want := 5000 - q + obligation - face; balance != want {
-			t.Errorf("after a winning draw the caller has %d, want %d", balance, want)
-		}
-	default:
-		t.Fatalf("the buyer paid %d, which is neither nothing nor the face value of %d", paid, face)
-	}
-
-	// Whatever the draw, a peer row holds no money at all.
-	if got := seller.peerBalance(t, buyer.key); got != 0 {
-		t.Errorf("the seller's row for the buyer holds %d, want 0", got)
-	}
-	if got := buyer.peerBalance(t, seller.key); got != 0 {
-		t.Errorf("the buyer's row for the seller holds %d, want 0", got)
+			// Nobody records anything by hand. This world has no addresses, so the buyer's signed
+			// reveal is itself the finalized payment (D23): one pass of the buyer's own worker sends
+			// it, and the seller's books close against it — the provider credited exactly what the
+			// draw decided, and the exposure the delivery created discharged by that cash and by
+			// nothing else.
+			providerBefore, exposureBefore := seller.balance(t, cara.ID), seller.exposure(t)
+			buyer.k.RailPass(context.Background())
+			closed := seller.owedBy(t, buyer.key)
+			if closed == nil {
+				net.dump()
+				t.Fatal("the seller's obligation vanished")
+			}
+			credited := seller.balance(t, cara.ID) - providerBefore
+			wantStatus := kernel.OwedCredited
+			if paid == 0 {
+				wantStatus = kernel.OwedCancelled
+			}
+			if closed.Status != wantStatus || credited != paid {
+				t.Errorf("a draw paying %d left the obligation %q and credited the provider %d, want %q and %d",
+					paid, closed.Status, credited, wantStatus, paid)
+			}
+			if got := seller.exposure(t); got != exposureBefore-paid {
+				t.Errorf("exposure = %d, want %d: the cash received is what discharges it, and nothing else",
+					got, exposureBefore-paid)
+			}
+		})
 	}
 }
 
@@ -1319,6 +1352,16 @@ func (s *simNode) paidFor(t *testing.T, id string) int64 {
 		return 0
 	}
 	return row.Amount
+}
+
+// exposure is what this kernel has delivered to foreign buyers and not been paid for.
+func (s *simNode) exposure(t *testing.T) int64 {
+	t.Helper()
+	e, err := s.db.Exposure(context.Background())
+	if err != nil {
+		t.Fatalf("%s: read exposure: %v", s.name, err)
+	}
+	return e
 }
 
 // A peer account is identity, attribution and moderation state — never a wallet. The old economy

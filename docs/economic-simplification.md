@@ -51,10 +51,12 @@ then credited what arrives: \(L\) or nothing, expected \(D\). Local trades are u
 Each **node** maintains one counter
 
 $$
-E=\text{service value delivered to remote buyers}-\text{final rail cash received for it},
+E=\text{service value delivered to remote buyers}-\text{final cash received for it},
 $$
 
-and one credit limit \(E_{\max}\). It admits new foreign work only if the advertised maximum charge,
+where *final cash* is whatever the world the node serves counts as a finalized payment: a settled
+chain transaction where there is a chain, and the buyer's own signed reveal where there is none —
+a world with no chain is play money, not cash-backed. It keeps one credit limit \(E_{\max}\). It admits new foreign work only if the advertised maximum charge,
 plus all reserved unfinished work, keeps \(E\le E_{\max}\). Reservations are atomic. Only final cash
 reduces \(E\); a cancelled draw discharges the obligation but leaves \(E\) unchanged. This is the
 central security rule, and the counter is the node's own rather than any peer's: a bound that reset

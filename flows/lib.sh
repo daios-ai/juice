@@ -295,17 +295,38 @@ import sys,json
 rows=json.loads(sys.argv[1]).get(sys.argv[2]) or []
 print('' if not rows else rows[0].get(sys.argv[3],''))" "$1" "$2" "$3" 2>/dev/null; }
 
-# owed_count db home peer — how many obligations one buyer still owes this kernel, from the
-# operator's own worklist. An obligation is kept only by the side that is owed, so this is read on
-# the seller and counted by the buyer it names.
+# owed_count db home peer — how many open obligations one buyer still owes this kernel, from the
+# operator's own view of them. An obligation is kept only by the side that is owed, so this is read
+# on the seller and counted by the buyer it names. A read that fails says so rather than counting
+# zero: a broken read must fail its assertion, never look like everything settled.
 owed_count() {
     local db="$1" home="$2" peer="$3"
     python3 -c "
 import sys,json
-rows=json.loads(sys.argv[1] or '{}').get('owed') or []
+rows=json.loads(sys.argv[1]).get('owed') or []
 peer=sys.argv[2]
 print(sum(1 for r in rows if r.get('peer') in (peer, peer[:8]) or peer.startswith(r.get('peer',''))))" \
-        "$(jj "$db" "$home" admin kernel deposits)" "$peer" 2>/dev/null || echo 0
+        "$(jj "$db" "$home" admin kernel deposits)" "$peer" 2>/dev/null || echo unreadable
+}
+
+# exposure_of db home — what a kernel has delivered to foreign buyers and not been paid for.
+exposure_of() { numfield "$(jj "$1" "$2" admin kernel show)" exposure; }
+
+# balance_of db home — the spendable balance of whoever that home is logged in as.
+balance_of() { numfield "$(jj "$1" "$2" user me)" available; }
+
+# await_eq name want cmd... — poll until the command's output is want, then assert it. Settlement
+# happens on the buyer's own cadence with nobody to prod it, so what a flow can do is wait for the
+# end state and say what it wanted when it never arrives.
+await_eq() {
+    local name="$1" want="$2"; shift 2
+    local got="" i
+    for i in $(seq 1 30); do
+        got=$("$@")
+        [ "$got" = "$want" ] && break
+        sleep 1
+    done
+    assert_eq "$name" "$want" "$got"
 }
 
 # pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.

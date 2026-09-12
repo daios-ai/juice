@@ -178,7 +178,8 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 One economy, run unchanged on all three. A rail supplies only how money enters, how a payment is
 made and becomes final, and what the run cost. A test fails if `story.go` so much as names a rail.
 
-- **play** — no chain. The operator's own record is the finalized fact.
+- **play** — no chain. A person's payment is the operator's own record of it; a peer's is the
+  buyer's own signed reveal, so cross-kernel debts close with nobody acting. Play money.
 - **anvil** — a local chain, real contracts and signatures, blocks made on demand, currency free.
 - **sepolia** — Arbitrum Sepolia, and nowhere else: the rail refuses any chain but 421614. The
   shipped test world settles at `latest`, Arbitrum's own confirmation; a run that must wait for

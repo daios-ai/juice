@@ -540,14 +540,16 @@ type Store interface {
 	ReadOwed(ctx context.Context, id, peerUserID string) (*Owed, error)
 	// ApplyReveal records on the trace how a draw came out. An amount waits for the payment that
 	// carries it, from the payer frozen at admission; nothing owed closes the obligation outright,
-	// and the exposure it added stays either way, since only cash reduces exposure.
-	ApplyReveal(ctx context.Context, traceID string, amount int64, txHash string) error
+	// and the exposure it added stays either way, since only cash reduces exposure. Where the reveal
+	// is itself the payment (D23) the caller passes that payment, booked in the same statement.
+	ApplyReveal(ctx context.Context, sys, traceID string, amount int64, txHash string, payment *RailTransfer) error
 	// ReconcileDeposits is the one path every observed payment takes: obligations whose money has
 	// arrived are closed first — the join is the rule, so no caller can credit a payment from the
 	// wrong sender, amount or transaction — and whatever no obligation claimed is then attributed to
 	// the account that registered the address it came from. Returns the credits it wrote.
 	ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]*LedgerEntry, error)
-	// ListOwed is what this kernel is still waiting to be paid for, oldest first.
+	// ListOwed is every obligation this kernel is still waiting to be paid for, oldest first —
+	// including one whose buyer has not yet said how the draw came out.
 	ListOwed(ctx context.Context, limit int) ([]*Owed, error)
 	// Exposure returns what this kernel has delivered to foreign buyers and not been paid for. It may
 	// be negative: premium income accumulates there.

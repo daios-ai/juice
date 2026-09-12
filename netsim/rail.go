@@ -35,10 +35,6 @@ type Rail interface {
 	GasUp(k *Kernel, payments int) error
 	// Fund puts money in a user's hands and returns when the kernel counts it as theirs.
 	Fund(k *Kernel, user string, credits int64) error
-	// Credit closes one obligation on the seller's books against the payment the buyer made for it.
-	// On a world whose finalized facts are the operator's own records this is that record; on a
-	// chain the kernel's own deposit scan does it, and this only reports whether it has yet.
-	Credit(seller *Kernel, ticketID, buyer string, amount int64) error
 	// SettleWait is how long a payment may take to become final on this rail, so the story waits for
 	// what a chain actually needs rather than a figure guessed once.
 	SettleWait() time.Duration
@@ -89,14 +85,9 @@ func (playRail) Fund(k *Kernel, user string, credits int64) error {
 	return err
 }
 
-// Credit is the operator's own record that the buyer's payment arrived, which on this world is what
-// makes it final.
-func (playRail) Credit(seller *Kernel, ticketID, buyer string, amount int64) error {
-	return confirmPayment(seller, ticketID, buyer, amount)
-}
-
-// SettleWait is nothing: the operator's record is the finality.
-func (playRail) SettleWait() time.Duration { return 5 * time.Second }
+// SettleWait is how long the buyer's own worker may take to pay and say so: on this world its
+// signed reveal is the payment, so what the story waits for is that message and nothing else.
+func (playRail) SettleWait() time.Duration { return 30 * time.Second }
 
 // ---- a chain ----------------------------------------------------------------
 // What anvil and Sepolia share: real contracts, real signatures, a payment that is final only when
@@ -164,14 +155,6 @@ func (c *chainRail) Credit(seller *Kernel, ticketID, buyer string, amount int64)
 // SettleWait is how long the chain takes to make a payment final, which is what the story waits for.
 func (c *chainRail) SettleWait() time.Duration { return c.await }
 
-// confirmPayment is the operator's own confirmation that a payment arrived, naming the obligation it
-// closes. Flags first, then a bare `--`: a public key is base64url and may begin with a dash, which
-// is otherwise read as an unknown flag and leaves the obligation silently open.
-func confirmPayment(seller *Kernel, ticketID, buyer string, amount int64) error {
-	_, err := seller.Run("sysop-"+seller.Name, "admin", "peer", "settle", "--yes", "--ref", ticketID,
-		"--", buyer, strconv.FormatInt(amount, 10))
-	return err
-}
 
 // payingWallet is the one wallet the whole run pays in from. An address registers per kernel, so one
 // wallet can pay into every kernel; a fresh wallet per user would cost a funding transaction each

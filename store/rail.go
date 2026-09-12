@@ -133,16 +133,7 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 			out, err = readLedgerByExternalKey(ctx, tx, kernel.AttributionKey(row.ID))
 			return err
 		}
-		// The crossing: credits enter the ledger here and nowhere else, against a finalized fact.
-		if err := hold(ctx, tx, sys, row.Amount); err != nil {
-			return err
-		}
-		if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
-			ID: uuid.NewString(), OperatorUserID: sys, ToUserID: sys, Amount: row.Amount,
-			Reason: row.Reason, ExternalKey: row.ID, CreatedAt: row.CreatedAt}); err != nil {
-			return err
-		}
-		if err := insertRail(ctx, tx, row); err != nil {
+		if err := bookDeposit(ctx, tx, sys, row); err != nil {
 			return err
 		}
 		if toUserID == "" {
@@ -152,6 +143,20 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 		return err
 	})
 	return out, err
+}
+
+// bookDeposit is the crossing: credits enter the ledger here and nowhere else, against a finalized
+// fact. The money is the operator's and held — unspendable — until reconciliation says whose it is.
+func bookDeposit(ctx context.Context, tx *sql.Tx, sys string, row *kernel.RailTransfer) error {
+	if err := hold(ctx, tx, sys, row.Amount); err != nil {
+		return err
+	}
+	if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
+		ID: uuid.NewString(), OperatorUserID: sys, ToUserID: sys, Amount: row.Amount,
+		Reason: row.Reason, ExternalKey: row.ID, CreatedAt: row.CreatedAt}); err != nil {
+		return err
+	}
+	return insertRail(ctx, tx, row)
 }
 
 // deliverDeposit hands a held payment to its owner: the hold ends, the owner is credited, and what

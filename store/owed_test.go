@@ -98,10 +98,11 @@ func paymentIn(key, from, txHash string, amount int64) *kernel.RailTransfer {
 }
 
 // announce puts an obligation where the buyer has said it paid: settled, then revealed as a win.
+// The payment is nil because this is a world with addresses — the money is observed on its own.
 func announce(t *testing.T, db *DB, seller *kernel.Account, c foreignCall, txHash string, obligation, amount int64) {
 	t.Helper()
 	settle(t, db, seller, c, obligation)
-	if err := db.ApplyReveal(context.Background(), c.tr.ID, amount, txHash); err != nil {
+	if err := db.ApplyReveal(context.Background(), "", c.tr.ID, amount, txHash, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -289,12 +290,12 @@ func TestOnlyTheNamedPaymentClosesAnObligationAndItCreditsTheWholeOfIt(t *testin
 // A losing draw closes the obligation and moves nothing, and the exposure it created stays: only
 // cash reduces exposure, which is what stops a buyer taking delivery for free at scale.
 func TestALosingDrawLeavesTheExposureBehind(t *testing.T) {
-	db, _, seller, peer := owedFixture(t)
+	db, sys, seller, peer := owedFixture(t)
 	ctx := context.Background()
 	call := admit(t, db, seller, peer, "call-1", 40, 100000)
 	settle(t, db, seller, call, 40)
 	before, _ := balances(t, db, seller.ID)
-	if err := db.ApplyReveal(ctx, call.tr.ID, 0, ""); err != nil {
+	if err := db.ApplyReveal(ctx, sys, call.tr.ID, 0, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := db.ReadOwed(ctx, "call-1", peer.ID); r.Status != kernel.OwedCancelled || r.Amount != 0 {
@@ -305,6 +306,96 @@ func TestALosingDrawLeavesTheExposureBehind(t *testing.T) {
 	}
 	if e, _ := db.Exposure(ctx); e != 40 {
 		t.Errorf("exposure after a losing draw = %d, want the 40 that was delivered", e)
+	}
+}
+
+// Where the world has no addresses the reveal is itself the payment (D23), so the two are one
+// commit: the money is booked with the fact that made it final, reconciliation then closes the
+// obligation and credits the seller, and none of it needs an operator.
+func TestARevealBooksItsOwnPaymentWhereThereAreNoAddresses(t *testing.T) {
+	db, sys, seller, peer := owedFixture(t)
+	ctx := context.Background()
+	call := admitFrom(t, db, seller, peer, "call-1", "", 40, 100000)
+	settle(t, db, seller, call, 40)
+	before, _ := balances(t, db, seller.ID)
+
+	pay := depositRow("rail:ref:manual:call-1", "", 40)
+	pay.TxHash = "manual:call-1"
+	if err := db.ApplyReveal(ctx, sys, call.tr.ID, 40, pay.TxHash, pay); err != nil {
+		t.Fatal(err)
+	}
+	if row, _ := db.ReadRailTransfer(ctx, pay.ID); row == nil || row.Status != kernel.RailStatusHeld {
+		t.Fatalf("the reveal booked no held payment: %+v", row)
+	}
+	// A resend is answered from the record, so it must book nothing a second time: the guard that
+	// makes the reveal idempotent is the same one the payment is written under.
+	if err := db.ApplyReveal(ctx, sys, call.tr.ID, 40, pay.TxHash, pay); err != nil {
+		t.Fatalf("a resent reveal must be safe: %v", err)
+	}
+	if _, err := db.ReconcileDeposits(ctx, sys, 10); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := db.ReadOwed(ctx, "call-1", peer.ID); r.Status != kernel.OwedCredited {
+		t.Errorf("the obligation = %s, want credited with no operator act", r.Status)
+	}
+	if after, _ := balances(t, db, seller.ID); after != before+40 {
+		t.Errorf("the seller was credited %d, want the whole 40 once", after-before)
+	}
+	if e, _ := db.Exposure(ctx); e != 0 {
+		t.Errorf("exposure after the payment = %d, want 0: cash is what discharges it", e)
+	}
+}
+
+// A reveal whose payment cannot be booked leaves no trace of itself either: the buyer will resend,
+// and a reveal recorded without its money would be an obligation nothing could ever close.
+func TestARevealThatCannotBookItsPaymentRecordsNothing(t *testing.T) {
+	db, _, seller, peer := owedFixture(t)
+	ctx := context.Background()
+	call := admitFrom(t, db, seller, peer, "call-1", "", 40, 100000)
+	settle(t, db, seller, call, 40)
+
+	// A payment naming an account that does not exist: the crossing's own ledger entry fails.
+	if err := db.ApplyReveal(ctx, "nobody", call.tr.ID, 40, "manual:call-1",
+		depositRow("rail:ref:manual:call-1", "", 40)); err == nil {
+		t.Fatal("a payment that could not be booked was accepted")
+	}
+	if r, _ := db.ReadOwed(ctx, "call-1", peer.ID); r.Status != "" {
+		t.Errorf("the reveal survived its payment failing: %s", r.Status)
+	}
+}
+
+// The operator sees every obligation this kernel is waiting on, not only the ones whose buyer has
+// spoken: what bounds a buyer that goes quiet is the credit limit, and what acts on one is the
+// operator, so an obligation nobody has revealed is exactly what must be visible.
+func TestOpenObligationsAreListedBeforeTheirBuyerSpeaks(t *testing.T) {
+	db, sys, seller, peer := owedFixture(t)
+	ctx := context.Background()
+	quiet := admit(t, db, seller, peer, "call-quiet", 40, 100000)
+	settle(t, db, seller, quiet, 40)
+	spoken := admit(t, db, seller, peer, "call-spoken", 40, 100000)
+	announce(t, db, seller, spoken, "0xpaid", 40, 40)
+	lost := admit(t, db, seller, peer, "call-lost", 40, 100000)
+	settle(t, db, seller, lost, 40)
+	if err := db.ApplyReveal(ctx, sys, lost.tr.ID, 0, "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.ListOwed(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.ID] = r.Status
+	}
+	if s, ok := got["call-quiet"]; !ok || s != "" {
+		t.Errorf("an unrevealed obligation = %q/%v, want listed with no status", s, ok)
+	}
+	if got["call-spoken"] != kernel.OwedAnnounced {
+		t.Errorf("a revealed obligation = %q, want announced", got["call-spoken"])
+	}
+	if _, ok := got["call-lost"]; ok {
+		t.Error("a losing draw owes nothing and must not be listed")
 	}
 }
 
@@ -598,7 +689,7 @@ func TestAPaymentFromAPeerWaitsForItsRevealBeforeAnyoneElseGetsIt(t *testing.T) 
 	}
 
 	// The reveal arrives: the payment is the obligation's, and closes it.
-	if err := db.ApplyReveal(ctx, call.tr.ID, 40, "0xpaid"); err != nil {
+	if err := db.ApplyReveal(ctx, sys, call.tr.ID, 40, "0xpaid", nil); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
@@ -648,7 +739,7 @@ func TestOneObligationTakesOnePaymentAndReservedMoneyIsNotHandedOut(t *testing.T
 	if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:0xpaid:0", "0xbuyer", "0xpaid", 40), ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ApplyReveal(ctx, call.tr.ID, 40, "0xpaid"); err != nil {
+	if err := db.ApplyReveal(ctx, sys, call.tr.ID, 40, "0xpaid", nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := db.Exposure(ctx)
