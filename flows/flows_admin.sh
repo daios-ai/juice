@@ -4,8 +4,8 @@
 # Dedupe note: user-facing CLI commands are HTTP clients, so `tx list` IS GET
 # /v1/transactions, `run` IS POST /v1/run, `step complete` IS POST /v1/steps/{id}/complete,
 # `user me` IS GET /v1/me. The old curl mirrors re-asserted state the CLI already exercised;
-# they are dropped. admin/* are HTTP clients too: they call /control/* on the same TCP API,
-# gated by requireSuperuserMW, and carry the noun they were given as ?kind=.
+# they are dropped. admin/* are HTTP clients too: they call /v1/admin/users|peers|kernel on the
+# same TCP API, gated by requireSuperuserMW, the noun they were given being the route itself.
 
 flow_transaction_access() {
     echo "=== FLOW transaction_access ==="

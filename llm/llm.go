@@ -283,8 +283,9 @@ func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.Decide
 // grammar-constraint stalls that JSON-mode causes on Ollama with accumulated context.
 //
 // The model is asked to output exactly one line:
-//   "lookup:<search query>"  → select @sys/lookup
-//   "<sanitized-name>"       → select that action (e.g. "sys_llm_chat")
+//
+//	"lookup:<search query>"  → select @sys/lookup
+//	"<sanitized-name>"       → select that action (e.g. "sys_llm_chat")
 func (o *OllamaChatter) chatDecideText(ctx context.Context, messages []kernel.DecideMessage, tools []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
 	// Build sanitized name map and action descriptions.
 	sanitizedToRef := make(map[string]string, len(tools))
@@ -373,4 +374,3 @@ func (o *OllamaChatter) chatDecideText(ctx context.Context, messages []kernel.De
 
 	return nil, nil, kernel.ErrExecutionFailed.Wrap("model did not select an action")
 }
-

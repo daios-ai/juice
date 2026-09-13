@@ -59,7 +59,7 @@ flow_rail_withdraw() {
     # Both legs are in her own ledger: out of her account, then out of the kernel.
     assert_contains "rail_withdraw.ledger_records_it" "sys" "$(j "$db" "$ha" user ledger)"
     # The row is listed with its outcome.
-    assert_contains "rail_withdraw.listed" "confirmed" "$(j "$db" "$ha" user withdraw)"
+    assert_contains "rail_withdraw.listed" "confirmed" "$(j "$db" "$ha" user withdrawals)"
     # More than she holds is refused, and nothing moves.
     assert_fails "rail_withdraw.over_balance" "insufficient\|error" -- j "$db" "$ha" user withdraw "$(units 9000)" --yes
     assert_jnum "rail_withdraw.unchanged_after_refusal" "$(jj "$db" "$ha" user me)" available 300
@@ -472,8 +472,11 @@ flow_one_output_policy() {
     # A user is named by its handle here, never by a raw account id (D20), so that is what pipes on.
     assert_contains "output.quiet_admin_list" "alice" "$(q "$db" "$hs" admin user list)"
     assert_eq "output.quiet_admin_show" "alice" "$(q "$db" "$hs" admin user show alice)"
-    assert_eq "output.quiet_says_nothing_of_no_resource" "" "$(q "$db" "$hs" admin user suspend alice)"
-    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
+    # A verb that changes a roster entry answers with what it changed, so --quiet names it and
+    # --json is the same document `show` returns.
+    assert_eq "output.quiet_names_what_it_changed" "alice" "$(q "$db" "$hs" admin user suspend alice)"
+    assert_json "output.change_answers_with_the_account" "$(jj "$db" "$hs" admin user unsuspend alice)" handle alice
+    assert_eq "output.quiet_says_nothing_of_no_resource" "" "$(q "$db" "$ha" process end no-such-process 2>/dev/null)"
 
     # A client-local list obeys the same rule, though no server is asked.
     assert_contains "output.quiet_names_the_kernels" "$KERNEL_NAME" "$(q "$db" "$ha" kernel list)"

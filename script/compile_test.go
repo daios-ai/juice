@@ -37,7 +37,6 @@ func TestInspectModuleEchoWASM(t *testing.T) {
 	}
 }
 
-
 func TestInspectModuleInvalidBytes(t *testing.T) {
 	_, _, err := InspectModule([]byte("not wasm"))
 	if !errors.Is(err, kernel.ErrInvalidInput) {
@@ -109,7 +108,7 @@ func TestSDKContract(t *testing.T) {
 	must := []string{
 		"//export run",
 		"func run(",
-		"Handle(in)",          // run delegates to author's Handle
+		"Handle(in)", // run delegates to author's Handle
 		"func JuiceCall(",
 		"func JuiceStepCreate(",
 		"func JuiceStepComplete(",
@@ -305,8 +304,10 @@ func (h *reentrantHost) Log(context.Context, string, string) error { return nil 
 // sdkTestHost is a no-op kernel.HostFunctions for the SDK compile test.
 type sdkTestHost struct{}
 
-func (sdkTestHost) Call(context.Context, string, []byte) ([]byte, error)       { return []byte("{}"), nil }
-func (sdkTestHost) StepCreate(context.Context, []byte, string, string) (string, error) { return "", nil }
+func (sdkTestHost) Call(context.Context, string, []byte) ([]byte, error) { return []byte("{}"), nil }
+func (sdkTestHost) StepCreate(context.Context, []byte, string, string) (string, error) {
+	return "", nil
+}
 func (sdkTestHost) StepComplete(context.Context, string, []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }

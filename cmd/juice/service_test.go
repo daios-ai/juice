@@ -768,10 +768,11 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	}
 }
 
-// TestResolveMixedNamespaces: only the six mixed admin commands consult both namespaces, and a bare
-// name matching a handle and a petname is refused rather than guessed — money and moderation must
-// never pick a target silently (§14).
-func TestResolveMixedNamespaces(t *testing.T) {
+// TestATargetIsWhatItsNounNames: every admin route says which namespace its target belongs to, so
+// a name is resolved as that kind or not at all — a petname equal to a handle can no more take a
+// deposit than be mistaken for the account that owns it, and nothing is ever guessed from a name's
+// shape (§14).
+func TestATargetIsWhatItsNounNames(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 
@@ -784,49 +785,44 @@ func TestResolveMixedNamespaces(t *testing.T) {
 	if _, err := k.BindPetname(ctx, key, "kernelonly", true); err != nil {
 		t.Fatal(err)
 	}
-
-	// Unambiguous: the local handle resolves to the account, the petname to the kernel.
-	if acct, gotKey, err := resolveMixed(k, ctx, "shared", ""); err != nil || acct == nil || acct.ID != local.ID || gotKey != "" {
-		t.Errorf("handle: got acct=%v key=%q err=%v", acct, gotKey, err)
-	}
-	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly", ""); err != nil || gotKey != key {
-		t.Errorf("petname: got key=%q err=%v, want %s", gotKey, err, key)
-	}
-	// A raw key is self-identifying and always names the kernel.
-	if _, gotKey, err := resolveMixed(k, ctx, key, ""); err != nil || gotKey != key {
-		t.Errorf("raw key: got key=%q err=%v", gotKey, err)
-	}
-
-	// A caller that says which kind it means gets that kind or nothing: `admin user suspend` on a
-	// peer, or `admin peer settle` on a user, is a refusal rather than a guess — which is what makes
-	// the noun in the command mean something.
-	if _, _, err := resolveMixed(k, ctx, "kernelonly", "user"); err == nil {
-		t.Error("a peer answered a command that named a user")
-	}
-	if _, _, err := resolveMixed(k, ctx, key, "user"); err == nil {
-		t.Error("a public key answered a command that named a user")
-	}
-	if _, _, err := resolveMixed(k, ctx, "shared", "peer"); err == nil {
-		t.Error("a user answered a command that named a peer")
-	}
-	if acct, gotKey, err := resolveMixed(k, ctx, "shared", "user"); err != nil || acct.ID != local.ID || gotKey != "" {
-		t.Errorf("a user named as a user: acct=%v key=%q err=%v", acct, gotKey, err)
-	}
-	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly", "peer"); err != nil || gotKey != key {
-		t.Errorf("a peer named as a peer: key=%q err=%v", gotKey, err)
-	}
-
-	// Now make the name ambiguous by binding the same string in the kernel namespace.
+	// The same string is both a handle and a petname here, which is exactly the case the noun
+	// settles: neither route has to ask which was meant.
 	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
 	if _, err := k.BindPetname(ctx, key2, "shared", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, "shared", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("ambiguous bare name: want ErrInvalidInput, got %v", err)
-	}
-	if _, _, err := resolveMixed(k, ctx, "nobody", ""); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("unknown name: want ErrNotFound, got %v", err)
+
+	for _, c := range []struct {
+		name, ident, noun string
+		wantAcct, wantKey string
+	}{
+		{"a handle under users", "shared", "user", local.ID, ""},
+		{"a petname under peers", "kernelonly", "peer", "", key},
+		{"a raw key under peers", key, "peer", "", key},
+		{"a petname under users", "kernelonly", "user", "", ""},
+		{"a raw key under users", key, "user", "", ""},
+		{"one name, two namespaces: the noun decides", "shared", "peer", "", key2},
+		{"a name that is neither", "nobody", "user", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			acct, gotKey, err := resolveTarget(k, ctx, c.ident, c.noun)
+			if c.wantAcct == "" && c.wantKey == "" {
+				if err == nil {
+					t.Fatalf("%s resolved as a %s: acct=%v key=%q", c.ident, c.noun, acct, gotKey)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if c.wantKey != "" && gotKey != c.wantKey {
+				t.Errorf("key: got %q, want %q", gotKey, c.wantKey)
+			}
+			if c.wantAcct != "" && (acct == nil || acct.ID != c.wantAcct) {
+				t.Errorf("account: got %v, want %s", acct, c.wantAcct)
+			}
+		})
 	}
 }
 
@@ -854,9 +850,9 @@ func TestAccountCacheReferenceRendersKernels(t *testing.T) {
 	}
 }
 
-// TestResolveMixedRefusesTombstones: the mixed admin commands take an id, so the purged-peer anchor
+// TestATargetIsNeverATombstone: the mixed admin commands take an id, so the purged-peer anchor
 // must be refused there too — it names no live entity (§13).
-func TestResolveMixedRefusesTombstones(t *testing.T) {
+func TestATargetIsNeverATombstone(t *testing.T) {
 	k, st := newRemoteTestKernel(t)
 	ctx := context.Background()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -867,7 +863,7 @@ func TestResolveMixedRefusesTombstones(t *testing.T) {
 	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, acct.ID, ""); !errors.Is(err, kernel.ErrNotFound) {
+	if _, _, err := resolveTarget(k, ctx, acct.ID, "user"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
 	}
 }

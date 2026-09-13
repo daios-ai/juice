@@ -113,7 +113,7 @@ func userConnectCmd() *cobra.Command {
 // that authorized on the way through has its own reply to answer with, and stdout carries one.
 func connectSelector(selector string, device, yes bool) ([]string, error) {
 	var plan kernel.ConsentPlan
-	if err := apiCall(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
+	if err := cli.call(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
 		return nil, err
 	}
 	var todo []kernel.ConsentGroup
@@ -222,7 +222,7 @@ func connectToken(selector, provider, token string) ([]string, error) {
 		body["provider"] = provider
 	}
 	var done grantCompleteResp
-	if err := apiCall(context.Background(), "POST", "/v1/grants", body, &done); err != nil {
+	if err := cli.call(context.Background(), "POST", "/v1/grants", body, &done); err != nil {
 		return nil, err
 	}
 	return done.Actions, nil
@@ -280,7 +280,7 @@ func connectOAuthCode(selector, provider string) ([]string, error) {
 	defer srv.Close()
 
 	var start grantStartResp
-	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
+	if err := cli.call(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"selector": selector, "provider": provider, "redirect_uri": redirectURI, "flow": "code",
 	}, &start); err != nil {
 		return nil, err
@@ -302,7 +302,7 @@ func connectOAuthCode(selector, provider string) ([]string, error) {
 	}
 
 	var done grantCompleteResp
-	if err := apiCall(context.Background(), "POST", "/v1/grants/complete", map[string]string{
+	if err := cli.call(context.Background(), "POST", "/v1/grants/complete", map[string]string{
 		"state": start.State, "code": got.code,
 	}, &done); err != nil {
 		return nil, err
@@ -314,7 +314,7 @@ func connectOAuthCode(selector, provider string) ([]string, error) {
 // server's /complete until the connection lands.
 func connectOAuthDevice(selector, provider string) ([]string, error) {
 	var start grantStartResp
-	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
+	if err := cli.call(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"selector": selector, "provider": provider, "flow": "device",
 	}, &start); err != nil {
 		return nil, err
@@ -336,7 +336,7 @@ func connectOAuthDevice(selector, provider string) ([]string, error) {
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Duration(interval) * time.Second)
 		var done grantCompleteResp
-		if err := apiCall(context.Background(), "POST", "/v1/grants/complete",
+		if err := cli.call(context.Background(), "POST", "/v1/grants/complete",
 			map[string]string{"state": start.State}, &done); err != nil {
 			return nil, err
 		}
@@ -357,12 +357,12 @@ func userDisconnectCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if account != "" {
-				return apiEmit("DELETE", "/v1/grants?account="+url.QueryEscape(account), nil, output{})
+				return cli.emit("DELETE", "/v1/grants?account="+url.QueryEscape(account), nil, output{})
 			}
 			if len(args) != 1 {
 				return kernel.ErrInvalidInput.Wrap("a selector or --account is required")
 			}
-			return apiEmit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil, output{})
+			return cli.emit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil, output{})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "Disconnect a whole upstream account (provider) and all its grants")

@@ -219,7 +219,7 @@ func (k *Kernel) railOrFail(ctx context.Context) (Rail, error) {
 // themselves rather than stored: a halt cannot then survive the condition that caused it, nor lift
 // while another payment is still refused.
 func (k *Kernel) RailStop(ctx context.Context) (reason string, since time.Time, err error) {
-	rows, err := k.store.ListRailTransfers(ctx, "", "", RailStatusBlocked, 1)
+	rows, err := k.store.ListRailTransfers(ctx, "", "", RailStatusBlocked, 1, 0)
 	if err != nil || len(rows) == 0 {
 		return "", time.Time{}, err
 	}
@@ -325,7 +325,7 @@ func (k *Kernel) ListHeldDeposits(ctx context.Context, operatorID string) ([]*Ra
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
-	return k.store.ListRailTransfers(ctx, RailKindDeposit, "", RailStatusHeld, 200)
+	return k.store.ListRailTransfers(ctx, RailKindDeposit, "", RailStatusHeld, 200, 0)
 }
 
 // ListOwed is what buyers have said they paid and this kernel has not yet seen the money for — the
@@ -388,8 +388,8 @@ func (k *Kernel) Withdraw(ctx context.Context, callerID, id string, amount int64
 	return row, nil
 }
 
-// ListWithdrawals returns the caller's own payouts, newest first.
-func (k *Kernel) ListWithdrawals(ctx context.Context, callerID string, limit int) ([]*RailTransfer, error) {
+// ListWithdrawals returns a page of the caller's own payouts.
+func (k *Kernel) ListWithdrawals(ctx context.Context, callerID string, limit, offset int) ([]*RailTransfer, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -397,7 +397,7 @@ func (k *Kernel) ListWithdrawals(ctx context.Context, callerID string, limit int
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	return k.store.ListRailTransfers(ctx, RailKindPayout, u.ID, "", limit)
+	return k.store.ListRailTransfers(ctx, RailKindPayout, u.ID, "", limit, offset)
 }
 
 // ---- Addresses (D23) ----
@@ -834,7 +834,7 @@ func (k *Kernel) railReport(ctx context.Context) (*RailReport, error) {
 	}
 	// Nor is it a cut while a payment is in flight: the holdings may already be without money the
 	// books still hold, and the difference that produces is timing rather than loss.
-	inFlight, err := k.store.ListRailTransfers(ctx, "", "", RailStatusSubmitted, 1)
+	inFlight, err := k.store.ListRailTransfers(ctx, "", "", RailStatusSubmitted, 1, 0)
 	if err != nil || len(inFlight) > 0 {
 		return rep, nil
 	}

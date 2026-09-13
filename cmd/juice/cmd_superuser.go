@@ -73,7 +73,7 @@ var rosters = map[string]roster{
 func rosterCmds(noun string) []*cobra.Command {
 	r := rosters[noun]
 	path := func(target, verb string) string {
-		return "/control/users/" + url.PathEscape(target) + verb + "?kind=" + r.noun
+		return "/v1/admin/" + r.noun + "s/" + url.PathEscape(target) + verb
 	}
 	// Suspending and restoring are one act and its undo: the same target, the same route, and a
 	// word apart, so they are written once.
@@ -84,7 +84,7 @@ func rosterCmds(noun string) []*cobra.Command {
 			Long:  long + "\n\n" + r.target + " is " + r.named + ".",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(_ *cobra.Command, args []string) error {
-				return apiEmit("POST", path(args[0], "/"+verb), nil, output{human: func([]byte) error {
+				return cli.emit("POST", path(args[0], "/"+verb), nil, output{id: r.id, human: func([]byte) error {
 					fmt.Printf("%s %s.\n", args[0], done)
 					return nil
 				}})
@@ -97,7 +97,7 @@ func rosterCmds(noun string) []*cobra.Command {
 		Long:  "Show one " + r.noun + "'s account on this kernel.\n\n" + r.target + " is " + r.named + ".",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", path(args[0], ""), nil, output{id: r.id, money: moneyAccount})
+			return cli.emit("GET", path(args[0], ""), nil, output{id: r.id, money: moneyAccount})
 		},
 	}
 	rename := &cobra.Command{
@@ -107,7 +107,7 @@ func rosterCmds(noun string) []*cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"new_name": args[1]}
-			return apiEmit("POST", path(args[0], "/rename"), body, output{human: func([]byte) error {
+			return cli.emit("POST", path(args[0], "/rename"), body, output{id: r.id, human: func([]byte) error {
 				fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
 				return nil
 			}})
@@ -135,7 +135,7 @@ func identityCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return apiEmitCtx(ctx, "GET", "/control/identity", nil, output{id: "public_key", human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel", nil, output{id: "public_key", human: func(b []byte) error {
 				var out struct {
 					Handle      string   `json:"handle"`
 					PublicKey   string   `json:"public_key"`
@@ -248,7 +248,7 @@ func adminUserListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return apiEmit("GET", "/control/users?"+q.Encode(), nil, output{id: "handle", human: func(b []byte) error {
+			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "handle", human: func(b []byte) error {
 				var users []*kernel.Account
 				if err := json.Unmarshal(b, &users); err != nil {
 					return err
@@ -292,27 +292,23 @@ func adminUserDepositCmd() *cobra.Command {
 			if ref == "" {
 				return kernel.ErrInvalidInput.Wrap("name the payment this records (--ref)")
 			}
-			me, _, merr := selected()
-			if merr != nil {
-				return merr
-			}
 			var amount int64
-			what := fmt.Sprintf("Credit %s@%s with payment %s?", args[0], me.Kernel, ref)
+			what := fmt.Sprintf("Credit %s with payment %s", args[0], ref)
 			if len(args) == 2 {
-				net, err := serverNetwork(ctx)
+				net, err := cli.network(ctx)
 				if err != nil {
 					return err
 				}
 				if amount, err = parseAmount(args[1], net.Decimals); err != nil {
 					return err
 				}
-				what = fmt.Sprintf("Credit %s to %s@%s?", net.Amount(amount), args[0], me.Kernel)
+				what = fmt.Sprintf("Credit %s to %s", net.Amount(amount), args[0])
 			}
-			if err := confirm(what+" This cannot be undone.", yes); err != nil {
+			if err := cli.confirm(what, yes); err != nil {
 				return err
 			}
-			return apiEmitCtx(ctx, "POST", "/control/deposit", map[string]any{
-				"handle": args[0], "amount": amount, "reason": reason, "ref": ref,
+			return cli.emitCtx(ctx, "POST", "/v1/admin/users/"+url.PathEscape(args[0])+"/deposit", map[string]any{
+				"amount": amount, "reason": reason, "ref": ref,
 			}, output{money: moneyLedger})
 		},
 	}
@@ -338,7 +334,7 @@ func adminDepositsCmd() *cobra.Command {
 			}
 			// Two real lists rather than one flattened model, so each prints as its own rows —
 			// money included, since this is where an operator reads what is outstanding.
-			return apiEmitCtx(ctx, "GET", "/control/deposits", nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel/deposits", nil, output{human: func(b []byte) error {
 				var a struct {
 					Deposits json.RawMessage `json:"deposits"`
 					Owed     json.RawMessage `json:"owed"`
@@ -372,8 +368,8 @@ func peerInspectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			path := "/control/peers/inspect?key=" + url.QueryEscape(args[0])
-			return apiEmitCtx(ctx, "GET", path, nil, output{id: "public_key", human: func(b []byte) error {
+			path := "/v1/admin/peers/" + url.PathEscape(args[0]) + "/inspect"
+			return cli.emitCtx(ctx, "GET", path, nil, output{id: "public_key", human: func(b []byte) error {
 				var out struct {
 					Petname   string `json:"petname"`
 					Nickname  string `json:"nickname"`
@@ -544,11 +540,11 @@ func peerListCmd() *cobra.Command {
 				q.Set("all", "1")
 			}
 			setLimitOffset(q, limit, offset)
-			path := "/control/peers"
+			path := "/v1/admin/peers"
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			return apiEmit("GET", path, nil, output{id: "public_key", human: func(b []byte) error {
+			return cli.emit("GET", path, nil, output{id: "public_key", human: func(b []byte) error {
 				var peers []*kernel.RemoteKernelView
 				if err := json.Unmarshal(b, &peers); err != nil {
 					return err

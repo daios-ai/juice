@@ -28,7 +28,7 @@ holding the file can join.
 
 ## Kernels
 
-A kernel = one `juice serve` + one home: ledger, identity key, world file, port, and — on a
+A kernel = one `juice kernel serve` + one home: ledger, identity key, world file, port, and — on a
 chain rail — rail db and key. One kernel, one network, permanently; no switching, only
 separate kernels.
 First boot writes the digest into `juice.db`; startup refuses a mismatched world file (as D9
@@ -87,7 +87,7 @@ type Rail interface {
 - Backing, stated honestly: credits are backed by the vault **plus peer IOUs bounded by X**. In
   the worst case users jointly hold up to X more credits than the vault can pay. Deliberate,
   Sybil-proof, priced by `remote_bps`; the operator's accepted, bounded risk.
-- Solvency identity, checked periodically and on `admin identity`. Terms defined so no account
+- Solvency identity, checked periodically and on `admin kernel show`. Terms defined so no account
   appears twice: **liabilities** = each account's balance where positive (available + locked) —
   pending payouts and unattributed deposits sit inside it, on `sys`; **receivables** = each
   account's shortfall where negative (peer accounts only, ≤ X at admission):
@@ -237,15 +237,15 @@ logic missing from the library.
 ## Client
 
 Pure client, the only thing spanning networks: named profiles (endpoint, token, label).
-`juice use <name>` switches **and verifies** — dials the kernel, checks the token, prints the
-server's name, key, world; fails loudly if unreachable. `juice use` lists; `auth login` stores
-what it creates. A `JUICE_PROFILE` env var overrides the sticky selection per invocation, for
-scripts. Withdraw and settle confirm before moving money, naming the world; paid runs are not
-pre-confirmed (agents are first-class). No per-command `--profile`.
+`juice auth use <handle>@<kernel>` switches **and verifies** — dials the kernel, checks its key
+and network, fails loudly if either has changed; `juice auth list` lists the logins held and
+`juice auth login` stores what it creates. `--as`/`JUICE_AS` name a login for one invocation, for
+scripts. Transfer, withdraw and deposit confirm before moving money, naming the login they act
+as; a run is itself consent to its price (agents are first-class).
 
 ## Operator surface
 
-`admin identity` gains rail address, finalized holdings, the split of `sys` into earnings and in-transit
+`admin kernel show` gains rail address, finalized holdings, the split of `sys` into earnings and in-transit
 (unattributed deposits, pending payouts), the solvency identity with its named terms, and the
 stop signal with its reason and age. `admin kernel deposits` lists the unattributed money on `sys`
 and every obligation still open; `admin user deposit <user> --ref <txhash>` attributes one
@@ -303,7 +303,7 @@ identity fields change lockstep.
 - U3 rewritten over the two primitives (crossing on `sys` against a finalized fact; transfer on
   the owner's authority; idempotency preserved); U33 narrowed to *the* rail; the stop signal
   joins the operator surface (U44).
-- D20 gains `use`, profiles, `user address`, `user deposit`, `user withdraw`, and the rail
+- D20 gains `user address`, `user deposit`, `user withdraw`/`withdrawals`, and the rail
   operator surface; `admin withdraw` and `--cash` are retired.
 
 ## Non-goals

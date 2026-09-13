@@ -71,8 +71,8 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": "rcpt", "amount": 500, "ref": "test-payment"})
+	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt/deposit",
+		map[string]any{"amount": 500, "ref": "test-payment"})
 	if status != http.StatusOK {
 		t.Fatalf("deposit status %d: %s", status, body)
 	}
@@ -86,8 +86,8 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	// Recording the same payment again moves nothing and answers with the entry that recorded it —
 	// a reply, not a crash: the handler renders whatever the kernel returns, so the kernel must
 	// return something.
-	body2, status2 := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": "rcpt", "amount": 500, "ref": "test-payment"})
+	body2, status2 := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt/deposit",
+		map[string]any{"amount": 500, "ref": "test-payment"})
 	if status2 != http.StatusOK {
 		t.Fatalf("replayed deposit: status %d: %s", status2, body2)
 	}
@@ -104,7 +104,7 @@ func TestAdminDepositOverTCP(t *testing.T) {
 func TestPeerRosterIsAPlainArrayWhenEmpty(t *testing.T) {
 	env := newTestEnv(t)
 	suTok := bootSuperuser(t, env)
-	body, status := tcpDo(t, suTok, "GET", "/control/peers", nil)
+	body, status := tcpDo(t, suTok, "GET", "/v1/admin/peers", nil)
 	if status != http.StatusOK {
 		t.Fatalf("peers: status %d: %s", status, body)
 	}
@@ -131,8 +131,8 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	}
 
 	// Addressed by key or by petname, and with or without an amount, it is the same refusal.
-	body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": keyB64, "amount": 300, "ref": "test-payment"})
+	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+keyB64+"/deposit",
+		map[string]any{"amount": 300, "ref": "test-payment"})
 	if status == http.StatusOK {
 		t.Fatalf("a bare deposit to a peer was accepted: %s", body)
 	}
@@ -148,8 +148,8 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	// A key this kernel has never seen: the refusal must leave no account behind it.
 	stranger, _, _ := ed25519.GenerateKey(rand.Reader)
 	strangerKey := base64.RawURLEncoding.EncodeToString(stranger)
-	if body, status := tcpDo(t, suTok, "POST", "/control/deposit",
-		map[string]any{"handle": strangerKey, "amount": 300, "ref": "test-payment-2"}); status == http.StatusOK {
+	if body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+strangerKey+"/deposit",
+		map[string]any{"amount": 300, "ref": "test-payment-2"}); status == http.StatusOK {
 		t.Fatalf("a deposit to an unknown kernel was accepted: %s", body)
 	}
 	if acct, _ := env.k.ReadAccountByKernelKey(ctx, strangerKey); acct != nil {
@@ -170,7 +170,7 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, suTok, "POST", "/control/users/bob/rename",
+	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/bob/rename",
 		map[string]any{"new_name": "bob-retired"})
 	if status != http.StatusOK {
 		t.Fatalf("rename status %d: %s", status, body)
@@ -197,7 +197,7 @@ func TestAdminSuperuserGate(t *testing.T) {
 	ctx := context.Background()
 	_ = bootSuperuser(t, env)
 
-	if _, status := tcpDo(t, "", "GET", "/control/users", nil); status != http.StatusUnauthorized {
+	if _, status := tcpDo(t, "", "GET", "/v1/admin/users", nil); status != http.StatusUnauthorized {
 		t.Errorf("no token: got status %d, want 401", status)
 	}
 
@@ -210,8 +210,8 @@ func TestAdminSuperuserGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, regTok, "POST", "/control/deposit",
-		map[string]any{"handle": "regular", "amount": 1, "ref": "test-payment"})
+	body, status := tcpDo(t, regTok, "POST", "/v1/admin/users/regular/deposit",
+		map[string]any{"amount": 1, "ref": "test-payment"})
 	if status == http.StatusOK {
 		t.Fatalf("non-superuser deposit should be rejected, got 200")
 	}
@@ -229,7 +229,7 @@ func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/control/users", "/control/users/shown"} {
+	for _, path := range []string{"/v1/admin/users", "/v1/admin/users/shown"} {
 		body, status := tcpDo(t, suTok, "GET", path, nil)
 		if status != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", path, status, body)
@@ -248,7 +248,7 @@ func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
 func TestListsBuiltOutsideTheStoreAreArrays(t *testing.T) {
 	env := newTestEnv(t)
 	suTok := bootSuperuser(t, env)
-	body, status := tcpDo(t, suTok, "GET", "/control/identity", nil)
+	body, status := tcpDo(t, suTok, "GET", "/v1/admin/kernel", nil)
 	if status != http.StatusOK {
 		t.Fatalf("identity: status %d: %s", status, body)
 	}

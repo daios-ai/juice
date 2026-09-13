@@ -167,14 +167,14 @@ type output struct {
 // units reads the world's money unit for a field view that will write money for a person. It runs
 // before the request, never while printing its reply: a unit that cannot be read must refuse
 // before anything is sent, rather than report "nothing was sent" about a write that committed.
-// --json and --quiet carry base units, so they read nothing. apiEmitCtx calls this for every
-// request; a command that emits without going through it calls this itself, or its money prints
-// in whatever unit an unread world has.
-func (o *output) units(ctx context.Context) error {
+// --json and --quiet carry base units, so they read nothing. emitCtx calls this for every request
+// with the client that will make it; a command that emits without going through it calls this
+// itself, or its money prints in whatever unit an unread world has.
+func (o *output) units(ctx context.Context, c *client) error {
 	if len(o.money) == 0 || flagJSON || flagQuiet {
 		return nil
 	}
-	net, err := serverNetwork(ctx)
+	net, err := c.network(ctx)
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func humanUnits(ctx context.Context) (kernel.Network, error) {
 	if flagJSON || flagQuiet {
 		return kernel.Network{}, nil
 	}
-	return serverNetwork(ctx)
+	return cli.network(ctx)
 }
 
 // emit is the one output policy every command ends in (§14 C8): --json prints the server's body
@@ -355,7 +355,8 @@ func renderValue(raw json.RawMessage) string {
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
 	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
-		userConnectCmd(), userDisconnectCmd(), userAddressCmd(), userDepositCmd(), userWithdrawCmd())
+		userConnectCmd(), userDisconnectCmd(), userAddressCmd(), userDepositCmd(),
+		userWithdrawCmd(), userWithdrawalsCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -371,7 +372,7 @@ func userCreateCmd() *cobra.Command {
 			"password (`juice auth recover`).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			l, err := namedLogin(args[0])
+			l, c, err := namedClient(args[0])
 			if err != nil {
 				return err
 			}
@@ -385,7 +386,7 @@ func userCreateCmd() *cobra.Command {
 			}
 			ctx := context.Background()
 			shown := output{money: moneyAccount}
-			if err := shown.units(ctx); err != nil {
+			if err := shown.units(ctx, c); err != nil {
 				return err
 			}
 			// Enroll a recovery phrase (§12): generated client-side, only the public key is
@@ -393,7 +394,7 @@ func userCreateCmd() *cobra.Command {
 			// ceremony shows and acknowledges the phrase before committing.
 			var created json.RawMessage
 			if err := enrollRecovery("Recovery phrase", func(recoveryPub string) error {
-				return apiCall(ctx, "POST", "/v1/users", kernel.CreateUserRequest{
+				return c.call(ctx, "POST", "/v1/users", kernel.CreateUserRequest{
 					Handle: user, Password: password, RecoveryPublicKey: recoveryPub,
 				}, &created)
 			}); err != nil {
@@ -412,7 +413,7 @@ func userMeCmd() *cobra.Command {
 		Short: "Show your profile",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return apiEmit("GET", "/v1/me", nil, output{money: moneyAccount})
+			return cli.emit("GET", "/v1/me", nil, output{money: moneyAccount})
 		},
 	}
 }
@@ -447,7 +448,7 @@ func userUpdateCmd() *cobra.Command {
 			if changePassword {
 				req.CurrentPassword, req.NewPassword = currentPassword, newPassword
 			}
-			return apiEmit("PUT", "/v1/me", req, output{money: moneyAccount})
+			return cli.emit("PUT", "/v1/me", req, output{money: moneyAccount})
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New profile description (about); pass empty to clear")
@@ -468,7 +469,7 @@ func userTransferCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			net, err := serverNetwork(ctx)
+			net, err := cli.network(ctx)
 			if err != nil {
 				return err
 			}
@@ -476,17 +477,10 @@ func userTransferCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// The confirmation names both parties in full: it is read out of the context that made
-			// it obvious which kernel and which account are meant.
-			me, _, merr := selected()
-			if merr != nil {
-				return merr
-			}
-			if err := confirm(fmt.Sprintf("Send %s from %s to %s@%s? This cannot be undone.",
-				net.Amount(amount), me, args[0], me.Kernel), yes); err != nil {
+			if err := cli.confirm(fmt.Sprintf("Send %s to %s", net.Amount(amount), args[0]), yes); err != nil {
 				return err
 			}
-			return apiEmitCtx(ctx, "POST", "/v1/transfers", map[string]any{
+			return cli.emitCtx(ctx, "POST", "/v1/transfers", map[string]any{
 				"recipient": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
 			}, output{money: moneyLedger})
 		},
@@ -511,7 +505,7 @@ func userLedgerCmd() *cobra.Command {
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return apiEmitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: func(b []byte) error {
 				var entries []*ledgerView
 				if err := json.Unmarshal(b, &entries); err != nil {
 					return err
@@ -545,7 +539,7 @@ type meView struct {
 
 func readMe(ctx context.Context) (*meView, error) {
 	var me meView
-	if err := apiCall(ctx, "GET", "/v1/me", nil, &me); err != nil {
+	if err := cli.call(ctx, "GET", "/v1/me", nil, &me); err != nil {
 		return nil, err
 	}
 	return &me, nil
@@ -560,37 +554,21 @@ func userAddressCmd() *cobra.Command {
 	var signature string
 	cmd := &cobra.Command{
 		Use:   "address [ADDRESS]",
-		Short: "Show or register the address you are paid at",
-		Long: "Show or register the address you are paid at. With no arguments, shows the address\n" +
-			"registered for your account.\n\n" +
-			"ADDRESS registers that address. It is yours only once you prove it: this command prints a\n" +
-			"message naming this kernel, your account, and the address; sign that message with the\n" +
-			"wallet that holds the address and paste the signature back, or pass it with --signature.\n" +
-			"Registering also credits you for payments already received from that address.",
-		Args: cobra.MaximumNArgs(1),
+		Short: "Register the address you are paid at",
+		Long: "Register ADDRESS as the address you are paid at; `juice user me` shows the one\n" +
+			"registered.\n\n" +
+			"It is yours only once you prove it: this command prints a message naming this kernel,\n" +
+			"your account, and the address; sign that message with the wallet that holds the address\n" +
+			"and paste the signature back, or pass it with --signature. Registering also credits you\n" +
+			"for payments already received from that address.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			if len(args) == 0 {
-				// The reply is the profile the server sent, so --json is that and --quiet the
-				// address itself; only the line a person reads is composed here.
-				return apiEmitCtx(ctx, "GET", "/v1/me", nil, output{id: "rail_address", human: func(b []byte) error {
-					var me meView
-					if err := json.Unmarshal(b, &me); err != nil {
-						return err
-					}
-					if me.RailAddress == "" {
-						fmt.Println("No address registered.")
-						return nil
-					}
-					fmt.Println(me.RailAddress)
-					return nil
-				}})
-			}
 			me, err := readMe(ctx)
 			if err != nil {
 				return err
 			}
-			h, err := probeHealth(ctx, serverBaseURL())
+			h, err := cli.banner(ctx)
 			if err != nil {
 				return err
 			}
@@ -604,7 +582,7 @@ func userAddressCmd() *cobra.Command {
 				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				signature = strings.TrimSpace(line)
 			}
-			return apiEmitCtx(ctx, "PUT", "/v1/me/address", map[string]any{
+			return cli.emitCtx(ctx, "PUT", "/v1/me/address", map[string]any{
 				"address": args[0], "signature": signature,
 			}, output{id: "address"})
 		},
@@ -623,7 +601,7 @@ func userDepositCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ctx := context.Background()
-			h, err := probeHealth(ctx, serverBaseURL())
+			h, err := cli.banner(ctx)
 			if err != nil {
 				return err
 			}
@@ -666,22 +644,19 @@ func userWithdrawCmd() *cobra.Command {
 	var reason, id string
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "withdraw [AMOUNT]",
-		Short: "Withdraw your credits, or list your withdrawals",
-		Long: "Withdraw your credits to the address you registered with `juice user address`. With no\n" +
-			"arguments, lists the withdrawals you have made and where each stands.\n\n" +
+		Use:   "withdraw AMOUNT",
+		Short: "Withdraw your credits",
+		Long: "Withdraw AMOUNT to the address you registered with `juice user address`; `juice user\n" +
+			"withdrawals` lists the ones you have made and where each stands.\n\n" +
 			"A withdrawal fixes its destination when it is made, so registering another address later\n" +
 			"never redirects one already under way.",
-		Args: cobra.MaximumNArgs(1),
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
-			if len(args) == 0 {
-				return apiEmitCtx(ctx, "GET", "/v1/withdrawals", nil, output{money: moneyRail})
-			}
 			if id == "" {
 				id = uuid.NewString()
 			}
-			net, err := serverNetwork(ctx)
+			net, err := cli.network(ctx)
 			if err != nil {
 				return err
 			}
@@ -699,15 +674,10 @@ func userWithdrawCmd() *cobra.Command {
 			if me.RailAddress != "" {
 				where = " to " + me.RailAddress
 			}
-			who, _, merr := selected()
-			if merr != nil {
-				return merr
-			}
-			if err := confirm(fmt.Sprintf("Withdraw %s from %s on %s%s? This cannot be undone.",
-				net.Amount(amount), who, net.Name, where), yes); err != nil {
+			if err := cli.confirm(fmt.Sprintf("Withdraw %s on %s%s", net.Amount(amount), net.Name, where), yes); err != nil {
 				return err
 			}
-			return apiEmitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{
+			return cli.emitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{
 				"id": id, "amount": amount, "reason": reason,
 			}, output{money: moneyRail})
 		},
@@ -715,6 +685,25 @@ func userWithdrawCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().StringVar(&id, "id", "", "An identifier for this withdrawal. Running the command again with the same --id does not withdraw twice. Chosen for you if omitted.")
+	return cmd
+}
+
+// userWithdrawalsCmd lists what the caller has sent out and where each stands. A verb that reads
+// and a verb that moves money are two words, never one word with and without an argument.
+func userWithdrawalsCmd() *cobra.Command {
+	var limit, offset int
+	cmd := &cobra.Command{
+		Use:   "withdrawals",
+		Short: "List the withdrawals you have made",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			return cli.emitCtx(context.Background(), "GET", "/v1/withdrawals?"+q.Encode(), nil,
+				output{money: moneyRail})
+		},
+	}
+	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
@@ -741,7 +730,7 @@ func init() {
 // what a command takes is what it shows (D20). A price may be nothing, which is the one way it
 // differs from an amount to move; a command that was given no price at all does not call here.
 func priceIn(price string) (int64, error) {
-	net, err := serverNetwork(context.Background())
+	net, err := cli.network(context.Background())
 	if err != nil {
 		return 0, err
 	}
@@ -797,7 +786,7 @@ func actionCreateCmd() *cobra.Command {
 					return err
 				}
 			}
-			return apiEmit("POST", "/v1/actions", kernel.CreateActionRequest{
+			return cli.emit("POST", "/v1/actions", kernel.CreateActionRequest{
 				Name: name, Kind: kernel.ActionKind(kind), Price: amount, Description: description,
 				InputSchema: inputSchema, OutputSchema: outputSchema,
 				Source: srcData, WasmArtifact: artData,
@@ -882,7 +871,7 @@ func actionUpdateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
 			}
-			return apiEmit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, output{money: moneyAction})
+			return cli.emit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, output{money: moneyAction})
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
@@ -933,7 +922,7 @@ func reportActions(verb string) output {
 func actionRunE(fn func(ctx context.Context, id, ref string) error) func(*cobra.Command, []string) error {
 	return func(_ *cobra.Command, args []string) error {
 		ctx := context.Background()
-		id, err := resolveActionID(ctx, args[0])
+		id, err := cli.resolveActionID(ctx, args[0])
 		if err != nil {
 			return err
 		}
@@ -950,7 +939,7 @@ func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.C
 		Long:  short + ".\n\n" + actionPathHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/v1/actions/"+suffix,
+			return cli.emit("POST", "/v1/actions/"+suffix,
 				map[string]string{"target": args[0]}, reportActions(pastTense))
 		},
 	}
@@ -993,7 +982,7 @@ func actionListCmd() *cobra.Command {
 			if name != "" {
 				q.Set("name", name)
 			}
-			return apiEmitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: func(b []byte) error {
 				var actions []actionResp
 				if err := json.Unmarshal(b, &actions); err != nil {
 					return err
@@ -1032,7 +1021,7 @@ func actionShowCmd() *cobra.Command {
 		Long:  "Show action details.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			return apiEmitCtx(ctx, "GET", "/v1/actions/"+id, nil, output{money: moneyAction})
+			return cli.emitCtx(ctx, "GET", "/v1/actions/"+id, nil, output{money: moneyAction})
 		}),
 	}
 }
@@ -1045,7 +1034,7 @@ func actionDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			q := url.Values{"target": {args[0]}}
-			return apiEmit("DELETE", "/v1/actions?"+q.Encode(), nil, reportActions("deleted"))
+			return cli.emit("DELETE", "/v1/actions?"+q.Encode(), nil, reportActions("deleted"))
 		},
 	}
 }
@@ -1072,7 +1061,7 @@ func actionImportCmd() *cobra.Command {
 				}
 				body["auth"] = auth
 			}
-			return apiEmit("POST", "/v1/actions/import", body, output{human: func(b []byte) error {
+			return cli.emit("POST", "/v1/actions/import", body, output{human: func(b []byte) error {
 				var result importResp
 				if err := json.Unmarshal(b, &result); err != nil {
 					return err
@@ -1120,7 +1109,7 @@ func actionStatsCmd() *cobra.Command {
 		Long:  "Show an action's statistics.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			return apiEmitCtx(ctx, "GET", "/v1/stats/"+id, nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/stats/"+id, nil, output{human: func(b []byte) error {
 				if len(b) == 0 || string(b) == "null" {
 					fmt.Println("No statistics yet.")
 					return nil
@@ -1145,7 +1134,7 @@ func actionRatingsCmd() *cobra.Command {
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			return apiEmitCtx(ctx, "GET", path, nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", path, nil, output{human: func(b []byte) error {
 				var ratings []struct {
 					Value   int     `json:"value"`
 					Note    *string `json:"note"`
@@ -1192,7 +1181,7 @@ func processListCmd() *cobra.Command {
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return apiEmitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: func(b []byte) error {
 				var processes []*processView
 				if err := json.Unmarshal(b, &processes); err != nil {
 					return err
@@ -1219,7 +1208,7 @@ func processEndCmd() *cobra.Command {
 		Short: "End a process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/v1/processes/"+args[0]+"/end", nil, output{human: func([]byte) error {
+			return cli.emit("POST", "/v1/processes/"+args[0]+"/end", nil, output{human: func([]byte) error {
 				fmt.Printf("Process %s ended.\n", args[0])
 				return nil
 			}})
@@ -1233,7 +1222,7 @@ func processShowCmd() *cobra.Command {
 		Short: "Show process details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/processes/"+args[0], nil, output{money: moneyAccount})
+			return cli.emit("GET", "/v1/processes/"+args[0], nil, output{money: moneyAccount})
 		},
 	}
 }
@@ -1268,7 +1257,7 @@ func stepCreateCmd() *cobra.Command {
 				RequiredCaller: requiredCaller,
 				PartialArgs:    pa,
 			}
-			return apiEmit("POST", "/v1/steps", body, output{money: moneyStep})
+			return cli.emit("POST", "/v1/steps", body, output{money: moneyStep})
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the step (required)")
@@ -1301,7 +1290,7 @@ func stepListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return apiEmitCtx(ctx, "GET", "/v1/steps?"+q.Encode(), nil, output{rows: "steps", human: func(b []byte) error {
+				return cli.emitCtx(ctx, "GET", "/v1/steps?"+q.Encode(), nil, output{rows: "steps", human: func(b []byte) error {
 					var held kernel.PeerStepList
 					if err := json.Unmarshal(b, &held); err != nil {
 						return err
@@ -1325,7 +1314,7 @@ func stepListCmd() *cobra.Command {
 				q.Set("status", status)
 			}
 			setLimitOffset(q, limit, offset)
-			return apiEmit("GET", "/v1/steps?"+q.Encode(), nil, output{human: func(b []byte) error {
+			return cli.emit("GET", "/v1/steps?"+q.Encode(), nil, output{human: func(b []byte) error {
 				var steps []stepWithAction
 				if err := json.Unmarshal(b, &steps); err != nil {
 					return err
@@ -1358,7 +1347,7 @@ func stepShowCmd() *cobra.Command {
 		Short: "Show step details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/steps/"+args[0], nil, output{money: moneyStep})
+			return cli.emit("GET", "/v1/steps/"+args[0], nil, output{money: moneyStep})
 		},
 	}
 }
@@ -1383,7 +1372,7 @@ func stepCompleteCmd() *cobra.Command {
 			if peer != "" {
 				body["peer"] = peer
 			}
-			return apiEmit("POST", "/v1/steps/"+args[0]+"/complete", body, output{id: "tx_id"})
+			return cli.emit("POST", "/v1/steps/"+args[0]+"/complete", body, output{id: "tx_id"})
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (handle or key), over federation")
@@ -1416,7 +1405,7 @@ func txListCmd() *cobra.Command {
 				q.Set("process_id", processID)
 			}
 			setLimitOffset(q, limit, offset)
-			return apiEmitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: func(b []byte) error {
 				var txs []*txSummary
 				if err := json.Unmarshal(b, &txs); err != nil {
 					return err
@@ -1441,7 +1430,7 @@ func txShowCmd() *cobra.Command {
 		Short: "Show transaction details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/transactions/"+args[0], nil, output{money: moneyTx})
+			return cli.emit("GET", "/v1/transactions/"+args[0], nil, output{money: moneyTx})
 		},
 	}
 }
@@ -1452,7 +1441,7 @@ func txVerifyReceiptCmd() *cobra.Command {
 		Short: "Verify a transaction's signed receipt offline",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil, output{})
+			return cli.emit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil, output{})
 		},
 	}
 }
@@ -1473,7 +1462,7 @@ func txRateCmd() *cobra.Command {
 			if note != "" {
 				body["note"] = note
 			}
-			return apiEmit("POST", "/v1/transactions/"+args[0]+"/rate", body, output{})
+			return cli.emit("POST", "/v1/transactions/"+args[0]+"/rate", body, output{})
 		},
 	}
 	cmd.Flags().StringVar(&note, "note", "", "Optional justification note")
@@ -1546,7 +1535,7 @@ func runCmd() *cobra.Command {
 			}
 			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
-			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
+			err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
 			// offer it inline and re-run once, so the user issues a single `juice run`. Non-TTY
 			// callers (scripts, agents) get the structured error + hint instead — no browser.
@@ -1558,7 +1547,7 @@ func runCmd() *cobra.Command {
 						return cerr
 					}
 					fmt.Fprintf(os.Stderr, "Connected %s.\n", strings.Join(connected, ", "))
-					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
+					err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
 				}
 			}
 			if err != nil {

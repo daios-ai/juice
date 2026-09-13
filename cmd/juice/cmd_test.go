@@ -166,6 +166,16 @@ func selectTestLogin(t *testing.T, name, endpoint string) {
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatalf("select test login: %v", err)
 	}
+	// A login is a login once it holds a session: `auth login` stores one, and a selected name
+	// with no credentials is what a command refuses. Tests that need a real token overwrite this.
+	if err := withCredentials(l, func(c *credentials) (bool, error) {
+		if c.Token == "" {
+			c.Token = "test-session"
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("select test login: %v", err)
+	}
 }
 
 // mountTestServer starts an httptest server exposing the full route set backed by k, for
@@ -187,6 +197,7 @@ func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
 
 func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
 	t.Helper()
+	resetClient() // one client per command, as rootCmd's PersistentPreRun gives a real invocation
 	buf := &bytes.Buffer{}
 	cmd.SetOut(buf)
 	cmd.SetErr(buf)
@@ -1780,8 +1791,12 @@ func TestCLIActionRatings(t *testing.T) {
 	}
 
 	// A public action's ratings are public evidence, readable with no session at all (§11) — the
-	// reference resolution the CLI performs first must not put a login in front of them.
-	if err := saveToken(""); err != nil {
+	// reference resolution the CLI performs first must not put a login in front of them. No
+	// session means no login selected: a login that IS selected and holds none is not a stranger,
+	// it is a broken session, and says so rather than reading as one (D20).
+	cfg := loadClientConfig()
+	cfg.Current = ""
+	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	anon := captureStdout(t, func() error {
@@ -1980,7 +1995,7 @@ func TestMoneyIsShownTheWayItIsWritten(t *testing.T) {
 			flagJSON = c.json
 			t.Cleanup(func() { flagJSON = old })
 			got := captureStdout(t, func() error {
-				return apiEmit("GET", "/v1/actions/a-1", nil, output{money: moneyAction})
+				return freshClient().emit("GET", "/v1/actions/a-1", nil, output{money: moneyAction})
 			})
 			if !strings.Contains(got, c.want) {
 				t.Errorf("want %q in:\n%s", c.want, got)
@@ -2011,7 +2026,7 @@ func TestTheUnitIsReadBeforeTheRequest(t *testing.T) {
 	t.Cleanup(func() { flagServer = old })
 	selectTestLogin(t, "tester@stub", srv.URL)
 
-	if err := apiEmit("POST", "/v1/withdrawals", map[string]any{"amount": 5}, output{money: moneyRail}); err == nil {
+	if err := freshClient().emit("POST", "/v1/withdrawals", map[string]any{"amount": 5}, output{money: moneyRail}); err == nil {
 		t.Fatal("a command that could not read the world's unit went ahead anyway")
 	}
 	if sent {
@@ -2328,5 +2343,183 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	}
 	if runs != 2 {
 		t.Errorf("the run was not retried after the consent: %d calls", runs)
+	}
+}
+
+// TestAVerbReadsOrWrites: a word means one thing. `user address` registers and `user withdraw`
+// pays; what each of them used to show with no argument is a verb of its own, so no command turns
+// from a read into a write because an argument appeared.
+func TestAVerbReadsOrWrites(t *testing.T) {
+	var paths []string
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/withdrawals") && r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "w-1", "amount": 5000000}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u", "rail_address": "0xabc", "amount": 1000000})
+	})
+	for _, c := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+	}{
+		{"showing an address is not this verb's job", userAddressCmd, nil},
+		{"withdrawing needs the amount it moves", userWithdrawCmd, nil},
+		{"listing withdrawals takes no amount", userWithdrawalsCmd, []string{"5"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := execTestCmd(t, c.cmd(), c.args...); err == nil {
+				t.Error("the command accepted an argument list it has no meaning for")
+			}
+		})
+	}
+	paths = nil
+	if _, err := execTestCmd(t, userWithdrawalsCmd()); err != nil {
+		t.Fatalf("withdrawals: %v", err)
+	}
+	if len(paths) != 1 || !strings.HasPrefix(paths[0], "GET /v1/withdrawals") {
+		t.Errorf("withdrawals read %v, want one GET of the list", paths)
+	}
+}
+
+// TestAdminRoutesNameTheirNoun: the route says which namespace the target belongs to, so the
+// server never has to guess and a parameter never has to carry it. A user route answers for users
+// alone, and nothing answers under the old unversioned prefix.
+func TestAdminRoutesNameTheirNoun(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "carol", Password: "password123"}); err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := env.k.BindPetname(ctx, key, "shop", true); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := loginTokenFor(env.k, ctx, sys.Handle, "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name, method, path string
+		want               int
+	}{
+		{"a user under users", "POST", "/v1/admin/users/carol/suspend", http.StatusOK},
+		{"a peer under users", "POST", "/v1/admin/users/shop/suspend", http.StatusNotFound},
+		{"a peer under peers", "POST", "/v1/admin/peers/shop/suspend", http.StatusOK},
+		{"a user under peers", "POST", "/v1/admin/peers/carol/suspend", http.StatusNotFound},
+		{"the old prefix answers nothing", "POST", "/control/users/carol/suspend", http.StatusNotFound},
+		{"nor does the old deposit", "POST", "/control/deposit", http.StatusNotFound},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body, status := tcpDo(t, tok, c.method, c.path, map[string]any{})
+			if status != c.want {
+				t.Errorf("%s %s: status %d, want %d: %s", c.method, c.path, status, c.want, body)
+			}
+		})
+	}
+	// What a verb changed is what it answers with, so an acknowledgement is worth reading and a
+	// caller needs no second request to see the result (API.md R5).
+	body, status := tcpDo(t, tok, "POST", "/v1/admin/users/carol/unsuspend", map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("unsuspend: %d %s", status, body)
+	}
+	shown, _ := tcpDo(t, tok, "GET", "/v1/admin/users/carol", nil)
+	if string(body) != string(shown) {
+		t.Errorf("a change answers with something other than the account:\n changed %s\n shown   %s", body, shown)
+	}
+}
+
+// TestWithdrawalsPageByOffset: a list is paginated, so the rows past the first page are reachable.
+// The handler read the limit and dropped the offset, which left older withdrawals unreachable.
+func TestWithdrawalsPageByOffset(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	u, tok := makeUser(t, env.k, "payer")
+	if err := env.db.SetRailAddress(ctx, u, "0xpayer", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.k.Deposit(ctx, sys.ID, u, 1000, "", newRef()); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 0; i < 3; i++ {
+		row, err := env.k.Withdraw(ctx, u, uuid.NewString(), 100, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, row.ID)
+	}
+	page := func(query string) []map[string]any {
+		body, status := tcpDo(t, tok, "GET", "/v1/withdrawals"+query, nil)
+		if status != http.StatusOK {
+			t.Fatalf("withdrawals%s: %d %s", query, status, body)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	if all := page(""); len(all) != 3 {
+		t.Fatalf("three withdrawals, got %d", len(all))
+	}
+	second := page("?limit=1&offset=1")
+	if len(second) != 1 || second[0]["id"] != ids[1] {
+		t.Errorf("the second page is not the second row: %v", second)
+	}
+	if last := page("?limit=1&offset=2"); len(last) != 1 || last[0]["id"] != ids[2] {
+		t.Errorf("the last row is unreachable by paging: %v", last)
+	}
+}
+
+// TestOnlyTheClientResolvesTheIdentity: one client per invocation is a promise the compiler cannot
+// keep for us — Go has no visibility boundary inside a package — so it is kept here. A command that
+// worked out for itself whom it acts as is how the identity a request carried, the account a prompt
+// named, and the login a retry refreshed came to disagree.
+//
+// Two rules, because two things are being kept apart. No command may decide the selection: that is
+// the client's, from the flags and the records, once. And no command but the ones whose subject IS
+// the client's records — `kernel add|list|forget`, `auth login|use|list|logout` — may read or dial
+// anything itself; those legitimately edit the records and dial an address before any identity
+// exists. The server's own outbound HTTP (action execution, OpenAPI, sys/web) is not the client's
+// and is not in scope.
+func TestOnlyTheClientResolvesTheIdentity(t *testing.T) {
+	selection := []string{"JUICE_AS", "flagServer", "flagAs"}
+	records := []string{"loadClientConfig(", "readCredentials(", "doHTTP(", "http.Get(", "http.Post("}
+	for _, c := range []struct {
+		file      string
+		forbidden []string
+	}{
+		{"cmd.go", append(selection, records...)},
+		{"cmd_superuser.go", append(selection, records...)},
+		{"connect.go", append(selection, records...)},
+		{"cmd_client.go", selection}, // the commands over the records, which they may read
+		{"main.go", records},         // where the flags are declared, and nothing else
+	} {
+		src, err := os.ReadFile(c.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, forbidden := range c.forbidden {
+				if strings.Contains(line, forbidden) {
+					t.Errorf("%s:%d resolves its own identity or transport (%s):\n%s", c.file, i+1, forbidden, line)
+				}
+			}
+		}
 	}
 }

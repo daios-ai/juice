@@ -67,19 +67,16 @@ func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 	writeOr(w, accountViews(users), err)
 }
 
-func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
-	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"), r.URL.Query().Get("kind"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
+// rosterView is one roster target as every verb on it answers: reading it, and each act that
+// changes it. A caller sees the same document whether it asked what the target is or made it so,
+// which is what makes an acknowledgement worth reading (API.md R5).
+func (s *server) rosterView(ctx context.Context, acct *kernel.Account, key string) any {
 	if key == "" {
-		writeOr(w, accountView{Account: acct}, nil)
-		return
+		return accountView{Account: acct}
 	}
 	// A kernel target renders one flat record: its naming state, plus what it owes us when it has
 	// traded here. A peer account holds no balance of its own (P10), so none is shown.
-	rk, _ := s.kernel.ReadKernel(r.Context(), key)
+	rk, _ := s.kernel.ReadKernel(ctx, key)
 	out := map[string]any{"public_key": key}
 	if rk != nil {
 		out["petname"], out["nickname"], out["about"], out["rail_address"] = rk.Petname, rk.Nickname, rk.About, rk.RailAddress
@@ -89,17 +86,33 @@ func (s *server) ctlShowUser(w http.ResponseWriter, r *http.Request) {
 		// No internal id: a peer is named by its key and its petname (D20).
 		out["suspended_at"], out["created_at"] = acct.SuspendedAt, acct.CreatedAt
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
-func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
+// target resolves the roster target this route names, the noun coming from the route itself.
+func (s *server) target(r *http.Request, noun string) (*kernel.Account, string, error) {
+	return resolveTarget(s.kernel, r.Context(), chi.URLParam(r, "target"), noun)
+}
+
+func (s *server) ctlShowTarget(noun string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ident := chi.URLParam(r, "handle")
-		acct, key, err := resolveMixed(s.kernel, r.Context(), ident, r.URL.Query().Get("kind"))
+		acct, key, err := s.target(r, noun)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
+		writeOr(w, s.rosterView(r.Context(), acct, key), nil)
+	}
+}
+
+func (s *server) ctlSetSuspended(noun string, suspend bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		acct, key, err := s.target(r, noun)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		ident := chi.URLParam(r, "target")
 		switch {
 		case suspend && key != "":
 			// Suspending a kernel provisions its account and freezes it atomically, so a
@@ -112,37 +125,39 @@ func (s *server) ctlSetSuspended(suspend bool) http.HandlerFunc {
 		default:
 			err = s.kernel.UnsuspendUser(r.Context(), callerFrom(r), acct.ID)
 		}
-		writeOr(w, map[string]string{"target": ident}, err)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		acct, key, err = s.target(r, noun) // re-read: what it is now is what the caller is told
+		writeOr(w, s.rosterView(r.Context(), acct, key), err)
 	}
 }
 
-func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		NewName string `json:"new_name"`
-	}
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	acct, key, err := resolveMixed(s.kernel, r.Context(), chi.URLParam(r, "handle"), r.URL.Query().Get("kind"))
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if key != "" {
-		petname, berr := s.kernel.RenameKernel(r.Context(), callerFrom(r), key, req.NewName)
-		if berr != nil {
-			writeErr(w, berr)
+func (s *server) ctlRename(noun string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			NewName string `json:"new_name"`
+		}
+		if !decodeBody(w, r, &req) {
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"petname": petname, "public_key": key})
-		return
+		acct, key, err := s.target(r, noun)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if key != "" {
+			if _, err = s.kernel.RenameKernel(r.Context(), callerFrom(r), key, req.NewName); err != nil {
+				writeErr(w, err)
+				return
+			}
+		} else if acct, err = s.kernel.RenameUser(r.Context(), callerFrom(r), acct.ID, req.NewName); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeOr(w, s.rosterView(r.Context(), acct, key), nil)
 	}
-	out, err := s.kernel.RenameUser(r.Context(), callerFrom(r), acct.ID, req.NewName)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"handle": out.Handle})
 }
 
 // ctlDeposit records money that arrived from outside (U3). ref names the payment: the operator's own
@@ -150,7 +165,6 @@ func (s *server) ctlRenameUser(w http.ResponseWriter, r *http.Request) {
 // Nothing is credited without it, and only a user is ever credited (D23).
 func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Handle string `json:"handle"`
 		Amount int64  `json:"amount"`
 		Reason string `json:"reason"`
 		Ref    string `json:"ref"`
@@ -158,16 +172,12 @@ func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	// The command's noun says which namespace it means, so this resolves users and nothing else: a
+	// The route's noun says which namespace this means, so it resolves users and nothing else: a
 	// peer whose petname happens to equal a handle can no more take a deposit than be mistaken for
 	// the account that owns it (D15, D20).
-	u, _, err := resolveMixed(s.kernel, r.Context(), req.Handle, "user")
+	u, _, err := s.target(r, "user")
 	if err != nil {
 		writeErr(w, err)
-		return
-	}
-	if u == nil {
-		writeErr(w, kernel.ErrNotFound.Wrapf("%s has no account here", req.Handle))
 		return
 	}
 	e, err := s.kernel.Deposit(r.Context(), callerFrom(r), u.ID, req.Amount, req.Reason, req.Ref)
@@ -220,7 +230,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 // offline peer fails in seconds, not on the client timeout.
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	ident := strings.TrimSpace(r.URL.Query().Get("key"))
+	ident := strings.TrimSpace(chi.URLParam(r, "target"))
 	// A local account with no public key is a plain user, not a federation peer, and an @handle
 	// naming no account is not a peer either — resolvePeerKey rejects both rather than probing the
 	// handle as if it were a key (inspect is a peer-only window, §13). An unresolvable non-@

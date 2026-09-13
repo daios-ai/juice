@@ -659,16 +659,22 @@ func registerRoutes(r chi.Router, srv *server) {
 	// per-route by requireSuperuserMW (§14). Not a separate surface; authority is the @sys bearer.
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware, srv.requireSuperuserMW)
-		r.Get("/control/users", srv.ctlListUsers)
-		r.Get("/control/users/{handle}", srv.ctlShowUser)
-		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
-		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
-		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
-		r.Post("/control/deposit", srv.ctlDeposit)
-		r.Get("/control/deposits", srv.ctlListDeposits)
-		r.Get("/control/peers", srv.ctlListPeers)
-		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
-		r.Get("/control/identity", srv.ctlIdentity)
+		// Each noun is its own resource, so the route says which kind of target it takes and no
+		// parameter has to: the verbs are identical, the namespaces never are (D15, D20).
+		for _, noun := range []string{"user", "peer"} {
+			r.Route("/v1/admin/"+noun+"s/{target}", func(r chi.Router) {
+				r.Get("/", srv.ctlShowTarget(noun))
+				r.Post("/suspend", srv.ctlSetSuspended(noun, true))
+				r.Post("/unsuspend", srv.ctlSetSuspended(noun, false))
+				r.Post("/rename", srv.ctlRename(noun))
+			})
+		}
+		r.Get("/v1/admin/users", srv.ctlListUsers)
+		r.Post("/v1/admin/users/{target}/deposit", srv.ctlDeposit)
+		r.Get("/v1/admin/peers", srv.ctlListPeers)
+		r.Get("/v1/admin/peers/{target}/inspect", srv.ctlInspectPeer)
+		r.Get("/v1/admin/kernel", srv.ctlIdentity)
+		r.Get("/v1/admin/kernel/deposits", srv.ctlListDeposits)
 	})
 }
 
@@ -1441,8 +1447,8 @@ func (s *server) postWithdrawal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getWithdrawals(w http.ResponseWriter, r *http.Request) {
-	limit, _ := listBounds(r)
-	rows, err := s.kernel.ListWithdrawals(r.Context(), callerFrom(r), limit)
+	limit, offset := listBounds(r)
+	rows, err := s.kernel.ListWithdrawals(r.Context(), callerFrom(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return

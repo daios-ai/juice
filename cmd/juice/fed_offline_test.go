@@ -19,6 +19,7 @@ import (
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/go-chi/chi/v5"
 )
 
 // fakeFed is a fedClient whose reachability and live-fetch outcome are controlled per test, so the
@@ -105,9 +106,18 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	return handle, key
 }
 
+// inspectReq builds the request the router would deliver: the target rides on the route, so a
+// test calling the handler directly has to put it there too.
+func inspectReq(ident string) *http.Request {
+	req := httptest.NewRequest("GET", "/v1/admin/peers/"+url.PathEscape(ident)+"/inspect", nil)
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("target", ident)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rc))
+}
+
 func inspectResp(t *testing.T, srv *server, ident string) map[string]any {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape(ident), nil)
+	req := inspectReq(ident)
 	rec := httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
 	if rec.Code != http.StatusOK {
@@ -122,7 +132,7 @@ func inspectResp(t *testing.T, srv *server, ident string) map[string]any {
 
 func listPeersResp(t *testing.T, srv *server, all bool) []map[string]any {
 	t.Helper()
-	path := "/control/peers"
+	path := "/v1/admin/peers"
 	if all {
 		path += "?all=1"
 	}
@@ -278,7 +288,7 @@ func TestInspectLocalUserRejected(t *testing.T) {
 	// fed is present so the guard, not a missing transport, is what rejects.
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "direct"}}
 
-	req := httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("chat"), nil)
+	req := inspectReq("chat")
 	rec := httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -290,7 +300,7 @@ func TestInspectLocalUserRejected(t *testing.T) {
 
 	// An @handle that names nothing at all is "no peer" (404), not a key to probe: a stranger is
 	// inspected by key, never by an unfriended handle.
-	req = httptest.NewRequest("GET", "/control/peers/inspect?key="+url.QueryEscape("nope"), nil)
+	req = inspectReq("nope")
 	rec = httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
 	if rec.Code != http.StatusNotFound {

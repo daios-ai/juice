@@ -39,9 +39,10 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 	// PersistentPreRun fires after flag parsing and argument validation pass, just before a
 	// command body runs. Marking that boundary lets main distinguish a syntax error (usage
-	// worth showing) from a runtime error (usage would be noise). No subcommand overrides
-	// this, so the behavior is uniform across every command.
-	PersistentPreRun: func(_ *cobra.Command, _ []string) { enteredCommand = true },
+	// worth showing) from a runtime error (usage would be noise). It is also where this
+	// invocation's client is made, so every command body has exactly one — and the same one.
+	// No subcommand overrides this, so the behavior is uniform across every command.
+	PersistentPreRun: func(_ *cobra.Command, _ []string) { enteredCommand, cli = true, &client{} },
 	// Hide cobra's stock `completion` command from the help listing (it still works if invoked).
 	CompletionOptions: cobra.CompletionOptions{HiddenDefaultCmd: true},
 }

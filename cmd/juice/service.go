@@ -385,19 +385,18 @@ func userView(u *kernel.Account) map[string]any {
 
 // ---- Resolution helpers ----
 
-// resolveMixed resolves a target that may name either namespace, returning an account for a local
-// user and a public key for a kernel. `want` is the kind the caller asked for — "user", "peer", or
-// "" for either: a command that names its noun gets what it named, so a petname that happens to
-// equal a handle can no longer decide whose account is suspended. Within "" the shapes are
-// self-identifying, so only a bare name can be ambiguous, and one matching both is refused rather
-// than guessed: money and moderation must never pick a target silently.
-func resolveMixed(k *kernel.Kernel, ctx context.Context, ident, want string) (*kernel.Account, string, error) {
+// resolveTarget turns an admin target into the thing its noun names, and never the other. The noun
+// is the route the request arrived on — `users` or `peers` — so a petname that happens to equal a
+// handle can no more take a deposit than be mistaken for the account that owns it, and nothing has
+// to guess from the shape of a name (D15, D20).
+func resolveTarget(k *kernel.Kernel, ctx context.Context, ident, noun string) (*kernel.Account, string, error) {
 	ident = strings.TrimSpace(ident)
 	if ident == "" {
-		return nil, "", kernel.ErrInvalidInput.Wrap("a user handle, kernel petname, or public key is required")
+		return nil, "", kernel.ErrInvalidInput.Wrapf("name the %s", noun)
 	}
-	if want == "user" {
-		// A user is named by handle alone, so a key never resolves here however well it would.
+	if noun == "user" {
+		// A user is named by handle or id alone, so a key never resolves here however well it
+		// would; a purged account's tombstone resolves but names no live target (§13 Retention).
 		acct, err := k.ResolveUser(ctx, ident)
 		if err != nil {
 			return nil, "", err
@@ -407,43 +406,13 @@ func resolveMixed(k *kernel.Kernel, ctx context.Context, ident, want string) (*k
 		}
 		return acct, "", nil
 	}
-	acctOf, keyOf, err := resolveAny(k, ctx, ident)
+	// A peer is named by its public key or the petname this kernel gave it; its account exists
+	// only once money has been involved, so a nil one is ordinary (D15).
+	key, acct, err := k.ResolveKernelKey(ctx, ident)
 	if err != nil {
-		return nil, "", err
-	}
-	if want == "peer" && keyOf == "" {
 		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or public key", ident)
 	}
-	return acctOf, keyOf, nil
-}
-
-// resolveAny takes an identifier that may name either kind — what a caller that did not say gets.
-func resolveAny(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, string, error) {
-	if kernel.IsPublicKey(ident) {
-		key, acct, err := k.ResolveKernelKey(ctx, ident)
-		if err != nil {
-			return nil, "", err
-		}
-		return acct, key, nil
-	}
-	acct, aerr := k.ResolveUser(ctx, ident)
-	if aerr == nil && !acct.IsLiveUser() && !acct.IsPeer() {
-		// A purged peer's tombstone still carries a resolvable id, but it names no live entity
-		// (§13 Retention): it must never become the target of a rename, a deposit, or a suspend.
-		return nil, "", kernel.ErrNotFound.Wrapf("%s is a purged account, not a live target", ident)
-	}
-	rk, rerr := k.ReadKernelByPetname(ctx, ident)
-	switch {
-	case aerr == nil && rk != nil && rerr == nil && acct.KernelPublicKey != rk.PublicKey:
-		return nil, "", kernel.ErrInvalidInput.Wrapf(
-			"%q names both a local user and a kernel; use the account id or the kernel's public key", ident)
-	case rk != nil && rerr == nil:
-		kacct, _ := k.ReadAccountByKernelKey(ctx, rk.PublicKey)
-		return kacct, rk.PublicKey, nil
-	case aerr == nil:
-		return acct, acct.KernelPublicKey, nil
-	}
-	return nil, "", kernel.ErrNotFound.Wrapf("%s not found", ident)
+	return acct, key, nil
 }
 
 // ---- User operations ----

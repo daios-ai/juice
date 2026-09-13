@@ -490,7 +490,7 @@ type Store interface {
 
 	// ListRailTransfers filters by kind, party and status — any of which may be empty for all —
 	// oldest first, bounded by limit. It answers what happened, so finished rows are included.
-	ListRailTransfers(ctx context.Context, kind, party, status string, limit int) ([]*RailTransfer, error)
+	ListRailTransfers(ctx context.Context, kind, party, status string, limit, offset int) ([]*RailTransfer, error)
 
 	// ListOpenRailTransfers returns the rows that still have work to do. Kept apart from the reading
 	// question so a long history cannot crowd out the few rows the worker must drive.

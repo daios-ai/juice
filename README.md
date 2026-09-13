@@ -128,6 +128,7 @@ amounts are written the way that token is written — `1.50`, not `1500000`:
 ./juice user deposit               # where to send money, and whether you are registered
 ./juice user address 0xAbC...      # register a payout address, proving you control it
 ./juice user withdraw 100 --yes    # pays out to that address
+./juice user withdrawals          # the ones you have made, and where each stands
 ```
 
 Every command that moves money asks before it does, since none of them can be undone.
@@ -277,11 +278,11 @@ The operator (`sys`) uses the same commands as users, widened in scope, plus the
 and trust verbs:
 
 ```bash
-./juice admin users                    # all local accounts
+./juice admin user list                # all local accounts
 ./juice admin user deposit carol 500 --ref wire-4471  # credit against a payment received
 ./juice admin kernel deposits          # payments held for a sender nobody has registered
-./juice admin suspend carol            # one reversible lever, humans and kernels alike
-./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
+./juice admin user suspend carol       # one reversible lever, humans and kernels alike
+./juice admin peer rename k-3f8a2c9d weather-farm # give a peer a memorable local name
 ./juice admin peer list                # counterparties and discovered kernels, last seen
 ./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
 ./juice admin kernel show              # own key, addresses, rail position, money rules and credit

@@ -128,7 +128,7 @@ flow_rail_chain() {
         row=$(python3 -c "
 import sys, json
 rows = json.loads(sys.argv[1])
-print(rows[0]['status'], rows[0].get('tx_hash', '-')) if rows else print('- -')" "$(jj "$db" "$ha" user withdraw)")
+print(rows[0]['status'], rows[0].get('tx_hash', '-')) if rows else print('- -')" "$(jj "$db" "$ha" user withdrawals)")
         status=${row%% *}; hash=${row##* }
         [ "$status" = confirmed ] && break
         sleep 0.5
@@ -239,7 +239,7 @@ PYEOF
     assert_contains "rail_refill.refusal_says_not_ready" "not ready" "$out"
 
     # Nothing is half-done: no withdrawal row is created for a payment the rail never accepted.
-    assert_eq "rail_refill.no_orphan_row" 0 "$(list_len "$(jj "$db" "$ha" user withdraw)")"
+    assert_eq "rail_refill.no_orphan_row" 0 "$(list_len "$(jj "$db" "$ha" user withdrawals)")"
 
     # Reads keep working while money is refused — an operator must be able to see why.
     assert_nonempty "rail_refill.reads_continue"    "$(jj "$db" "$ha" user me)"
@@ -265,7 +265,7 @@ PYEOF
         anvil_mine 2
         status=$(python3 -c "
 import sys, json
-rows = json.loads(sys.argv[1]); print(rows[0]['status'] if rows else '-')" "$(jj "$db2" "$ha2" user withdraw)")
+rows = json.loads(sys.argv[1]); print(rows[0]['status'] if rows else '-')" "$(jj "$db2" "$ha2" user withdrawals)")
         [ "$status" = confirmed ] && break
         sleep 0.5
     done

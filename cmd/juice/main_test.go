@@ -34,7 +34,7 @@ func captureStderr(t *testing.T, fn func()) string {
 func TestRenderError(t *testing.T) {
 	t.Cleanup(func() { flagVerbose = false })
 	cause := errors.New("dial tcp 127.0.0.1:4040: connect: connection refused")
-	kerr := kernel.ErrInvalidState.Wrap("cannot reach juice server (is `juice serve` running?)").Because(cause)
+	kerr := kernel.ErrInvalidState.Wrap("cannot reach juice server (is `juice kernel serve` running?)").Because(cause)
 
 	flagVerbose = false
 	out := captureStderr(t, func() { renderError(kerr) })
