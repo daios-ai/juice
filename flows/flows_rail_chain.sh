@@ -101,7 +101,7 @@ flow_rail_chain() {
     make_user "$db" "$hs" "$ha" alice
 
     # Money sent to an address nobody proved they hold is gone, so there is nowhere to pay yet.
-    assert_fails "rail_chain.withdraw_needs_an_address" "address" -- j "$db" "$ha" user withdraw 1 --yes
+    assert_fails "rail_chain.withdraw_needs_an_address" "address" -- j "$db" "$ha" user withdraw "$(units 1)" --yes
 
     # The address becomes hers by signing the kernel's registration message with the wallet itself,
     # and a payment from it into the kernel's own account, once final, is hers too.
@@ -120,7 +120,7 @@ flow_rail_chain() {
     # own before it can sign anything, which is the one thing no ledger can supply.
     anvil_send "$ANVIL_KEY" "$vault" --value 1ether
     local before; before=$(anvil_uint "$token" "balanceOf(address)(uint256)" "$aaddr")
-    j "$db" "$ha" user withdraw 5 --yes >/dev/null 2>&1
+    j "$db" "$ha" user withdraw "$(units 5)" --yes >/dev/null 2>&1
     local status="" hash="" row
     deadline=$(( $(date +%s) + 90 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -179,7 +179,7 @@ flow_rail_chain_settlement() {
     anvil_send "$ANVIL_KEY" "$rvault" --value 1ether
 
     # L buys from R and now owes it. With no lottery the obligation is paid exactly.
-    publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price 1000000 >/dev/null
+    publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price "$(units 1000000)" >/dev/null
     local tx; tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)
     assert_nonempty "rail_chain_settlement.call" "$tx"
     local d ticket; d=1050000
@@ -233,7 +233,7 @@ PYEOF
     # every amount." A kernel that cannot price its own fuel is in exactly that state, and the
     # refusal must say which term failed rather than fail obscurely.
     local out
-    out=$(j "$db" "$ha" user withdraw 1 --yes 2>&1)
+    out=$(j "$db" "$ha" user withdraw "$(units 1)" --yes 2>&1)
     echo "  money verb says: $(head -c 140 <<< "$out")"
     assert_contains "rail_refill.refusal_names_the_venue" "venue" "$out"
     assert_contains "rail_refill.refusal_says_not_ready" "not ready" "$out"
@@ -259,7 +259,7 @@ PYEOF
     _chain_pay_in "$db2" "$ha2" "$akey" 20000000 >/dev/null
     anvil_send "$ANVIL_KEY" "$vault2" --value 1ether
     assert_jnum "rail_refill.working_venue_credits" "$(jj "$db2" "$ha2" user me)" available 20000000
-    j "$db2" "$ha2" user withdraw 2 --yes >/dev/null 2>&1
+    j "$db2" "$ha2" user withdraw "$(units 2)" --yes >/dev/null 2>&1
     local i status=""
     for i in $(seq 1 40); do
         anvil_mine 2

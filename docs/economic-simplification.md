@@ -23,9 +23,10 @@ help. Identities are free, so any limit that resets per counterparty is ineffect
 \(L\) is the lottery size, \(L_{\max}\) its ceiling, \(E\) the node's outstanding credit, \(E_{\max}\)
 its credit limit, \(r\) the risk premium.
 
-\(L_{\max}\) is a rail parameter in the world file, so every node on a world shares it without
-negotiation; it is outside the world's defining part, so it moves with the rail fee without forking
-the network. Each operator sets one \(L\le L_{\max}\) for the node. The rail fee is the operator's
+\(L_{\max}\) is the node's own configuration, not the network's: it is the largest ticket the node
+will accept from a buyer, and a node sets its own \(L\le L_{\max}\) for what it writes. A trade
+happens where the buyer's \(L\) is one the seller accepts, so each side bounds its own variance
+without either agreeing anything with the other. The rail fee is the operator's
 cost, recovered through the import fee, so \(L\) fixes how many rail payments the node makes per unit
 bought and the import fee must cover them, \(\text{import fee}\ge F/L\). For \(D<L\),
 

@@ -369,20 +369,30 @@ func probeHealth(ctx context.Context, base string) (*serverHealth, error) {
 
 // ---- amounts ----
 
-// parseAmount converts an amount as a person writes it into the whole base units the kernel counts
-// in. The digits are shifted by hand: money never passes through floating point.
-func parseAmount(s string, decimals uint8) (int64, error) {
-	bad := kernel.ErrInvalidInput.Wrap("amount must be a positive whole number")
+// parseUnits converts an amount as a person writes it into the whole base units the kernel counts
+// in. The digits are shifted by hand: money never passes through floating point. Zero is a valid
+// reading here — a price may be nothing — so a verb that must move money checks that itself.
+func parseUnits(s string, decimals uint8) (int64, error) {
+	bad := kernel.ErrInvalidInput.Wrap("amount must be a whole number")
 	if decimals > 0 {
-		bad = kernel.ErrInvalidInput.Wrapf("amount must be positive, with at most %d decimal places", decimals)
+		bad = kernel.ErrInvalidInput.Wrapf("amount must have at most %d decimal places", decimals)
 	}
 	whole, frac, _ := strings.Cut(strings.TrimSpace(s), ".")
 	if !allDigits(whole) || (frac != "" && !allDigits(frac)) || len(frac) > int(decimals) {
 		return 0, bad
 	}
 	v, err := strconv.ParseInt(whole+frac+strings.Repeat("0", int(decimals)-len(frac)), 10, 64)
-	if err != nil || v <= 0 {
+	if err != nil {
 		return 0, bad
+	}
+	return v, nil
+}
+
+// parseAmount is parseUnits for the verbs that move money, where nothing to move is a mistake.
+func parseAmount(s string, decimals uint8) (int64, error) {
+	v, err := parseUnits(s, decimals)
+	if err != nil || v <= 0 {
+		return 0, kernel.ErrInvalidInput.Wrapf("amount must be positive, with at most %d decimal places", decimals)
 	}
 	return v, nil
 }

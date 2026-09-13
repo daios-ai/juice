@@ -56,7 +56,8 @@ func testConfig(secret string) kernel.Config {
 // the draw turns it on deliberately.
 func testEconomy() kernel.Economy {
 	econ := kernel.DefaultEconomy()
-	econ.CreditLimit, econ.LotteryMax = 100000, 1_000_000
+	// Exact payment, so a test asserting an amount gets the one it wrote.
+	econ.CreditLimit, econ.Lottery = 100000, 0
 	return econ
 }
 

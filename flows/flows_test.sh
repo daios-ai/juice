@@ -84,7 +84,7 @@ run_flows \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
     flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_provider_crash_recovery flow_fed_peer_sync flow_fed_inspect_read_only \
-    flow_fed_step_complete flow_ticket flow_transfer \
+    flow_fed_step_complete flow_ticket flow_ticket_too_large flow_transfer \
     flow_compose_remote_child flow_compose_partial_refund flow_compose_through_kernel flow_compose_returns_home flow_compose_ticket flow_compose_underfunded flow_compose_inner_unreachable flow_compose_middle_cannot_stake flow_compose_middle_crash flow_compose_cycle \
     flow_transaction_access flow_list_projections flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

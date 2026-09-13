@@ -282,21 +282,53 @@ func TestFedListenAddrsIsReadFromConfig(t *testing.T) {
 	}
 }
 
-// The credit limit defaults from the world's ceiling, not from the ticket the operator chose:
-// choosing exact settlement (`lottery: 0`) must not silently set the limit to zero and refuse
-// every paid inbound call. And the ceiling is the ceiling even when it is zero — a world with no
-// lottery accepts no ticket at all.
-func TestEconomyDefaultsFromTheWorldCeiling(t *testing.T) {
-	zero := int64(0)
-	econ, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero}).Economy(100)
+// The money rules come from the kernel's own configuration and nowhere else, so a file that sets
+// none of them gets the shipped economy whole. The three amounts are independent: choosing exact
+// settlement (`lottery: 0`), or refusing every ticket (`lottery_max: 0`), must not quietly take the
+// credit limit with it and stop the kernel serving foreign work at all.
+func TestEconomyDefaultsAndIndependence(t *testing.T) {
+	base := ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500}
+	econ, err := base.Economy()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if econ.CreditLimit != 100*100 {
-		t.Errorf("credit limit with lottery 0 = %d, want a hundred tickets at the ceiling", econ.CreditLimit)
+	if econ.Lottery != 1_000_000 || econ.LotteryMax != 5_000_000 || econ.CreditLimit != 500_000_000 {
+		t.Errorf("unset money keys gave %d/%d/%d, want 1000000/5000000/500000000",
+			econ.Lottery, econ.LotteryMax, econ.CreditLimit)
 	}
-	five := int64(5)
-	if _, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &five}).Economy(0); err == nil {
-		t.Error("a ticket above a ceiling of zero was accepted")
+	zero := int64(0)
+	for _, c := range []struct {
+		name string
+		cfg  ServerConfig
+	}{
+		{"paying every obligation exactly", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero}},
+		{"refusing every ticket", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero, LotteryMax: &zero}},
+	} {
+		got, err := c.cfg.Economy()
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got.CreditLimit != 500_000_000 {
+			t.Errorf("%s moved the credit limit to %d", c.name, got.CreditLimit)
+		}
+	}
+	// A kernel that would not accept its own ticket could never be paid for what it sells.
+	five, four := int64(5), int64(4)
+	if _, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &five, LotteryMax: &four}).Economy(); err == nil {
+		t.Error("a ticket above this kernel's own maximum was accepted")
+	}
+	// A negative amount is refused on its own account. Both cases below pass the size-against-maximum
+	// check, so only the sign check can catch them.
+	neg := int64(-1)
+	for _, c := range []struct {
+		name string
+		cfg  ServerConfig
+	}{
+		{"lottery", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &neg}},
+		{"credit_limit", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, CreditLimit: &neg}},
+	} {
+		if _, err := c.cfg.Economy(); err == nil {
+			t.Errorf("a negative %s was accepted", c.name)
+		}
 	}
 }

@@ -86,8 +86,9 @@ type ServerConfig struct {
 	FeeBPS                     int64        `json:"fee_bps"`
 	RemoteBPS                  int64        `json:"remote_bps"`   // serving-side markup on inbound remote calls (§13)
 	ImportBPS                  int64        `json:"import_bps"`   // origin-side import fee on outbound remote calls, retained locally (§13)
-	Lottery                    *int64       `json:"lottery"`      // L: ticket face value (P10); 0 = pay every obligation exactly; unset = the world's ceiling
-	CreditLimit                *int64       `json:"credit_limit"` // E_max: most unpaid delivered service carried at once (P10); unset = 100 tickets
+	Lottery                    *int64       `json:"lottery"`      // L: the ticket this kernel writes (P10); 0 = pay every obligation exactly
+	LotteryMax                 *int64       `json:"lottery_max"`  // the largest ticket this kernel accepts from a buyer (P10)
+	CreditLimit                *int64       `json:"credit_limit"` // E_max: most unpaid delivered service carried at once (P10)
 	TokenTTL                   string       `json:"token_ttl"`
 	AuthIssuer                 string       `json:"auth_issuer"`
 	AuthAudience               string       `json:"auth_audience"`
@@ -154,10 +155,8 @@ func DefaultServerConfig() ServerConfig {
 		FeeBPS:            2000,
 		RemoteBPS:         500,
 		ImportBPS:         500,
-		// A fresh kernel serves remote paid calls out of the box (P10). Both money figures are left
-		// unset here because their sensible values depend on the world: a ticket at the world's own
-		// ceiling, and a credit limit of a hundred of them. A base-unit number written here would
-		// mean a hundredth of a token on one world and a hundred tokens on another.
+		// The three money amounts are left unset here so they come from one place, the shipped
+		// economy (kernel.DefaultEconomy), which a written-out file then shows the operator.
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",
@@ -258,14 +257,10 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	return cfg, nil
 }
 
-// Economy assembles the money rules from this configuration and the world it runs on (P10). The
-// world supplies the ticket ceiling, because what a payment costs is a property of the rail; the
-// operator chooses its own ticket at or below it, and how much unpaid work it will carry.
-//
-// Both money figures default from the ceiling rather than from a fixed number: base units mean
-// different amounts on different worlds, so a shipped 1000 would be a hundredth of a token on one
-// and a hundred tokens on another.
-func (c ServerConfig) Economy(lotteryMax int64) (kernel.Economy, error) {
+// Economy assembles the money rules from this configuration alone (P10): the ticket this kernel
+// writes, the largest it will accept from a buyer, and how much unpaid work it will carry. All
+// three are the operator's own, defaulted from the shipped economy.
+func (c ServerConfig) Economy() (kernel.Economy, error) {
 	econ := kernel.DefaultEconomy()
 	for _, bps := range []struct {
 		name  string
@@ -281,23 +276,26 @@ func (c ServerConfig) Economy(lotteryMax int64) (kernel.Economy, error) {
 		}
 		*bps.dst = bps.value
 	}
-	econ.LotteryMax = lotteryMax
-	econ.Lottery = lotteryMax
-	if c.Lottery != nil {
-		econ.Lottery = *c.Lottery
+	for _, amount := range []struct {
+		name  string
+		value *int64
+		dst   *int64
+	}{
+		{"lottery", c.Lottery, &econ.Lottery},
+		{"lottery_max", c.LotteryMax, &econ.LotteryMax},
+		{"credit_limit", c.CreditLimit, &econ.CreditLimit},
+	} {
+		if amount.value == nil {
+			continue
+		}
+		if *amount.value < 0 {
+			return kernel.Economy{}, fmt.Errorf("%s must not be negative", amount.name)
+		}
+		*amount.dst = *amount.value
 	}
-	if econ.Lottery < 0 {
-		return kernel.Economy{}, fmt.Errorf("lottery must not be negative")
-	}
-	if econ.Lottery > lotteryMax {
-		return kernel.Economy{}, fmt.Errorf("lottery %d exceeds this world's ceiling of %d", econ.Lottery, lotteryMax)
-	}
-	econ.CreditLimit = 100 * lotteryMax
-	if c.CreditLimit != nil {
-		econ.CreditLimit = *c.CreditLimit
-	}
-	if econ.CreditLimit < 0 {
-		return kernel.Economy{}, fmt.Errorf("credit_limit must not be negative")
+	// A kernel that would not accept its own ticket could never be paid for what it sells.
+	if econ.Lottery > econ.LotteryMax {
+		return kernel.Economy{}, fmt.Errorf("lottery %d is above this kernel's own lottery_max of %d", econ.Lottery, econ.LotteryMax)
 	}
 	return econ, nil
 }

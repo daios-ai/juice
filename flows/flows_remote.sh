@@ -65,7 +65,7 @@ flow_successful_receipt() {
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 100
 
-    local aid; aid=$(publish "$db" "$ha" receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price 10 --description "receipt")
+    local aid; aid=$(publish "$db" "$ha" receipt-action --kind http --source "http://127.0.0.1:${bport}/act" --price "$(units 10)" --description "receipt")
 
     local out; out=$(jj "$db" "$hb" run alice/receipt-action '{}')
     assert_nonempty "successful_receipt.call_succeeded" "$(strfield "$out" tx_id)"
@@ -81,7 +81,7 @@ flow_failed_receipt() {
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 100
 
-    local aid; aid=$(publish "$db" "$ha" fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price 10 --description "fail")
+    local aid; aid=$(publish "$db" "$ha" fail-action --kind http --source "http://127.0.0.1:${bport}/fail" --price "$(units 10)" --description "fail")
 
     j "$db" "$hb" run alice/fail-action '{}' >/dev/null 2>&1 || true
     local txs; txs=$(jj "$db" "$hb" tx list)
@@ -101,7 +101,7 @@ flow_lookup() {
     # Hybrid lookup degrades to the lexical (BM25) leg with no Ollama, so a distinctively-named
     # action is discoverable by keyword — the offline happy path, untestable before.
     local aid
-    aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price 0 --description "zqxwvprobe lexical lookup probe")" id)
+    aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price "$(units 0)" --description "zqxwvprobe lexical lookup probe")" id)
     assert_nonempty "lookup.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     assert_contains "lookup.lexical_hit" "alice/zqxwvprobe" "$(jj "$db" "$ha" run sys/lookup '{"query":"zqxwvprobe"}')"
@@ -237,7 +237,7 @@ flow_openapi_changed_reimport() {
     # A price the owner set stays the owner's across a re-import when the document declares none.
     _greet_spec_nopricing "$aport" "$dir/spec.json" "hello v3"
     j "$db" "$ha" action import mail >/dev/null 2>&1
-    j "$db" "$ha" action update "$aid" --price 11 >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --price "$(units 11)" >/dev/null 2>&1
     _greet_spec_nopricing "$aport" "$dir/spec.json" "hello v4"
     j "$db" "$ha" action import mail >/dev/null 2>&1
     assert_json "openapi_reimport.owner_price_kept" "$(jj "$db" "$ha" action show "$aid")" price 11
@@ -265,7 +265,7 @@ PY
     local greet_id; greet_id=$(python3 -c "import sys,json;print(next(a['id'] for a in json.loads(sys.argv[1])['created'] if 'greet' in a['name']))" "$imp" 2>/dev/null)
     j "$db" "$ha" action enable alice/mail >/dev/null 2>&1
     # A manual action outside the application's path must NOT be touched.
-    local manual_id; manual_id=$(enabled "$db" "$ha" manual --kind http --source "http://127.0.0.1:${aport}/manual" --price 0 --description "manual")
+    local manual_id; manual_id=$(enabled "$db" "$ha" manual --kind http --source "http://127.0.0.1:${aport}/manual" --price "$(units 0)" --description "manual")
 
     # Withdrawing an application is the ordinary disable verb over its path: no separate verb.
     assert_contains "openapi_disable.names_rows" "mail/greet" "$(j "$db" "$ha" action disable alice/mail)"

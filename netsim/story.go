@@ -214,12 +214,14 @@ type settlement struct {
 	WallMs     int64  `json:"wall_ms"`
 }
 
-// px converts a price in credits to the base units the kernel counts in. A chain counts in the
-// token's decimals; the manual rail counts in whole credits. Every price, cap and balance
-// comparison in the story goes through here, and the three command-line money verbs
-// (`user transfer`, `user withdraw`, `admin deposit`) are the exception: they take the amount as a
-// person writes it and scale it themselves.
+// px converts an amount in credits to the base units the kernel counts in, for every cap and
+// balance comparison the story makes against a number the kernel reported, and for an argument
+// carried inside a JSON payload. Command-line money arguments are the exception and take credits
+// as a person writes them: the CLI scales those itself, in the world's own unit (D20).
 func (s *story) px(credits int64) string { return strconv.FormatInt(credits*s.scale, 10) }
+
+// cr is a price as a command line takes it: the number a person writes.
+func cr(credits int64) string { return strconv.FormatInt(credits, 10) }
 
 func Run(n *Net, rounds int) (*story, error) {
 	s := &story{n: n, scale: n.Rail.Scale(), shape: StoryShape(),
@@ -274,6 +276,7 @@ func (s *story) opts(name string, limit int64) bootOpts {
 	}
 	return bootOpts{Handle: handle, FeeBps: fee, RemoteBps: remote, ImportBps: imp,
 		CreditLimit: limit * s.scale, Lottery: storyLottery * s.scale,
+		LotteryMax:   storyLottery * s.scale,
 		RetrySeconds: 2, Bootstrap: s.boot}
 }
 
@@ -352,7 +355,7 @@ func (s *story) publish(kernel, owner, name string, credits int64, visibility, r
 	s.prices[owner+"/"+name] = credits
 	s.owners[owner+"/"+name] = kernel
 	_, _ = k.Run(owner, "action", "create", name, "--kind", "http", "--source", s.n.Backend+route,
-		"--description", desc, "--price", s.px(credits), "--input-schema", schemaIn, "--output-schema", schemaOut)
+		"--description", desc, "--price", cr(credits), "--input-schema", schemaIn, "--output-schema", schemaOut)
 	_, _ = k.Run(owner, "action", "enable", owner+"/"+name)
 	if visibility != "private" {
 		_, _ = k.Run(owner, "action", "update", owner+"/"+name, "--visibility", visibility)
@@ -484,14 +487,14 @@ func (s *story) actCatalogue() error {
 		return err
 	}
 	s.n.MustWork("catalogue.composite_across_kernels", s.k("k3"), "dan", "action", "create", "chain",
-		"--kind", "wasm", "--source", chain, "--price", s.px(120),
+		"--kind", "wasm", "--source", chain, "--price", cr(120),
 		"--description", "A composite that buys a service on another kernel")
 	_, _ = s.k("k3").Run("dan", "action", "enable", "dan/chain")
 	// A composite nobody but its owner may call is a composite that never composes: the cross-
 	// kernel trade below buys this one, and so does another user on its own kernel.
 	_, _ = s.k("k3").Run("dan", "action", "update", "dan/chain", "--visibility", "public")
 	s.n.MustWork("catalogue.composite_partial", s.k("k2"), "cara", "action", "create", "pair",
-		"--kind", "wasm", "--source", pair, "--price", s.px(90),
+		"--kind", "wasm", "--source", pair, "--price", cr(90),
 		"--description", "Buys a quote, then a service that returns the wrong shape")
 	_, _ = s.k("k2").Run("cara", "action", "enable", "cara/pair")
 	_, _ = s.k("k2").Run("cara", "action", "update", "cara/pair", "--visibility", "public")
@@ -855,7 +858,7 @@ func (s *story) actDelegated() error {
 	k2 := s.k("k2")
 	auth := `{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}`
 	s.n.MustWork("auth.published", k2, "cara", "action", "create", "vault/read", "--kind", "http",
-		"--source", s.n.Backend+"/headers", "--price", s.px(15),
+		"--source", s.n.Backend+"/headers", "--price", cr(15),
 		"--description", "Reads the caller's own upstream account", "--auth", auth)
 	_, _ = k2.Run("cara", "action", "enable", "cara/vault/read")
 

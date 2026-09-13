@@ -21,7 +21,7 @@ func TestShippedWorldsLoad(t *testing.T) {
 		name     string
 		chained  bool
 		decimals uint8
-	}{{"play", false, 0}, {"test", true, 6}, {"real", true, 6}} {
+	}{{"play", false, 6}, {"test", true, 6}, {"real", true, 6}} {
 		w, err := rail.Load(tc.name)
 		if err != nil {
 			t.Fatalf("load %s: %v", tc.name, err)
@@ -128,15 +128,33 @@ func TestLoadRejectsBadWorlds(t *testing.T) {
 		"no decimals": {"name": "x", "chainId": float64(1), "token": "0x0000000000000000000000000000000000000001"},
 		// the ledger holds 64-bit integers; a token needing more than 18 places could not be held
 		"too many decimals": {"name": "x", "chainId": float64(1), "token": "0x0000000000000000000000000000000000000001", "decimals": float64(24)},
+		// a setting this build does not know would silently have no effect at all
+		"unknown key": {"name": "x", "decimals": float64(6), "somethingElse": float64(1)},
+		// the ticket ceiling moved to the kernel's own lottery_max; a file still naming it here
+		// would be read as a rule that no longer applies
+		"the retired ceiling": {"name": "x", "decimals": float64(6), "lotteryMax": float64(100)},
 	} {
 		b, _ := json.Marshal(doc)
 		p := filepath.Join(t.TempDir(), "w.json")
 		if err := os.WriteFile(p, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := rail.Load(p); err == nil {
+		_, err := rail.Load(p)
+		if err == nil {
 			t.Fatalf("%s: expected rejection", name)
 		}
+		if name == "the retired ceiling" && !strings.Contains(err.Error(), "lotteryMax") {
+			t.Errorf("the refusal must name the key it refused: %v", err)
+		}
+	}
+	// One document per file. A second one is a world somebody meant to serve, and reading only the
+	// first would serve the other silently.
+	p := filepath.Join(t.TempDir(), "two.json")
+	if err := os.WriteFile(p, []byte(`{"name":"x","decimals":6} {"name":"y","decimals":6}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rail.Load(p); err == nil {
+		t.Error("a file holding two worlds was read as one")
 	}
 }
 

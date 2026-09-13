@@ -12,7 +12,7 @@ flow_rail_onboard() {
     # The selling kernel serves strangers on credit, which is what makes the first call possible
     # without anyone prefunding anything (U29). Serving is funded by the seller's own money.
     _fed_setup "$dir" || { fail "rail_onboard.setup" "setup failed"; return; }
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" alice)
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
 
@@ -23,20 +23,20 @@ flow_rail_onboard() {
     assert_not_contains "rail_onboard.no_address_here" "0x" "$how"
 
     # Every crossing names the payment it records: without one, a repeated command would mint money.
-    assert_fails "rail_onboard.ref_required" "ref\|payment" -- j "$FED_DBL" "$FED_HL" admin user deposit alice 500
+    assert_fails "rail_onboard.ref_required" "ref\|payment" -- j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)"
     local ref="invoice-77"
-    j "$FED_DBL" "$FED_HL" admin user deposit alice 500 --ref "$ref" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.funded" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # Recording the same payment again moves money once.
-    j "$FED_DBL" "$FED_HL" admin user deposit alice 500 --ref "$ref" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.recorded_once" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # The same payment on other terms is a different intention and is refused.
-    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin user deposit alice 900 --ref "$ref" --yes
+    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 900)" --ref "$ref" --yes
     # Nothing is waiting on the operator: every payment so far had an owner.
     assert_not_contains "rail_onboard.nothing_held" "$ref" "$(j "$FED_DBL" "$FED_HL" admin kernel deposits)"
 
     # And the point of the money: she buys a priced action on the other kernel.
-    local rid; rid=$(publish "$FED_DBR" "$FED_HR" priced --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a priced service" --price 100)
+    local rid; rid=$(publish "$FED_DBR" "$FED_HR" priced --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a priced service" --price "$(units 100)")
     assert_nonempty "rail_onboard.remote_call" "$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/priced '{}')" tx_id)"
     local left; left=$(numfield "$(jj "$FED_DBL" "$ha" user me)" available)
     # 100 to the provider, 5 for serving it, 6 the origin keeps: one all-in price, charged once.
@@ -50,10 +50,10 @@ flow_rail_withdraw() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "rail_withdraw.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
-    j "$db" "$hs" admin user deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # No prompt without a terminal: agents are first-class.
-    local out; out=$(j "$db" "$ha" user withdraw 200 --yes)
+    local out; out=$(j "$db" "$ha" user withdraw "$(units 200)" --yes)
     assert_contains "rail_withdraw.confirmed" "confirmed" "$out"
     assert_jnum "rail_withdraw.balance" "$(jj "$db" "$ha" user me)" available 300
     # Both legs are in her own ledger: out of her account, then out of the kernel.
@@ -61,7 +61,7 @@ flow_rail_withdraw() {
     # The row is listed with its outcome.
     assert_contains "rail_withdraw.listed" "confirmed" "$(j "$db" "$ha" user withdraw)"
     # More than she holds is refused, and nothing moves.
-    assert_fails "rail_withdraw.over_balance" "insufficient\|error" -- j "$db" "$ha" user withdraw 9000 --yes
+    assert_fails "rail_withdraw.over_balance" "insufficient\|error" -- j "$db" "$ha" user withdraw "$(units 9000)" --yes
     assert_jnum "rail_withdraw.unchanged_after_refusal" "$(jj "$db" "$ha" user me)" available 300
 
     # A reply lost in transit is safe to ask for again: the same request id returns the same row.
@@ -90,9 +90,9 @@ flow_rail_settlement() {
     _fed_setup "$dir" || { fail "rail_settlement.setup" "setup failed"; return; }
     local lkey="$FED_LKEY"
 
-    local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price "$(units 10)")
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local before seller; before=$(balance_of "$FED_DBL" "$FED_HL"); seller=$(balance_of "$FED_DBR" "$FED_HR")
 
     assert_nonempty "rail_settlement.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
@@ -127,7 +127,7 @@ flow_rail_isolation() {
 
     # A world of somebody's own: same shape, different name, therefore a different network.
     local other="$dir/other-world.json"
-    printf '{"name":"otherworld","decimals":0}\n' > "$other"
+    printf '{"name":"otherworld","decimals":6}\n' > "$other"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 || { fail "rail_isolation.boot_r" "no start"; return; }
     local boot; boot=$(kernel_fed_addr "$dbr")
@@ -143,7 +143,7 @@ flow_rail_isolation() {
     assert_contains "rail_isolation.l_network" "otherworld" "$(j "$dbl" "$hl" kernel health)"
 
     local rkey; rkey=$(kernel_key "$dbr" "$hr")
-    publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1" --description "greet" --price 0 >/dev/null 2>&1
+    publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1" --description "greet" --price "$(units 0)" >/dev/null 2>&1
 
     # Give discovery several passes to find nothing.
     sleep 6
@@ -161,7 +161,7 @@ flow_rail_world_mismatch() {
     stop_server "$db"
 
     local other="$dir/other-world.json"
-    printf '{"name":"otherworld","decimals":0}\n' > "$other"
+    printf '{"name":"otherworld","decimals":6}\n' > "$other"
     local log="$(dirname "$db")/mismatch.log"
     write_config "$db" world="$other"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
@@ -245,15 +245,15 @@ flow_rail_economic_loop() {
     know "$dbc" "$hc"
     j "$dbc" "$hc" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local ckey; ckey=$(kernel_key "$dbc" "$hc")
-    publish "$dbc" "$hc" tooling --kind http --source "http://127.0.0.1:$FED_BPORT" --description "tooling" --price 20 >/dev/null 2>&1
-    j "$dbc" "$hc" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$dbc" "$hc" tooling --kind http --source "http://127.0.0.1:$FED_BPORT" --description "tooling" --price "$(units 20)" >/dev/null 2>&1
+    j "$dbc" "$hc" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # B sells, funding its own work; A's buyer pays for it.
-    publish "$FED_DBR" "$FED_HR" service --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a service" --price 200 >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$FED_DBR" "$FED_HR" service --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a service" --price "$(units 200)" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
-    j "$FED_DBL" "$FED_HL" admin user deposit buyer 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit buyer "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "rail_economic_loop.buyer_pays_b" "$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/service '{}')" tx_id)"
 
     # A owes B for the work, and pays it without anyone being asked: B's books clear on A's reveal.
@@ -442,6 +442,6 @@ flow_money_reads_as_money() {
     assert_contains "money.identity_names_the_unit" "credits" "$(j "$db" "$hs" admin kernel show)"
 
     # An irreversible movement is confirmed, and a script that has not said --yes moves nothing.
-    assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys 10
+    assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys "$(units 10)"
     assert_jnum "money.nothing_moved" "$(jj "$db" "$ha" user me)" available 500
 }

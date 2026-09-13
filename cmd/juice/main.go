@@ -268,10 +268,8 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}
 	cfg.Network = world.Network()
-	// Every money rule comes from one place, built from the operator's configuration and the world's
-	// own ticket ceiling (P10): what a payment costs is a property of the rail, so the ceiling rides
-	// with it and the operator picks a ticket at or below it.
-	econ, err := globalCfg.Economy(world.LotteryMax)
+	// Every money rule comes from one place, the operator's own configuration (P10).
+	econ, err := globalCfg.Economy()
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, rail.World{}, err
 	}

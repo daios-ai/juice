@@ -6,7 +6,6 @@
   "decimals": 6,
   "symbol": "USDC",
   "description": "fake USDC on the Arbitrum Sepolia test chain",
-  "lotteryMax": 1000000000,
   "finality": "latest",
   "fromBlock": 297184700,
   "venue": {

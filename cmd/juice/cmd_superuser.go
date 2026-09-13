@@ -164,6 +164,7 @@ func identityCmd() *cobra.Command {
 					Since  string `json:"since"`
 				} `json:"stop"`
 				Lottery     int64 `json:"lottery"`
+				LotteryMax  int64 `json:"lottery_max"`
 				CreditLimit int64 `json:"credit_limit"`
 				Exposure    int64 `json:"exposure"`
 				FeeBPS      int64 `json:"fee_bps"`
@@ -225,9 +226,10 @@ func identityCmd() *cobra.Command {
 				fmt.Println("ALARM: more work has been delivered on credit than the limit allows")
 			}
 			// The money rules this kernel serves under, named by their configuration keys so an
-			// operator can find them. A lottery of 0 pays every obligation exactly.
-			fmt.Printf("Rates:      fee_bps=%d remote_bps=%d import_bps=%d lottery=%s\n",
-				out.FeeBPS, out.RemoteBPS, out.ImportBPS, net.Amount(out.Lottery))
+			// operator can find them. A lottery of 0 pays every obligation exactly, and lottery_max
+			// is the largest ticket this kernel accepts from a buyer.
+			fmt.Printf("Rates:      fee_bps=%d remote_bps=%d import_bps=%d lottery=%s lottery_max=%s\n",
+				out.FeeBPS, out.RemoteBPS, out.ImportBPS, net.Amount(out.Lottery), net.Amount(out.LotteryMax))
 			if len(out.Addrs) > 0 {
 				fmt.Println("Listen addresses:")
 				for _, a := range out.Addrs {

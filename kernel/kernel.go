@@ -2365,6 +2365,14 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		if rerr != nil {
 			return nil, rerr
 		}
+		// A buyer may not draw for more than this kernel will accept: the face value is what its own
+		// draw pays, so an unbounded one would name a payment nobody agreed to. Refused here rather
+		// than at the transport, so it settles on a signed rejection like every other pre-execution
+		// refusal instead of leaving the buyer's call parked for a day (P4, P10).
+		if buyer.Lottery < 0 || buyer.Lottery > k.econ.LotteryMax {
+			return nil, ErrInvalidInput.Wrapf("a ticket of %d is above the %d this kernel accepts",
+				buyer.Lottery, k.econ.LotteryMax)
+		}
 		// Where a winning ticket will be paid from is proven now and frozen with the call: on a
 		// world with addresses a priced call from a buyer that proves none could never be paid, and
 		// a payer learned only later could be mistaken for somebody else's in the meantime (P10).

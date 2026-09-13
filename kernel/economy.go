@@ -14,16 +14,18 @@ type Economy struct {
 	FeeBPS      int64 // domestic fee on a local layer's margin
 	RemoteBPS   int64 // r: advertised markup for serving a foreign call
 	ImportBPS   int64 // retained markup for importing one
-	Lottery     int64 // L: ticket face value; 0 ⇒ every obligation is paid exactly
-	LotteryMax  int64 // the world's ceiling on L, which no kernel here may quote above
+	Lottery     int64 // L: this kernel's ticket face value; 0 ⇒ every obligation is paid exactly
+	LotteryMax  int64 // the largest ticket this kernel will accept from a buyer
 	CreditLimit int64 // E_max: the ceiling on unpaid delivered service
 }
 
-// DefaultEconomy is the shipped money rules: a domestic fee of 20%, serving and import markups of
-// 5% each, and no lottery — every obligation paid exactly, which is what a kernel with no rail
-// configuration can honour. LotteryMax comes from the world and has no default.
+// DefaultEconomy is the shipped money rules, whole: a domestic fee of 20%, serving and import
+// markups of 5% each, a ticket of one unit drawn against a maximum of five, and five hundred of
+// unpaid delivered service. The two ticket figures are this kernel's own, not the world's — every
+// shipped world counts in millionths, so one number means the same amount on all of them.
 func DefaultEconomy() Economy {
-	return Economy{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500}
+	return Economy{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500,
+		Lottery: 1_000_000, LotteryMax: 5_000_000, CreditLimit: 500_000_000}
 }
 
 // Fee splits a taxable amount into what the provider keeps and what the operator takes.

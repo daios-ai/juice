@@ -286,7 +286,3 @@ func (k *Kernel) Exposure(ctx context.Context, operatorID string) (int64, error)
 	}
 	return k.store.Exposure(ctx)
 }
-
-// LotteryMax is the largest ticket this network permits, from its world file. A foreign call quoting
-// more is refused: the face value is what its own draw pays.
-func (k *Kernel) LotteryMax() int64 { return k.econ.LotteryMax }

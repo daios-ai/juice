@@ -297,6 +297,7 @@ type bootOpts struct {
 	Bootstrap    string
 	CreditLimit  int64
 	Lottery      int64
+	LotteryMax   int64
 	FeeBps       int
 	RemoteBps    int
 	ImportBps    int
@@ -315,7 +316,7 @@ func writeKernelConfig(path string, o bootOpts, railCfg map[string]any) error {
 	for key, val := range map[string]any{
 		"script_timeout_ms": 10000, "script_memory_bytes": 67108864,
 		"fee_bps": o.FeeBps, "remote_bps": o.RemoteBps, "import_bps": o.ImportBps,
-		"credit_limit": o.CreditLimit, "lottery": o.Lottery,
+		"credit_limit": o.CreditLimit, "lottery": o.Lottery, "lottery_max": o.LotteryMax,
 		"token_ttl": "60m", "log_level": "info", "log_format": "json",
 		"allow_local_sources": true, "kernel_handle": o.Handle,
 		"bootstrap_peers":               []string{},

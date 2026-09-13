@@ -591,7 +591,6 @@ func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {
 	_ = sys
 }
 
-
 // A payment from an unknown sender waits held; the operator names its transaction and its owner,
 // and it is delivered once — with no second delivery on a repeat and no crash on the reply.
 func TestOperatorAttributesAHeldPayment(t *testing.T) {
@@ -1071,7 +1070,6 @@ func TestARevertedObligationPaymentIsPresentedAgainUnderAFreshName(t *testing.T)
 	}
 }
 
-
 // Where a buyer pays from is proven and frozen when its call is admitted, not learned later: an
 // unproven address is refused, a priced call from a buyer proving none is refused on a world with
 // addresses, and an accepted one names the payer on the obligation from that moment — before any
@@ -1137,4 +1135,3 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	}
 	_ = sys
 }
-

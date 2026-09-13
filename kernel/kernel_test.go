@@ -90,7 +90,9 @@ func testConfig() kernel.Config {
 // arithmetic a test asserts is the one it wrote — a test about the draw turns it on deliberately.
 func testEconomy() kernel.Economy {
 	econ := kernel.DefaultEconomy()
-	econ.CreditLimit, econ.LotteryMax = 1000, 1_000_000
+	// Exact payment, so a test asserting an amount gets the one it wrote; a test about the draw
+	// turns the lottery on deliberately.
+	econ.CreditLimit, econ.Lottery = 1000, 0
 	return econ
 }
 

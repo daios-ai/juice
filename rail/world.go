@@ -5,6 +5,7 @@
 package rail
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -61,11 +62,6 @@ type World struct {
 	FromBlock uint64   `json:"fromBlock"`
 	Venue     venueCfg `json:"venue"`
 	Gas       gasCfg   `json:"gas"`
-	// LotteryMax is the largest ticket a kernel on this world may write (P10). It rides with the
-	// rail because it is a property of what a payment there costs, and it is outside the defining
-	// part so it can follow that cost without splitting the network. An operator picks its own
-	// lottery at or below it; every kernel refuses a foreign call quoting more.
-	LotteryMax int64 `json:"lotteryMax"`
 }
 
 type venueCfg struct {
@@ -103,9 +99,18 @@ func Load(nameOrPath string) (World, error) {
 		}
 		raw = b
 	}
+	// Strict, as config.json is: a key this build does not know is a setting the operator meant to
+	// have an effect and that would silently have none, so the refusal names it.
 	var w World
-	if err := json.Unmarshal(raw, &w); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&w); err != nil {
 		return World{}, fmt.Errorf("parse world file: %w", err)
+	}
+	// One document and nothing after it: a second object in the file is a world somebody meant to
+	// serve, silently ignored.
+	if dec.More() {
+		return World{}, fmt.Errorf("parse world file: more than one document")
 	}
 	if err := w.validate(); err != nil {
 		return World{}, err
@@ -118,9 +123,6 @@ func Load(nameOrPath string) (World, error) {
 func (w World) validate() error {
 	if w.Name == "" {
 		return fmt.Errorf("world file has no name")
-	}
-	if w.LotteryMax < 0 {
-		return fmt.Errorf("world %q states a negative lottery ceiling", w.Name)
 	}
 	if strings.ContainsAny(w.Name, "/@ ") {
 		return fmt.Errorf("world name %q must be a bare name", w.Name)

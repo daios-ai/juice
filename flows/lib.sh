@@ -69,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local lottery=0 credit_limit=100000 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
+    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -79,6 +79,7 @@ write_config() {
         remote_retry_interval_seconds=*) remote_retry_interval_seconds=${a#*=} ;;
         discovery_interval_seconds=*)    discovery_interval_seconds=${a#*=} ;;
         lottery=*)                       lottery=${a#*=} ;;
+        lottery_max=*)                   lottery_max=${a#*=} ;;
         credit_limit=*)                  credit_limit=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
         world=*)                         world=${a#*=} ;;
@@ -104,6 +105,7 @@ except Exception:
   "fee_bps": $fee_bps,
   "import_bps": $import_bps,
   "lottery": $lottery,
+  "lottery_max": $lottery_max,
   "credit_limit": $credit_limit,
   "token_ttl": "15m",
   "log_level": "info",
@@ -454,9 +456,20 @@ make_user() {
 # rather than a counter because it is called from a subshell, where a counter would never advance.
 newref() { echo "flow-$(date +%s%N)-$RANDOM"; }
 
-# deposit db home target amount [ref] — records money that arrived from outside. Every crossing
-# names the payment it stands for, so a reference is minted when the caller does not give one (U3).
-deposit() { j "$1" "$2" admin user deposit "$3" "$4" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1; :; }
+# units N — N base units as a person writes them: every world here counts in millionths, and the
+# CLI takes and shows money in the world's own unit (D20), so a flow that means 5000 base units
+# types 0.005000. Integer arithmetic, like the kernel's own: money never passes through a float.
+# Assertions read JSON, which is base units, so only command inputs go through this.
+units() { printf '%d.%06d\n' "$(( $1 / 1000000 ))" "$(( $1 % 1000000 ))"; }
+
+# deposit db home target amount [ref] — records money that arrived from outside, the amount given in
+# base units. Every crossing names the payment it stands for, so a reference is minted when the
+# caller does not give one (U3). A deposit that fails fails the flow: a test funded by accident
+# proves nothing about what it then measures.
+deposit() {
+    j "$1" "$2" admin user deposit "$3" "$(units "$4")" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1 \
+        || fail "deposit" "could not credit $3 with $4"
+}
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4

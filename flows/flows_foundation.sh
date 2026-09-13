@@ -121,12 +121,12 @@ flow_deposits() {
     make_user "$db" "$hs" "$hb" bob
 
     assert_jnum "deposits.initial_zero" "$(jj "$db" "$ha" user me)" available 0
-    j "$db" "$hs" admin user deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.balance_updated" "$(jj "$db" "$ha" user me)" available 500
-    j "$db" "$hs" admin user deposit alice 200 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.accumulates" "$(jj "$db" "$ha" user me)" available 700
 
-    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin user deposit alice 10
+    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin user deposit alice "$(units 10)"
     assert_jnum "deposits.other_user_unaffected" "$(jj "$db" "$hb" user me)" available 0
 }
 
@@ -136,10 +136,10 @@ flow_transfers() {
     make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin user deposit alice 500 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # Alice transfers 200 to bob by handle; balances move by exactly the amount.
-    j "$db" "$ha" user transfer bob 200 --reason gift --yes >/dev/null 2>&1
+    j "$db" "$ha" user transfer bob "$(units 200)" --reason gift --yes >/dev/null 2>&1
     assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available 300
     assert_jnum "transfers.recipient_credited" "$(jj "$db" "$hb" user me)" available 200
 
@@ -152,8 +152,8 @@ flow_transfers() {
         "$(jj "$db" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
     # Over-balance and self transfers are rejected; balance unchanged.
-    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob 100000 --yes
-    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice 10 --yes
+    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob "$(units 100000)" --yes
+    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice "$(units 10)" --yes
     assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available 300
 }
 
@@ -166,7 +166,7 @@ flow_action_lifecycle() {
 
     # Create — inactive by default.
     local cr aid
-    cr=$(jj "$db" "$ha" action create greet --kind http --source "http://127.0.0.1:1/greet" --description "hello world" --price 5)
+    cr=$(jj "$db" "$ha" action create greet --kind http --source "http://127.0.0.1:1/greet" --description "hello world" --price "$(units 5)")
     aid=$(strfield "$cr" id)
     assert_nonempty "action_lifecycle.created" "$aid"
     assert_json "action_lifecycle.inactive_by_default" "$cr" active False
@@ -196,7 +196,7 @@ flow_action_lifecycle() {
     # action_name is captured in a transaction and survives action deletion.
     bport=$(backend_port); start_backend "$bport" 200 '{"answer":42}'
     local tid tx_id
-    tid=$(publish "$db" "$ha" callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price 0)
+    tid=$(publish "$db" "$ha" callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price "$(units 0)")
     tx_id=$(strfield "$(jj "$db" "$hb" run alice/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
     assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable

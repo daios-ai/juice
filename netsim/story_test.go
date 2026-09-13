@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/daios-ai/juice/rail"
 	"os"
 	"regexp"
 	"strings"
@@ -204,10 +203,10 @@ func TestEveryCommandThatTakesAKeyPassesItAfterADoubleDash(t *testing.T) {
 	}
 }
 
-// Every kernel in the story draws under the same face value, so a payment costs the same wherever
-// it is made and one kernel's rail bill is comparable with another's. The face value must also be
-// something the shipped worlds permit, or a kernel refuses the configuration at boot — which a run
-// discovers as a kernel that never came up, with every later act broken.
+// Every kernel in the story draws under the same face value and accepts the same maximum, so a
+// payment costs the same wherever it is made and one kernel's rail bill is comparable with
+// another's. A kernel that would not accept its own ticket refuses its configuration at boot, which
+// a run discovers as a kernel that never came up with every later act broken.
 func TestEveryKernelDrawsUnderTheSameFaceValue(t *testing.T) {
 	s := &story{scale: 1}
 	limits := []int64{sybilVictimHeadroom}
@@ -219,22 +218,11 @@ func TestEveryKernelDrawsUnderTheSameFaceValue(t *testing.T) {
 		if o.Lottery != storyLottery {
 			t.Errorf("limit %d: lottery %d, want %d", c, o.Lottery, storyLottery)
 		}
+		if o.LotteryMax < o.Lottery {
+			t.Errorf("limit %d: accepts at most %d but draws for %d", c, o.LotteryMax, o.Lottery)
+		}
 		if o.CreditLimit != c {
 			t.Errorf("limit %d: configured as %d", c, o.CreditLimit)
-		}
-	}
-	for _, name := range []string{"play", "test"} {
-		w, err := rail.Load(name)
-		if err != nil {
-			t.Fatalf("world %s: %v", name, err)
-		}
-		scale := int64(1)
-		for i := uint8(0); i < w.Decimals; i++ {
-			scale *= 10
-		}
-		if want := storyLottery * scale; w.LotteryMax < want {
-			t.Errorf("world %s permits a ticket of at most %d; the story draws for %d",
-				name, w.LotteryMax, want)
 		}
 	}
 }

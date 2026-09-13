@@ -716,6 +716,20 @@ func TestAmountRoundTrip(t *testing.T) {
 			t.Errorf("parseAmount(%q) was accepted", bad)
 		}
 	}
+	// A price is the same reading with one rule lifted: nothing is a price a provider may set, and
+	// every way of writing nothing reads the same. Everything else stays refused, so a free action
+	// and a malformed one are never confused.
+	for _, zero := range []string{"0", "0.00", "0.000000"} {
+		got, err := parseUnits(zero, 6)
+		if err != nil || got != 0 {
+			t.Errorf("parseUnits(%q, 6) = %d, %v; want 0", zero, got, err)
+		}
+	}
+	for _, bad := range []string{"", "-1", "1.234", "abc"} {
+		if _, err := parseUnits(bad, 2); err == nil {
+			t.Errorf("parseUnits(%q) was accepted", bad)
+		}
+	}
 }
 
 // loadToken reads the selected login's access token. Production code asks tokenFor, which also

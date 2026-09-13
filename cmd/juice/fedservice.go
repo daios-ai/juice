@@ -530,11 +530,6 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	if err := k.Network().VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, buyer.Commitment, buyer.Lottery, sigStr); err != nil {
 		return 0, nil, err
 	}
-	// A buyer may not quote a ticket larger than this world allows: the face value is what its own
-	// draw pays, so an unbounded one would let a caller name a payment nobody agreed to (P10).
-	if max := k.LotteryMax(); buyer.Lottery < 0 || buyer.Lottery > max {
-		return 0, nil, kernel.ErrInvalidInput.Wrapf("a ticket of %d exceeds this network's ceiling of %d", buyer.Lottery, max)
-	}
 	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
 	// signature-valid caller with no account here gets a zero-balance one, so a price-0 call
 	// succeeds and a priced call hits the normal insufficient-funds rejection the provider clears

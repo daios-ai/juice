@@ -21,12 +21,12 @@ func TestRailsAreNamedAndNothingElseIs(t *testing.T) {
 	}
 }
 
-// A chain counts in the token's decimals and the manual rail counts in whole credits. A price that
-// did not scale would be a millionth of the one intended, which is not a refusal but a wrong
+// Every world counts in millionths, so one number means the same amount on all of them. A price
+// that did not scale would be a millionth of the one intended, which is not a refusal but a wrong
 // economy that still runs.
 func TestScaleFollowsTheWorldsMoney(t *testing.T) {
-	if (playRail{}).Scale() != 1 {
-		t.Error("the manual rail counts in whole credits")
+	if (playRail{}).Scale() != 1_000_000 {
+		t.Error("play counts in millionths like the chains")
 	}
 	for _, name := range []string{"anvil", "sepolia"} {
 		r, _ := NewRail(name)

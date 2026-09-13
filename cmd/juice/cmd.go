@@ -621,6 +621,17 @@ func init() {
 	rootCmd.AddCommand(actionCmd)
 }
 
+// priceIn reads a price the way every other money input is written: in the world's own unit, so
+// what a command takes is what it shows (D20). A price may be nothing, which is the one way it
+// differs from an amount to move; a command that was given no price at all does not call here.
+func priceIn(price string) (int64, error) {
+	net, err := serverNetwork(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	return parseUnits(price, net.Decimals)
+}
+
 // Shared placeholder definitions for the action commands' help.
 const (
 	actionPathHelp = "ACTION is an action id or owner/name; owner/path also matches every action beneath\nthat path (bob/mail covers bob/mail/send, never bob/mailer)."
@@ -628,15 +639,14 @@ const (
 )
 
 func actionCreateCmd() *cobra.Command {
-	var kind, source, description, artifact, method string
+	var kind, source, description, artifact, method, price string
 	var params []string
-	var price int64
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "create NAME",
 		Short: "Create an action",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			name := args[0]
 			inputSchema := map[string]any{}
 			if inputSchemaStr != "" {
@@ -665,8 +675,14 @@ func actionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			var amount int64
+			if c.Flags().Changed("price") {
+				if amount, err = priceIn(price); err != nil {
+					return err
+				}
+			}
 			return apiEmit("POST", "/v1/actions", kernel.CreateActionRequest{
-				Name: name, Kind: kernel.ActionKind(kind), Price: price, Description: description,
+				Name: name, Kind: kernel.ActionKind(kind), Price: amount, Description: description,
 				InputSchema: inputSchema, OutputSchema: outputSchema,
 				Source: srcData, WasmArtifact: artData,
 				Method: method, Params: httpParams, Auth: auth,
@@ -679,7 +695,7 @@ func actionCreateCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 WASM artifact or file path")
 	cmd.Flags().StringVar(&description, "description", "", "Description")
-	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
+	cmd.Flags().StringVar(&price, "price", "", "Price, written the way this kernel shows money (for example 1.50)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs (or @file.json)")
 	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json)")
@@ -687,9 +703,8 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var description, source, method, artifact string
+	var description, source, method, artifact, price string
 	var params []string
-	var price int64
 	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
@@ -725,7 +740,11 @@ func actionUpdateCmd() *cobra.Command {
 				req.Params = &httpParams
 			}
 			if c.Flags().Changed("price") {
-				req.Price = &price
+				amount, err := priceIn(price)
+				if err != nil {
+					return err
+				}
+				req.Price = &amount
 			}
 			if c.Flags().Changed("visibility") {
 				v := kernel.ActionVisibility(visibility)
@@ -755,7 +774,7 @@ func actionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&artifact, "artifact", "", "New base64 WASM artifact or file path")
 	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
-	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
+	cmd.Flags().StringVar(&price, "price", "", "New price, written the way this kernel shows money (for example 1.50)")
 	cmd.Flags().StringVar(&visibility, "visibility", "", "Set visibility: private|local|public")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs (or @file.json)")

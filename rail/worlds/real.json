@@ -6,7 +6,6 @@
   "decimals": 6,
   "symbol": "USDC",
   "description": "USDC on Arbitrum One",
-  "lotteryMax": 10000000,
   "finality": "finalized",
   "fromBlock": 493710567,
   "venue": {

@@ -426,6 +426,7 @@ type simConfig struct {
 	ImportBPS     int64
 	CreditLimit   int64
 	Lottery       int64
+	LotteryMax    int64
 	PendingMaxAge time.Duration
 	PeerRetention time.Duration
 }
@@ -433,7 +434,7 @@ type simConfig struct {
 // The default simulated economy pays every obligation exactly (no lottery), so a test asserting an
 // amount gets the one it wrote; a test about the draw turns the lottery on deliberately.
 func defaultSimConfig() simConfig {
-	return simConfig{FeeBPS: 1000, RemoteBPS: 500, ImportBPS: 500, CreditLimit: 100000}
+	return simConfig{FeeBPS: 1000, RemoteBPS: 500, ImportBPS: 500, CreditLimit: 100000, LotteryMax: 1_000_000}
 }
 
 // addNode builds one kernel: real store, real first boot, real signing key, real inbound handlers,
@@ -451,7 +452,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	econ := testEconomy()
 	econ.FeeBPS, econ.RemoteBPS, econ.ImportBPS = sc.FeeBPS, sc.RemoteBPS, sc.ImportBPS
 	econ.CreditLimit = sc.CreditLimit
-	econ.Lottery = sc.Lottery // the ceiling stays the shared one every simulated node runs under
+	econ.Lottery, econ.LotteryMax = sc.Lottery, sc.LotteryMax
 	if sc.PendingMaxAge > 0 {
 		cfg.RemotePendingMaxAge = sc.PendingMaxAge
 	}
@@ -1340,6 +1341,58 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 					got, exposureBefore-paid)
 			}
 		})
+	}
+}
+
+// A buyer drawing for more than the seller accepts does not trade with it, and finds that out at
+// once. The two kernels agree on nothing here except the protocol: the seller's maximum is its own
+// configuration, the buyer's ticket is its own, and neither can see the other's. What must not
+// happen is the refusal arriving as silence — the condition is identical on every retry, so a call
+// parked against it would hold the caller's funds for a day to reach the same answer (P4, P10).
+func TestSimOversizedTicketIsRefusedAtOnce(t *testing.T) {
+	net := newSimNet(t)
+
+	sellCfg := defaultSimConfig()
+	sellCfg.LotteryMax = 100
+	buyCfg := defaultSimConfig()
+	buyCfg.Lottery, buyCfg.LotteryMax = 200, 200
+
+	seller := net.addNode("seller", sellCfg)
+	buyer := net.addNode("buyer", buyCfg)
+
+	cara := seller.user(t, "cara", sellerCapital)
+	seller.publish(t, cara, "quote", 25)
+	dan := buyer.user(t, "dan", 5000)
+
+	before := buyer.balance(t, dan.ID)
+	_, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote"))
+	if err == nil {
+		net.dump()
+		t.Fatal("a ticket the seller does not accept was served")
+	}
+	if errors.Is(err, kernel.ErrTimeout) {
+		net.dump()
+		t.Fatalf("the call parked on a refusal that can never change: %v", err)
+	}
+	if got := buyer.pendingRemote(t); got != 0 {
+		net.dump()
+		t.Errorf("the refused call left %d parked traces; want 0", got)
+	}
+	if got := buyer.balance(t, dan.ID); got != before {
+		net.dump()
+		t.Errorf("the caller was left %d, want its %d back in full", got, before)
+	}
+	if got := seller.owedBy(t, buyer.key); got != nil && got.Obligation != 0 {
+		net.dump()
+		t.Errorf("the seller is owed %d for work it refused to do", got.Obligation)
+	}
+	// A ticket the seller does accept trades normally, so the refusal is the maximum and not the
+	// pair of kernels failing to talk at all.
+	buyer2 := net.addNode("buyer2", defaultSimConfig())
+	eve := buyer2.user(t, "eve", 5000)
+	if _, err := buyer2.run(t, eve.ID, remoteRef(seller, "cara", "quote")); err != nil {
+		net.dump()
+		t.Fatalf("a ticket inside the seller's maximum: %v", err)
 	}
 }
 

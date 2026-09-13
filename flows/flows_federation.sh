@@ -35,7 +35,7 @@ _fed_setup() {
     FED_LKEY=$(kernel_key "$FED_DBL" "$FED_HL")
     [ -n "$FED_RKEY" ] && [ -n "$FED_LKEY" ] || return 1
 
-    FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price 0)" id)
+    FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price "$(units 0)")" id)
     [ -n "$FED_RID" ] || return 1
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility public >/dev/null 2>&1
@@ -104,7 +104,7 @@ flow_federation_changed_reimport() {
     _fed_setup "$dir" || { fail "fed_reimport.setup" "setup failed"; return; }
 
     # A brand-new action on R resolves on first use (§8) — no operator step, no bulk sync.
-    local wid; wid=$(publish "$FED_DBR" "$FED_HR" wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price 0)
+    local wid; wid=$(publish "$FED_DBR" "$FED_HR" wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price "$(units 0)")
     assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/wave '{}')" tx_id)"
     assert_json "fed_reimport.wave_resolves_on_use" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/wave)" active True
     assert_nonempty "fed_reimport.greet_before" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)"
@@ -180,8 +180,8 @@ flow_fed_denial_underfunded() {
     _fed_setup "$dir" || { fail "fed_denial_underfunded.setup" "setup failed"; return; }
 
     # A paid action on R, whose owner holds nothing to fund the work with.
-    local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 100)
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" paid-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price "$(units 100)")
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     local run_out rc
     run_out=$(j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid-svc '{}' 2>&1); rc=$?
@@ -217,14 +217,14 @@ flow_fed_import_duty() {
     # Two-step pricing (§13). mp=1000, remote_bps=500, import_bps=500:
     #   sr    = 1000 + ceil(1000*500/10000) = 1050  (serving markup, → R's sys)
     #   price = 1050 + ceil(1050*500/10000) = 1103  (import fee 53, retained by L's sys)
-    local pid; pid=$(publish "$FED_DBR" "$FED_HR" duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price 1000)
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" duty-svc --kind http --source "http://127.0.0.1:$FED_BPORT" --description "duty" --price "$(units 1000)")
     # A call cold-resolves the proxy (§8); it fails unfunded here but caches the row with its price.
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}' >/dev/null 2>&1
     assert_jnum "fed_pricing.proxy_price" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/duty-svc)" price 1103
 
     # R's provider funds its own work, so it holds working capital; L funds its caller.
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/duty-svc '{}')" tx_id)
@@ -274,8 +274,8 @@ flow_fed_failed_action_refund() {
     fport=$(backend_port); start_backend "$fport" 500 '{"error":"boom"}'
 
     # Paid action on R backed by a 500 backend; two-step price = sr(105) + ceil(105*5%) = 111.
-    local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price 100)
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    local pid; pid=$(publish "$FED_DBR" "$FED_HR" fail-svc --kind http --source "http://127.0.0.1:$fport" --description "fails" --price "$(units 100)")
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ub; ub=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     # Remote 500 → remote failure receipt → full refund to L's caller.
@@ -394,7 +394,7 @@ flow_fed_discovery() {
     # R publishes a public action so its gossip carries something to display. It is PRICED, so the
     # discovery card's indicative price is checkable (§9): mp=1000, remote_bps=500, import_bps=500
     # ⇒ sr = 1050 (stored on the doc), displayed = 1050 + ceil(1050*500/10000) = 1103.
-    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:$bport" --description greet --price 1000)
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:$bport" --description greet --price "$(units 1000)")
 
     # L joins with R as its ONLY bootstrap peer; it must discover R without subscribing to it.
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
@@ -438,8 +438,8 @@ print(next((x.get('quote_hash','') for x in res if sys.argv[2] in str(x.get('act
     assert_nonempty "fed_discovery.card_quote_hash" "$dhash"
 
     # R's provider funds its own work; L funds its caller.
-    j "$dbr" "$hr" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$dbl" "$hl" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbr" "$hr" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbl" "$hl" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "fed_discovery.pinned_first_call" \
         "$(strfield "$(jj "$dbl" "$hl" run "sys@$rkey/greet" '{}' --quote-hash "$dhash")" tx_id)"
     assert_eq "fed_discovery.proxy_hash_equals_card" "$dhash" \
@@ -471,7 +471,7 @@ flow_fed_peer_sync() {
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally (manifest
     # only, no backend call) and binds the kernel-r alias. R then funds L's proxy on R by key.
-    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price "$(units 0)")
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin peer rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_peer_sync.resolve" "resolve/rename failed"; return; }
     # A peer-sync pass runs at startup, then every 2s. Poll L's own peer list until it has recorded
@@ -512,7 +512,7 @@ flow_fed_inspect_read_only() {
 
     # R exposes a public action; L cold-resolves it by key to provision R's proxy locally and bind the
     # kernel-r alias.
-    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price 0)
+    local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:1/x" --description greet --price "$(units 0)")
     j "$dbl" "$hl" run "sys@$rkey/greet" '{}' >/dev/null 2>&1  # resolve caches the proxy even if greet's dead backend fails execution
     j "$dbl" "$hl" admin peer rename -- "$rkey" kernel-r >/dev/null 2>&1 || { fail "fed_inspect_read_only.resolve" "resolve/rename failed"; return; }
 
@@ -585,7 +585,7 @@ flow_fed_step_complete() {
     # On R: sys messages L's proxy user, parking a sys/sink step whose required caller is kernel-l.
     # R must know L as a peer for the address to resolve, and it learns one the only way a peer is
     # ever learned: L makes a signed call, and that call provisions the account (P4).
-    publish "$FED_DBR" "$FED_HR" hello --kind http --source "http://127.0.0.1:$FED_BPORT" --description "hello" --price 0 >/dev/null
+    publish "$FED_DBR" "$FED_HR" hello --kind http --source "http://127.0.0.1:$FED_BPORT" --description "hello" --price "$(units 0)" >/dev/null
     assert_nonempty "fed_step_complete.peer_known_by_its_call" \
         "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/hello '{}')" tx_id)"
     local step_id
@@ -644,6 +644,35 @@ flow_fed_step_complete() {
         "$(jj "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}')"
 }
 
+# The ticket is each kernel's own: the buyer writes one it chose, and the seller takes one no larger
+# than it chose to accept. Where the two do not fit there is no trade, and the buyer learns that on
+# the spot — the condition is identical on every retry, so a call parked against it would hold the
+# caller's funds for a day to reach the same answer.
+flow_ticket_too_large() {
+    echo "=== FLOW ticket_too_large ==="
+    local dir; dir=$(new_dir)
+    FED_LCFG=(lottery=200 lottery_max=200)
+    FED_RCFG=(lottery_max=100)
+    _fed_setup "$dir" || { fail "ticket_big.setup" "setup failed"; return; }
+
+    publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price "$(units 10)" >/dev/null
+    deposit "$FED_DBR" "$FED_HR" sys 5000
+    deposit "$FED_DBL" "$FED_HL" sys 5000
+    local before; before=$(balance_of "$FED_DBL" "$FED_HL")
+
+    # Refused, and refused as the peer's decision rather than as something to try again.
+    assert_fails "ticket_big.refused" "refused\|unauthorized\|ticket" -- j "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}'
+    assert_eq "ticket_big.caller_whole" "$before" "$(balance_of "$FED_DBL" "$FED_HL")"
+    assert_jnum "ticket_big.nothing_locked" "$(jj "$FED_DBL" "$FED_HL" user me)" locked 0
+    # Nothing is waiting on a receipt that will never differ, and the seller is owed nothing for
+    # work it refused to do. A parked call is one whose process is still open, holding its funds.
+    assert_eq "ticket_big.nothing_parked" 0 "$(python3 -c "
+import sys,json
+print(sum(1 for p in json.loads(sys.argv[1]) if p.get('status') == 'open'))" "$(jj "$FED_DBL" "$FED_HL" process list)")"
+    assert_eq "ticket_big.seller_owed_nothing" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY")"
+    assert_jnum "ticket_big.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure 0
+}
+
 # A cross-kernel obligation settles by a lottery ticket (P10): the buyer draws with a secret it
 # committed to before the work and the seller's nonce from the receipt, both sides compute the same
 # outcome, and either the obligation is discharged for nothing or the face value is paid on the rail.
@@ -658,9 +687,9 @@ flow_ticket() {
 
     # R's provider funds its own work (a foreign call is served on the seller's money, P10); L funds
     # its caller and its own stake.
-    local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price 10)
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 5000 --ref "$(newref)" --yes >/dev/null 2>&1
+    local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price "$(units 10)")
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     assert_nonempty "ticket.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
@@ -719,7 +748,7 @@ flow_transfer() {
     j "$FED_DBL" "$FED_HL" user create bob@$KERNEL_NAME --password userpass >/dev/null 2>&1
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" user create alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit alice 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ahome; ahome=$(home "$dir" alice); know "$FED_DBL" "$ahome"; j "$FED_DBL" "$ahome" auth login alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
 
     # alice sends 100 to bob on her own kernel: the execution price (0) rides the trace and is taxed,
@@ -783,12 +812,12 @@ flow_fed_provider_crash_recovery() {
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
     deposit "$FED_DBL" "$FED_HL" buyer 1000
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 1000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     local sport; sport=$(backend_port)
     start_slow_backend "$sport" 8
     publish "$FED_DBR" "$FED_HR" slow --kind http --source "http://127.0.0.1:${sport}/slow" \
-        --description "a service slow enough to interrupt" --price 20 >/dev/null 2>&1
+        --description "a service slow enough to interrupt" --price "$(units 20)" >/dev/null 2>&1
 
     # Warm the proxy so the crash lands on the call rather than on the resolve. What that call owes
     # is left standing: the credit limit bounds the total a buyer may run up, and one obligation is
@@ -861,9 +890,9 @@ flow_compose_remote_child() {
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
 
     # R sells a leaf at 1000. L quotes it at 1103: sr = 1000 + 5% serving = 1050, then 5% import.
-    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price "$(units 1000)" >/dev/null
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
     # Warm the proxy with one direct call, so what the composed call is measured against is the
     # composition and not the cold resolve (§8).
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/leaf '{}' >/dev/null 2>&1
@@ -871,7 +900,7 @@ flow_compose_remote_child() {
 
     # alice composes it at 2000, which must cover the 1103 the child costs her.
     make_contractor_wasm "$dir/wrap.wasm" "sys@kernel-r/leaf"
-    publish "$FED_DBL" "$ha" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price 2000 >/dev/null
+    publish "$FED_DBL" "$ha" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price "$(units 2000)" >/dev/null
     deposit "$FED_DBL" "$FED_HL" carol 5000
 
     local cb ab sb eb
@@ -920,19 +949,19 @@ flow_compose_partial_refund() {
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
 
-    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    publish "$FED_DBR" "$FED_HR" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price "$(units 1000)" >/dev/null
     # A leaf that fails its own output schema: the backend answers, the check refuses the answer.
-    publish "$FED_DBR" "$FED_HR" badleaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "bad leaf" --price 1000 \
+    publish "$FED_DBR" "$FED_HR" badleaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "bad leaf" --price "$(units 1000)" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}' >/dev/null
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/leaf '{}' >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/badleaf '{}' >/dev/null 2>&1
 
     # A composite that buys the good leaf and then fails itself: its reply cannot satisfy the output
     # schema it declared, and that check runs after the child has been called and settled.
     make_contractor_wasm "$dir/half.wasm" "sys@kernel-r/leaf"
-    publish "$FED_DBL" "$ha" half --kind wasm --source "$dir/half.wasm" --description "half" --price 2000 \
+    publish "$FED_DBL" "$ha" half --kind wasm --source "$dir/half.wasm" --description "half" --price "$(units 2000)" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}' >/dev/null
     deposit "$FED_DBL" "$FED_HL" carol 5000
 
@@ -958,7 +987,7 @@ print(rows[0]['id'] if rows else '')" 2>/dev/null)
 
     # The other end of the same rule: a child that fails commits nothing, so the caller keeps it all.
     make_contractor_wasm "$dir/none.wasm" "sys@kernel-r/badleaf"
-    publish "$FED_DBL" "$ha" none --kind wasm --source "$dir/none.wasm" --description "none" --price 2000 >/dev/null
+    publish "$FED_DBL" "$ha" none --kind wasm --source "$dir/none.wasm" --description "none" --price "$(units 2000)" >/dev/null
     cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
     eb=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
     assert_fails "compose_refund.child_failed" "schema\|invalid\|error\|failed" -- j "$FED_DBL" "$hc" run alice/none '{}'
@@ -1043,9 +1072,9 @@ flow_compose_returns_home() {
     local hc; hc=$(home "$dir" carol)
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
 
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 20000 --ref "$(newref)" --yes >/dev/null 2>&1
-    publish "$FED_DBL" "$FED_HL" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price 1000 >/dev/null
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 20000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$FED_DBL" "$FED_HL" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price "$(units 1000)" >/dev/null
 
     # R resolves the leaf back on L and composes it, so the inner call returns to where it started.
     local i
@@ -1055,7 +1084,7 @@ flow_compose_returns_home() {
     done
     j "$FED_DBR" "$FED_HR" admin peer rename -- "$FED_LKEY" kernel-l >/dev/null 2>&1 || { fail "compose_home.link_back" "R never resolved L"; return; }
     make_contractor_wasm "$dir/loop.wasm" "sys@kernel-l/leaf"
-    publish "$FED_DBR" "$FED_HR" loop --kind wasm --source "$dir/loop.wasm" --description "loop" --price 2000 >/dev/null
+    publish "$FED_DBR" "$FED_HR" loop --kind wasm --source "$dir/loop.wasm" --description "loop" --price "$(units 2000)" >/dev/null
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/loop '{}' >/dev/null 2>&1   # cold-resolve the proxy
     deposit "$FED_DBL" "$FED_HL" carol 5000
 
@@ -1194,10 +1223,10 @@ _fed_chain() {
         discovery_interval_seconds=2 remote_retry_interval_seconds=2 "$@" || return 1
     FED3_TKEY=$(kernel_key "$FED3_DBT" "$FED3_HT")
     [ -n "$FED3_TKEY" ] || return 1
-    publish "$FED3_DBT" "$FED3_HT" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price "$leaf" >/dev/null
-    j "$FED3_DBT" "$FED3_HT" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    publish "$FED3_DBT" "$FED3_HT" leaf --kind http --source "http://127.0.0.1:$FED_BPORT" --description "leaf" --price "$(units "$leaf")" >/dev/null
+    j "$FED3_DBT" "$FED3_HT" admin user deposit sys "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     local i
     for i in $(seq 1 20); do
@@ -1206,7 +1235,7 @@ _fed_chain() {
     done
     j "$FED_DBR" "$FED_HR" admin peer rename -- "$FED3_TKEY" kernel-t >/dev/null 2>&1 || return 1
     make_contractor_wasm "$dir/wrap.wasm" "sys@kernel-t/leaf"
-    publish "$FED_DBR" "$FED_HR" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price "$wrap" >/dev/null
+    publish "$FED_DBR" "$FED_HR" wrap --kind wasm --source "$dir/wrap.wasm" --description "wrap" --price "$(units "$wrap")" >/dev/null
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/wrap '{}' >/dev/null 2>&1   # cold-resolve the proxy on L
     return 0
 }
@@ -1262,7 +1291,7 @@ flow_compose_middle_cannot_stake() {
     # R keeps enough to serve the composite it sells (20) and less than the 100 it must stake to buy
     # the leg inside it. The operator takes the rest out: what is left is what the kernel can commit.
     local rb; rb=$(numfield "$(jj "$FED_DBR" "$FED_HR" user me)" available)
-    j "$FED_DBR" "$FED_HR" user withdraw "$(( rb - 50 ))" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" user withdraw "$(units "$(( rb - 50 ))")" --yes >/dev/null 2>&1
     assert_jnum "compose_stake.middle_is_short" "$(jj "$FED_DBR" "$FED_HR" user me)" available 50
 
     local cb et tt
@@ -1298,9 +1327,9 @@ flow_compose_middle_crash() {
     # A leaf slow enough to be interrupted, and a composite around it.
     local sport; sport=$(backend_port); start_slow_backend "$sport" 8
     publish "$FED3_DBT" "$FED3_HT" slowleaf --kind http --source "http://127.0.0.1:${sport}/slow" \
-        --description "a leaf slow enough to interrupt" --price 1000 >/dev/null
+        --description "a leaf slow enough to interrupt" --price "$(units 1000)" >/dev/null
     make_contractor_wasm "$dir/slowwrap.wasm" "sys@kernel-t/slowleaf"
-    publish "$FED_DBR" "$FED_HR" slowwrap --kind wasm --source "$dir/slowwrap.wasm" --description "slow wrap" --price 2000 >/dev/null
+    publish "$FED_DBR" "$FED_HR" slowwrap --kind wasm --source "$dir/slowwrap.wasm" --description "slow wrap" --price "$(units 2000)" >/dev/null
     # Warm both proxies, so the crash lands on the call rather than on a resolution.
     j "$FED_DBL" "$FED_HL" run sys@kernel-r/slowwrap '{}' >/dev/null 2>&1
 
@@ -1359,8 +1388,8 @@ flow_compose_cycle() {
     local ha hc; ha=$(home "$dir" alice); hc=$(home "$dir" carol)
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
     make_user "$FED_DBL" "$FED_HL" "$hc" carol
-    j "$FED_DBR" "$FED_HR" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys 50000 --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # R must be able to name L before it can buy from it.
     local i
@@ -1373,8 +1402,8 @@ flow_compose_cycle() {
     # Each composite buys the other, across the boundary, in both directions.
     make_contractor_wasm "$dir/there.wasm" "sys@kernel-r/back"
     make_contractor_wasm "$dir/back.wasm" "alice@kernel-l/there"
-    publish "$FED_DBR" "$FED_HR" back --kind wasm --source "$dir/back.wasm" --description "back" --price 1000 >/dev/null
-    publish "$FED_DBL" "$ha" there --kind wasm --source "$dir/there.wasm" --description "there" --price 2000 >/dev/null
+    publish "$FED_DBR" "$FED_HR" back --kind wasm --source "$dir/back.wasm" --description "back" --price "$(units 1000)" >/dev/null
+    publish "$FED_DBL" "$ha" there --kind wasm --source "$dir/there.wasm" --description "there" --price "$(units 2000)" >/dev/null
     deposit "$FED_DBL" "$FED_HL" carol 5000
     local cb; cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
 

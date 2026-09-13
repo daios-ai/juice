@@ -73,7 +73,7 @@ type playRail struct{}
 func (playRail) Name() string                        { return "play" }
 func (playRail) Prepare(n *Net, s Shape) error       { return nil }
 func (playRail) Config() map[string]any              { return map[string]any{"world": "play", "rail_rpc": ""} }
-func (playRail) Scale() int64                        { return 1 }
+func (playRail) Scale() int64                        { return 1_000_000 }
 func (playRail) GasUp(k *Kernel, payments int) error { return nil }
 func (playRail) Finish(n *Net) (map[string]any, error) {
 	return map[string]any{"rail": "play", "cost": "none"}, nil
@@ -154,7 +154,6 @@ func (c *chainRail) Credit(seller *Kernel, ticketID, buyer string, amount int64)
 
 // SettleWait is how long the chain takes to make a payment final, which is what the story waits for.
 func (c *chainRail) SettleWait() time.Duration { return c.await }
-
 
 // payingWallet is the one wallet the whole run pays in from. An address registers per kernel, so one
 // wallet can pay into every kernel; a fresh wallet per user would cost a funding transaction each
@@ -251,10 +250,7 @@ func (a *anvilRail) Prepare(n *Net, s Shape) error {
 	world := map[string]any{
 		"name": "netsim-anvil", "chainId": 31337, "token": token, "decimals": 6,
 		"finality": "finalized", "fromBlock": 0,
-		// The largest ticket a kernel on this world may write, like the shipped worlds carry: the
-		// story draws at storyLottery tokens, and a world without a ceiling permits no ticket at all.
-		"lotteryMax": storyLottery * a.scale,
-		"venue":      map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
+		"venue": map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
 		"gas": map[string]any{"min": "20000000000000000", "max": "50000000000000000",
 			"feeBound": "10000000000000000", "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000},
 	}

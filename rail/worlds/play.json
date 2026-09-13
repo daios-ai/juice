@@ -1,7 +1,6 @@
 {
   "name": "play",
-  "decimals": 0,
+  "decimals": 6,
   "symbol": "credits",
-  "description": "no real money: you credit accounts yourself and keep the records",
-  "lotteryMax": 100
+  "description": "no real money: you credit accounts yourself and keep the records"
 }

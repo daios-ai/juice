@@ -339,7 +339,8 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	econ := s.kernel.Economy()
 	exposure, _ := s.kernel.Exposure(ctx, callerFrom(r))
 	out := map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
-		"lottery": econ.Lottery, "credit_limit": econ.CreditLimit, "exposure": exposure,
+		"lottery": econ.Lottery, "lottery_max": econ.LotteryMax,
+		"credit_limit": econ.CreditLimit, "exposure": exposure,
 		"fee_bps": econ.FeeBPS, "remote_bps": econ.RemoteBPS, "import_bps": econ.ImportBPS}
 	// The rail position: what is held, what is promised elsewhere, and whether the books still add
 	// up (D23). An operator reads this before believing any other number here.

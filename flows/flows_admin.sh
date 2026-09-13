@@ -22,7 +22,7 @@ flow_transaction_access() {
     # alice (seller) publishes a paid action (price=10) callable by anyone.
     local aid
     aid=$(strfield "$(jj "$db" "$ha" action create pvd-action --kind http \
-        --source "http://127.0.0.1:${bport}/pvd" --price 10 --description "tx access test")" id)
+        --source "http://127.0.0.1:${bport}/pvd" --price "$(units 10)" --description "tx access test")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
@@ -74,7 +74,7 @@ flow_list_projections() {
     make_echo_wasm "$dir/echo.wasm"
     local aid
     aid=$(strfield "$(jj "$db" "$ha" action create wasm-big --kind wasm --artifact "$dir/echo.wasm" \
-        --description "a compiled action" --price 1)" id)
+        --description "a compiled action" --price "$(units 1)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
@@ -95,7 +95,7 @@ flow_list_projections() {
     start_backend "$bport" 200 "{\"blob\":\"$(head -c 20000 /dev/zero | tr '\0' 'x')\"}"
     local hid
     hid=$(strfield "$(jj "$db" "$ha" action create bulky --kind http --source "http://127.0.0.1:${bport}/b" \
-        --description "returns a large reply" --price 1)" id)
+        --description "returns a large reply" --price "$(units 1)")" id)
     j "$db" "$ha" action enable "$hid" >/dev/null 2>&1
     local i; for i in 1 2 3 4 5; do j "$db" "$ha" run alice/bulky '{}' >/dev/null 2>&1; done
 
@@ -145,7 +145,7 @@ flow_admin_supervision() {
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     local aid
     aid=$(strfield "$(jj "$db" "$ha" action create test --kind http \
-        --source "http://127.0.0.1:$bport" --description "alice's action" --price 0)" id)
+        --source "http://127.0.0.1:$bport" --description "alice's action" --price "$(units 0)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     # sys `action list` shows alice's action (system-wide scope).

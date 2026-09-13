@@ -115,7 +115,8 @@ by the fact that witnesses it, and then move freely between local users:
 ```
 
 On `play` no crypto is involved at all. The operator records the payments they receive from
-people, `--ref` is whatever names one in their own books, and amounts are whole credits. What
+people, `--ref` is whatever names one in their own books, and amounts have six decimal places like
+the other worlds, so the same number means the same amount everywhere. What
 another kernel owes needs no such record: its own signed message saying it paid is the payment
 here, so those debts close by themselves. `play` money is play money — it is backed by nothing,
 and is meant for trying the system out.
@@ -310,7 +311,7 @@ The ones you are most likely to touch:
 | `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
-| `lottery` / `credit_limit` | The ticket a cross-kernel charge is settled by (`0` pays every charge exactly), and the ceiling on work delivered and unpaid |
+| `lottery` / `lottery_max` / `credit_limit` | The ticket this kernel settles a cross-kernel charge by (`0` pays every charge exactly), the largest ticket it accepts from a buyer, and the ceiling on work delivered and unpaid |
 | `native.*` | Stdlib prices and LLM URL/models (`native.llm`) |
 | `allow_local_sources` | Permit private-network URLs for action sources (off by default; loopback always allowed) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
