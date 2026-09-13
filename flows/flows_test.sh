@@ -70,6 +70,7 @@ run_flows \
     flow_rail_onboard flow_rail_withdraw flow_rail_settlement flow_rail_isolation \
     flow_rail_world_mismatch flow_rail_lock flow_rail_profile flow_rail_economic_loop \
     flow_two_kernels flow_home_migration flow_first_boot flow_money_reads_as_money \
+    flow_one_output_policy \
     flow_bootstrap flow_signup_errors flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
     flow_action_lifecycle flow_action_owner_visibility \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \

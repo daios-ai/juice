@@ -42,6 +42,11 @@ func loginCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Before the password is asked for, let alone sent: a server answering at this address
+			// that is not the kernel recorded here gets nothing.
+			if err := verifyLogin(context.Background(), l); err != nil {
+				return err
+			}
 			if password == "" {
 				p, perr := promptPassword("Password: ")
 				if perr != nil {
@@ -54,6 +59,17 @@ func loginCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
 	return cmd
+}
+
+// loginRecord is what the commands that make, switch or end a login answer with: the login, its
+// halves, and whether the act reached the kernel. No token is ever in it — a credential is written
+// to its 0600 file and nowhere else.
+func loginRecord(l login, extra map[string]any) ([]byte, error) {
+	row := map[string]any{"login": l.String(), "handle": l.Handle, "kernel": l.Kernel}
+	for k, v := range extra {
+		row[k] = v
+	}
+	return json.Marshal(row)
 }
 
 // authUseCmd switches to a login already held, without a password. The kernel is checked before
@@ -75,10 +91,19 @@ func authUseCmd() *cobra.Command {
 			if err := selectLogin(context.Background(), l); err != nil {
 				return err
 			}
-			fmt.Println(l)
-			return nil
+			return emitLogin(l, nil)
 		},
 	}
+}
+
+// emitLogin answers with one login under the one output policy: --quiet is the login, which is
+// what a script pipes into --as, and the human line is the login alone.
+func emitLogin(l login, extra map[string]any) error {
+	body, err := loginRecord(l, extra)
+	if err != nil {
+		return err
+	}
+	return emit(body, output{id: "login", human: func([]byte) error { fmt.Println(l); return nil }})
 }
 
 // authListCmd lists the logins this client holds, marking the one in use. A login is its credential
@@ -91,22 +116,25 @@ func authListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			here, _, _ := selected()
 			held := logins()
-			if flagJSON {
-				out := make([]map[string]any, 0, len(held))
-				for _, l := range held {
-					out = append(out, map[string]any{"login": l.String(), "handle": l.Handle, "kernel": l.Kernel,
-						"principal_id": readCredentials(l).PrincipalID, "selected": l == here})
-				}
-				return printJSON(out)
-			}
+			rows := make([]map[string]any, 0, len(held))
 			for _, l := range held {
-				mark := " "
-				if l == here {
-					mark = "*"
-				}
-				fmt.Printf("%s %s\n", mark, l)
+				rows = append(rows, map[string]any{"login": l.String(), "handle": l.Handle, "kernel": l.Kernel,
+					"principal_id": readCredentials(l).PrincipalID, "selected": l == here})
 			}
-			return nil
+			body, err := json.Marshal(rows)
+			if err != nil {
+				return err
+			}
+			return emit(body, output{id: "login", human: func([]byte) error {
+				for _, l := range held {
+					mark := " "
+					if l == here {
+						mark = "*"
+					}
+					fmt.Printf("%s %s\n", mark, l)
+				}
+				return nil
+			}})
 		},
 	}
 }
@@ -140,20 +168,15 @@ func loginPKCE(l login, password, server string) error {
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	authBody, _ := json.Marshal(map[string]string{
+	ctx := context.Background()
+	if _, err := authPost(ctx, server, "/v1/auth/authorize", map[string]string{
 		"handle":                l.Handle,
 		"password":              password,
 		"code_challenge":        challenge,
 		"code_challenge_method": "S256",
 		"redirect_uri":          redirectURI,
-	})
-	resp, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/authorize", "application/json", bytes.NewReader(authBody))
-	if err != nil {
-		return errUnreachable(server, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
-		return kernel.ErrExecutionFailed.Wrapf("authorize failed: status %d", resp.StatusCode)
+	}); err != nil {
+		return err
 	}
 
 	var code string
@@ -163,22 +186,19 @@ func loginPKCE(l login, password, server string) error {
 		return kernel.ErrTimeout.Wrap("timed out waiting for authorization code")
 	}
 
-	tokenBody, _ := json.Marshal(map[string]string{
+	tokens, err := authPost(ctx, server, "/v1/auth/token", map[string]string{
 		"code":          code,
 		"code_verifier": verifier,
 		"redirect_uri":  redirectURI,
 	})
-	resp2, err := http.Post(strings.TrimRight(server, "/")+"/v1/auth/token", "application/json", bytes.NewReader(tokenBody))
 	if err != nil {
-		return errUnreachable(server, err)
+		return err
 	}
-	defer resp2.Body.Close()
-
 	var tokenResp struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := decodeJSON(resp2.Body, &tokenResp); err != nil {
+	if err := json.Unmarshal(tokens, &tokenResp); err != nil {
 		return kernel.ErrExecutionFailed.Wrapf("decode token response: %v", err)
 	}
 	if tokenResp.AccessToken == "" {
@@ -186,7 +206,7 @@ func loginPKCE(l login, password, server string) error {
 	}
 	// Logging in is what makes a login, so it is also what selects it: the tokens are stored under
 	// the name just proved, and every later command acts as it until another is chosen.
-	if err := selectLogin(context.Background(), l); err != nil {
+	if err := selectLogin(ctx, l); err != nil {
 		return err
 	}
 	if err := saveToken(tokenResp.AccessToken); err != nil {
@@ -196,8 +216,23 @@ func loginPKCE(l login, password, server string) error {
 		_ = saveRefreshToken(tokenResp.RefreshToken)
 	}
 	bindPrincipal(l)
-	fmt.Println(l)
-	return nil
+	return emitLogin(l, nil)
+}
+
+// authPost sends one unauthenticated JSON request of the login exchange and returns the reply. It
+// shares the path every other request takes, so the server's own refusal survives as a typed error
+// rather than becoming a bare status number, and an unreachable server reads as one.
+func authPost(ctx context.Context, server, path string, body map[string]string) ([]byte, error) {
+	raw, _ := json.Marshal(body)
+	respBody, status, err := doHTTP(ctx, "POST", strings.TrimRight(server, "/")+path,
+		map[string]string{"Content-Type": "application/json"}, bytes.NewReader(raw), 0, true)
+	if err != nil {
+		return nil, errUnreachable(server, err)
+	}
+	if status != http.StatusOK && status != http.StatusFound {
+		return nil, errorFromResponse(status, respBody)
+	}
+	return respBody, nil
 }
 
 // bindPrincipal records which account this login holds. The name on the file is a label — a handle
@@ -231,17 +266,22 @@ func logoutCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			l, _, err := selected()
 			if len(args) == 1 {
-				l, err = namedLogin(args[0])
+				l, err = namedLogin(args[0]) // which also points this invocation at that kernel
 			}
 			if err != nil {
 				return err
 			}
 			// Revoke at the server first, while the credentials are still here to prove who is
 			// asking; then remove them locally whatever the server said, since a token this client
-			// will not send again is one it should not keep.
-			if c := readCredentials(l); c.RefreshToken != "" && atHome(serverBaseURL()) {
-				_ = apiCall(context.Background(), "POST", "/v1/auth/logout",
-					map[string]string{"refresh_token": c.RefreshToken}, nil)
+			// will not send again is one it should not keep. The session belongs to the login being
+			// logged out, so the revocation goes to that login's own kernel — never to whichever
+			// one happens to be selected, and never to an address named by --server.
+			revoked := true
+			if c := readCredentials(l); c.RefreshToken != "" {
+				k, kerr := kernelNamed(loadClientConfig(), l.Kernel)
+				revoked = kerr == nil && sameAddress(serverBaseURL(), k.Endpoint) &&
+					apiCall(context.Background(), "POST", "/v1/auth/logout",
+						map[string]string{"refresh_token": c.RefreshToken}, nil) == nil
 			}
 			if path, perr := credentialPath(l); perr == nil {
 				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
@@ -255,8 +295,21 @@ func logoutCmd() *cobra.Command {
 					return serr
 				}
 			}
-			fmt.Printf("Logged out %s\n", l)
-			return nil
+			body, berr := loginRecord(l, map[string]any{"revoked": revoked})
+			if berr != nil {
+				return berr
+			}
+			return emit(body, output{id: "login", human: func([]byte) error {
+				if !revoked {
+					// The credentials are gone from here either way, so saying "log out again"
+					// would be advice this client can no longer take: say what is true instead.
+					fmt.Printf("Removed %s from this computer. The kernel \"%s\" could not be reached, so the\n"+
+						"session there could not be confirmed ended; it may remain valid until it expires.\n", l, l.Kernel)
+					return nil
+				}
+				fmt.Printf("Logged out %s\n", l)
+				return nil
+			}})
 		},
 	}
 }
@@ -404,13 +457,9 @@ func recoverCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var view json.RawMessage
-			if err := apiCall(ctx, "POST", "/v1/auth/recover/complete", map[string]any{
+			return apiEmitCtx(ctx, "POST", "/v1/auth/recover/complete", map[string]any{
 				"handle": handle, "nonce": started.Nonce, "signature": sig, "password": newPassword,
-			}, &view); err != nil {
-				return err
-			}
-			return emitRaw(view)
+			}, output{})
 		},
 	}
 	cmd.Flags().StringVar(&phrase, "phrase", "", "Recovery phrase (prompted if omitted)")

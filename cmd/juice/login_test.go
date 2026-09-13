@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/spf13/cobra"
 )
 
 // healthServer serves one identity banner, the thing a client records a kernel by.
@@ -320,12 +322,12 @@ func TestAddThenRefuseAnotherKernel(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "DIGEST-A", "play")
 
-	name, k, added, err := registerKernel(context.Background(), "", srv.URL, false)
+	name, k, outcome, err := registerKernel(context.Background(), "", srv.URL)
 	if err != nil {
 		t.Fatalf("first add: %v", err)
 	}
-	if name != "k" || !added { // the name defaults to the nickname the kernel advertises
-		t.Fatalf("add: name %q added %v", name, added)
+	if name != "k" || outcome != "added" { // the name defaults to the nickname the kernel advertises
+		t.Fatalf("add: name %q outcome %q", name, outcome)
 	}
 	if k.PublicKey != "KEY-A" || k.WorldDigest != "DIGEST-A" || k.Network != "play" {
 		t.Fatalf("nothing recorded: %+v", k)
@@ -334,14 +336,14 @@ func TestAddThenRefuseAnotherKernel(t *testing.T) {
 		t.Errorf("adding a kernel selected %q; it must select nothing", cfg.Current)
 	}
 	// Adding the same kernel again, on the same terms, is a no-op rather than an error.
-	if _, _, added, err := registerKernel(context.Background(), "k", srv.URL, false); err != nil || added {
-		t.Errorf("re-adding the same kernel: added %v, %v", added, err)
+	if _, _, outcome, err := registerKernel(context.Background(), "k", srv.URL); err != nil || outcome != "already known" {
+		t.Errorf("re-adding the same kernel: outcome %q, %v", outcome, err)
 	}
 
 	// Another kernel under a name already taken is refused, and the record stands.
 	other := healthServer(t, "KEY-B", "DIGEST-A", "play")
 	resetHealthCache()
-	if _, _, _, err := registerKernel(context.Background(), "k", other.URL, false); err == nil {
+	if _, _, _, err := registerKernel(context.Background(), "k", other.URL); err == nil {
 		t.Fatal("a different kernel took a name already held")
 	}
 	if got := loadClientConfig().Kernels["k"]; got.PublicKey != "KEY-A" || got.Endpoint != srv.URL {
@@ -432,15 +434,17 @@ func TestCredentialsGoOnlyToTheirKernelsAddress(t *testing.T) {
 	}
 }
 
-// TestRepointingAKernelForgetsEveryLoginOnIt: a login belongs to the address it was made at, and
-// several logins resolve through one kernel record, so pointing that kernel somewhere new strands
-// all of them. Otherwise a second login would carry its token to whatever now answers.
-func TestRepointingAKernelForgetsEveryLoginOnIt(t *testing.T) {
+// TestAMovedKernelKeepsItsLoginsAndAStrangerTakesNoName: a key is what says which kernel this is,
+// so the same kernel at a new address is followed and keeps every session made on it — a session
+// belongs to the kernel that issued it, and this is that kernel. A different kernel under a name
+// already held is refused outright: taking the name would point every login on it at a stranger.
+func TestAMovedKernelKeepsItsLoginsAndAStrangerTakesNoName(t *testing.T) {
 	clientHomeFor(t)
-	pinned := healthServer(t, "KEY-A", "DIGEST-A", "play")
-	elsewhere := healthServer(t, "KEY-B", "DIGEST-A", "play")
+	first := healthServer(t, "KEY-A", "DIGEST-A", "play")
+	moved := healthServer(t, "KEY-A", "DIGEST-A", "play") // the same kernel, answering elsewhere
+	stranger := healthServer(t, "KEY-B", "DIGEST-A", "play")
 
-	recordLogin(t, "person@work", pinned.URL, "KEY-A")
+	recordLogin(t, "person@work", first.URL, "KEY-A")
 	for _, name := range []string{"person@work", "agent@work"} {
 		t.Setenv("JUICE_AS", name)
 		if err := saveToken("SECRET-" + name); err != nil {
@@ -449,24 +453,42 @@ func TestRepointingAKernelForgetsEveryLoginOnIt(t *testing.T) {
 	}
 	t.Setenv("JUICE_AS", "")
 
-	if _, _, _, err := registerKernel(context.Background(), "work", elsewhere.URL, true); err != nil {
-		t.Fatalf("re-point: %v", err)
+	_, _, outcome, err := registerKernel(context.Background(), "work", moved.URL)
+	if err != nil {
+		t.Fatalf("following a moved kernel: %v", err)
+	}
+	if !strings.Contains(outcome, "moved") {
+		t.Errorf("outcome = %q, want it to say the kernel moved", outcome)
+	}
+	if k := loadClientConfig().Kernels["work"]; k.Endpoint != moved.URL || k.PublicKey != "KEY-A" {
+		t.Errorf("the new address was not recorded: %+v", k)
 	}
 	for _, name := range []string{"person@work", "agent@work"} {
 		t.Setenv("JUICE_AS", name)
-		if tok, err := loadToken(); err == nil {
-			t.Errorf("login %s kept %q across a change of address", name, tok)
+		if tok, err := loadToken(); err != nil || tok != "SECRET-"+name {
+			t.Errorf("login %s lost its session when its kernel moved: %q %v", name, tok, err)
 		}
 	}
 	t.Setenv("JUICE_AS", "")
-	if k := loadClientConfig().Kernels["work"]; k.Endpoint != elsewhere.URL || k.PublicKey != "KEY-B" {
-		t.Errorf("endpoint not updated: %+v", k)
+
+	resetHealthCache()
+	if _, _, _, err := registerKernel(context.Background(), "work", stranger.URL); err == nil {
+		t.Fatal("a different kernel took a name already held")
+	}
+	if k := loadClientConfig().Kernels["work"]; k.Endpoint != moved.URL || k.PublicKey != "KEY-A" {
+		t.Errorf("a refused add moved the record: %+v", k)
+	}
+	for _, name := range []string{"person@work", "agent@work"} {
+		t.Setenv("JUICE_AS", name)
+		if _, err := loadToken(); err != nil {
+			t.Errorf("a refused add logged %s out: %v", name, err)
+		}
 	}
 }
 
-// TestAMistypedEndpointChangesNothing: a repoint that cannot be reached is a refusal. The records
-// must not move and the logins must survive, or a typo would leave a client pointing at its old
-// kernel with every session on it destroyed.
+// TestAMistypedEndpointChangesNothing: an address that cannot be reached is a refusal. The records
+// must not move and the logins must survive, or a typo would leave a client pointing at nothing
+// with every session on it destroyed.
 func TestAMistypedEndpointChangesNothing(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "DIGEST-A", "play")
@@ -479,7 +501,7 @@ func TestAMistypedEndpointChangesNothing(t *testing.T) {
 	}
 	t.Setenv("JUICE_AS", "")
 
-	if _, _, _, err := registerKernel(context.Background(), "work", "http://127.0.0.1:1", true); err == nil {
+	if _, _, _, err := registerKernel(context.Background(), "work", "http://127.0.0.1:1"); err == nil {
 		t.Fatal("an unreachable endpoint was accepted")
 	}
 	if k := loadClientConfig().Kernels["work"]; k.Endpoint != srv.URL || k.PublicKey != "KEY-A" {
@@ -498,7 +520,7 @@ func TestAMistypedEndpointChangesNothing(t *testing.T) {
 func TestASecondLoginNeedsNoSecondKernel(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "DIGEST-A", "play")
-	if _, _, _, err := registerKernel(context.Background(), "work", srv.URL, false); err != nil {
+	if _, _, _, err := registerKernel(context.Background(), "work", srv.URL); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"person@work", "agent@work"} {
@@ -765,4 +787,269 @@ func loadRefreshToken() (string, error) {
 
 func removeRefreshToken() error {
 	return onSelected(func(c *credentials) (bool, error) { c.RefreshToken = ""; return true, nil })
+}
+
+// TestAPasswordGoesOnlyToTheKernelItWasRecordedFor: logging in checks which kernel is answering
+// before it asks for a password, let alone sends one. A server that has taken over a recorded
+// address must not be handed the credential and refused afterwards.
+func TestAPasswordGoesOnlyToTheKernelItWasRecordedFor(t *testing.T) {
+	clientHomeFor(t)
+	asked, reached := false, false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "handle": "k", "public_key": "KEY-B", "network": "play", "network_digest": "D"})
+			return
+		}
+		reached = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := loadClientConfig()
+	cfg.Kernels["work"] = &kernelRec{Endpoint: srv.URL, PublicKey: "KEY-A", WorldDigest: "D", Network: "play"}
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	oldPrompt := promptPassword
+	promptPassword = func(string) (string, error) { asked = true; return "secret", nil }
+	t.Cleanup(func() { promptPassword = oldPrompt })
+	oldServer := flagServer
+	t.Cleanup(func() { flagServer = oldServer })
+
+	if _, err := execTestCmd(t, loginCmd(), "alice@work"); err == nil {
+		t.Fatal("a login on a kernel that is not the recorded one succeeded")
+	}
+	if asked {
+		t.Error("the password was asked for before it was known where it would go")
+	}
+	if reached {
+		t.Error("the password was sent to a server that is not the kernel recorded here")
+	}
+	// The same holds when the password needs no prompt: it is the sending that must not happen.
+	flagServer = ""
+	if _, err := execTestCmd(t, loginCmd(), "alice@work", "--password", "secret"); err == nil {
+		t.Fatal("a login on a kernel that is not the recorded one succeeded")
+	}
+	if reached {
+		t.Error("a password given on the command line was sent to the wrong kernel")
+	}
+}
+
+// TestLoggingOutANamedLoginEndsItOnItsOwnKernel: a session lives on the kernel that issued it, so
+// logging one out must reach that kernel — not whichever login happens to be selected here. When
+// it cannot be reached the credentials still go, and the operator is told what is actually true:
+// the session there may stand until it expires, and running the command again cannot end it.
+func TestLoggingOutANamedLoginEndsItOnItsOwnKernel(t *testing.T) {
+	clientHomeFor(t)
+	revoked := ""
+	home := healthServer(t, "KEY-A", "D-A", "play")
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "handle": "other", "public_key": "KEY-B", "network": "play", "network_digest": "D-B"})
+			return
+		}
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		revoked = req.RefreshToken
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(other.Close)
+
+	recordLogin(t, "alice@home", home.URL, "KEY-A")
+	cfg := loadClientConfig()
+	cfg.Kernels["away"] = &kernelRec{Endpoint: other.URL, PublicKey: "KEY-B", WorldDigest: "D-B", Network: "play"}
+	cfg.Current = "alice@home"
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JUICE_AS", "bob@away")
+	if err := saveRefreshToken("BOB-REFRESH"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JUICE_AS", "")
+	oldServer := flagServer
+	flagServer = ""
+	t.Cleanup(func() { flagServer = oldServer })
+
+	if _, err := execTestCmd(t, logoutCmd(), "bob@away"); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if revoked != "BOB-REFRESH" {
+		t.Errorf("the session was not ended on its own kernel: revoked %q", revoked)
+	}
+	if _, err := os.Stat(credPath(t, "bob@away")); !os.IsNotExist(err) {
+		t.Error("the credentials stayed on this computer")
+	}
+	if loadClientConfig().Current != "alice@home" {
+		t.Error("logging out a named login changed which login is selected")
+	}
+
+	// A kernel that cannot be reached: the credentials still go, and the report says so.
+	t.Setenv("JUICE_AS", "carol@away")
+	if err := saveRefreshToken("CAROL-REFRESH"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JUICE_AS", "")
+	other.Close()
+	flagServer = ""
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, logoutCmd(), "carol@away"); return err })
+	if !strings.Contains(out, "could not be reached") || !strings.Contains(out, "may remain valid") {
+		t.Errorf("an unrevoked session was reported as a clean logout: %q", out)
+	}
+	if _, err := os.Stat(credPath(t, "carol@away")); !os.IsNotExist(err) {
+		t.Error("credentials this client will not send again were kept")
+	}
+}
+
+// TestHealthRefusesSomethingThatIsNotAKernel: `kernel health` answers "which kernel is this?", so a
+// 200 carrying anything else is a failure. It once printed `ok` with every field blank.
+func TestHealthRefusesSomethingThatIsNotAKernel(t *testing.T) {
+	clientHomeFor(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html>hello</html>"))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := loadClientConfig()
+	cfg.Kernels["w"] = &kernelRec{Endpoint: srv.URL, Network: "play"}
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execTestCmd(t, kernelHealthCmd(), "w")
+	if err == nil {
+		t.Fatalf("a server that is not a kernel reported healthy: %q", out)
+	}
+	if !strings.Contains(err.Error(), "not a juice kernel") {
+		t.Errorf("unhelpful refusal: %v", err)
+	}
+}
+
+// TestACommandWithNoLoginSaysSo: a command that shows money reads the world's unit before it acts,
+// and with no login there is no address to read it from. What the caller must hear is which login
+// to make — not that a unit could not be read, which is true but useless.
+func TestACommandWithNoLoginSaysSo(t *testing.T) {
+	clientHomeFor(t)
+	old := flagServer
+	flagServer = ""
+	t.Cleanup(func() { flagServer = old })
+	t.Setenv("JUICE_AS", "alice@nosuch")
+
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"a read that shows money", userMeCmd(), nil},
+		{"a list that shows money", actionListCmd(), nil},
+		{"a write that takes money", userTransferCmd(), []string{"bob", "5"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := execTestCmd(t, c.cmd, c.args...)
+			if err == nil {
+				t.Fatal("a command with no login went ahead")
+			}
+			if !strings.Contains(err.Error(), "no kernel named nosuch") {
+				t.Errorf("the refusal does not name what to fix: %v", err)
+			}
+		})
+	}
+}
+
+// TestALoginRefusalSaysWhichRefusalItIs: a wrong password and a suspended account are different
+// answers and lead to different remedies. The server knows which is which, so its words are what
+// the operator reads; a client that rewrote both into one would send a suspended user to reset a
+// password that was never wrong.
+func TestALoginRefusalSaysWhichRefusalItIs(t *testing.T) {
+	clientHomeFor(t)
+	env := newTestEnv(t)
+	if _, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: "alice", Password: "correct-horse"}); err != nil {
+		t.Fatal(err)
+	}
+	base := flagServer
+	cfg := loadClientConfig()
+	cfg.Kernels["k"] = &kernelRec{Endpoint: base, Network: "play"}
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execTestCmd(t, loginCmd(), "alice@k", "--password", "wrong"); err == nil ||
+		!strings.Contains(err.Error(), "wrong user name or password") {
+		t.Errorf("a wrong password did not say so: %v", err)
+	}
+	sys, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
+		Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := env.k.ReadUserByHandle(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.k.SuspendUser(context.Background(), sys.ID, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execTestCmd(t, loginCmd(), "alice@k", "--password", "correct-horse"); err == nil ||
+		!strings.Contains(err.Error(), "suspended") {
+		t.Errorf("a suspended account was reported as a bad password: %v", err)
+	}
+}
+
+// TestTheClientsOwnRecordsAnswerUnderBothFlags: "--json and --quiet mean the same thing on every
+// command" covers the commands that write this client's own records too. They talk to no server —
+// which is exactly why they were the ones still printing whatever they liked.
+func TestTheClientsOwnRecordsAnswerUnderBothFlags(t *testing.T) {
+	clientHomeFor(t)
+	srv := healthServer(t, "KEY-A", "D-A", "play")
+	old := flagServer
+	flagServer = ""
+	t.Cleanup(func() { flagServer = old })
+
+	// Each command is run twice, so each restores what it consumes: a login to end, a kernel to
+	// forget. The point is the two answers, not the second act.
+	restore := func() {
+		resetHealthCache()
+		recordLogin(t, "alice@work", srv.URL, "KEY-A")
+		t.Setenv("JUICE_AS", "alice@work")
+		if err := saveRefreshToken("R"); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("JUICE_AS", "")
+		if _, _, _, err := registerKernel(context.Background(), "k2", srv.URL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+		id   string // an id --quiet must print, one per line
+	}{
+		{"registering a kernel", kernelAddCmd, []string{srv.URL, "k2"}, "k2"},
+		{"listing the kernels known", kernelListCmd, nil, "k2"},
+		{"switching to a login held", authUseCmd, []string{"alice@work"}, "alice@work"},
+		{"listing the logins held", authListCmd, nil, "alice@work"},
+		{"ending a login", logoutCmd, []string{"alice@work"}, "alice@work"},
+		{"forgetting a kernel", kernelForgetCmd, []string{"k2", "--yes"}, "k2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			run := func(flag *bool) string {
+				restore()
+				old := *flag
+				*flag = true
+				defer func() { *flag = old }()
+				return captureStdout(t, func() error { _, err := execTestCmd(t, c.cmd(), c.args...); return err })
+			}
+			var reply any
+			if out := run(&flagJSON); json.Unmarshal([]byte(out), &reply) != nil {
+				t.Fatalf("--json did not print JSON:\n%s", out)
+			}
+			lines := strings.Fields(run(&flagQuiet))
+			if len(lines) == 0 || !slices.Contains(lines, c.id) {
+				t.Errorf("--quiet = %v, want it to name %q and nothing else", lines, c.id)
+			}
+		})
+	}
 }

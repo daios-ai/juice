@@ -136,7 +136,7 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*Account, error) {
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil || !CheckPassword(password, u.PasswordHash) {
-		return nil, ErrUnauthenticated.Wrap("invalid credentials")
+		return nil, ErrUnauthenticated.Wrap("wrong user name or password")
 	}
 	return u, rejectSuspended(u)
 }

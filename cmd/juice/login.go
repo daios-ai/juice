@@ -170,37 +170,47 @@ func kernelNamed(cfg *clientConfig, name string) (*kernelRec, error) {
 	return nil, kernel.ErrNotFound.Wrapf("no kernel named %s; add it with: juice kernel add URL %s", name, name)
 }
 
-// selectLogin makes a login the current one, after the kernel it names has answered as the kernel
-// its record was made for. Selecting is the moment a client commits to sending credentials to an
-// address, so it is the moment the address is checked.
-func selectLogin(ctx context.Context, l login) error {
-	cfg := loadClientConfig()
-	k, err := kernelNamed(cfg, l.Kernel)
+// verifyLogin refuses a login whose kernel is no longer the one its record was made for. Every
+// command that is about to send something to a kernel — a password above all — calls this before
+// it sends, never after.
+func verifyLogin(ctx context.Context, l login) error {
+	k, err := kernelNamed(loadClientConfig(), l.Kernel)
 	if err != nil {
 		return err
 	}
-	if err := verifyKernel(ctx, l.Kernel, k); err != nil {
+	return verifyKernel(ctx, l.Kernel, k)
+}
+
+// selectLogin makes a login the current one, after the kernel it names has answered as the kernel
+// its record was made for.
+func selectLogin(ctx context.Context, l login) error {
+	if err := verifyLogin(ctx, l); err != nil {
 		return err
 	}
+	cfg := loadClientConfig()
 	cfg.Current = l.String()
 	return saveClientConfig(cfg)
 }
 
 // verifyKernel refuses a server that is no longer the kernel a record was made for. A key that
 // changed is a different kernel on the same port; a network that changed means every balance and
-// signature there now means something else (D23).
+// signature there now means something else (D23). The banner is read through the per-run cache, so
+// checking before an act and again as it completes costs one dial.
 func verifyKernel(ctx context.Context, name string, k *kernelRec) error {
-	h, err := health(ctx, k.Endpoint)
+	h, err := probeHealth(ctx, k.Endpoint)
 	if err != nil {
 		return err
 	}
+	again := fmt.Sprintf("\nIf it was reinstalled, forget the old record and add it again:\n"+
+		"  juice kernel forget %s\n  juice kernel add %s %s", name, k.Endpoint, name)
 	if k.PublicKey != "" && h.PublicKey != k.PublicKey {
 		return kernel.ErrInvalidState.Wrapf(
-			"the server at %s is a different kernel than %s recorded; not switching", k.Endpoint, name)
+			"the kernel at %s is not the one you registered as \"%s\". Nothing was sent.%s", k.Endpoint, name, again)
 	}
 	if k.WorldDigest != "" && h.Digest != k.WorldDigest {
 		return kernel.ErrInvalidState.Wrapf(
-			"the server at %s now serves the %s network, not the one %s recorded; not switching", k.Endpoint, h.Network, name)
+			"the kernel at %s now serves the %s network, not the one you registered as \"%s\". Nothing was "+
+				"sent, because money and signatures mean something different there.%s", k.Endpoint, h.Network, name, again)
 	}
 	return nil
 }
@@ -322,7 +332,7 @@ func onSelected(fn func(*credentials) (bool, error)) error {
 // banner is a claim, not a proof, so any other address gets every request anonymously.
 func atHome(base string) bool {
 	_, k, err := selected()
-	return err == nil && strings.TrimRight(base, "/") == strings.TrimRight(k.Endpoint, "/")
+	return err == nil && sameAddress(base, k.Endpoint)
 }
 
 // tokenFor returns the bearer token to send to base, or why none is sent.

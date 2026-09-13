@@ -140,8 +140,9 @@ var (
 	// gateway), distinct from ErrTimeout's 504 (parked, awaiting a receipt). Meta["peer"] names it.
 	ErrPeerUnreachable = &KernelError{Code: "peer_unreachable", HTTP: 502}
 	// ErrPeerUnfunded: the peer will not serve this kernel on credit (P10); the peer
-	// signed a zero-charge rejection. An operator condition (out-of-band payment + admin deposit),
-	// never the caller's own balance — hence a distinct code carrying Meta["peer"], HTTP 402.
+	// signed a zero-charge rejection. Its limit with us is reached, or it cannot fund the work at
+	// its own provider — an operator condition either way, never the caller's own balance, hence a
+	// distinct code carrying Meta["peer"], HTTP 402.
 	ErrPeerUnfunded = &KernelError{Code: "peer_unfunded", HTTP: 402}
 	// ErrTermsChanged: a run's quote pin no longer matches (§4 precondition 7). Distinct from
 	// ErrInvalidState, which it shares a status with, because the action is perfectly callable —

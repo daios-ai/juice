@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1616,15 +1617,15 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 
 	t.Run("detail view prints the id", func(t *testing.T) {
 		out := captureStdout(t, func() error {
-			return emitRaw([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`))
+			return emit([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`), output{})
 		})
 		if out != "act-1\n" {
-			t.Errorf("emitRaw --quiet = %q, want %q", out, "act-1\n")
+			t.Errorf("emit --quiet = %q, want %q", out, "act-1\n")
 		}
 	})
 
 	t.Run("a response naming no resource prints nothing", func(t *testing.T) {
-		out := captureStdout(t, func() error { return emitRaw([]byte(`{"status":"ok"}`)) })
+		out := captureStdout(t, func() error { return emit([]byte(`{"status":"ok"}`), output{}) })
 		if out != "" {
 			t.Errorf("--quiet must suppress a response with no resource id, got %q", out)
 		}
@@ -1653,7 +1654,7 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 	})
 }
 
-// TestPrintTextParity asserts that printText surfaces every field the canonical JSON
+// TestPrintTextParity asserts that the field view surfaces every field the canonical JSON
 // (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
 // checks that structured values are rendered as indented JSON.
 func TestPrintTextParity(t *testing.T) {
@@ -1678,7 +1679,7 @@ func TestPrintTextParity(t *testing.T) {
 		if err := json.Unmarshal(raw, &fields); err != nil {
 			t.Fatal(err)
 		}
-		text := captureStdout(t, func() error { return printText(obj) })
+		text := captureStdout(t, func() error { return printFields(raw, nil, kernel.Network{}) })
 		for key := range fields {
 			if !strings.Contains(text, key+":") {
 				t.Errorf("%T text output missing field %q\n%s", obj, key, text)
@@ -1687,13 +1688,15 @@ func TestPrintTextParity(t *testing.T) {
 	}
 
 	// Structured values must appear as indented JSON, not be dropped.
-	text := captureStdout(t, func() error {
-		return printText(enrichAction(&kernel.Kernel{}, &kernel.Action{
-			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
-			InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
-			OutputSchema: map[string]any{"type": "object"},
-		}, newAccountCache(&kernel.Kernel{}, context.Background())))
-	})
+	schemas, err := json.Marshal(enrichAction(&kernel.Kernel{}, &kernel.Action{
+		ID: "a1", Name: "x", Kind: kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+		OutputSchema: map[string]any{"type": "object"},
+	}, newAccountCache(&kernel.Kernel{}, context.Background())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := captureStdout(t, func() error { return printFields(schemas, nil, kernel.Network{}) })
 	if !strings.Contains(text, "input_schema: {") || !strings.Contains(text, `"type": "object"`) {
 		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)
 	}
@@ -1897,4 +1900,433 @@ func withStdin(t *testing.T, text string) {
 	orig := os.Stdin
 	os.Stdin = r
 	t.Cleanup(func() { os.Stdin = orig; r.Close() })
+}
+
+// TestEmitFollowsOneOutputPolicy pins the single rule every command's output obeys (§14 C8):
+// --json is the server's body exactly as it arrived, --quiet is ids one per line — a list yields
+// one per row, and a reply naming no resource yields nothing — and otherwise the command renders
+// it. One function decides this for every command, so no command can drift from the promise.
+func TestEmitFollowsOneOutputPolicy(t *testing.T) {
+	one := []byte(`{"id":"a-1","price":10}`)
+	many := []byte(`[{"id":"a-1"},{"id":"a-2"}]`)
+	run := []byte(`{"tx_id":"t-9","result":{}}`)
+	said := output{human: func([]byte) error { fmt.Println("done."); return nil }}
+	for _, c := range []struct {
+		name        string
+		json, quiet bool
+		body        []byte
+		out         output
+		want        string
+	}{
+		{"json relays the body", true, false, one, output{}, "{\n  \"id\": \"a-1\",\n  \"price\": 10\n}\n"},
+		{"json of an empty reply is nothing", true, false, nil, said, ""},
+		{"json ignores the command's own rendering", true, false, many, said, "[\n  {\n    \"id\": \"a-1\"\n  },\n  {\n    \"id\": \"a-2\"\n  }\n]\n"},
+		{"quiet prints one resource's id", false, true, one, output{}, "a-1\n"},
+		{"quiet prints a list's ids, one per line", false, true, many, output{}, "a-1\na-2\n"},
+		{"quiet prints the field the command names", false, true, run, output{id: "tx_id"}, "t-9\n"},
+		{"quiet prints nothing for a reply naming no resource", false, true, []byte(`{"status":"ok"}`), said, ""},
+		{"quiet prints nothing for an empty reply", false, true, nil, said, ""},
+		{"the command renders its own view", false, false, many, said, "done.\n"},
+		{"a rendering runs on an empty reply too", false, false, nil, said, "done.\n"},
+		{"without one, every field the reply carries is shown", false, false, one, output{}, "  id: a-1\n  price: 10\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			oldJSON, oldQuiet := flagJSON, flagQuiet
+			flagJSON, flagQuiet = c.json, c.quiet
+			t.Cleanup(func() { flagJSON, flagQuiet = oldJSON, oldQuiet })
+			if got := captureStdout(t, func() error { return emit(c.body, c.out) }); got != c.want {
+				t.Errorf("emit = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestTheFieldViewScalesOnlyTheFieldsItIsGiven: money is written and read in one unit, the world's
+// (D20), so a field view shows an amount the way the command that asked for it is written. Which
+// fields those are is named by the command, never guessed from a field's name — an action's own
+// arguments and results ride inside these replies, and a result that happens to carry "price" is
+// the action's own number, not this kernel's money.
+func TestTheFieldViewScalesOnlyTheFieldsItIsGiven(t *testing.T) {
+	body := []byte(`{"price":1500000,"result":{"price":1500000},"uses":1500000}`)
+	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
+	got := captureStdout(t, func() error { return printFields(body, moneyAction, net) })
+	if !strings.Contains(got, "price: 1.50 credits") {
+		t.Errorf("a named money field was not written in the world's unit:\n%s", got)
+	}
+	if !strings.Contains(got, `"price": 1500000`) {
+		t.Errorf("a field inside the action's own result was rewritten as money:\n%s", got)
+	}
+	if !strings.Contains(got, "uses: 1500000") {
+		t.Errorf("a field the command did not name was rewritten as money:\n%s", got)
+	}
+}
+
+// TestMoneyIsShownTheWayItIsWritten closes the loop over HTTP: a price given the way this kernel
+// writes money comes back the same way, while --json stays in the base units a program counts in.
+func TestMoneyIsShownTheWayItIsWritten(t *testing.T) {
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": "bob/echo", "price": 1500000})
+	})
+	for _, c := range []struct {
+		name string
+		json bool
+		want string
+	}{
+		{"a person reads it in the world's unit", false, "price: 1.50 credits"},
+		{"a program reads the base units", true, `"price": 1500000`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			old := flagJSON
+			flagJSON = c.json
+			t.Cleanup(func() { flagJSON = old })
+			got := captureStdout(t, func() error {
+				return apiEmit("GET", "/v1/actions/a-1", nil, output{money: moneyAction})
+			})
+			if !strings.Contains(got, c.want) {
+				t.Errorf("want %q in:\n%s", c.want, got)
+			}
+		})
+	}
+}
+
+// TestTheUnitIsReadBeforeTheRequest: a command that will show money reads the world's unit first,
+// so a unit it cannot read refuses before anything is sent. Reading it afterwards would report
+// "nothing was sent" about a write that had already committed.
+func TestTheUnitIsReadBeforeTheRequest(t *testing.T) {
+	sent := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		sent = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "w-1", "amount": 5})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	resetHealthCache()
+	t.Cleanup(resetHealthCache)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	selectTestLogin(t, "tester@stub", srv.URL)
+
+	if err := apiEmit("POST", "/v1/withdrawals", map[string]any{"amount": 5}, output{money: moneyRail}); err == nil {
+		t.Fatal("a command that could not read the world's unit went ahead anyway")
+	}
+	if sent {
+		t.Error("the request was sent before the unit it would be shown in could be read")
+	}
+}
+
+// TestARunsAdviceNamesCommandsThatExist: when a run fails, what the operator is told to do next is
+// the whole value of the message. A hint naming a command that has since been deleted — or renamed
+// — is worse than none, so every command any hint names is resolved against the command tree.
+func TestARunsAdviceNamesCommandsThatExist(t *testing.T) {
+	parked := &kernel.KernelError{Code: "timeout", Meta: map[string]string{"process_id": "p-1"}}
+	for _, c := range []struct {
+		name  string
+		err   error
+		quote string
+		want  string
+	}{
+		{"a call needing consent", kernel.ErrGrantRequired.Wrap("x"), "", "user connect"},
+		{"a peer that is offline", kernel.ErrPeerUnreachable.Wrap("x"), "", ""},
+		{"a peer that will not serve on credit", kernel.ErrPeerUnfunded.Wrap("x").WithMeta("peer", "other"), "", "admin peer inspect"},
+		{"terms that changed under a pin", (&kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2"}}), "h", ""},
+		{"money parked on a peer", parked, "", "process show"},
+		{"money parked with a refund date", parked.WithMeta("refund_eligible_at", "2026-01-01T00:00:00Z"), "", "process end"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hint := runHint(c.err, "bob/echo", c.quote)
+			if hint == "" {
+				t.Fatal("a failure an operator must act on said nothing")
+			}
+			if c.want != "" && !strings.Contains(hint, c.want) {
+				t.Errorf("hint does not mention %q:\n%s", c.want, hint)
+			}
+			for _, named := range namedCommands(hint) {
+				if !resolves(named) {
+					t.Errorf("the hint names `juice %s`, which is not a command:\n%s", strings.Join(named, " "), hint)
+				}
+			}
+		})
+	}
+}
+
+// namedCommands pulls every `juice ...` the text tells the operator to run, as the words following
+// it: a flag, a dash, or a reference ends one, since nothing past that addresses a command.
+func namedCommands(hint string) [][]string {
+	var out [][]string
+	for _, field := range strings.Split(hint, "juice ")[1:] {
+		var words []string
+		for _, w := range strings.Fields(field) {
+			w = strings.Trim(w, "`.,;:")
+			if w == "" || w == "—" || strings.HasPrefix(w, "-") || strings.ContainsAny(w, "/@") {
+				break
+			}
+			words = append(words, w)
+		}
+		if len(words) > 0 {
+			out = append(out, words)
+		}
+	}
+	return out
+}
+
+// resolves walks the command tree by name: every word must be a subcommand until one that has none
+// is reached, after which the rest are its arguments. Cobra's own Find answers "the deepest command
+// I could match", which would accept `admin deposit` for as long as `admin` exists — the very kind
+// of stale advice this checks for.
+func resolves(words []string) bool {
+	c := rootCmd
+	for _, w := range words {
+		if !c.HasSubCommands() {
+			return true // a leaf: what follows is an argument to it
+		}
+		next := (*cobra.Command)(nil)
+		for _, sub := range c.Commands() {
+			if sub.Name() == w || sub.HasAlias(w) {
+				next = sub
+				break
+			}
+		}
+		if next == nil {
+			return false
+		}
+		c = next
+	}
+	return c.Runnable()
+}
+
+// TestAdminKernelShowRelaysEveryFieldTheServerSent: the identity view is read whole — an operator
+// checks a kernel's network digest here before believing anything else it says. The CLI once kept
+// its own copy of the response shape, and the field it had not copied vanished from --json.
+func TestAdminKernelShowRelaysEveryFieldTheServerSent(t *testing.T) {
+	body := map[string]any{
+		"handle": "acme", "public_key": "KEY", "network": "play",
+		"network_digest": "5e0dcafe", "lottery": 1000000, "lottery_max": 5000000,
+		"credit_limit": 500000000, "exposure": 0, "fee_bps": 2000, "remote_bps": 500, "import_bps": 500,
+	}
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) })
+	old := flagJSON
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = old })
+
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, identityCmd()); return err })
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json did not print JSON: %v\n%s", err, out)
+	}
+	for field := range body {
+		if _, ok := got[field]; !ok {
+			t.Errorf("--json dropped %q, which the server sent:\n%s", field, out)
+		}
+	}
+}
+
+// TestAWithdrawalIsNamedByTheCaller: the server returns the row a withdrawal id already made
+// rather than making a second one (U51), so repeating the command with the same id after a lost
+// reply recovers the first withdrawal. That is only true if the id is the caller's to repeat.
+func TestAWithdrawalIsNamedByTheCaller(t *testing.T) {
+	var ids []string
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var req struct {
+				ID string `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			ids = append(ids, req.ID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "w-1", "amount": 5000000, "status": "pending"})
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := execTestCmd(t, userWithdrawCmd(), "5", "--yes", "--id", "7a3c"); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+	}
+	if len(ids) != 2 || ids[0] != "7a3c" || ids[1] != "7a3c" {
+		t.Fatalf("the id the caller gave was not the one sent: %v", ids)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := execTestCmd(t, userWithdrawCmd(), "5", "--yes"); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+	}
+	if len(ids) != 4 || ids[2] == ids[3] || ids[2] == "" {
+		t.Fatalf("without --id every run must mint its own: %v", ids)
+	}
+}
+
+// TestOnlyTheOutputPolicyReadsTheOutputFlags: "--json and --quiet mean the same thing on every
+// command" is a promise about the whole surface, and it holds only while one function decides it.
+// Each command that branched on the flags itself was a command that had drifted — one printing
+// prose under --json, another ignoring --quiet — so a new branch anywhere else is the defect
+// returning, not a detail.
+func TestOnlyTheOutputPolicyReadsTheOutputFlags(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "main.go" { // main.go declares them
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if !strings.Contains(line, "flagJSON") && !strings.Contains(line, "flagQuiet") {
+				continue
+			}
+			if f == "cmd.go" {
+				continue // the policy itself
+			}
+			t.Errorf("%s:%d decides its own output instead of leaving it to emit:\n%s", f, i+1, line)
+		}
+	}
+}
+
+// TestAListOfResourcesReadsLikeOne: a reply of several rows is several resources, so it is shown
+// as resources — money included. A command whose reply happens to be a list (updating a whole
+// path of actions, listing withdrawals) was printing its amounts in base units while the same
+// reply for one row printed them in the world's unit.
+func TestAListOfResourcesReadsLikeOne(t *testing.T) {
+	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
+	got := captureStdout(t, func() error {
+		return printFields([]byte(`[{"id":"a-1","price":1500000},{"id":"a-2","price":2000000}]`), moneyAction, net)
+	})
+	if !strings.Contains(got, "price: 1.50 credits") || !strings.Contains(got, "price: 2.00 credits") {
+		t.Errorf("a list's money was not written in the world's unit:\n%s", got)
+	}
+	if !strings.Contains(got, "id: a-1") || !strings.Contains(got, "id: a-2") {
+		t.Errorf("a list lost its rows:\n%s", got)
+	}
+	// Something that is not resources at all still prints as it arrived.
+	plain := captureStdout(t, func() error { return printFields([]byte(`[1,2,3]`), moneyAction, net) })
+	if !strings.Contains(plain, "1,") && !strings.Contains(plain, "1\n") {
+		t.Errorf("a plain list was not printed: %q", plain)
+	}
+}
+
+// TestQuietFindsTheResourcesInsideAReplyThatWrapsThem: a peer answers with its page of steps beside
+// whether more are waiting, so the ids are one field in. The command names that field rather than
+// having every reply searched for something id-shaped.
+func TestQuietFindsTheResourcesInsideAReplyThatWrapsThem(t *testing.T) {
+	old := flagQuiet
+	flagQuiet = true
+	t.Cleanup(func() { flagQuiet = old })
+	body := []byte(`{"steps":[{"id":"s-1"},{"id":"s-2"}],"truncated":false}`)
+	if got := captureStdout(t, func() error { return emit(body, output{rows: "steps"}) }); got != "s-1\ns-2\n" {
+		t.Errorf("--quiet = %q, want the two step ids", got)
+	}
+	// Unnamed, the same reply names no resource of its own and prints nothing.
+	if got := captureStdout(t, func() error { return emit(body, output{}) }); got != "" {
+		t.Errorf("--quiet went looking for ids: %q", got)
+	}
+}
+
+// TestOnlyAHumanViewCostsAHealthRead: --json and --quiet carry base units, so a read that prints no
+// money for a person must not turn a working reply into a failed /health. A write that shows what
+// it moved still reads the unit before it acts.
+func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
+	var banners int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			banners++
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": "bob/echo", "price": 1500000}})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	resetHealthCache()
+	t.Cleanup(resetHealthCache)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	selectTestLogin(t, "tester@stub", srv.URL)
+
+	for _, f := range []*bool{&flagJSON, &flagQuiet} {
+		resetHealthCache()
+		banners = 0
+		oldFlag := *f
+		*f = true
+		_, err := execTestCmd(t, actionListCmd())
+		*f = oldFlag
+		if err != nil {
+			t.Errorf("a read that prints no money was refused because the banner was: %v", err)
+		}
+		if banners != 0 {
+			t.Errorf("the banner was read %d times for output that carries base units", banners)
+		}
+	}
+}
+
+// TestARunThatAuthorizesOnTheWayStillAnswersOnce: a run that meets a consent it can settle inline
+// does two things and answers with one — its own reply. The connection is a step on the way, so it
+// is reported as progress; anything else leaves --json printing two documents where a program
+// expects one, and nothing downstream can read it (§14 C8).
+func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
+	runs := 0
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/run":
+			runs++
+			if runs == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": "authorization required", "code": "grant_required",
+					"meta": map[string]string{"action": "bob/echo"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"ok": true}})
+		case strings.HasPrefix(r.URL.Path, "/v1/grants/plan"):
+			_ = json.NewEncoder(w).Encode(kernel.ConsentPlan{Groups: []kernel.ConsentGroup{{
+				Provider: "chat", ProviderKey: "pk", Scheme: kernel.AuthSchemeDelegatedBearer,
+				Connected: true, Covered: true,
+				Actions: []kernel.ConsentAction{{Action: "bob/echo"}},
+			}}})
+		default: // POST /v1/grants
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "granted", "actions": []string{"bob/echo"}})
+		}
+	})
+	// Somebody is at the terminal and says yes, which is what makes the run settle the consent
+	// itself rather than printing the command to run.
+	oldTTY := interactiveTTY
+	interactiveTTY = func() bool { return true }
+	t.Cleanup(func() { interactiveTTY = oldTTY })
+	in, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = in
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	oldJSON := flagJSON
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = oldJSON })
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, runCmd(), "bob/echo"); return err })
+
+	dec := json.NewDecoder(strings.NewReader(out))
+	var reply map[string]any
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatalf("--json did not print JSON: %v\n%s", err, out)
+	}
+	if reply["tx_id"] != "t-1" {
+		t.Errorf("the one document is not the run's reply: %v", reply)
+	}
+	if err := dec.Decode(&reply); err == nil {
+		t.Errorf("a second document followed the reply; stdout carries one:\n%s", out)
+	}
+	if runs != 2 {
+		t.Errorf("the run was not retried after the consent: %d calls", runs)
+	}
 }

@@ -105,9 +105,8 @@ Commands:
 
 | Command | Effect |
 |---|---|
-| `juice kernel add URL [NAME]` | register the kernel answering there, under its advertised nickname unless NAME is given; selects nothing |
+| `juice kernel add URL [NAME]` | register the kernel answering there, under its advertised nickname unless NAME is given; selects nothing. The same key at a new address is that kernel having moved: the address is updated and its logins are kept |
 | `juice kernel list` | the kernels known, marking the one in use |
-| `juice kernel update NAME URL` | repoint it, and log out every login on it |
 | `juice kernel forget NAME` | drop the record and those logins' credentials |
 | `juice auth login USER@KERNEL` | authenticate there, and act as that login |
 | `juice auth use USER@KERNEL` | switch to a login already held, verifying the kernel first |

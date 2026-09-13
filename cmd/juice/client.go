@@ -48,7 +48,7 @@ func addressKernel(name string) error {
 	if k == nil {
 		return kernel.ErrNotFound.Wrapf("no kernel named %s; add it with: juice kernel add URL %s", name, name)
 	}
-	if flagServer != "" && strings.TrimRight(flagServer, "/") != strings.TrimRight(k.Endpoint, "/") {
+	if flagServer != "" && !sameAddress(flagServer, k.Endpoint) {
 		return kernel.ErrInvalidInput.Wrapf(
 			"--server %s names a different address than kernel %s (%s); give one or the other", flagServer, name, k.Endpoint)
 	}
@@ -139,21 +139,20 @@ func apiDo(ctx context.Context, method, path string, body, out any, retry bool) 
 	return nil
 }
 
-// apiEmit runs the request and prints the server's JSON response via emitRaw, preserving
-// field order. An empty body (e.g. 204) prints nothing.
-func apiEmit(method, path string, body any) error {
-	return apiEmitCtx(context.Background(), method, path, body)
+// apiEmit runs one request and prints the server's reply under the one output policy (emit).
+func apiEmit(method, path string, body any, o output) error {
+	return apiEmitCtx(context.Background(), method, path, body, o)
 }
 
-func apiEmitCtx(ctx context.Context, method, path string, body any) error {
+func apiEmitCtx(ctx context.Context, method, path string, body any, o output) error {
+	if err := o.units(ctx); err != nil {
+		return err
+	}
 	var out json.RawMessage
 	if err := apiCall(ctx, method, path, body, &out); err != nil {
 		return err
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return emitRaw(out)
+	return emit(out, o)
 }
 
 // refreshToken rotates the stored access token using the stored refresh token, returning true on
@@ -258,11 +257,23 @@ func health(ctx context.Context, base string) (*serverHealth, error) {
 	if status != 200 {
 		return nil, errorFromResponse(status, body)
 	}
+	return decodeHealth(base, body)
+}
+
+// decodeHealth reads an identity banner, refusing a body that is not one: a 200 from something
+// else at that address must be an error rather than a blank "ok" line.
+func decodeHealth(base string, body []byte) (*serverHealth, error) {
 	var h serverHealth
 	if err := json.Unmarshal(body, &h); err != nil || h.PublicKey == "" {
-		return nil, kernel.ErrInvalidState.Wrapf("%s is not a juice server", base)
+		return nil, kernel.ErrInvalidState.Wrapf("%s answered, but it is not a juice kernel", base)
 	}
 	return &h, nil
+}
+
+// sameAddress reports whether two base URLs name one address. Trailing slashes are a spelling,
+// not a difference, and every decision about where a credential may go is made through here.
+func sameAddress(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }
 
 // serverNetwork returns the network of the server this invocation is talking to. Signatures are
@@ -270,7 +281,14 @@ func health(ctx context.Context, base string) (*serverHealth, error) {
 // error is a refusal at the call site: a guessed zero would move a thousandth of what an operator
 // typed, or a thousand times it.
 func serverNetwork(ctx context.Context) (kernel.Network, error) {
-	h, err := probeHealth(ctx, serverBaseURL())
+	base := serverBaseURL()
+	if base == "" {
+		// No address — no login selected, none named — is not a money question: answer it the way
+		// every request does, with the login to make, which is what the caller has to act on.
+		_, _, err := selected()
+		return kernel.Network{}, err
+	}
+	h, err := probeHealth(ctx, base)
 	if err != nil {
 		return kernel.Network{}, kernel.ErrInvalidState.Wrapf(
 			"cannot read this kernel's money units right now; nothing was sent — retry").Because(err)

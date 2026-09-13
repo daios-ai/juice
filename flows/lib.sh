@@ -207,8 +207,8 @@ stop_server() {
 
 # repoint_kernels old new — a restarted server answers on a new address, and a client's login is
 # sent only to the address recorded for its kernel. Every client that knew the old address is told
-# the new one, which is what an operator does with `juice kernel update` after a restart. The
-# recorded key is untouched: a restart changes where a kernel answers, never who it is.
+# the new one, which is what an operator does with `juice kernel add` after a restart. The recorded
+# key is untouched: a restart changes where a kernel answers, never who it is.
 repoint_kernels() {
     local f
     while IFS= read -r f; do
@@ -232,6 +232,7 @@ json.dump(d, open(path, "w"))
 _srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s\n' "${SERVER_URL[$db]}"; }
 j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" "$@" 2>&1; }
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
+q()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --quiet "$@" 2>/dev/null; }
 
 # kdb root — the database of the kernel served under an installation root. One kernel is one named
 # directory, kernels/<name>/, holding the ledger, the config, the rail key and the single-server

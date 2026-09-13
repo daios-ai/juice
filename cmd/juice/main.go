@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,8 +71,8 @@ var globalCfg ServerConfig
 var resolvedConfigPath string
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Output JSON instead of human-readable text")
-	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only the created resource ID")
+	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Print the server's JSON reply instead of human-readable text")
+	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "Print only ids, one per line")
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
 	rootCmd.PersistentFlags().StringVar(&flagAs, "as", "", "Login to act as for this command, as USER@KERNEL")
@@ -343,10 +342,6 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	}
 
 	return k, db, logger, httpExec, fedAdapter, specs, world, nil
-}
-
-func decodeJSON(r io.Reader, v any) error {
-	return json.NewDecoder(r).Decode(v)
 }
 
 // promptPassword reads a password from the terminal without echo. It is a

@@ -17,70 +17,40 @@ import (
 // knows about kernels it talks to — the same thing from either side, so one noun holds both.
 func init() {
 	kernelCmd := &cobra.Command{Use: "kernel", Short: "Run a kernel, or manage the ones this client knows"}
-	kernelCmd.AddCommand(kernelServeCmd(), kernelAddCmd(), kernelUpdateCmd(),
-		kernelListCmd(), kernelHealthCmd(), kernelForgetCmd())
+	kernelCmd.AddCommand(kernelServeCmd(), kernelAddCmd(), kernelListCmd(),
+		kernelHealthCmd(), kernelForgetCmd())
 	rootCmd.AddCommand(kernelCmd)
 }
 
-// kernelAddCmd registers a kernel by dialling it. The name is the client's own label, defaulting to
-// the nickname the kernel advertises — the name an operator has already seen is the one they will
-// type — but a nickname is a label rather than proof, so a name held by another key is not taken.
+// kernelAddCmd registers a kernel by dialling it, and is also how a kernel that has moved is
+// repointed: a key is what says which kernel this is, so the same key at a new address is the same
+// kernel and keeps its logins. The name is the client's own label, defaulting to the nickname the
+// kernel advertises — the name an operator has already seen is the one they will type — but a
+// nickname is a label rather than proof, so a name held by another key is not taken.
 func kernelAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add URL [NAME]",
-		Short: "Register a kernel this client can talk to",
+		Short: "Register a kernel this client can talk to, or follow one that has moved",
 		Long: "Register the kernel answering at URL, under NAME. Without NAME it is registered under the\n" +
 			"nickname the kernel advertises. Adding does not log in and does not select anything:\n" +
 			"`juice auth login USER@NAME` does that.\n\n" +
 			"Adding a kernel already known under that name succeeds: the same kernel at the same\n" +
-			"address changes nothing, and one that has moved has its address updated, since a key is\n" +
-			"what says which kernel this is. A different kernel under a name already taken is refused.",
+			"address changes nothing, and one that has moved has its address updated and keeps its\n" +
+			"logins. A different kernel under a name already taken is refused; give it another name,\n" +
+			"or `juice kernel forget NAME` first, which also removes that name's logins.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := ""
 			if len(args) == 2 {
 				name = args[1]
 			}
-			name, k, added, err := registerKernel(context.Background(), name, args[0], false)
+			name, k, outcome, err := registerKernel(context.Background(), name, args[0])
 			if err != nil {
 				return err
 			}
-			printKernel(name, k, added)
-			return nil
+			return emitKernel(name, k, outcome)
 		},
 	}
-}
-
-// kernelUpdateCmd repoints a kernel that has moved. It is its own verb because it is the one act
-// here that destroys something: a session is only valid to the server that issued it, so every
-// login on that kernel is logged out once the new address has answered.
-func kernelUpdateCmd() *cobra.Command {
-	var yes bool
-	cmd := &cobra.Command{
-		Use:   "update NAME URL",
-		Short: "Point a registered kernel at another address",
-		Long: "Point NAME at URL, recording the identity that answers there.\n\n" +
-			"Every login on that kernel is logged out: a session is only valid to the server that\n" +
-			"issued it, so pointing a name somewhere else strands the ones made at the old address.",
-		Args: cobra.ExactArgs(2),
-		RunE: func(_ *cobra.Command, args []string) error {
-			name, url := args[0], args[1]
-			if _, err := kernelNamed(loadClientConfig(), name); err != nil {
-				return err
-			}
-			if err := confirm(fmt.Sprintf("Point %s at %s? Every login on it is logged out.", name, url), yes); err != nil {
-				return err
-			}
-			_, k, _, err := registerKernel(context.Background(), name, url, true)
-			if err != nil {
-				return err
-			}
-			printKernel(name, k, false)
-			return nil
-		},
-	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
-	return cmd
 }
 
 // kernelListCmd shows what this client knows, marking the kernel the selected login acts through.
@@ -91,25 +61,34 @@ func kernelListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg := loadClientConfig()
-			if flagJSON {
-				return printJSON(cfg)
-			}
 			names := make([]string, 0, len(cfg.Kernels))
 			for name := range cfg.Kernels {
 				names = append(names, name)
 			}
 			sort.Strings(names)
 			here, _, _ := selected()
-			fmt.Printf("  %-16s %-10s %-32s %s\n", "KERNEL", "NETWORK", "ADDRESS", "KEY")
+			rows := make([]map[string]any, 0, len(names))
 			for _, name := range names {
-				mark := " "
-				if name == here.Kernel {
-					mark = "*"
-				}
 				k := cfg.Kernels[name]
-				fmt.Printf("%s %-16s %-10s %-32s %s\n", mark, name, k.Network, k.Endpoint, k.PublicKey)
+				rows = append(rows, map[string]any{"kernel": name, "endpoint": k.Endpoint,
+					"network": k.Network, "public_key": k.PublicKey, "selected": name == here.Kernel})
 			}
-			return nil
+			body, err := json.Marshal(rows)
+			if err != nil {
+				return err
+			}
+			return emit(body, output{id: "kernel", human: func([]byte) error {
+				fmt.Printf("  %-16s %-10s %-32s %s\n", "KERNEL", "NETWORK", "ADDRESS", "KEY")
+				for _, name := range names {
+					mark := " "
+					if name == here.Kernel {
+						mark = "*"
+					}
+					k := cfg.Kernels[name]
+					fmt.Printf("%s %-16s %-10s %-32s %s\n", mark, name, k.Network, k.Endpoint, k.PublicKey)
+				}
+				return nil
+			}})
 		},
 	}
 }
@@ -134,26 +113,24 @@ func kernelHealthCmd() *cobra.Command {
 			if base == "" {
 				return kernel.ErrInvalidInput.Wrap("name a kernel: juice kernel health NAME")
 			}
-			resp, err := http.Get(base + "/health") //nolint:noctx
+			ctx := context.Background()
+			body, status, err := doHTTP(ctx, "GET", base+"/health", nil, nil, 0, true)
 			if err != nil {
 				return errUnreachable(base, err)
 			}
-			defer resp.Body.Close()
-			var body map[string]any
-			_ = json.NewDecoder(resp.Body).Decode(&body)
-			if resp.StatusCode != http.StatusOK {
-				return kernel.ErrExecutionFailed.Wrapf("server returned status %d", resp.StatusCode)
+			if status != http.StatusOK {
+				return kernel.ErrExecutionFailed.Wrapf("%s returned status %d", base, status)
 			}
-			if flagJSON {
-				return printJSON(body)
+			h, err := decodeHealth(base, body)
+			if err != nil {
+				return err
 			}
-			h, _ := body["handle"].(string)
-			pk, _ := body["public_key"].(string)
-			net, _ := body["network"].(string)
-			// The network comes first after the name: a kernel serves one for life, and it decides
-			// what every balance and every signature here means (D23).
-			fmt.Printf("ok  %s  network %s  %s\n", h, net, pk)
-			return nil
+			return emit(body, output{id: "public_key", human: func([]byte) error {
+				// The network comes first after the name: a kernel serves one for life, and it
+				// decides what every balance and every signature here means (D23).
+				fmt.Printf("ok  %s  network %s  %s\n", h.Handle, h.Network, h.PublicKey)
+				return nil
+			}})
 		},
 	}
 }
@@ -186,53 +163,62 @@ func kernelForgetCmd() *cobra.Command {
 			if err := saveClientConfig(cfg); err != nil {
 				return err
 			}
-			fmt.Printf("Forgot %s\n", name)
-			return nil
+			body, err := json.Marshal(map[string]any{"kernel": name, "forgotten": true})
+			if err != nil {
+				return err
+			}
+			return emit(body, output{id: "kernel", human: func([]byte) error {
+				fmt.Printf("Forgot %s\n", name)
+				return nil
+			}})
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
-// registerKernel records a kernel after the server at that address has answered as itself. Nothing
-// is written until it has: a name that cannot be dialled keeps whatever it meant before. replace is
-// what `kernel update` passes, and it is also what strands the logins made at the old address.
-func registerKernel(ctx context.Context, name, url string, replace bool) (string, *kernelRec, bool, error) {
+// registerKernel records a kernel after the server at that address has answered as itself, and
+// returns what it did: added, already known, or moved. Nothing is written until the server has
+// answered, so a name that cannot be dialled keeps whatever it meant before.
+func registerKernel(ctx context.Context, name, url string) (string, *kernelRec, string, error) {
 	url = strings.TrimRight(strings.TrimSpace(url), "/")
 	h, err := health(ctx, url)
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, "", err
 	}
 	if name == "" {
 		name = h.Handle
 	}
 	if err := validateLocalName("kernel", name); err != nil {
-		return "", nil, false, err
+		return "", nil, "", err
 	}
 	cfg := loadClientConfig()
 	existing := cfg.Kernels[name]
+	outcome := "added"
 	switch {
-	case existing == nil, replace:
-		if replace {
-			forgetLogins(name) // a repoint may be to another kernel entirely, so its logins go
-		}
+	case existing == nil:
 	case existing.PublicKey != h.PublicKey:
-		return "", nil, false, kernel.ErrInvalidState.Wrapf(
-			"%s is already the name of another kernel here (%s); add this one under another name, or "+
-				"point %s at it deliberately: juice kernel update %s %s", name, existing.Endpoint, name, name, url)
+		// A name is one kernel's here. Taking it for another would silently point every login and
+		// every reference made under it at a stranger, so the operator says which they mean.
+		return "", nil, "", kernel.ErrInvalidState.Wrapf(
+			"\"%s\" is already the name of a different kernel here (%s).\n"+
+				"Add this one under another name, or first: juice kernel forget %s",
+			name, existing.Endpoint, name)
 	case existing.Endpoint == url:
-		return name, existing, false, nil // already known, on the same terms: nothing to do
+		return name, existing, "already known", nil // nothing to do
+	default:
+		// The kernel answering is the one recorded — the same key, at whatever address it answers
+		// on today — so it keeps its logins: a session belongs to the kernel that issued it, and
+		// this is that kernel.
+		outcome = "moved; existing logins kept"
 	}
-	// Past that, either the name is new or the kernel answering is the one recorded — the same key,
-	// at whatever address it answers on today. A kernel that has moved keeps its logins: a session
-	// belongs to the kernel that issued it, and this is that kernel.
 	k := &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldDigest: h.Digest,
 		Network: h.Network, Decimals: h.Decimals, Symbol: h.Symbol}
 	cfg.Kernels[name] = k
 	if err := saveClientConfig(cfg); err != nil {
-		return "", nil, false, err
+		return "", nil, "", err
 	}
-	return name, k, true, nil
+	return name, k, outcome, nil
 }
 
 // forgetLogins removes the credentials of every login on one kernel, and unselects one that was
@@ -249,12 +235,17 @@ func forgetLogins(kernelName string) {
 	}
 }
 
-// printKernel names what was registered the way `kernel list` will show it: the local name first,
-// since that is the word every other command takes.
-func printKernel(name string, k *kernelRec, added bool) {
-	verb := "already known"
-	if added {
-		verb = "added"
+// emitKernel answers with the record that was registered, in the shape `kernel list` answers with,
+// plus what registering did. The human line names the local name first, since that is the word
+// every other command takes.
+func emitKernel(name string, k *kernelRec, outcome string) error {
+	body, err := json.Marshal(map[string]any{"kernel": name, "endpoint": k.Endpoint,
+		"network": k.Network, "public_key": k.PublicKey, "outcome": outcome})
+	if err != nil {
+		return err
 	}
-	fmt.Printf("%s  network %s  %s  %s  (%s)\n", name, k.Network, k.Endpoint, k.PublicKey, verb)
+	return emit(body, output{id: "kernel", human: func([]byte) error {
+		fmt.Printf("%s  network %s  %s  %s  (%s)\n", name, k.Network, k.Endpoint, k.PublicKey, outcome)
+		return nil
+	}})
 }

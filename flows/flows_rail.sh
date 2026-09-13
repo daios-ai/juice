@@ -445,3 +445,51 @@ flow_money_reads_as_money() {
     assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys "$(units 10)"
     assert_jnum "money.nothing_moved" "$(jj "$db" "$ha" user me)" available 500
 }
+
+# One output policy, on every command (§14): --json is the reply the server sent, --quiet is the
+# ids alone, and the human view writes money the way the command takes it. Each was true of some
+# commands and not others, which is what makes a global flag unusable in a script.
+flow_one_output_policy() {
+    echo "=== FLOW one_output_policy ==="
+    local dir db hs ha aid; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "output.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 500
+    aid=$(strfield "$(jj "$db" "$ha" action create greet --kind http --source "http://127.0.0.1:1/greet" --price "$(units 5)")" id)
+    assert_nonempty "output.created" "$aid"
+
+    # A price given the way this kernel writes money reads back that way wherever a person sees it,
+    # while a program still reads the base units it counts in.
+    assert_contains "output.detail_shows_the_unit" "credits" "$(j "$db" "$ha" action show "$aid")"
+    assert_contains "output.list_shows_the_unit" "credits" "$(j "$db" "$ha" action list --all)"
+    assert_contains "output.profile_shows_the_unit" "credits" "$(j "$db" "$ha" user me)"
+    assert_jnum "output.json_stays_in_base_units" "$(jj "$db" "$ha" action show "$aid")" price 5
+
+    # --quiet: ids alone, one per line, on a read as on a write — and nothing at all from a command
+    # that names no resource.
+    assert_eq "output.quiet_detail" "$aid" "$(q "$db" "$ha" action show "$aid")"
+    assert_contains "output.quiet_list" "$aid" "$(q "$db" "$ha" action list --all)"
+    # A user is named by its handle here, never by a raw account id (D20), so that is what pipes on.
+    assert_contains "output.quiet_admin_list" "alice" "$(q "$db" "$hs" admin user list)"
+    assert_eq "output.quiet_admin_show" "alice" "$(q "$db" "$hs" admin user show alice)"
+    assert_eq "output.quiet_says_nothing_of_no_resource" "" "$(q "$db" "$hs" admin user suspend alice)"
+    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
+
+    # A client-local list obeys the same rule, though no server is asked.
+    assert_contains "output.quiet_names_the_kernels" "$KERNEL_NAME" "$(q "$db" "$ha" kernel list)"
+    assert_contains "output.quiet_names_the_logins" "alice@$KERNEL_NAME" "$(q "$db" "$ha" auth list)"
+
+    # A reply of several rows is several resources: `action update` on a path answers with each
+    # one, and its price reads the way it was given.
+    assert_contains "output.list_reply_shows_the_unit" "credits" "$(j "$db" "$ha" action update "$aid" --price "$(units 7)")"
+    assert_contains "output.operator_waiting_list_shows_the_unit" "Work delivered" "$(j "$db" "$hs" admin kernel deposits)"
+
+    # The commands that write this client's own records answer the same way as the rest.
+    assert_contains "output.quiet_names_the_kernel_added" "$KERNEL_NAME" "$(q "$db" "$ha" kernel add "${SERVER_URL[$db]}" "$KERNEL_NAME")"
+    assert_nonempty "output.json_names_the_kernel_added" "$(strfield "$(jj "$db" "$ha" kernel add "${SERVER_URL[$db]}" "$KERNEL_NAME")" outcome)"
+
+    # --json is what the server sent, so a field the CLI does not print is still carried. The
+    # network digest is read here before an operator believes any other number.
+    assert_nonempty "output.identity_keeps_the_digest" "$(strfield "$(jj "$db" "$hs" admin kernel show)" network_digest)"
+    assert_nonempty "output.health_is_the_banner" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" public_key)"
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -87,9 +88,17 @@ func userConnectCmd() *cobra.Command {
 						return err
 					}
 				}
-				return connectToken(selector, "", token)
+				actions, err := connectToken(selector, "", token)
+				if err != nil {
+					return err
+				}
+				return emitConnected(actions)
 			}
-			return connectSelector(selector, device, yes)
+			actions, err := connectSelector(selector, device, yes)
+			if err != nil {
+				return err
+			}
+			return emitConnected(actions)
 		},
 	}
 	cmd.Flags().BoolVar(&device, "device", false, "Use the device-code flow for OAuth groups (no local browser)")
@@ -99,11 +108,13 @@ func userConnectCmd() *cobra.Command {
 }
 
 // connectSelector fetches the consent plan, shows the delta, and covers each group needing work
-// with one gesture: a token paste per bearer group, one browser consent per OAuth group (§8).
-func connectSelector(selector string, device, yes bool) error {
+// with one gesture: a token paste per bearer group, one browser consent per OAuth group (§8). It
+// returns what it granted rather than printing it: `user connect` answers with that, while a run
+// that authorized on the way through has its own reply to answer with, and stdout carries one.
+func connectSelector(selector string, device, yes bool) ([]string, error) {
 	var plan kernel.ConsentPlan
 	if err := apiCall(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
-		return err
+		return nil, err
 	}
 	var todo []kernel.ConsentGroup
 	for _, g := range plan.Groups {
@@ -111,33 +122,55 @@ func connectSelector(selector string, device, yes bool) error {
 			todo = append(todo, g)
 		}
 	}
-	if len(todo) == 0 {
-		fmt.Println("Already connected.")
-		return nil
+	if len(todo) > 0 {
+		printDelta(todo)
+		if err := confirm("Proceed?", yes); err != nil {
+			return nil, err
+		}
 	}
-	printDelta(todo)
-	if err := confirm("Proceed?", yes); err != nil {
-		return err
-	}
+	// Connecting is a ceremony of several acts — a token pasted here, a browser consent there —
+	// and what it answers with is what it connected. So the acts report progress on stderr and the
+	// actions they granted are collected, to be answered with once, like any other command (§14).
+	connected := []string{}
 	for _, g := range todo {
+		var (
+			actions []string
+			err     error
+		)
 		if g.Scheme == kernel.AuthSchemeDelegatedBearer {
 			tok := ""
 			if !g.Connected {
-				var err error
 				if tok, err = promptSecret(fmt.Sprintf("Paste token for %s: ", g.Provider)); err != nil {
-					return err
+					return nil, err
 				}
 			}
-			if err := connectToken(selector, g.ProviderKey, tok); err != nil {
-				return err
-			}
-			continue
+			actions, err = connectToken(selector, g.ProviderKey, tok)
+		} else {
+			actions, err = connectOAuthGroup(selector, g.ProviderKey, device)
 		}
-		if err := connectOAuthGroup(selector, g.ProviderKey, device); err != nil {
-			return err
+		if err != nil {
+			return nil, err
 		}
+		connected = append(connected, actions...)
 	}
-	return nil
+	return connected, nil
+}
+
+// emitConnected answers with what a connect ceremony granted: one reply for the whole gesture,
+// however many acts it took.
+func emitConnected(actions []string) error {
+	body, err := json.Marshal(map[string]any{"connected": actions})
+	if err != nil {
+		return err
+	}
+	return emit(body, output{human: func([]byte) error {
+		if len(actions) == 0 {
+			fmt.Println("Already connected.")
+			return nil
+		}
+		fmt.Printf("Connected %s.\n", strings.Join(actions, ", "))
+		return nil
+	}})
 }
 
 // groupNeedsWork reports whether a plan group has anything to connect: an uncovered account, or a
@@ -154,8 +187,10 @@ func groupNeedsWork(g kernel.ConsentGroup) bool {
 	return false
 }
 
+// printDelta shows what consent is about to cover. It is what the question below it is about, so
+// it goes where prompts go — stderr — leaving stdout to the answer (§14).
 func printDelta(todo []kernel.ConsentGroup) {
-	fmt.Println("The following will be connected:")
+	fmt.Fprintln(os.Stderr, "The following will be connected:")
 	for _, g := range todo {
 		how := "paste a token"
 		if g.Scheme == kernel.AuthSchemeOAuthDelegated {
@@ -163,35 +198,34 @@ func printDelta(todo []kernel.ConsentGroup) {
 		} else if g.Connected {
 			how = "already connected"
 		}
-		fmt.Printf("  %s (%s):\n", g.Provider, how)
+		fmt.Fprintf(os.Stderr, "  %s (%s):\n", g.Provider, how)
 		if len(g.Destinations) > 0 {
 			// The recipient of your credential — for OAuth this is the action's own upstream host,
 			// which need not be the login provider. Shown so the destination is never hidden (§8).
-			fmt.Printf("    → sends your credential to: %s\n", strings.Join(g.Destinations, ", "))
+			fmt.Fprintf(os.Stderr, "    → sends your credential to: %s\n", strings.Join(g.Destinations, ", "))
 		}
 		for _, a := range g.Actions {
 			mark := " "
 			if a.Granted {
 				mark = "✓"
 			}
-			fmt.Printf("    [%s] %s\n", mark, a.Action)
+			fmt.Fprintf(os.Stderr, "    [%s] %s\n", mark, a.Action)
 		}
 	}
 }
 
 // connectToken stores a static token for a delegated_bearer group via POST /v1/grants (§8). An
 // empty token instant-grants against an already-connected account.
-func connectToken(selector, provider, token string) error {
+func connectToken(selector, provider, token string) ([]string, error) {
 	body := map[string]string{"selector": selector, "token": token}
 	if provider != "" {
 		body["provider"] = provider
 	}
 	var done grantCompleteResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants", body, &done); err != nil {
-		return err
+		return nil, err
 	}
-	fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
-	return nil
+	return done.Actions, nil
 }
 
 // promptSecret reads a secret from the terminal without echoing it; if stdin is not a terminal it
@@ -215,7 +249,7 @@ func promptSecret(prompt string) (string, error) {
 
 // connectOAuthGroup connects one oauth_delegated provider group: an already-covered account grants
 // instantly (no browser); otherwise the loopback code flow (or device flow) drives one consent.
-func connectOAuthGroup(selector, provider string, device bool) error {
+func connectOAuthGroup(selector, provider string, device bool) ([]string, error) {
 	if device {
 		return connectOAuthDevice(selector, provider)
 	}
@@ -224,10 +258,10 @@ func connectOAuthGroup(selector, provider string, device bool) error {
 
 // connectOAuthCode runs the authorization-code + PKCE flow, hosting the loopback redirect listener
 // locally (the browser reaches it even behind NAT — the provider never contacts the kernel).
-func connectOAuthCode(selector, provider string) error {
+func connectOAuthCode(selector, provider string) ([]string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return kernel.ErrInternal.Wrapf("could not start loopback server: %v", err)
+		return nil, kernel.ErrInternal.Wrapf("could not start loopback server: %v", err)
 	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", ln.Addr().(*net.TCPAddr).Port)
 
@@ -249,53 +283,50 @@ func connectOAuthCode(selector, provider string) error {
 	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"selector": selector, "provider": provider, "redirect_uri": redirectURI, "flow": "code",
 	}, &start); err != nil {
-		return err
+		return nil, err
 	}
 	if start.Status == "granted" {
-		fmt.Printf("Connected %s.\n", strings.Join(start.Actions, ", "))
-		return nil
+		return start.Actions, nil
 	}
-	fmt.Printf("Open this URL to authorize:\n\n  %s\n\n", start.AuthorizeURL)
+	fmt.Fprintf(os.Stderr, "Open this URL to authorize:\n\n  %s\n\n", start.AuthorizeURL)
 	openBrowser(start.AuthorizeURL)
 
 	var got cb
 	select {
 	case got = <-cbCh:
 	case <-time.After(5 * time.Minute):
-		return kernel.ErrTimeout.Wrap("timed out waiting for authorization")
+		return nil, kernel.ErrTimeout.Wrap("timed out waiting for authorization")
 	}
 	if got.state != start.State {
-		return kernel.ErrUnauthenticated.Wrap("state mismatch — aborting")
+		return nil, kernel.ErrUnauthenticated.Wrap("state mismatch — aborting")
 	}
 
 	var done grantCompleteResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants/complete", map[string]string{
 		"state": start.State, "code": got.code,
 	}, &done); err != nil {
-		return err
+		return nil, err
 	}
-	fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
-	return nil
+	return done.Actions, nil
 }
 
 // connectOAuthDevice runs the device-code flow: the server polls the provider, the CLI polls the
 // server's /complete until the connection lands.
-func connectOAuthDevice(selector, provider string) error {
+func connectOAuthDevice(selector, provider string) ([]string, error) {
 	var start grantStartResp
 	if err := apiCall(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"selector": selector, "provider": provider, "flow": "device",
 	}, &start); err != nil {
-		return err
+		return nil, err
 	}
 	if start.Status == "granted" {
-		fmt.Printf("Connected %s.\n", strings.Join(start.Actions, ", "))
-		return nil
+		return start.Actions, nil
 	}
 	target := start.VerificationURIComplete
 	if target == "" {
 		target = start.VerificationURI
 	}
-	fmt.Printf("Go to %s and enter code: %s\n", target, start.UserCode)
+	fmt.Fprintf(os.Stderr, "Go to %s and enter code: %s\n", target, start.UserCode)
 
 	interval := start.Interval
 	if interval <= 0 {
@@ -307,14 +338,13 @@ func connectOAuthDevice(selector, provider string) error {
 		var done grantCompleteResp
 		if err := apiCall(context.Background(), "POST", "/v1/grants/complete",
 			map[string]string{"state": start.State}, &done); err != nil {
-			return err
+			return nil, err
 		}
 		if done.Status == "granted" {
-			fmt.Printf("Connected %s.\n", strings.Join(done.Actions, ", "))
-			return nil
+			return done.Actions, nil
 		}
 	}
-	return kernel.ErrTimeout.Wrap("timed out waiting for device authorization")
+	return nil, kernel.ErrTimeout.Wrap("timed out waiting for device authorization")
 }
 
 // userDisconnectCmd revokes by selector (grants only) or, with --account, a whole upstream account
@@ -327,12 +357,12 @@ func userDisconnectCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if account != "" {
-				return apiEmit("DELETE", "/v1/grants?account="+url.QueryEscape(account), nil)
+				return apiEmit("DELETE", "/v1/grants?account="+url.QueryEscape(account), nil, output{})
 			}
 			if len(args) != 1 {
 				return kernel.ErrInvalidInput.Wrap("a selector or --account is required")
 			}
-			return apiEmit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil)
+			return apiEmit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil, output{})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "Disconnect a whole upstream account (provider) and all its grants")

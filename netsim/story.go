@@ -423,7 +423,7 @@ func (s *story) actMoney() error {
 	// Then it spreads, as it would. A transfer between local users carries no fee and needs no
 	// rail: the money is already inside the kernel.
 	//
-	// Note the units. `user transfer`, `user withdraw` and `admin deposit` take an amount as a
+	// Note the units. `user transfer`, `user withdraw` and `admin user deposit` take an amount as a
 	// person writes it and scale it by the world's decimals themselves, while every price and
 	// balance elsewhere in this story is in base units. Passing base units here funds nobody, and
 	// does so silently.

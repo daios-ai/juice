@@ -19,6 +19,12 @@ import (
 // stubServer starts an httptest server, points the CLI client at it via flagServer, and
 // isolates credential storage in a temp home. Everything resets at test end.
 func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
+	return stubKernel(t, 0, h)
+}
+
+// stubKernel is stubServer with the world's decimals named: a kernel whose money has decimal
+// places is what shows whether an amount was written in the world's unit or in base units (D20).
+func stubKernel(t *testing.T, decimals uint8, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	// The identity banner is what a client reads before it trusts a server or scales its money, so
 	// a stub kernel answers it; everything else is the test's own handler.
@@ -26,7 +32,7 @@ func stubServer(t *testing.T, h http.HandlerFunc) *httptest.Server {
 		if r.URL.Path == "/health" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status": "ok", "handle": "stub", "public_key": "stub-key",
-				"network": "play", "decimals": 0, "symbol": "credits",
+				"network": "play", "decimals": decimals, "symbol": "credits",
 			})
 			return
 		}
