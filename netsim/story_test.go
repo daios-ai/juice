@@ -61,7 +61,7 @@ func TestTheRailInterfaceOffersNoStoryChoices(t *testing.T) {
 // The story's declared shape is what a budgeted rail prices before it spends anything. If it drifts
 // from the trades the story actually makes, a rail can approve a run it cannot pay for.
 func TestShapeMatchesTheTradesTheStoryMakes(t *testing.T) {
-	s := StoryShape()
+	s := StoryShape(12)
 	if s.Kernels != len(kernelPlan) {
 		t.Errorf("shape says %d kernels, the plan has %d", s.Kernels, len(kernelPlan))
 	}
@@ -127,6 +127,55 @@ func TestShapeMatchesTheTradesTheStoryMakes(t *testing.T) {
 	}
 	if s.SigningKernels == 0 || s.PayingUsers == 0 {
 		t.Fatal("a shape with no payers or no signers would let any budget approve any run")
+	}
+}
+
+// Every cross-kernel call that owes draws its own ticket, and every winning draw is its own
+// payment (P10), so the number of payments grows with the rounds. Counting the ordered pairs the
+// trade graph forms — one per creditor, whatever the volume — funded a kernel for two payments
+// where it made thirty-three, and it stalled the moment its vault ran dry.
+func TestPaymentsAreCountedPerCallNotPerCounterparty(t *testing.T) {
+	few, many := StoryShape(1), StoryShape(12)
+	for k, n := range few.PaymentsPerKernel {
+		if k == "k4" || k == "k1" { // the kernels the trading rounds actually make buy
+			if many.PaymentsPerKernel[k] <= n {
+				t.Errorf("kernel %s is budgeted %d payments over 12 rounds and %d over one; "+
+					"more trading must cost more payments", k, many.PaymentsPerKernel[k], n)
+			}
+		}
+	}
+	// A kernel that buys in the acts outside the rounds is budgeted for those too, whatever the
+	// number of rounds: the burst alone is eighty calls.
+	if StoryShape(1).PaymentsPerKernel["k4"] < 10 {
+		t.Errorf("k4 makes eighty burst calls beyond the rounds but is budgeted %d payments",
+			StoryShape(1).PaymentsPerKernel["k4"])
+	}
+	// A free action owes nothing, so it can never cost a payment.
+	if odds := payingOdds("gus/index", "k4"); odds != 0 {
+		t.Errorf("a free action was priced at %v of a payment", odds)
+	}
+	// An obligation at or above the face value is paid in full every time; one below it is paid
+	// with the probability that makes the expected payment the obligation (P10).
+	if odds := payingOdds("dan/chain", "k3"); odds != 1 {
+		t.Errorf("an obligation above the ticket was priced at %v, not certain", odds)
+	}
+	if odds := payingOdds("ana/echo", "k1"); odds <= 0 || odds >= 1 {
+		t.Errorf("an obligation under the ticket was priced at %v, not a fraction", odds)
+	}
+}
+
+// The catalogue's prices are declared once. The story publishes from that table and the shape
+// prices the rail from it, so a price cannot be changed in one place and budgeted from another.
+func TestEveryTradedActionHasADeclaredPrice(t *testing.T) {
+	for _, tr := range crossKernelTrades {
+		if _, ok := actionPrices[bareRef(tr.action)]; !ok {
+			t.Errorf("%s is traded across a boundary but has no declared price", tr.action)
+		}
+	}
+	for _, tr := range otherCrossKernelTrades {
+		if _, ok := actionPrices[tr.action]; !ok {
+			t.Errorf("%s is traded across a boundary but has no declared price", tr.action)
+		}
 	}
 }
 

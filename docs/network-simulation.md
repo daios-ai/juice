@@ -190,7 +190,16 @@ gas provision and ticket payment, from the declared shape — and refuses if it 
 (`JUICE_SEPOLIA_BUDGET`, 0.005 ETH by default). It never spends from the funding account: it moves
 exactly the cap into a wallet made for the run and spends only from there, so whatever the estimate
 got wrong, the run cannot exceed it. At the last measurement the canonical story costs about
-0.0037 ETH. The report separates gas actually burned from ETH merely parked in temporary wallets.
+0.0217 ETH, so a Sepolia run needs `JUICE_SEPOLIA_BUDGET` raised deliberately, to 0.03 or so.
+
+That figure is a count of payments, not of trading partners. Every cross-kernel call that owes
+draws its own ticket and every winning draw is its own chain payment, so twelve rounds and an
+eighty-call burst come to roughly a hundred and thirty payments across seven kernels; the story
+declares the calls each act makes and the shape prices them at the odds the lottery gives each one
+(`payingOdds`), with half again for the variance of the draw. Funding a kernel by the number of
+creditors it has instead — which is what a settlement was before it became per call — starves the
+busiest buyer partway through, and it stalls with an unpayable debt rather than failing outright.
+The report separates gas actually burned from ETH merely parked in temporary wallets.
 
 ## The artifacts
 

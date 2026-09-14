@@ -73,7 +73,7 @@ func run(railName string, rounds int, binary string) error {
 
 	// The rail is told what the story will ask of it before anything starts, so a rail with a
 	// spending limit refuses in advance with numbers rather than running dry halfway through.
-	if err := r.Prepare(n, StoryShape()); err != nil {
+	if err := r.Prepare(n, StoryShape(rounds)); err != nil {
 		stop()
 		return err
 	}

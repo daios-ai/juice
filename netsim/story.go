@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -62,6 +63,16 @@ var userPlan = []struct {
 	{"hal", "k5", 6000, 0},
 }
 
+// actionPrices is what every action in the catalogue advertises, in credits. The story publishes
+// from this and the shape prices the rail from it, so what a buyer is charged and what the run is
+// funded for cannot drift apart.
+var actionPrices = map[string]int64{
+	"ana/echo": 10, "ana/helper": 5, "ana/local-only": 7, "ben/index": 3,
+	"cara/quote": 25, "cara/premium": 200, "cara/flaky": 33, "cara/badout": 11,
+	"dan/bundle": 60, "gus/index": 0, "hal/service": 40,
+	"dan/chain": 120, "cara/pair": 90, // the composites
+}
+
 // The paid trades that cross a kernel boundary. Each opens a debt from the buyer's kernel to the
 // seller's, and each of those debts is settled. This is the trade graph, and it is the same
 // everywhere.
@@ -78,39 +89,62 @@ var crossKernelTrades = []struct{ kernel, user, action, seller string }{
 	{"k1", "ben", "dan@maker/chain", "k3"}, // a composite that itself buys across a boundary
 }
 
-// The trades the other acts make across a kernel boundary. They are declared here, beside the
-// trading rounds, because a payment they cause costs exactly as much as one the rounds cause and a
-// rail that was not told about them runs out of gas partway through.
-var otherCrossKernelTrades = []struct{ kernel, seller string }{
-	{"k1", "k5"}, // the late joiner sells to an established kernel
-	{"k5", "k2"}, // and buys from one
-	{"k6", "k2"}, // the two Sybil identities borrow from the shop
-	{"k7", "k2"},
+// The calls the other acts make across a kernel boundary, with how many each act makes. They are
+// declared here, beside the trading rounds, because a payment they cause costs exactly as much as
+// one the rounds cause and a rail that was not told about them runs out of gas partway through.
+// `calls` is what the act does at most: the burst fires a fixed number, the Sybil act loops a fixed
+// number, and the late joiner polls until it is discovered.
+var otherCrossKernelTrades = []struct {
+	kernel, action, seller string
+	calls                  int
+}{
+	{"k4", "cara/quote", "k2", 80},  // the burst that closes the trading rounds
+	{"k1", "hal/service", "k5", 15}, // the late joiner sells to an established kernel
+	{"k5", "cara/quote", "k2", 1},   // and buys from one
+	{"k6", "cara/quote", "k2", 12},  // the two Sybil identities borrow from the shop
+	{"k7", "cara/quote", "k2", 12},
+	{"k3", "cara/quote", "k2", 12}, // an honest kernel borrows alongside them
+}
+
+// payingOdds is how likely one cross-kernel call is to cost a payment. The call owes
+// `D = mp + the seller's markup` and the ticket pays the whole face value with probability D/L,
+// or exactly D when D is at or above it (P10) — which is what turns hundreds of calls into a
+// handful of payments, and what a chain rail's bill actually measures.
+func payingOdds(action, seller string) float64 {
+	mp := actionPrices[action]
+	if mp <= 0 {
+		return 0 // a free call owes nothing and settles no payment
+	}
+	rates := storyRates()[seller]
+	owed := mp + int64(math.Ceil(float64(mp*int64(rates.remoteBps))/10000))
+	if owed >= storyLottery {
+		return 1
+	}
+	return float64(owed) / float64(storyLottery)
 }
 
 // StoryShape is what the story will ask of the rail, declared before anything runs so a rail with
-// a budget can price it and refuse in advance rather than run dry halfway through.
-func StoryShape() Shape {
-	sellers := map[string]bool{}
-	for _, t := range crossKernelTrades {
-		sellers[t.seller] = true
-	}
-	// A settlement is one payment, and there is one for every ordered pair that ends in debt —
-	// from every act, not only the trading rounds. Pricing by the number of debtors instead would
-	// understate a chain rail's bill by the number of creditors each debtor owes.
-	pairs := map[string]bool{}
+// a budget can price it and refuse in advance rather than run dry halfway through. It depends on
+// the number of trading rounds, because every cross-kernel call that owes draws its own ticket and
+// every winning draw is its own payment (P10): counting the ordered pairs a story forms, as this
+// once did, understates a chain's bill by the number of rounds.
+func StoryShape(rounds int) Shape {
 	debtors := map[string]bool{}
+	pairs := map[string]bool{}
+	expected := map[string]float64{}
 	for _, t := range crossKernelTrades {
-		pairs[t.kernel+"->"+t.seller] = true
-		debtors[t.kernel] = true
+		debtors[t.kernel], pairs[t.kernel+"->"+t.seller] = true, true
+		expected[t.kernel] += float64(rounds) * payingOdds(bareRef(t.action), t.seller)
 	}
 	for _, t := range otherCrossKernelTrades {
-		pairs[t.kernel+"->"+t.seller] = true
-		debtors[t.kernel] = true
+		debtors[t.kernel], pairs[t.kernel+"->"+t.seller] = true, true
+		expected[t.kernel] += float64(t.calls) * payingOdds(t.action, t.seller)
 	}
-	perDebtor := map[string]int{}
-	for p := range pairs {
-		perDebtor[p[:strings.Index(p, "->")]]++
+	// A draw is a coin, so the count is a mean and a run may be unlucky. Half again plus one covers
+	// three standard deviations at these numbers, and a vault funded short stalls the whole story.
+	perKernel := map[string]int{}
+	for k, e := range expected {
+		perKernel[k] = int(math.Ceil(e*1.5)) + 1
 	}
 	// Only the users who bring money in from outside cost a chain rail anything; the rest are
 	// funded by a transfer inside the kernel, which the chain never sees.
@@ -127,8 +161,17 @@ func StoryShape() Shape {
 		PayingUsers:       payers,
 		SigningKernels:    len(debtors),
 		Settlements:       len(pairs),
-		PaymentsPerKernel: perDebtor,
+		PaymentsPerKernel: perKernel,
 	}
+}
+
+// bareRef drops the kernel from a reference: `cara@shop/quote` is `cara/quote` in the catalogue.
+func bareRef(ref string) string {
+	at, slash := strings.Index(ref, "@"), strings.Index(ref, "/")
+	if at < 0 || at > slash {
+		return ref
+	}
+	return ref[:at] + ref[slash:]
 }
 
 // shortOfMoney is how the kernel says a caller cannot afford a call. It names the balance and the
@@ -224,7 +267,7 @@ func (s *story) px(credits int64) string { return strconv.FormatInt(credits*s.sc
 func cr(credits int64) string { return strconv.FormatInt(credits, 10) }
 
 func Run(n *Net, rounds int) (*story, error) {
-	s := &story{n: n, scale: n.Rail.Scale(), shape: StoryShape(),
+	s := &story{n: n, scale: n.Rail.Scale(), shape: StoryShape(rounds),
 		prices: map[string]int64{}, owners: map[string]string{}}
 
 	for _, act := range []struct {
@@ -350,8 +393,8 @@ func (s *story) awaitFunds() error {
 }
 
 // publish puts an HTTP action in the catalogue and records its price and home for the oracle.
-func (s *story) publish(kernel, owner, name string, credits int64, visibility, route, desc string) {
-	k := s.k(kernel)
+func (s *story) publish(kernel, owner, name, visibility, route, desc string) {
+	k, credits := s.k(kernel), actionPrices[owner+"/"+name]
 	s.prices[owner+"/"+name] = credits
 	s.owners[owner+"/"+name] = kernel
 	_, _ = k.Run(owner, "action", "create", name, "--kind", "http", "--source", s.n.Backend+route,
@@ -463,16 +506,16 @@ func (s *story) actMoney() error {
 // ---- the catalogue ----------------------------------------------------------
 
 func (s *story) actCatalogue() error {
-	s.publish("k1", "ana", "echo", 10, "public", "/echo", "Echo a message back to the caller")
-	s.publish("k1", "ana", "helper", 5, "private", "/echo", "A private helper, reachable only by its owner")
-	s.publish("k1", "ana", "local-only", 7, "local", "/echo", "Echo restricted to this kernel's own users")
-	s.publish("k1", "ben", "index", 3, "public", "/echo", "Ben's front door")
-	s.publish("k2", "cara", "quote", 25, "public", "/echo", "Return a price quote")
-	s.publish("k2", "cara", "premium", 200, "public", "/echo", "Premium analysis")
-	s.publish("k2", "cara", "flaky", 33, "public", "/flaky", "A service whose upstream fails intermittently")
-	s.publish("k2", "cara", "badout", 11, "public", "/badout", "A service that returns the wrong shape")
-	s.publish("k3", "dan", "bundle", 60, "public", "/echo", "A service others buy, priced above its cost")
-	s.publish("k4", "gus", "index", 0, "public", "/echo", "A free front door")
+	s.publish("k1", "ana", "echo", "public", "/echo", "Echo a message back to the caller")
+	s.publish("k1", "ana", "helper", "private", "/echo", "A private helper, reachable only by its owner")
+	s.publish("k1", "ana", "local-only", "local", "/echo", "Echo restricted to this kernel's own users")
+	s.publish("k1", "ben", "index", "public", "/echo", "Ben's front door")
+	s.publish("k2", "cara", "quote", "public", "/echo", "Return a price quote")
+	s.publish("k2", "cara", "premium", "public", "/echo", "Premium analysis")
+	s.publish("k2", "cara", "flaky", "public", "/flaky", "A service whose upstream fails intermittently")
+	s.publish("k2", "cara", "badout", "public", "/badout", "A service that returns the wrong shape")
+	s.publish("k3", "dan", "bundle", "public", "/echo", "A service others buy, priced above its cost")
+	s.publish("k4", "gus", "index", "public", "/echo", "A free front door")
 
 	// The composites. dan/chain buys a service on another kernel, so its price must cover the
 	// imported quote — the remote price plus both operators' cuts. cara/pair buys two of cara's
@@ -487,14 +530,14 @@ func (s *story) actCatalogue() error {
 		return err
 	}
 	s.n.MustWork("catalogue.composite_across_kernels", s.k("k3"), "dan", "action", "create", "chain",
-		"--kind", "wasm", "--source", chain, "--price", cr(120),
+		"--kind", "wasm", "--source", chain, "--price", cr(actionPrices["dan/chain"]),
 		"--description", "A composite that buys a service on another kernel")
 	_, _ = s.k("k3").Run("dan", "action", "enable", "dan/chain")
 	// A composite nobody but its owner may call is a composite that never composes: the cross-
 	// kernel trade below buys this one, and so does another user on its own kernel.
 	_, _ = s.k("k3").Run("dan", "action", "update", "dan/chain", "--visibility", "public")
 	s.n.MustWork("catalogue.composite_partial", s.k("k2"), "cara", "action", "create", "pair",
-		"--kind", "wasm", "--source", pair, "--price", cr(90),
+		"--kind", "wasm", "--source", pair, "--price", cr(actionPrices["cara/pair"]),
 		"--description", "Buys a quote, then a service that returns the wrong shape")
 	_, _ = s.k("k2").Run("cara", "action", "enable", "cara/pair")
 	_, _ = s.k("k2").Run("cara", "action", "update", "cara/pair", "--visibility", "public")
@@ -947,7 +990,7 @@ func (s *story) actLateJoiner() error {
 	if err := s.awaitFunds(); err != nil {
 		return err
 	}
-	s.publish("k5", "hal", "service", 40, "public", "/echo", "A late provider's service")
+	s.publish("k5", "hal", "service", "public", "/echo", "A late provider's service")
 	// A newcomer must be found by the kernels already running, and must be able to buy from them.
 	found := poll(30*time.Second, 2*time.Second, func() bool {
 		good, _ := s.buy("k1", "ana", "hal@late/service")

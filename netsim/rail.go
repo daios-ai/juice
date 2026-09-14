@@ -312,7 +312,7 @@ func (a *anvilRail) Finish(n *Net) (map[string]any, error) {
 type sepoliaRail struct {
 	chainRail
 	keyfile, spenderAddr, funderAddr string
-	cap                              float64
+	cap, estimate                    float64
 }
 
 // Measured on Arbitrum Sepolia, 2026-09-04 at 0.48 gwei.
@@ -352,7 +352,7 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 			"(%d settlements, %d paying users) and the cap is %.6f. Raise JUICE_SEPOLIA_BUDGET "+
 			"deliberately or run it on anvil; the story is not reduced to fit", want, shape.Settlements, shape.PayingUsers, cap)
 	}
-	s.cap = cap
+	s.cap, s.estimate = cap, want
 	head, err := strconv.ParseInt(castOut("block", "finalized", "--rpc-url", s.rpc, "-f", "number"), 10, 64)
 	if err != nil {
 		return fmt.Errorf("no finalized head from %s", s.rpc)
@@ -447,7 +447,12 @@ func (s *sepoliaRail) Finish(n *Net) (map[string]any, error) {
 	}
 	burned := s.cap - left - parked
 	fmt.Printf("  burned %.6f ETH of the %.6f cap; %.6f parked in vaults and the paying wallet; %.6f returned\n", burned, s.cap, parked, swept)
+	// What was spent, against what was predicted. An estimate nobody compares with the bill is a
+	// number that stays wrong until a run stalls: this is where the two meet.
+	spent := s.cap - left - s.balance(s.wallet.addr)
+	fmt.Printf("  estimated %.6f ETH, allocated %.6f to kernels and wallets\n", s.estimate, spent)
 	m := map[string]any{"rail": "sepolia", "cap_eth": s.cap, "burned_eth": burned, "parked_eth": parked,
+		"estimated_eth": s.estimate, "allocated_eth": spent,
 		"parked_in_vaults": s.vaults, "swept_back_eth": swept, "exhausted": left <= sepReserve}
 	if left <= sepReserve {
 		return m, fmt.Errorf("the spending wallet ran dry: the run could not pay for all its work")

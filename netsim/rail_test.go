@@ -78,28 +78,28 @@ func TestThePayingWalletIsCostedForEveryTransferItMakes(t *testing.T) {
 // The point of pricing the story in advance: a rail that cannot afford it says so with numbers and
 // refuses, rather than running a cheaper economy under the same name.
 //
-// As it stands the canonical story does NOT fit the default cap. That is a measured fact about
-// this economy on this chain, not a defect in the suite, and the suite's job is to state it and
-// stop. The figures are pinned here so that a change to either the story or the fee model shows up
-// as a failing test rather than as a silently different bill.
+// The canonical story does not fit the default cap, and is not meant to: every cross-kernel call
+// that owes draws its own ticket and a winning draw is its own payment, so twelve rounds and a
+// burst come to roughly a hundred and thirty payments. That is a measured fact about this economy
+// on this chain, not a defect in the suite, and the suite's job is to state it and stop — the
+// operator raises JUICE_SEPOLIA_BUDGET deliberately or runs it on anvil. The figures are pinned so
+// that a change to the story or the fee model shows up as a failing test rather than as a silently
+// different bill.
 func TestTheCanonicalStoryIsPricedBeforeAnythingIsSpent(t *testing.T) {
 	s := &sepoliaRail{}
-	shape := StoryShape()
+	shape := StoryShape(12)
 	cost := s.cost(shape)
-	// The figure is pinned so that a change to the trade graph or the fee model shows up as a
-	// failing test rather than as a silently different bill. Update it deliberately.
-	if cost < 0.0030 || cost > 0.0042 {
+	if cost < 0.018 || cost > 0.026 {
 		t.Errorf("the canonical story now costs %.6f ETH, outside the expected band. If the trade "+
 			"graph changed on purpose, re-pin this figure and the note in docs/network-simulation.md", cost)
-	}
-	if cost > 0.005 {
-		t.Errorf("the story costs %.6f ETH, above the 0.005 default cap: the rail would refuse "+
-			"every run", cost)
 	}
 	// Each additional payment a kernel must sign has to raise the estimate, or the estimate is not
 	// measuring the thing that actually costs money.
 	bigger := shape
-	bigger.PaymentsPerKernel = map[string]int{"k1": 9, "k2": 9, "k3": 9, "k4": 9}
+	bigger.PaymentsPerKernel = map[string]int{}
+	for k, n := range shape.PaymentsPerKernel {
+		bigger.PaymentsPerKernel[k] = n + 1
+	}
 	if s.cost(bigger) <= cost {
 		t.Error("more payments per kernel did not raise the estimate")
 	}
@@ -169,6 +169,21 @@ func TestEveryKeyIsPassedAfterADoubleDash(t *testing.T) {
 				t.Errorf("%s:%d passes a public key with no bare -- before it: %s",
 					name, i+1, strings.TrimSpace(line))
 			}
+		}
+	}
+}
+
+// A run reports what it allocated beside what it estimated. An estimate nobody compares with the
+// bill stays wrong until a run stalls: counting trading partners instead of payments survived a
+// release that way, funding the busiest buyer for two payments where it made thirty-three.
+func TestTheRunReportsWhatItSpentAgainstWhatItEstimated(t *testing.T) {
+	src, err := os.ReadFile("rail.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"estimated_eth", "allocated_eth", "s.estimate"} {
+		if !strings.Contains(string(src), want) {
+			t.Errorf("the Sepolia rail does not report %s, so a wrong estimate is invisible", want)
 		}
 	}
 }
