@@ -141,7 +141,7 @@ func giveCredits(t *testing.T, k *kernel.Kernel, userID string, amount int64) {
 	if err != nil {
 		t.Fatalf("giveCredits: @sys not found: %v", err)
 	}
-	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test", ""); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, userID, amount, "test", newRef()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -162,7 +162,7 @@ func httpDo(t *testing.T, srv *httptest.Server, method, path string, body any, t
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
 	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	sig, err := kernel.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash)
+	sig, err := testNet.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 // missing counterparty or a tampered body) and wraps the result as an *http.Response.
 func fedCallRaw(t *testing.T, k *kernel.Kernel, cp, ts, idempKey, action, sig string, body []byte) *http.Response {
 	t.Helper()
-	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, "", ts, idempKey, action, sig, body)
+	status, respBody, callErr := handleFederationCall(k, context.Background(), cp, "", ts, idempKey, action, sig, kernel.BuyerTerms{}, body)
 	if callErr != nil {
 		status = kernel.HTTPStatusFromCode(kernel.KernelErrorCode(callErr))
 		respBody = map[string]any{"error": callErr.Error()}
@@ -257,7 +257,7 @@ func TestServeHealth(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body map[string]string
+	var body map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
@@ -1266,17 +1266,11 @@ func TestServeLogout(t *testing.T) {
 }
 
 func TestRateLimitLogin(t *testing.T) {
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "rl.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := newTestStore(t)
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "rl-test-secret"
+	cfg := testConfig("rl-test-secret")
 	logger := log.Discard()
-	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db})
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: "rlu", Password: "pass",
 	}); err != nil {
@@ -1615,11 +1609,11 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 	// A cached proxy row is never re-served, even when named by its id.
 	m := kernel.ActionManifest{
 		ActionID: "remote-act", OwnerHandle: "far", Name: "far-act", Kind: kernel.KindHTTP,
-		Price: 0, RemoteBPS: kernel.DefaultConfig().RemoteBPS, Description: "far",
+		Price: 0, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "far",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-far", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
 	}
-	m.Signature, _ = kernel.SignManifest(priv, &m)
+	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
 	if err != nil {
 		t.Fatal(err)
@@ -1770,7 +1764,7 @@ func TestStartRemoteRetryLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		startRemoteRetryLoop(ctx, nil, list, retry, time.Millisecond)
+		startRemoteRetryLoop(ctx, nil, list, retry, func(context.Context) {}, time.Millisecond)
 		close(done)
 	}()
 
@@ -1811,7 +1805,7 @@ func TestStartRemoteRetryLoopDrainsFirst(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go startRemoteRetryLoop(ctx, []*kernel.Trace{parked}, list, retry, time.Hour)
+	go startRemoteRetryLoop(ctx, []*kernel.Trace{parked}, list, retry, func(context.Context) {}, time.Hour)
 
 	select {
 	case id := <-calls:
@@ -2072,7 +2066,7 @@ func TestHealthCmd(t *testing.T) {
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
 
-	if _, err := execTestCmd(t, healthCmd()); err != nil {
+	if _, err := execTestCmd(t, kernelHealthCmd()); err != nil {
 		t.Fatalf("health: unexpected error: %v", err)
 	}
 }
@@ -2091,7 +2085,7 @@ func TestHealthCmdHonorsServer(t *testing.T) {
 	flagServer = srv.URL
 	t.Cleanup(func() { flagServer = old })
 
-	if _, err := execTestCmd(t, healthCmd()); err != nil {
+	if _, err := execTestCmd(t, kernelHealthCmd()); err != nil {
 		t.Fatalf("health: %v", err)
 	}
 	if hit != "/health" {
@@ -2119,12 +2113,38 @@ func TestServeImportOpenAPI(t *testing.T) {
 		t.Fatalf("import: want 200, got %d", resp.StatusCode)
 	}
 
-	var result kernel.ImportResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	raw, _ := io.ReadAll(resp.Body)
+	// The result is the ordinary action projection under snake_case keys (API.md R1): the same
+	// shape an action read returns, never the kernel's own struct serialised raw.
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &shape); err != nil {
 		t.Fatalf("decode import result: %v", err)
 	}
-	if len(result.Created) != 1 {
-		t.Fatalf("expected 1 created action, got %d", len(result.Created))
+	for _, key := range []string{"created", "unchanged", "updated", "deactivated", "rejected"} {
+		if _, ok := shape[key]; !ok {
+			t.Errorf("import result lacks %q: %s", key, raw)
+		}
+	}
+	if _, ok := shape["Created"]; ok {
+		t.Errorf("import result carries a PascalCase key: %s", raw)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(shape["created"], &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("expected 1 created action, got %v (%v)", len(rows), err)
+	}
+	for _, key := range []string{"action", "owner_handle", "http"} {
+		if _, ok := rows[0][key]; !ok {
+			t.Errorf("created row lacks %q: %s", key, shape["created"])
+		}
+	}
+	for _, key := range []string{"owner_user_id", "source"} {
+		if _, ok := rows[0][key]; ok {
+			t.Errorf("created row exposes %q, which no action read does: %s", key, shape["created"])
+		}
+	}
+	var result importResp
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode import result: %v", err)
 	}
 	if result.Created[0].Name != "mail/sayHello" {
 		t.Errorf("name: got %q, want %q", result.Created[0].Name, "mail/sayHello")
@@ -2136,7 +2156,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if again.StatusCode != http.StatusOK {
 		t.Fatalf("re-import by name: want 200, got %d", again.StatusCode)
 	}
-	var second kernel.ImportResult
+	var second importResp
 	if err := json.NewDecoder(again.Body).Decode(&second); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2457,8 +2477,8 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	argsHash := sha256HexBytes(body)
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
-	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash)
-	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, body)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash, "", 0)
+	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, kernel.BuyerTerms{}, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
 	}
@@ -2504,7 +2524,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	sig, _ := kernel.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash)
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash, "", 0)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -2553,11 +2573,16 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 		t.Fatal("call returned empty tx_id")
 	}
 
-	// Non-remote-proxy transaction → 409 ErrInvalidState.
+	// A local call is verifiable too: one surface, audited against this kernel's own key (§11).
 	resp := httpDo(t, srv, "GET", "/v1/transactions/"+txID+"/receipt-verification", nil, tok)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("non-remote-proxy: want 409, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("local receipt verification: want 200, got %d", resp.StatusCode)
+	}
+	var v kernel.ReceiptVerification
+	decodeResponse(t, resp, &v)
+	if !v.Valid {
+		t.Errorf("local receipt reported invalid over HTTP, checks=%v", v.Checks)
 	}
 
 	// Unknown transaction → 404.
@@ -2565,6 +2590,21 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown tx: want 404, got %d", resp2.StatusCode)
+	}
+}
+
+// A peer serves one page of what it holds, under its own order: a filter or an offset has nothing
+// to act on, so combining one with ?peer= is refused rather than silently ignored.
+func TestServeListStepsPeerRefusesFilters(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	_, tok := makeUser(t, k, "peer-list-flags")
+	for _, q := range []string{"limit=5", "offset=1", "status=waiting", "process_id=x"} {
+		resp := httpDo(t, srv, "GET", "/v1/steps?peer=cGVlcg&"+q, nil, tok)
+		resp.Body.Close()
+		if resp.StatusCode != kernel.ErrInvalidInput.HTTP {
+			t.Errorf("?peer with %s: want %d, got %d", q, kernel.ErrInvalidInput.HTTP, resp.StatusCode)
+		}
 	}
 }
 
@@ -2781,12 +2821,10 @@ func TestDiscoverOnce(t *testing.T) {
 }
 
 // discoverOnce runs peer sync with no seeds at all (empty bootstrap_peers and no known kernels, §13):
-// it still pulls gossip from each known peer and records the contact plus the reported
-// counterparty_balance. A kernel that answered is a contact whether or not it is a counterparty —
-// the balance rides the reply and is nil for a non-counterparty (§13), so no roster check gates it.
+// it still pulls gossip from each known peer and records that it was reached. A kernel that answered
+// is a contact whether or not it has ever traded here.
 func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
-	bal := int64(42)
-	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F", CounterpartyBalance: &bal})
+	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F"})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
 	peers := func(context.Context) []string { return []string{"F"} }
 	var contacts []contactCall
@@ -2796,9 +2834,8 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	if len(contacts) != 1 {
 		t.Fatalf("recorded %d contacts, want 1", len(contacts))
 	}
-	c := contacts[0]
-	if c.key != "F" || c.outcome != contactReached || c.credit == nil || *c.credit != 42 {
-		t.Errorf("contact = (%q, outcome=%v, credit=%v), want (F, reached, 42)", c.key, c.outcome, c.credit)
+	if c := contacts[0]; c.key != "F" || c.outcome != contactReached {
+		t.Errorf("contact = (%q, outcome=%v), want (F, reached)", c.key, c.outcome)
 	}
 }
 
@@ -2806,16 +2843,15 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 type contactCall struct {
 	key     string
 	outcome contactOutcome
-	credit  *int64
 }
 
 func recordInto(out *[]contactCall) contactRecorder {
-	return func(_ context.Context, key string, outcome contactOutcome, credit *int64) {
-		*out = append(*out, contactCall{key, outcome, credit})
+	return func(_ context.Context, key string, outcome contactOutcome) {
+		*out = append(*out, contactCall{key, outcome})
 	}
 }
 
-func noContact(context.Context, string, contactOutcome, *int64) {}
+func noContact(context.Context, string, contactOutcome) {}
 
 // A dial that never got an answer is the observation that proves a peer unreachable, so the pass
 // records it; every later stage means the peer DID answer and leaves reachability alone (§13).
@@ -2867,15 +2903,15 @@ func TestContactRecorderPersistsOnlyProof(t *testing.T) {
 		ok  bool
 	}
 	var writes []write
-	rec := newContactRecorder(func(_ context.Context, key string, ok bool, _ *int64) error {
+	rec := newContactRecorder(func(_ context.Context, key string, ok bool) error {
 		writes = append(writes, write{key, ok})
 		return nil
 	})
 	ctx := context.Background()
-	rec(ctx, "A", contactReached, nil)
-	rec(ctx, "B", contactUndispatched, nil)
-	rec(ctx, "C", contactUnknown, nil) // proves nothing
-	rec(ctx, "", contactReached, nil)  // no peer to date
+	rec(ctx, "A", contactReached)
+	rec(ctx, "B", contactUndispatched)
+	rec(ctx, "C", contactUnknown) // proves nothing
+	rec(ctx, "", contactReached)  // no peer to date
 
 	if len(writes) != 2 {
 		t.Fatalf("wrote %v, want only the two proven outcomes", writes)
@@ -2889,13 +2925,13 @@ func TestContactRecorderPersistsOnlyProof(t *testing.T) {
 // unreachable arrives with its context already dead.
 func TestContactRecorderSurvivesCancelledContext(t *testing.T) {
 	var got bool
-	rec := newContactRecorder(func(ctx context.Context, _ string, _ bool, _ *int64) error {
+	rec := newContactRecorder(func(ctx context.Context, _ string, _ bool) error {
 		got = ctx.Err() == nil
 		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	rec(ctx, "A", contactUndispatched, nil)
+	rec(ctx, "A", contactUndispatched)
 	if !got {
 		t.Error("the contact write inherited the cancellation that produced it")
 	}

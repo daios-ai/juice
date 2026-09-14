@@ -35,6 +35,7 @@ fail() { echo "  FAIL: $1 — $2"; FAIL=$((FAIL+1)); ERRS="${ERRS}\n  [$1] $2"; 
 declare -a _PIDS=()
 _RUNROOT="$(mktemp -d)"
 declare -A SERVER_URL=()   # db path -> http://host:port of its running server
+declare -A SERVER_OLD
 declare -A SERVER_PID=()   # db path -> serve pid
 
 track_pid() { _PIDS+=("$1"); }
@@ -68,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local exposure_max=0 settlement_trigger=0 settlement_quantum=0 import_bps=500
+    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -77,47 +78,76 @@ write_config() {
         bootstrap_peers=*)               bootstrap_peers=${a#*=} ;;
         remote_retry_interval_seconds=*) remote_retry_interval_seconds=${a#*=} ;;
         discovery_interval_seconds=*)    discovery_interval_seconds=${a#*=} ;;
-        exposure_max=*)                  exposure_max=${a#*=} ;;
-        settlement_trigger=*)            settlement_trigger=${a#*=} ;;
-        settlement_quantum=*)            settlement_quantum=${a#*=} ;;
+        lottery=*)                       lottery=${a#*=} ;;
+        lottery_max=*)                   lottery_max=${a#*=} ;;
+        credit_limit=*)                  credit_limit=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
+        world=*)                         world=${a#*=} ;;
+        rail_rpc=*)                      rail_rpc=${a#*=} ;;
+        fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
     esac; done
-    local bp_json="[]"
+    # Whatever first boot minted stays minted: read it back before the file is replaced.
+    local prev_key=""
+    [ -f "$(dirname "$db")/config.json" ] && prev_key=$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("credentials_key", ""))
+except Exception:
+    print("")
+' "$(dirname "$db")/config.json")
+    local bp_json="[]" fl_json="[]"
     [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
+    [ -n "$fed_listen_addrs" ] && fl_json="[\"$fed_listen_addrs\"]"
     cat > "$(dirname "$db")/config.json" <<EOF
 {
   "script_timeout_ms": $script_timeout_ms,
   "script_memory_bytes": 67108864,
   "fee_bps": $fee_bps,
   "import_bps": $import_bps,
-  "exposure_max": $exposure_max,
-  "settlement_trigger": $settlement_trigger,
-  "settlement_quantum": $settlement_quantum,
+  "lottery": $lottery,
+  "lottery_max": $lottery_max,
+  "credit_limit": $credit_limit,
   "token_ttl": "15m",
   "log_level": "info",
   "log_format": "json",
   "allow_local_sources": true,
+  "world": "$world",
+  "rail_rpc": "$rail_rpc",
   "kernel_handle": "$kernel_handle",
   "bootstrap_peers": $bp_json,
+  "fed_listen_addrs": $fl_json,
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
   "discovery_interval_seconds": $discovery_interval_seconds
 }
 EOF
+    # The credentials key is minted once, at first boot, and seals every stored credential. Rewriting
+    # the configuration keeps it, exactly as an operator editing this file by hand would.
+    [ -n "$prev_key" ] && python3 -c '
+import json, sys
+path, key = sys.argv[1:3]
+d = json.load(open(path)); d["credentials_key"] = key
+json.dump(d, open(path, "w"), indent=2)
+' "$(dirname "$db")/config.json" "$prev_key"
+    return 0
 }
+
+# server_log db — where start_server captures that kernel's output. It sits in the installation
+# root rather than the kernel's home, so a home that moves does not take its own log with it.
+server_log() { echo "$(khome "$1")/$(basename "$(dirname "$1")")-server.log"; }
 
 # kernel_fed_addr db  — print a running kernel's loopback libp2p multiaddr, scraped from the
 # fed_addrs on its `server.ready` log line. Every kernel now serves as a DHT+relay node, so one
 # kernel can be the bootstrap for the others — there is no separate seed process.
 kernel_fed_addr() {
     local db="$1"
-    local log; log="$(dirname "$db")/server.log"
+    local log; log=$(server_log "$db")
     sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null \
         | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
 }
 
-# kernel_key db home  — print a kernel's own federation public key (via admin identity).
+# kernel_key db home  — print a kernel's own federation public key (via admin kernel show).
 kernel_key() {
-    strfield "$(jj "$1" "$2" admin identity)" public_key
+    strfield "$(jj "$1" "$2" admin kernel show)" public_key
 }
 
 # ---------------------------------------------------------------------------
@@ -129,10 +159,24 @@ kernel_key() {
 # returns 1 (never a silent timeout).
 start_server() {
     local db="$1" home="$2"; shift 2
-    write_config "$db" "$@"
-    local log; log="$(dirname "$db")/server.log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" \
-        "$JUICE" --db "$db" serve --addr 127.0.0.1:0 >"$log" 2>&1 &
+    # A kernel is named, and the name is its directory: serving a second one under one installation
+    # root needs nothing but a second name (D20).
+    local inst; inst=$(basename "$(dirname "$db")")
+    # keep_config=1 leaves whatever configuration is already in the home alone — for the boot that
+    # has to find an untouched legacy home and move it.
+    local keep=0 a cfg=()
+    for a in "$@"; do case "$a" in keep_config=1) keep=1 ;; *) cfg+=("$a") ;; esac; done
+    if [ "$keep" = 0 ]; then
+        mkdir -p "$(dirname "$db")"
+        write_config "$db" ${cfg[@]+"${cfg[@]}"}
+    fi
+    local log; log=$(server_log "$db")
+    # Truncate here, in the parent, before the server is launched: the redirection below truncates
+    # only once the background child runs, and on a restart the wait loop could otherwise grep this
+    # server's predecessor's `server.ready` line and lock onto its now-dead port.
+    : >"$log"
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
+        "$JUICE" kernel serve "$inst" --addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -148,6 +192,7 @@ start_server() {
     done
     SERVER_URL["$db"]="http://$addr"
     SERVER_PID["$db"]="$pid"
+    [ -n "${SERVER_OLD[$db]:-}" ] && repoint_kernels "${SERVER_OLD[$db]}" "http://$addr"
     return 0
 }
 
@@ -156,7 +201,27 @@ start_server() {
 stop_server() {
     local pid="${SERVER_PID[$1]:-}"
     [ -n "$pid" ] && { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+    SERVER_OLD["$1"]="${SERVER_URL[$1]:-}"
     unset "SERVER_URL[$1]" "SERVER_PID[$1]" 2>/dev/null
+}
+
+# repoint_kernels old new — a restarted server answers on a new address, and a client's login is
+# sent only to the address recorded for its kernel. Every client that knew the old address is told
+# the new one, which is what an operator does with `juice kernel add` after a restart. The recorded
+# key is untouched: a restart changes where a kernel answers, never who it is.
+repoint_kernels() {
+    local f
+    while IFS= read -r f; do
+        python3 -c '
+import json, sys
+path, old, new = sys.argv[1:4]
+d = json.load(open(path))
+for k in d.get("kernels", {}).values():
+    if k.get("endpoint", "").rstrip("/") == old.rstrip("/"):
+        k["endpoint"] = new
+json.dump(d, open(path, "w"))
+' "$f" "$1" "$2"
+    done < <(find "$_RUNROOT" -path "*/.juice/client/config.json" 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
@@ -165,8 +230,36 @@ stop_server() {
 # as user commands.
 # ---------------------------------------------------------------------------
 _srv() { local db="$1"; [ -n "${SERVER_URL[$db]:-}" ] && printf -- '--server\n%s\n' "${SERVER_URL[$db]}"; }
-j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" "$@" 2>&1; }
-jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" --db "$db" "${a[@]}" --json "$@" 2>/dev/null; }
+j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" "$@" 2>&1; }
+jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
+q()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --quiet "$@" 2>/dev/null; }
+
+# kdb root — the database of the kernel served under an installation root. One kernel is one named
+# directory, kernels/<name>/, holding the ledger, the config, the rail key and the single-server
+# lock (D23); the flows name the kernel they serve.
+kdb() { echo "$1/kernels/${2:-default}/juice.db"; }
+
+# khome db — the installation root a database belongs to, the inverse of kdb.
+khome() { dirname "$(dirname "$(dirname "$1")")"; }
+
+# await_login db home — log in and wait until the server actually answers as that user. A restart
+# under load can bind its port a moment before it is serving, and a flow that reads too early sees
+# an empty answer rather than the truth it is asserting about.
+await_login() {
+    local db="$1" home="$2" i
+    for i in $(seq 20); do
+        know "$db" "$home" && j "$db" "$home" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
+        [ -n "$(strfield "$(jj "$db" "$home" user me)" handle)" ] && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+# know db home — register db's server with the client under one name, which is what a login names
+# after the @. Re-registering the same kernel at the same address is a no-op, so this is safe to
+# call before every login.
+KERNEL_NAME=k
+know() { j "$1" "$2" kernel add "$(url "$1")" "$KERNEL_NAME" >/dev/null 2>&1; }
 
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }
@@ -199,6 +292,46 @@ assert_fails() {
 # ---------------------------------------------------------------------------
 strfield() { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 numfield() { python3 -c "import sys,json; print(int(json.loads(sys.argv[1]).get(sys.argv[2],0)))" "$1" "$2" 2>/dev/null; }
+# rowfield json list field — a field of the first row of a named list inside a JSON object.
+rowfield() { python3 -c "
+import sys,json
+rows=json.loads(sys.argv[1]).get(sys.argv[2]) or []
+print('' if not rows else rows[0].get(sys.argv[3],''))" "$1" "$2" "$3" 2>/dev/null; }
+
+# owed_count db home peer — how many open obligations one buyer still owes this kernel, from the
+# operator's own view of them. An obligation is kept only by the side that is owed, so this is read
+# on the seller and counted by the buyer it names. A read that fails says so rather than counting
+# zero: a broken read must fail its assertion, never look like everything settled.
+owed_count() {
+    local db="$1" home="$2" peer="$3"
+    python3 -c "
+import sys,json
+rows=json.loads(sys.argv[1]).get('owed') or []
+peer=sys.argv[2]
+print(sum(1 for r in rows if r.get('peer') in (peer, peer[:8]) or peer.startswith(r.get('peer',''))))" \
+        "$(jj "$db" "$home" admin kernel deposits)" "$peer" 2>/dev/null || echo unreadable
+}
+
+# exposure_of db home — what a kernel has delivered to foreign buyers and not been paid for.
+exposure_of() { numfield "$(jj "$1" "$2" admin kernel show)" exposure; }
+
+# balance_of db home — the spendable balance of whoever that home is logged in as.
+balance_of() { numfield "$(jj "$1" "$2" user me)" available; }
+
+# await_eq name want cmd... — poll until the command's output is want, then assert it. Settlement
+# happens on the buyer's own cadence with nobody to prod it, so what a flow can do is wait for the
+# end state and say what it wanted when it never arrives.
+await_eq() {
+    local name="$1" want="$2"; shift 2
+    local got="" i
+    for i in $(seq 1 30); do
+        got=$("$@")
+        [ "$got" = "$want" ] && break
+        sleep 1
+    done
+    assert_eq "$name" "$want" "$got"
+}
+
 # pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.
 pathf() { python3 -c "
 import sys,json
@@ -250,26 +383,94 @@ token() {
         -d "{\"code\":\"$code\",\"code_verifier\":\"$v\"}" 2>/dev/null)" access_token
 }
 
-# juice_token_dir home db — mirrors tokenDir() in cmd/juice/main.go:
-# $HOME/.juice/kernel/tokens/{sha256(abs(db))[:12]}
-juice_token_dir() {
-    python3 -c "import hashlib,os,sys; print(os.path.join(sys.argv[1],'.juice','kernel','tokens',hashlib.sha256(os.path.abspath(sys.argv[2]).encode()).hexdigest()[:12]))" "$1" "$2"
+# A client keeps what it knows in $HOME/.juice/client/: config.json holds the kernels (address, key,
+# network) and which login is selected, and credentials/<handle@kernel>.json holds that login's
+# tokens (D20, ecosystem-standard.md). These read and write one field of the selected login,
+# dispatching by field name to whichever of the two files owns it — which is how a flow plants a
+# stale token or checks that logout dropped one.
+juice_client_dir() { echo "$1/.juice/client"; }
+
+_ctx_py() {
+    python3 -c '
+import json, os, sys
+d, field = sys.argv[1], sys.argv[2]
+write = len(sys.argv) > 3
+cfgp = os.path.join(d, "config.json")
+try:
+    cfg = json.load(open(cfgp))
+except Exception:
+    cfg = {"current": "", "kernels": {}}
+name = cfg.get("current") or "sys@k"
+if field in ("token", "refresh_token"):
+    path = os.path.join(d, "credentials", name + ".json")
+    try:
+        cred = json.load(open(path))
+    except Exception:
+        cred = {}
+    if not write:
+        print(cred.get(field, "")); raise SystemExit
+    cred[field] = sys.argv[3]
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    json.dump(cred, open(path, "w")); os.chmod(path, 0o600)
+    # Planting a session implies the login it belongs to, so a home that has never logged in
+    # still addresses it — which is how a flow plants a stale or rotated-away token.
+    cfg["current"] = name
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    json.dump(cfg, open(cfgp, "w"))
+    raise SystemExit
+kname = name.split("@")[-1]
+k = cfg.get("kernels", {}).get(kname, {})
+if not write:
+    print(k.get(field, "")); raise SystemExit
+cfg.setdefault("kernels", {}).setdefault(kname, {})[field] = sys.argv[3]
+cfg["current"] = name
+os.makedirs(d, mode=0o700, exist_ok=True)
+json.dump(cfg, open(cfgp, "w"))
+' "$@"
 }
+
+profile_get() { _ctx_py "$(juice_client_dir "$1")" "$2"; }
+profile_set() { _ctx_py "$(juice_client_dir "$1")" "$2" "$3"; }
 
 # ---------------------------------------------------------------------------
 # Fixtures — the repeated preambles, once.
 # ---------------------------------------------------------------------------
-# make_admin db home         — boot a server and log sys in (home is sys's home).
-make_admin() { start_server "$1" "$2" "${@:3}" && j "$1" "$2" auth login sys --password sys-pass >/dev/null 2>&1; }
+# make_admin db home         — boot a server, record its kernel, and log sys in (home is sys's home).
+# The client records the kernel before it sends a password, because that is what an operator does
+# and what the kernel requires: no secret leaves for an address whose key is not recorded (D20).
+make_admin() {
+    start_server "$1" "$2" "${@:3}" || return 1
+    know "$1" "$2"
+    j "$1" "$2" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
+}
 # make_user db admin_home user_home handle [password]  — create handle (as sys) and log it
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
     local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"
-    j "$db" "$ah" user create "$h" --password "$pw" >/dev/null 2>&1
-    j "$db" "$uh" auth login "$h" --password "$pw" >/dev/null 2>&1
+    j "$db" "$ah" user create "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
+    know "$db" "$uh"
+    j "$db" "$uh" auth login "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
 }
 # deposit db sys_home handle amount
-deposit() { j "$1" "$2" admin deposit "$3" "$4" >/dev/null 2>&1; :; }
+# newref — a distinct name for one payment. Every crossing names the payment it records, so two
+# fundings of the same account are two payments rather than one repeated (U3). It reads the clock
+# rather than a counter because it is called from a subshell, where a counter would never advance.
+newref() { echo "flow-$(date +%s%N)-$RANDOM"; }
+
+# units N — N base units as a person writes them: every world here counts in millionths, and the
+# CLI takes and shows money in the world's own unit (D20), so a flow that means 5000 base units
+# types 0.005000. Integer arithmetic, like the kernel's own: money never passes through a float.
+# Assertions read JSON, which is base units, so only command inputs go through this.
+units() { printf '%d.%06d\n' "$(( $1 / 1000000 ))" "$(( $1 % 1000000 ))"; }
+
+# deposit db home target amount [ref] — records money that arrived from outside, the amount given in
+# base units. Every crossing names the payment it stands for, so a reference is minted when the
+# caller does not give one (U3). A deposit that fails fails the flow: a test funded by accident
+# proves nothing about what it then measures.
+deposit() {
+    j "$1" "$2" admin user deposit "$3" "$(units "$4")" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1 \
+        || fail "deposit" "could not credit $3 with $4"
+}
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4
@@ -307,6 +508,31 @@ PYEOF
     track_pid $!
     _await_http "$port" POST
 }
+# start_slow_backend port seconds — a POST backend that takes its time. A flow that must interrupt a
+# call needs the call to still be in flight when it pulls the plug; without this the kernel has
+# already committed and the crash lands nowhere interesting.
+start_slow_backend() {
+    local port="$1" secs="${2:-5}"
+    python3 - "$port" "$secs" <<'PYEOF' &
+import sys, time, http.server, socketserver
+port, secs = int(sys.argv[1]), float(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        time.sleep(secs)
+        b = b'{"ok":true}'
+        self.send_response(200); self.send_header('Content-Type','application/json')
+        self.send_header('Content-Length', str(len(b))); self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+S(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    track_pid $!
+    sleep 0.3
+}
+
 # start_header_echo_backend port header  — POST backend that reflects one request header as
 # {"seen": <value>}, so a flow can prove an auth credential actually reached the upstream.
 start_header_echo_backend() {
@@ -444,6 +670,66 @@ wasm = (b'\x00asm\x01\x00\x00\x00'+sec(1,types)+sec(2,imports)+sec(3,funcs)
         +sec(5,mems)+sec(6,globs)+sec(7,exports)+sec(10,codes)+sec(11,data))
 open(outfile,'wb').write(wasm)
 PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# Local chain. Only the rail's opt-in release gate uses these, and they need Foundry
+# (anvil, cast) on PATH; anvil goes into the same process registry as everything else.
+# ---------------------------------------------------------------------------
+ANVIL_RPC=""
+# anvil's first account is funded at genesis and signs every setup transaction.
+ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+# start_anvil — boot a chain on a free port and set ANVIL_RPC. One slot per epoch, so the
+# finalized head trails the tip by two blocks and a flow can say what has settled.
+start_anvil() {
+    local port; port=$(backend_port)
+    anvil --port "$port" --chain-id 31337 --slots-in-an-epoch 1 --silent >/dev/null 2>&1 &
+    track_pid $!
+    ANVIL_RPC="http://127.0.0.1:$port"
+    local deadline=$(( $(date +%s) + 20 ))
+    while ! cast block-number --rpc-url "$ANVIL_RPC" >/dev/null 2>&1; do
+        [ "$(date +%s)" -ge "$deadline" ] && return 1
+        sleep 0.1
+    done
+    return 0
+}
+
+# rail_contracts — juice-rail's compiled mocks. The published module carries their sources but
+# not the artifacts, so a sibling checkout that has run `forge build` is what supplies them.
+rail_contracts() {
+    local dir="${JUICE_RAIL_CONTRACTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/juice-rail/contracts/out}"
+    [ -d "$dir" ] || return 1
+    echo "$dir"
+}
+
+# anvil_deploy name [value] [abi-encoded constructor args] — deploy one mock; echo its address.
+anvil_deploy() {
+    local name="$1" value="${2:-0}" args="${3:-}" out code
+    out=$(rail_contracts) || return 1
+    code=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['bytecode']['object'])" \
+        "$out/$name.sol/$name.json") || return 1
+    strfield "$(cast send --rpc-url "$ANVIL_RPC" --private-key "$ANVIL_KEY" --value "$value" \
+        --create "${code}${args#0x}" --json 2>/dev/null)" contractAddress
+}
+
+# anvil_send key to [cast send arguments...] — one transaction, mined at once.
+anvil_send() {
+    local key="$1" to="$2"; shift 2
+    cast send --rpc-url "$ANVIL_RPC" --private-key "$key" "$to" "$@" >/dev/null 2>&1
+}
+
+# anvil_mine n — advance the chain, which is how a flow reaches finality on demand.
+anvil_mine() {
+    local i
+    for ((i=0; i<$1; i++)); do cast rpc --rpc-url "$ANVIL_RPC" evm_mine >/dev/null 2>&1; done
+}
+
+# anvil_uint to signature args... — read one number straight from the chain, never through the
+# kernel, so an assertion about money has an independent witness.
+anvil_uint() {
+    local to="$1" sig="$2"; shift 2
+    cast call --rpc-url "$ANVIL_RPC" "$to" "$sig" "$@" 2>/dev/null | awk '{print $1}'
 }
 
 # ---------------------------------------------------------------------------

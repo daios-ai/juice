@@ -4,7 +4,7 @@
 
 flow_process_lifecycle() {
     echo "=== FLOW process_lifecycle ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "process_lifecycle.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 1000
@@ -38,14 +38,14 @@ flow_process_lifecycle() {
 
 flow_acl_public() {
     echo "=== FLOW acl_public ==="
-    local dir db hs ha hb aid; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb aid; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "acl_public.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
     # Private action pointing at an unreachable backend (port 1): permission is checked
     # before any process/backend work.
-    aid=$(enabled "$db" "$ha" target --kind http --source "http://127.0.0.1:1/target" --price 0 --description "acl")
+    aid=$(enabled "$db" "$ha" target --kind http --source "http://127.0.0.1:1/target" --price "$(units 0)" --description "acl")
 
     assert_fails "acl_public.private_denied" "unauthorized\|permission\|error" -- j "$db" "$hb" run alice/target '{}'
     assert_fails "acl_public.update_owner_only" "unauthorized\|error" -- j "$db" "$hb" action update "$aid" --visibility public
@@ -65,15 +65,15 @@ flow_acl_public() {
 
 flow_successful_paid_call() {
     echo "=== FLOW successful_paid_call ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     make_admin "$db" "$hs" fee_bps=2000 || { fail "successful_paid_call.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 500
 
-    local aid; aid=$(publish "$db" "$ha" pay --kind http --source "http://127.0.0.1:${bport}/pay" --price 100 --description "paid")
-    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin show sys)" available)
+    local aid; aid=$(publish "$db" "$ha" pay --kind http --source "http://127.0.0.1:${bport}/pay" --price "$(units 100)" --description "paid")
+    local sys_start; sys_start=$(numfield "$(jj "$db" "$hs" admin user show sys)" available)
 
     # fee_bps=2000 → on gross=100: fee=20, net=80.
     local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/pay '{}')" tx_id)
@@ -85,12 +85,12 @@ flow_successful_paid_call() {
     assert_json "successful_paid_call.tx_status" "$tx" status success
     assert_jnum "successful_paid_call.bob_debited"     "$(jj "$db" "$hb" user me)" available 400
     assert_jnum "successful_paid_call.target_credited" "$(jj "$db" "$ha" user me)" available 80
-    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin show sys)" available)"
+    assert_eq   "successful_paid_call.fee_credited" "$(( sys_start + 20 ))" "$(numfield "$(jj "$db" "$hs" admin user show sys)" available)"
 }
 
 flow_http_verbs() {
     echo "=== FLOW http_verbs ==="
-    local dir db hs ha bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_echo_backend "$bport" || { fail "http_verbs.backend" "echo backend failed"; return; }
     make_admin "$db" "$hs" || { fail "http_verbs.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -100,7 +100,7 @@ flow_http_verbs() {
     local verb lname aid out
     for verb in GET PUT PATCH DELETE; do
         lname=$(printf '%s' "$verb" | tr 'A-Z' 'a-z')
-        aid=$(enabled "$db" "$ha" "v-$lname" --kind http --method "$verb" --source "http://127.0.0.1:${bport}/echo" --price 0 --description "verb $verb")
+        aid=$(enabled "$db" "$ha" "v-$lname" --kind http --method "$verb" --source "http://127.0.0.1:${bport}/echo" --price "$(units 0)" --description "verb $verb")
         out=$(jj "$db" "$ha" run "alice/v-$lname" '{"v":"x"}')
         local m v
         m=$(pathf "$out" result.method)
@@ -114,14 +114,14 @@ flow_http_verbs() {
 
 flow_failed_call_refund() {
     echo "=== FLOW failed_call_refund ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 500 '{"error":"backend error"}'
     make_admin "$db" "$hs" || { fail "failed_call_refund.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 500
 
-    local aid; aid=$(publish "$db" "$ha" fail --kind http --source "http://127.0.0.1:${bport}/fail" --price 100 --description "failing")
+    local aid; aid=$(publish "$db" "$ha" fail --kind http --source "http://127.0.0.1:${bport}/fail" --price "$(units 100)" --description "failing")
 
     # Backend 500 → execution failure; full refund, alice credited nothing, failure tx recorded.
     j "$db" "$hb" run alice/fail '{}' >/dev/null 2>&1 || true
@@ -141,7 +141,7 @@ flow_failed_call_refund() {
     assert_not_contains "failed_call_refund.reason_hides_body" "backend error"    "$reason"
 
     # A dial failure (closed port) must not name the host either — a different code path.
-    local did; did=$(publish "$db" "$ha" dead --kind http --source "http://127.0.0.1:1/x" --price 10 --description "dead")
+    local did; did=$(publish "$db" "$ha" dead --kind http --source "http://127.0.0.1:1/x" --price "$(units 10)" --description "dead")
     j "$db" "$hb" run alice/dead '{}' >/dev/null 2>&1 || true
     local dtx; dtx=$(find_id "$(jj "$db" "$hb" tx list)" action_name dead)
     assert_not_contains "failed_call_refund.dial_reason_hides_host" "127.0.0.1:1" \
@@ -154,14 +154,14 @@ flow_failed_call_refund() {
 flow_terms_changed_refused() {
     echo "=== FLOW terms_changed_refused ==="
     local dir db hs ha hb bport
-    dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"result":"ok"}'
     make_admin "$db" "$hs" || { fail "terms.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 1000
 
-    local aid; aid=$(publish "$db" "$ha" svc --kind http --source "http://127.0.0.1:${bport}/x" --price 100 --description "quoted")
+    local aid; aid=$(publish "$db" "$ha" svc --kind http --source "http://127.0.0.1:${bport}/x" --price "$(units 100)" --description "quoted")
     local quoted; quoted=$(strfield "$(jj "$db" "$hb" action show alice/svc)" quote_hash)
     assert_nonempty "terms.hash_exposed" "$quoted"
 
@@ -170,7 +170,7 @@ flow_terms_changed_refused() {
     local bal; bal=$(numfield "$(jj "$db" "$hb" user me)" available)
 
     # The owner raises the price. The stale pin is refused, and nothing moves.
-    j "$db" "$ha" action update "$aid" --price 500 >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --price "$(units 500)" >/dev/null 2>&1
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     assert_fails "terms.stale_pin_refused" "" -- j "$db" "$hb" run alice/svc '{}' --quote-hash "$quoted"
     assert_jnum "terms.no_charge" "$(jj "$db" "$hb" user me)" available "$bal"
@@ -183,13 +183,13 @@ flow_terms_changed_refused() {
 
 flow_input_schema_failure() {
     echo "=== FLOW input_schema_failure ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "input_schema_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 300
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --kind http --source "http://127.0.0.1:1/x" --price 0 --description "schema" \
+    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --kind http --source "http://127.0.0.1:1/x" --price "$(units 0)" --description "schema" \
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -202,14 +202,14 @@ flow_input_schema_failure() {
 
 flow_output_schema_failure() {
     echo "=== FLOW output_schema_failure ==="
-    local dir db hs ha hb bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'   # missing required output "id"
     make_admin "$db" "$hs" || { fail "output_schema_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 300
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --kind http --source "http://127.0.0.1:${bport}/schema-out" --price 50 --description "schema out" \
+    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --kind http --source "http://127.0.0.1:${bport}/schema-out" --price "$(units 50)" --description "schema out" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -230,14 +230,14 @@ flow_output_schema_failure() {
 # covered by the Go flow suite (TestFlow_OAuthDelegated); here we assert the CLI gating.
 flow_grant() {
     echo "=== FLOW grant ==="
-    local dir db hs ha aid; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha aid; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "grant.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 1000
 
     # A delegated-OAuth action; provider endpoints are loopback stubs (never dialed on the
     # reject path — consent is required before any funds lock).
-    aid=$(strfield "$(jj "$db" "$ha" action create inbox --kind http --source "http://127.0.0.1:9/api" --price 100 --description "delegated inbox" --auth '{"scheme":"oauth_delegated","config":{"auth_url":"http://127.0.0.1:9/auth","token_url":"http://127.0.0.1:9/token","client_id":"cid","scopes":"read"}}')" id)
+    aid=$(strfield "$(jj "$db" "$ha" action create inbox --kind http --source "http://127.0.0.1:9/api" --price "$(units 100)" --description "delegated inbox" --auth '{"scheme":"oauth_delegated","config":{"auth_url":"http://127.0.0.1:9/auth","token_url":"http://127.0.0.1:9/token","client_id":"cid","scopes":"read"}}')" id)
     assert_nonempty "grant.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
@@ -256,14 +256,14 @@ flow_grant() {
 # two actions in `user me` (token-free), then disconnects the whole account and is rejected again.
 flow_grant_bearer() {
     echo "=== FLOW grant_bearer ==="
-    local dir db hs ha a1 a2 bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha a1 a2 bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     bport=$(backend_port); start_header_echo_backend "$bport" "X-Api-Key" || { fail "grant_bearer.backend" "backend failed"; return; }
     make_admin "$db" "$hs" || { fail "grant_bearer.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     # Two actions under the inbox/ directory sharing one upstream host → one connection.
-    a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
-    a2=$(strfield "$(jj "$db" "$ha" action create inbox/read --kind http --source "http://127.0.0.1:${bport}/api" --price 0 --description "bearer read" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    a2=$(strfield "$(jj "$db" "$ha" action create inbox/read --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer read" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
     assert_nonempty "grant_bearer.a1_created" "$a1"
     assert_nonempty "grant_bearer.a2_created" "$a2"
     j "$db" "$ha" action enable "$a1" >/dev/null 2>&1

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -26,29 +28,111 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func init() {
+// kernelServeCmd is built like every other command, so a test can exercise its argument rules
+// without starting a server. It is registered under the kernel noun (see kernel.go).
+func kernelServeCmd() *cobra.Command {
 	var addr string
-	serveCmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start the server",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return runServer(addr)
+	cmd := &cobra.Command{
+		Use:   "serve NAME",
+		Short: "Start a kernel",
+		Long: "Start the kernel called NAME, or create it if this is its first boot.\n\n" +
+			"NAME is the kernel's nickname: what it calls itself on the network, and the name of its\n" +
+			"home under ~/.juice/kernels/. A first boot fixes three things for the life of the kernel —\n" +
+			"its nickname, the network it serves, and its signing key — and asks for whatever its\n" +
+			"configuration does not already say.",
+		// Cobra's own arity message names an argument count; an operator needs the name.
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return kernel.ErrInvalidInput.Wrap("name the kernel to serve: juice kernel serve NAME")
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runServer(args[0], addr)
 		},
 	}
-	serveCmd.Flags().StringVar(&addr, "addr", ":4040", "Listen address")
-	rootCmd.AddCommand(serveCmd)
-
-	rootCmd.AddCommand(healthCmd())
+	cmd.Flags().StringVar(&addr, "addr", ":4040", "Address to listen on for clients")
+	return cmd
 }
 
-func runServer(addr string) error {
-	k, db, logger, httpExec, fedAdapter, specs, err := openKernel()
+// holdHome takes the one lock a kernel's home has, for as long as this process serves it. One
+// server per home is not a convenience: two would race the same signing key on the rail, where the
+// chain admits one transaction per nonce, and would double-drive every background worker (D23).
+func holdHome() (func(), error) {
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(kernelHome(), "serve.lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another server is already running for %s", kernelHome())
+	}
+	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+func runServer(name, addr string) error {
+	if err := validateLocalName("kernel", name); err != nil {
+		return err
+	}
+	kernelName = name
+	// A kernel made before kernels were named lives one directory up. Move it before anything opens
+	// or creates a home, so the first boot after the upgrade continues with the same ledger and
+	// the same identity rather than quietly starting an empty second kernel beside it.
+	if err := migrateLegacyHome(); err != nil {
+		return err
+	}
+	// A kernel with no database has not been created yet. Ask before taking the lock, so declining
+	// leaves not even a directory behind; write the answers after taking it, so two `serve` of one
+	// name cannot each mint a different credentials key for the same home.
+	dbFile := filepath.Join(kernelHome(), "juice.db")
+	fresh := !exists(dbFile)
+	var cfg ServerConfig
+	if fresh {
+		var err error
+		if cfg, err = firstBootConfig(name, kernelHome()); err != nil {
+			return err
+		}
+	}
+	release, err := holdHome()
+	if err != nil {
+		return err
+	}
+	defer release()
+	if fresh {
+		if exists(dbFile) {
+			return kernel.ErrInvalidState.Wrapf("kernel %s was created while this boot was being answered; run it again", name)
+		}
+		if err := writeConfig(filepath.Join(kernelHome(), "config.json"), cfg); err != nil {
+			return err
+		}
+	}
+
+	k, db, logger, httpExec, fedAdapter, specs, world, err := openKernel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	if err := bootstrap(k, globalCfg.Native, specs); err != nil {
+	// The rail witnesses external money (D23). A world whose chain or token is wrong refuses the
+	// boot; one whose endpoint is merely down serves, and money verbs wait for it. It runs before
+	// the network is bound, so a world that is not what it claims binds nothing.
+	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC)
+	if err != nil {
+		return fmt.Errorf("rail: %w", err)
+	}
+	k.SetRail(railway)
+	// Record the network once the rail has verified it, so the digest a kernel is bound to for life
+	// names a network that was checked rather than one that was merely configured. Every later boot
+	// writes the same value it read (D23).
+	if err := k.SetConfig(context.Background(), configKeyWorldDigest, world.Network().Digest); err != nil {
+		return err
+	}
+
+	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	// Prune natives the build no longer ships (e.g. after a native action is removed): a
@@ -111,45 +195,53 @@ func runServer(addr string) error {
 	// nothing (§14).
 	recordContact := newContactRecorder(k.RecordKernelContact)
 	if ferr != nil {
-		logger.Error("fed.start_failed", "error", ferr)
-	} else {
-		srv.fed = fedTransport
-		fedAdapter.SetTransport(fedTransport)
-		fedAdapter.SetContactRecorder(recordContact)
-		pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-		fedAdapter.SetLocalPubKey(pub)
-		defer fedTransport.Close()
-
-		// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
-		// shutdown first, then settles into the ordinary timer so a peer coming back online settles
-		// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
-		// server. bootstrap's own pass runs before this transport exists, so it can only settle
-		// max-age expiries — this drain is the first attempt that can actually reach a peer.
-		// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
-		// trace, so the drain is exactly the pre-existing work and never a moving target.
-		retryCtx, retryCancel := context.WithCancel(context.Background())
-		defer retryCancel()
-		pending, perr := k.PendingRemoteTraces(retryCtx)
-		if perr != nil {
-			logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
-		}
-		go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, globalCfg.remoteRetryInterval())
-
-		// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
-		// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
-		// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
-		// kernels re-advertise every pass, so the network fills in progressively with no home-grown
-		// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
-		// are synced. Best-effort; stops with runServer.
-		discCtx, discCancel := context.WithCancel(context.Background())
-		defer discCancel()
-		disc := fedTransport
-		go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
-			pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
-			defer cancel()
-			discoverOnce(pctx, disc, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
-		})
+		// A kernel that cannot reach the network is not serving: it would answer health `ok`, take
+		// local calls, and silently do no discovery, no inbound peer calls and no settlement. The
+		// standard says a listen collision is a startup failure; this is where that is true.
+		return fmt.Errorf("federation transport: %w", ferr)
 	}
+	srv.fed = fedTransport
+	fedAdapter.SetTransport(fedTransport)
+	fedAdapter.SetContactRecorder(recordContact)
+	pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	fedAdapter.SetLocalPubKey(pub)
+	defer fedTransport.Close()
+
+	// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
+	// shutdown first, then settles into the ordinary timer so a peer coming back online settles
+	// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
+	// server. bootstrap's own pass runs before this transport exists, so it can only settle
+	// max-age expiries — this drain is the first attempt that can actually reach a peer.
+	// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
+	// trace, so the drain is exactly the pre-existing work and never a moving target.
+	retryCtx, retryCancel := context.WithCancel(context.Background())
+	defer retryCancel()
+	pending, perr := k.PendingRemoteTraces(retryCtx)
+	if perr != nil {
+		logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
+	}
+	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, k.SettleReady, globalCfg.remoteRetryInterval())
+
+	// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
+	// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
+	// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
+	// kernels re-advertise every pass, so the network fills in progressively with no home-grown
+	// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
+	// are synced. Best-effort; stops with runServer.
+	discCtx, discCancel := context.WithCancel(context.Background())
+	defer discCancel()
+	go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
+		pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
+		defer cancel()
+		discoverOnce(pctx, fedTransport, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
+	})
+
+	// Drive external money (D23): re-present everything still open, observe payments in, close any
+	// settlement whose payment has arrived, and audit. It rides the retry cadence rather than adding
+	// a knob of its own, and does nothing until the rail is verified.
+	railCtx, railCancel := context.WithCancel(context.Background())
+	defer railCancel()
+	go startDiscoveryLoop(railCtx, globalCfg.remoteRetryInterval(), k.RailPass)
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
 	// DB-only, so it runs regardless of the federation transport; started only when enabled.
@@ -163,11 +255,8 @@ func runServer(addr string) error {
 	// It carries the kernel's public key and libp2p listen addrs, because federation no longer
 	// exposes them over HTTP (there is no .well-known).
 	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	readyFields := []any{"addr", ln.Addr().String(), "public_key", pubKey}
-	if srv.fed != nil {
-		readyFields = append(readyFields, "fed_addrs", srv.fed.ListenAddrs())
-	}
-	logger.Info("server.ready", readyFields...)
+	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
+		"addr", ln.Addr().String(), "public_key", pubKey, "fed_addrs", srv.fed.ListenAddrs())
 
 	httpSrv := &http.Server{Handler: r}
 
@@ -219,7 +308,7 @@ func everyTick(ctx context.Context, interval time.Duration, work func(context.Co
 // never overlaps the previous one); every retry is idempotent (same key → the remote replays), so
 // the drain and the first tick overlapping on one trace costs a replay, never a second execution.
 // Stops when ctx is cancelled.
-func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, interval time.Duration) {
+func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(context.Context) ([]*kernel.Trace, error), retry func(context.Context, *kernel.Trace) error, sweep func(context.Context), interval time.Duration) {
 	for _, tr := range drain {
 		if ctx.Err() != nil {
 			return
@@ -228,6 +317,9 @@ func startRemoteRetryLoop(ctx context.Context, drain []*kernel.Trace, list func(
 	}
 	sched := newBackoffScheduler(interval)
 	everyTick(ctx, interval, func(ctx context.Context) {
+		// Whatever a lost pass left with a recorded outcome settles here (D3), before the retries
+		// that may make more of it ready.
+		sweep(ctx)
 		traces, err := list(ctx)
 		if err != nil {
 			return
@@ -264,16 +356,16 @@ const (
 // write is detached from the caller's context, because the very timeout that proves a peer
 // unreachable would otherwise cancel the write recording it, and its error is dropped, because a
 // display-cache write must never change the result of the operation that observed it.
-type contactRecorder func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64)
+type contactRecorder func(ctx context.Context, peerKey string, outcome contactOutcome)
 
 // newContactRecorder is where an undecided outcome stops: only proof is persisted, so callers report
 // what happened and none of them has to know that "may have arrived" means "write nothing".
-func newContactRecorder(record func(context.Context, string, bool, *int64) error) contactRecorder {
-	return func(ctx context.Context, peerKey string, outcome contactOutcome, credit *int64) {
+func newContactRecorder(record func(context.Context, string, bool) error) contactRecorder {
+	return func(ctx context.Context, peerKey string, outcome contactOutcome) {
 		if peerKey == "" || outcome == contactUnknown {
 			return
 		}
-		_ = record(context.WithoutCancel(ctx), peerKey, outcome == contactReached, credit)
+		_ = record(context.WithoutCancel(ctx), peerKey, outcome == contactReached)
 	}
 }
 
@@ -290,7 +382,7 @@ type fedDiscoverer interface {
 // namespace, then pulls gossip from the union of the namespace's providers, configured bootstrap
 // seeds, and known counterparties. On a VERIFIED pull — one authenticated as the key we dialed
 // (g.PublicKey == key) that accumulates cleanly — it refreshes the catalog, advances the evidence
-// cursor, and (for a counterparty) caches liveness/credit. A non-verified pull (transport error, bad
+// cursor, and records that the peer was reached. A non-verified pull (transport error, bad
 // JSON, key mismatch, or accumulate rejection) is logged and retried a later pass; discovery holds no
 // per-candidate attempt state, since routing discovery re-surfaces live kernels every pass. One
 // structured discovery.pass summary ends the pass: Debug when nothing failed, Info otherwise.
@@ -344,7 +436,7 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		if err != nil {
 			// The rotation retries a later pass. Only a dial that never connected proves the peer is
 			// unreachable (§13); a stream that broke mid-pull proves nothing and records nothing.
-			recordContact(ctx, key, contactFromErr(err), nil)
+			recordContact(ctx, key, contactFromErr(err))
 			fail("transport", err)
 			continue
 		}
@@ -368,9 +460,8 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 			_ = setCursor(ctx, key, next)
 		}
 		// Recorded after accumulation, which is what upserts the kernel row: an earlier write would
-		// no-op on a first contact. CounterpartyBalance is set only for a known counterparty (§13),
-		// so passing it through needs no separate roster check.
-		recordContact(ctx, key, contactReached, g.CounterpartyBalance)
+		// no-op on a first contact.
+		recordContact(ctx, key, contactReached)
 	}
 
 	fields := []any{"candidates", len(keys), "ok", ok, "failed", failed, "duration_ms", time.Since(start).Milliseconds()}
@@ -467,18 +558,33 @@ const fedOpTimeout = 8 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
-func registerRoutes(r chi.Router, srv *server) {
-	// Health (unauthenticated). Doubles as an identity banner so someone can see which kernel
-	// they're pointed at before logging in: the handle and public key are the kernel's advertised
-	// federation identity (§13), not secrets — only the private key is withheld.
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		pub, _ := srv.kernel.GetConfig(r.Context(), configKeySigningPublic)
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":     "ok",
-			"handle":     globalCfg.KernelHandle,
-			"public_key": pub,
-		})
+// railAddress is where this kernel is paid, empty on a world with no addresses.
+func (s *server) railAddress(ctx context.Context) string {
+	addr, _ := s.kernel.RailIdentity(ctx)
+	return addr
+}
+
+// getHealth is the identity banner (unauthenticated) every client reads before it trusts a server:
+// which kernel this is, which network it serves, and how its money is written (D20). The handle and
+// public key are this kernel's advertised federation identity (§13), not secrets — only the private
+// key is withheld.
+func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
+	pub, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
+	net := s.kernel.Network()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":         "ok",
+		"handle":         globalCfg.KernelHandle,
+		"public_key":     pub,
+		"network":        net.Name,
+		"network_digest": net.Digest,
+		"decimals":       net.Decimals,
+		"symbol":         net.Symbol,
+		"rail_address":   s.railAddress(r.Context()),
 	})
+}
+
+func registerRoutes(r chi.Router, srv *server) {
+	r.Get("/health", srv.getHealth)
 
 	// Federation has no HTTP surface: peer identity, inbound calls, manifests, gossip, and
 	// inspection travel over the libp2p transport (§13), started in runServer. Public action
@@ -528,6 +634,9 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
+		r.Put("/v1/me/address", srv.putRailAddress)
+		r.Post("/v1/withdrawals", srv.postWithdrawal)
+		r.Get("/v1/withdrawals", srv.getWithdrawals)
 		r.Post("/v1/transfers", srv.postTransfer)
 		r.Get("/v1/ledger", srv.getLedger)
 
@@ -550,17 +659,22 @@ func registerRoutes(r chi.Router, srv *server) {
 	// per-route by requireSuperuserMW (§14). Not a separate surface; authority is the @sys bearer.
 	r.Group(func(r chi.Router) {
 		r.Use(srv.authMiddleware, srv.requireSuperuserMW)
-		r.Get("/control/users", srv.ctlListUsers)
-		r.Get("/control/users/{handle}", srv.ctlShowUser)
-		r.Post("/control/users/{handle}/suspend", srv.ctlSetSuspended(true))
-		r.Post("/control/users/{handle}/unsuspend", srv.ctlSetSuspended(false))
-		r.Post("/control/users/{handle}/rename", srv.ctlRenameUser)
-		r.Post("/control/deposit", srv.ctlAdjust(true))
-		r.Post("/control/withdraw", srv.ctlAdjust(false))
-		r.Post("/control/peers/settle", srv.ctlSettlePeer)
-		r.Get("/control/peers", srv.ctlListPeers)
-		r.Get("/control/peers/inspect", srv.ctlInspectPeer)
-		r.Get("/control/identity", srv.ctlIdentity)
+		// Each noun is its own resource, so the route says which kind of target it takes and no
+		// parameter has to: the verbs are identical, the namespaces never are (D15, D20).
+		for _, noun := range []string{"user", "peer"} {
+			r.Route("/v1/admin/"+noun+"s/{target}", func(r chi.Router) {
+				r.Get("/", srv.ctlShowTarget(noun))
+				r.Post("/suspend", srv.ctlSetSuspended(noun, true))
+				r.Post("/unsuspend", srv.ctlSetSuspended(noun, false))
+				r.Post("/rename", srv.ctlRename(noun))
+			})
+		}
+		r.Get("/v1/admin/users", srv.ctlListUsers)
+		r.Post("/v1/admin/users/{target}/deposit", srv.ctlDeposit)
+		r.Get("/v1/admin/peers", srv.ctlListPeers)
+		r.Get("/v1/admin/peers/{target}/inspect", srv.ctlInspectPeer)
+		r.Get("/v1/admin/kernel", srv.ctlIdentity)
+		r.Get("/v1/admin/kernel/deposits", srv.ctlListDeposits)
 	})
 }
 
@@ -913,7 +1027,11 @@ func (s *server) importOpenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.kernel.ImportOpenAPI(r.Context(), caller, caller, req.Name, specURL, specBytes, req.Auth)
-	writeOr(w, result, err)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, enrichImport(s.kernel, r.Context(), result))
 }
 
 func (s *server) postAction(w http.ResponseWriter, r *http.Request) {
@@ -931,12 +1049,6 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 
 // ratingView is the public reputation projection of a Rating (§13, §16): the market signal only,
 // never the rater identity, the transaction/receipt it links, or the signature.
-type ratingView struct {
-	Value   int       `json:"value"`
-	Note    *string   `json:"note"`
-	Created time.Time `json:"created_at"`
-}
-
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	// Gate on the action's own visibility (anonymous caller allowed for a public action); the read
 	// is independent of the action's active state so reputation survives deactivation (§8).
@@ -945,16 +1057,12 @@ func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := listBounds(r)
-	ratings, err := s.kernel.ListRatings(r.Context(), pathID(r), limit, offset)
+	ratings, err := s.kernel.ActionRatings(r.Context(), pathID(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	views := make([]ratingView, 0, len(ratings))
-	for _, rt := range ratings {
-		views = append(views, ratingView{Value: int(rt.Rating), Note: rt.Note, Created: rt.CreatedAt})
-	}
-	writeJSON(w, http.StatusOK, views)
+	writeJSON(w, http.StatusOK, ratings)
 }
 
 func (s *server) updateActionTarget(w http.ResponseWriter, r *http.Request) {
@@ -1039,12 +1147,15 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Note   *string `json:"note"`
 	}) (any, int, error) {
 		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
-		return rating, http.StatusOK, err
+		if err != nil {
+			return nil, 0, err
+		}
+		return ratingView{Rating: rating}, http.StatusOK, nil
 	})(w, r)
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	v, err := s.kernel.VerifyRemoteReceipt(r.Context(), callerFrom(r), pathID(r))
+	v, err := s.kernel.VerifyReceipt(r.Context(), callerFrom(r), pathID(r))
 	writeOr(w, v, err)
 }
 
@@ -1131,6 +1242,32 @@ func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
 // ---- Step handlers ----
 
 func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
+	// ?peer= asks a peer which of its parked steps this caller may complete — the listing half of
+	// `step complete --peer`, under the same rule: an ordinary user asks as themselves and sees the
+	// steps addressed to them, the superuser asks as the whole kernel and sees all of them (§13).
+	if peer := strings.TrimSpace(r.URL.Query().Get("peer")); peer != "" {
+		// A peer serves one bounded page of what it holds, under its own order (P8): there is
+		// nothing here for a filter or an offset to act on, so asking is an error, never silence.
+		for _, p := range []string{"process_id", "status", "limit", "offset"} {
+			if r.URL.Query().Get(p) != "" {
+				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the steps it holds", p))
+				return
+			}
+		}
+		callerID := callerFrom(r)
+		forUserID := callerID
+		if s.kernel.IsSuperuser(r.Context(), callerID) {
+			forUserID = ""
+		}
+		peerKey, err := s.resolvePeerKey(r.Context(), peer)
+		if err != nil {
+			writeOr(w, nil, err)
+			return
+		}
+		steps, err := s.kernel.PeerStepsAwaitingUs(r.Context(), peerKey, forUserID)
+		writeOr(w, steps, err)
+		return
+	}
 	limit, offset := listBounds(r)
 	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
 		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
@@ -1187,16 +1324,12 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a step on a peer")
 		}
 		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a step
-		// is a step. An ordinary authenticated user may complete a remote step addressed to THEM: the
-		// home kernel attaches a step_auth attestation naming their stable id, and the serving kernel
-		// enforces it against the step's required remote caller. A superuser completes kernel-level
-		// (no attestation) — the request acts as the whole kernel, for a kernel-addressed step.
+		// is a step. Every caller completes as themselves: the home kernel attests their stable id,
+		// and whether they are its operator, and the serving kernel matches that against the step's
+		// addressing — a user completes the steps addressed to them, the operator those and the ones
+		// addressed to the kernel itself.
 		if req.Peer != "" {
-			callerID := callerFrom(r)
-			forUserID := callerID
-			if s.kernel.IsSuperuser(r.Context(), callerID) {
-				forUserID = "" // kernel-level completion (no per-user attestation)
-			}
+			forUserID := callerFrom(r)
 			peerKey, err := s.resolvePeerKey(r.Context(), strings.TrimSpace(req.Peer))
 			if err != nil {
 				return nil, 0, err
@@ -1271,6 +1404,58 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 // getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
+// putRailAddress registers where the caller is paid, against a signature proving they hold it.
+// Registering also delivers anything that address has already paid in (D23).
+func (s *server) putRailAddress(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Address   string `json:"address"`
+		Signature string `json:"signature"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	u, attributed, err := s.kernel.SetRailAddress(r.Context(), callerFrom(r), req.Address, req.Signature)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	uc := newAccountCache(s.kernel, r.Context())
+	views := make([]*ledgerView, 0, len(attributed))
+	for _, e := range attributed {
+		views = append(views, enrichLedger(e, uc))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"address": u.RailAddress, "attributed": views})
+}
+
+// postWithdrawal sends the caller's own credits back out. The id is theirs and is the row, so a
+// reply lost in transit is safe to ask for again (U51).
+func (s *server) postWithdrawal(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID     string `json:"id"`
+		Amount int64  `json:"amount"`
+		Reason string `json:"reason"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	row, err := s.kernel.Withdraw(r.Context(), callerFrom(r), req.ID, req.Amount, req.Reason)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOr(w, railTransferViews(s.kernel, r.Context(), []*kernel.RailTransfer{row})[0], nil)
+}
+
+func (s *server) getWithdrawals(w http.ResponseWriter, r *http.Request) {
+	limit, offset := listBounds(r)
+	rows, err := s.kernel.ListWithdrawals(r.Context(), callerFrom(r), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOr(w, railTransferViews(s.kernel, r.Context(), rows), nil)
+}
+
 func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	entries, err := s.kernel.ListLedger(r.Context(), callerFrom(r), limit, offset)
@@ -1358,36 +1543,6 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 
 // ---- health command ----
 
-func healthCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "health",
-		Short: "Check server health",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			// Resolve the target through the single client resolver (§14: --server), like every
-			// other command — no bespoke URL that could hit another kernel.
-			base := serverBaseURL()
-			resp, err := http.Get(base + "/health") //nolint:noctx
-			if err != nil {
-				return errUnreachable(base, err)
-			}
-			defer resp.Body.Close()
-			var body map[string]any
-			_ = json.NewDecoder(resp.Body).Decode(&body)
-			if resp.StatusCode != http.StatusOK {
-				return kernel.ErrExecutionFailed.Wrapf("server returned status %d", resp.StatusCode)
-			}
-			if flagJSON {
-				return printJSON(body)
-			}
-			h, _ := body["handle"].(string)
-			pk, _ := body["public_key"].(string)
-			fmt.Printf("ok  %s  %s\n", h, pk)
-			return nil
-		},
-	}
-	return cmd
-}
-
 // ---- response helpers ----
 
 // pathID extracts the {id} URL parameter.
@@ -1460,8 +1615,10 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
 		BootstrapPeers:    globalCfg.BootstrapPeers,
+		ListenAddrs:       globalCfg.FedListenAddrs,
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,
+		Namespace:         kernel.DiscoveryNamespace(k.Network()),
 	})
 	if err != nil {
 		return nil, err

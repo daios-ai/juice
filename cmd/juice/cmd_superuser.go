@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -31,17 +30,9 @@ func lastSeenStr(t *time.Time) string {
 	}
 }
 
-func parseAmount(s string) (int64, error) {
-	amount, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || amount <= 0 {
-		return 0, kernel.ErrInvalidInput.Wrap("amount must be a positive integer")
-	}
-	return amount, nil
-}
-
 // admin holds the superuser-only supervisory verbs — the operations no ordinary user ever
-// performs: money (deposit/withdraw), access (suspend/unsuspend), federation trust
-// (peers/inspect/settle), and the global roster (users/show). They are ordinary TCP
+// performs: money (deposit), access (suspend/unsuspend), federation trust
+// (peers/inspect), and the global roster (users/show). They are ordinary TCP
 // clients like every other command (apiCall/apiEmit); the server gates the routes with
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
@@ -50,228 +41,321 @@ func parseAmount(s string) (int64, error) {
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
 	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser commands"}
-	adminCmd.AddCommand(
-		adminUsersCmd(),
-		adminShowCmd(),
-		adminSuspendCmd(),
-		adminUnsuspendCmd(),
-		adminRenameCmd(),
-		adminDepositCmd(),
-		adminWithdrawCmd(),
-		adminSettleCmd(),
-		peerListCmd(),
-		peerInspectCmd(),
-		identityCmd(),
-	)
+	userCmd := &cobra.Command{Use: "user", Short: "Accounts on this kernel"}
+	userCmd.AddCommand(append(rosterCmds("user"), adminUserListCmd(), adminUserDepositCmd())...)
+	peerCmd := &cobra.Command{Use: "peer", Short: "Kernels this one trades with"}
+	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd())...)
+	kernelCmd := &cobra.Command{Use: "kernel", Short: "This kernel itself"}
+	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd())
+	adminCmd.AddCommand(userCmd, peerCmd, kernelCmd)
 	rootCmd.AddCommand(adminCmd)
 }
 
-// identityCmd prints this kernel's own federation identity: its public key (which peers address
-// it by), handle, and libp2p listen addresses. Federation no longer exposes a .well-known
-// document, so this is how an operator learns the key to share.
+// roster is what the two nouns an operator supervises have in common: an account here, named its
+// own way, that can be read, suspended, restored and renamed. The verbs are identical but the
+// nouns are not, so the kind travels to the server and a target of the other kind is refused
+// there — which is the whole point of naming the noun rather than letting one command guess.
+type roster struct {
+	noun, target, named, renamed string
+	id                           string // the field that names one of them, which --quiet prints
+}
+
+var rosters = map[string]roster{
+	"user": {noun: "user", target: "USER", id: "handle", named: "a user's handle, as `admin user list` shows it",
+		renamed: "NEW_NAME becomes the account's handle, and the old handle is freed"},
+	"peer": {noun: "peer", target: "PEER", id: "public_key", named: "a peer kernel's petname or public key, as `admin peer list` shows it",
+		renamed: "NEW_NAME becomes the peer's petname — the local name your commands use for it"},
+}
+
+// rosterCmds builds those four verbs for one noun. One constructor rather than eight commands: the
+// difference between them is a word and a kind, and writing it once is what keeps them identical
+// where they should be.
+func rosterCmds(noun string) []*cobra.Command {
+	r := rosters[noun]
+	path := func(target, verb string) string {
+		return "/v1/admin/" + r.noun + "s/" + url.PathEscape(target) + verb
+	}
+	// Suspending and restoring are one act and its undo: the same target, the same route, and a
+	// word apart, so they are written once.
+	flip := func(verb, done, short, long string) *cobra.Command {
+		return &cobra.Command{
+			Use:   verb + " " + r.target,
+			Short: short,
+			Long:  long + "\n\n" + r.target + " is " + r.named + ".",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(_ *cobra.Command, args []string) error {
+				return cli.emit("POST", path(args[0], "/"+verb), nil, output{id: r.id, human: func([]byte) error {
+					fmt.Printf("%s %s.\n", args[0], done)
+					return nil
+				}})
+			},
+		}
+	}
+	show := &cobra.Command{
+		Use:   "show " + r.target,
+		Short: "Show one " + r.noun + "'s account here",
+		Long:  "Show one " + r.noun + "'s account on this kernel.\n\n" + r.target + " is " + r.named + ".",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cli.emit("GET", path(args[0], ""), nil, output{id: r.id, money: moneyAccount})
+		},
+	}
+	rename := &cobra.Command{
+		Use:   "rename " + r.target + " NEW_NAME",
+		Short: "Rename a " + r.noun,
+		Long:  "Rename a " + r.noun + ". " + r.renamed + ". A name already in use is refused.",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			body := map[string]any{"new_name": args[1]}
+			return cli.emit("POST", path(args[0], "/rename"), body, output{id: r.id, human: func([]byte) error {
+				fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
+				return nil
+			}})
+		},
+	}
+	return []*cobra.Command{show, rename,
+		flip("suspend", "suspended", "Suspend a "+r.noun,
+			"Suspend a "+r.noun+": a suspended user cannot log in, and a suspended peer's calls are\nrefused. Reversible with `admin "+r.noun+" unsuspend`."),
+		flip("unsuspend", "unsuspended", "Restore a suspended "+r.noun,
+			"Restore a suspended "+r.noun+", lifting every refusal the suspension caused.")}
+}
+
+// identityCmd prints who this kernel is and where it stands. Federation exposes no .well-known
+// document, so this is how an operator learns the key to share; it is also the one place the money
+// picture is read whole — what the rail holds against what the books say, so an operator sees a
+// disagreement here rather than in a user's failed withdrawal.
 func identityCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "identity",
-		Short: "Show this kernel's federation identity",
+		Use:   "show",
+		Short: "Show this kernel's identity, money position, and federation standing",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			var out struct {
-				Handle            string   `json:"handle"`
-				PublicKey         string   `json:"public_key"`
-				About             string   `json:"about"`
-				Addrs             []string `json:"addrs"`
-				ExposureMax       int64    `json:"exposure_max"`
-				SettlementTrigger int64    `json:"settlement_trigger"`
-				SettlementQuantum int64    `json:"settlement_quantum"`
-				GrossReceivables  int64    `json:"gross_receivables"`
-				SettlementDue     bool     `json:"settlement_due"`
-			}
-			if err := apiCall(context.Background(), "GET", "/control/identity", nil, &out); err != nil {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
 				return err
 			}
-			if flagJSON {
-				return printJSON(out)
-			}
-			fmt.Printf("Handle:     %s\n", out.Handle)
-			fmt.Printf("Public key: %s\n", out.PublicKey)
-			if out.About != "" {
-				fmt.Printf("About:      %s\n", out.About)
-			}
-			// Global exposure policy and current standing (§13), in operator words: how much
-			// unsecured credit this kernel extends serving peers, how much peers owe right now,
-			// and the two settlement thresholds from config.
-			fmt.Printf("Credit:     serving-cap=%d owed-by-peers=%d settle-signal-at=%d small-debt-threshold=%d\n",
-				out.ExposureMax, out.GrossReceivables, out.SettlementTrigger, out.SettlementQuantum)
-			if out.SettlementDue {
-				fmt.Println("Settlement: DUE (peers owe at least the settle signal)")
-			}
-			if len(out.Addrs) > 0 {
-				fmt.Println("Listen addresses:")
-				for _, a := range out.Addrs {
-					fmt.Printf("  %s\n", a)
+			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel", nil, output{id: "public_key", human: func(b []byte) error {
+				var out struct {
+					Handle      string   `json:"handle"`
+					PublicKey   string   `json:"public_key"`
+					About       string   `json:"about"`
+					Addrs       []string `json:"addrs"`
+					Network     string   `json:"network"`
+					RailAddress string   `json:"rail_address"`
+					Finalized   *struct {
+						Token int64  `json:"token"`
+						Gas   string `json:"gas"`
+						Block uint64 `json:"block"`
+					} `json:"finalized"`
+					Sys struct {
+						Earnings       int64 `json:"earnings"`
+						PendingPayouts int64 `json:"pending_payouts"`
+						HeldDeposits   int64 `json:"held_deposits"`
+						RefillLocks    int64 `json:"refill_locks"`
+					} `json:"sys"`
+					Solvency struct {
+						Liabilities int64 `json:"liabilities"`
+						Vault       int64 `json:"vault"`
+						Gap         int64 `json:"gap"`
+					} `json:"solvency"`
+					Custody *struct {
+						Checked    bool  `json:"checked"`
+						Difference int64 `json:"difference"`
+						OK         bool  `json:"ok"`
+					} `json:"custody"`
+					Stop *struct {
+						Reason string `json:"reason"`
+						Since  string `json:"since"`
+					} `json:"stop"`
+					Lottery     int64 `json:"lottery"`
+					LotteryMax  int64 `json:"lottery_max"`
+					CreditLimit int64 `json:"credit_limit"`
+					Exposure    int64 `json:"exposure"`
+					FeeBPS      int64 `json:"fee_bps"`
+					RemoteBPS   int64 `json:"remote_bps"`
+					ImportBPS   int64 `json:"import_bps"`
 				}
-			}
-			return nil
+				if err := json.Unmarshal(b, &out); err != nil {
+					return err
+				}
+				fmt.Printf("Handle:     %s\n", out.Handle)
+				fmt.Printf("Public key: %s\n", out.PublicKey)
+				if out.About != "" {
+					fmt.Printf("About:      %s\n", out.About)
+				}
+				if out.Network != "" {
+					fmt.Printf("Network:    %s\n", out.Network)
+				}
+				if out.RailAddress != "" {
+					fmt.Printf("Paid at:    %s\n", out.RailAddress)
+				}
+				if out.Finalized != nil {
+					fmt.Printf("Holdings:   %s (gas %s) as of block %d\n",
+						net.Amount(out.Finalized.Token), out.Finalized.Gas, out.Finalized.Block)
+				}
+				// What the operator's own account holds, split by what it is: money earned and spendable,
+				// versus money merely passing through (owed out, unattributed, or locked for rail fees).
+				fmt.Printf("Operator:   earned=%s paying-out=%s unclaimed=%s held-for-gas=%s\n",
+					net.Amount(out.Sys.Earnings), net.Amount(out.Sys.PendingPayouts),
+					net.Amount(out.Sys.HeldDeposits), net.Amount(out.Sys.RefillLocks))
+				// The books add up when what users hold equals what came in: the ledger is backed by cash
+				// alone, so there is nothing else in the identity.
+				fmt.Printf("Solvency:   user-balances=%s money-in=%s difference=%s\n",
+					net.Amount(out.Solvency.Liabilities), net.Amount(out.Solvency.Vault), net.Amount(out.Solvency.Gap))
+				if out.Solvency.Gap != 0 {
+					fmt.Printf("ALARM: the books do not add up — off by %s\n", net.Amount(out.Solvency.Gap))
+				}
+				// An audit that could not run says nothing either way; only a checked mismatch is an alarm.
+				if out.Custody != nil && out.Custody.Checked {
+					if out.Custody.OK {
+						fmt.Println("Custody:    the money the rail holds matches the books")
+					} else {
+						fmt.Printf("ALARM: the money the rail holds differs from the books by %s\n", net.Amount(out.Custody.Difference))
+					}
+				}
+				if out.Stop != nil {
+					fmt.Printf("ALARM: outgoing payments are halted since %s: %s\n", out.Stop.Since, out.Stop.Reason)
+				}
+				// What this kernel is owed for work already delivered, and the ceiling it will carry.
+				fmt.Printf("Credit:     owed-to-us=%s limit=%s\n", net.Amount(out.Exposure), net.Amount(out.CreditLimit))
+				if out.Exposure > out.CreditLimit {
+					fmt.Println("ALARM: more work has been delivered on credit than the limit allows")
+				}
+				// The money rules this kernel serves under, named by their configuration keys so an
+				// operator can find them. A lottery of 0 pays every obligation exactly, and lottery_max
+				// is the largest ticket this kernel accepts from a buyer.
+				fmt.Printf("Rates:      fee_bps=%d remote_bps=%d import_bps=%d lottery=%s lottery_max=%s\n",
+					out.FeeBPS, out.RemoteBPS, out.ImportBPS, net.Amount(out.Lottery), net.Amount(out.LotteryMax))
+				if len(out.Addrs) > 0 {
+					fmt.Println("Listen addresses:")
+					for _, a := range out.Addrs {
+						fmt.Printf("  %s\n", a)
+					}
+				}
+				return nil
+			}})
 		},
 	}
 }
 
-func adminUsersCmd() *cobra.Command {
+func adminUserListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "users",
-		Short: "List users",
+		Use:   "list",
+		Short: "List the accounts on this kernel",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			var users []*kernel.Account
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			if err := apiCall(context.Background(), "GET", "/control/users?"+q.Encode(), nil, &users); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(users)
-			}
-			for _, u := range users {
-				suspended := ""
-				if u.SuspendedAt != nil {
-					suspended = " [suspended]"
+			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "handle", human: func(b []byte) error {
+				var users []*kernel.Account
+				if err := json.Unmarshal(b, &users); err != nil {
+					return err
 				}
-				fmt.Printf("%-20s  %s%s\n", u.Handle, u.Description, suspended)
-			}
-			return nil
+				for _, u := range users {
+					suspended := ""
+					if u.SuspendedAt != nil {
+						suspended = " [suspended]"
+					}
+					fmt.Printf("%-20s  %s%s\n", u.Handle, u.Description, suspended)
+				}
+				return nil
+			}})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
-// targetHelp defines the shared TARGET placeholder of the mixed account/kernel admin commands.
-const targetHelp = "TARGET is a local user's handle, or a peer kernel's local name (petname) or\npublic key; names are shown by `admin users` and `admin peers`."
-
-func adminShowCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "show TARGET",
-		Short: "Show a local account or a remote kernel",
-		Long:  "Show a local account or a remote kernel.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/control/users/"+url.PathEscape(args[0]), nil)
-		},
-	}
-}
-
-func adminSuspendCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "suspend TARGET",
-		Short: "Suspend a local account or a remote kernel",
-		Long:  "Suspend a local account or a remote kernel: a suspended user cannot log in, and a\nsuspended peer's calls are refused. Reversible with `admin unsuspend`.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/suspend", nil, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s suspended.\n", kernel.NormalizeHandle(args[0]))
-			return nil
-		},
-	}
-}
-
-func adminUnsuspendCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "unsuspend TARGET",
-		Short: "Unsuspend a local account or a remote kernel",
-		Long:  "Unsuspend a local account or a remote kernel, restoring it fully.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/unsuspend", nil, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s unsuspended.\n", kernel.NormalizeHandle(args[0]))
-			return nil
-		},
-	}
-}
-
-func adminRenameCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "rename TARGET NEW_NAME",
-		Short: "Rename a local account, or bind a kernel's petname",
-		Long: "Rename a local account, or bind a kernel's petname.\n\n" + targetHelp + "\n\n" +
-			"For a user target, NEW_NAME becomes its handle and the old handle is freed. For a\n" +
-			"kernel target, NEW_NAME becomes its petname — the local name your commands use for\n" +
-			"that peer. A name already in use is refused.",
-		Args: cobra.ExactArgs(2),
-		RunE: func(_ *cobra.Command, args []string) error {
-			body := map[string]any{"new_name": args[1]}
-			if err := apiCall(context.Background(), "POST", "/control/users/"+url.PathEscape(args[0])+"/rename", body, nil); err != nil {
-				return err
-			}
-			fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
-			return nil
-		},
-	}
-}
-
-// adjustCmd builds the shared deposit/withdraw command (path is /control/deposit|withdraw).
-func adjustCmd(use, short, path string) *cobra.Command {
-	var reason, externalKey string
+// adminUserDepositCmd records money arriving from outside, once, against the fact that caused it.
+// Only a user is ever credited: what a peer owes closes when it pays, which nobody records by hand.
+// Repeating the same fact never moves money twice, and the same fact with a different amount is
+// refused — by the kernel, which is where idempotency belongs (D23).
+func adminUserDepositCmd() *cobra.Command {
+	var reason, ref string
+	var yes bool
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: short,
-		Long:  short + ", reflecting a payment made outside the system.\n\n" + targetHelp,
-		Args:  cobra.ExactArgs(2),
+		Use:   "deposit USER [AMOUNT]",
+		Short: "Credit an account for a payment received from outside",
+		Long: "Credit USER for a payment received from outside this kernel.\n\n" +
+			"Two forms:\n" +
+			"  admin user deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
+			"  admin user deposit USER --ref TXHASH        assign a received payment to its sender\n\n" +
+			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n" +
+			"account's once it is recorded.\n\n" +
+			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
+			"transaction that carried it where it has.",
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			amount, err := parseAmount(args[1])
+			ctx := context.Background()
+			if ref == "" {
+				return kernel.ErrInvalidInput.Wrap("name the payment this records (--ref)")
+			}
+			var amount int64
+			what := fmt.Sprintf("Credit %s with payment %s", args[0], ref)
+			if len(args) == 2 {
+				net, err := cli.network(ctx)
+				if err != nil {
+					return err
+				}
+				if amount, err = parseAmount(args[1], net.Decimals); err != nil {
+					return err
+				}
+				what = fmt.Sprintf("Credit %s to %s", net.Amount(amount), args[0])
+			}
+			if err := cli.confirm(what, yes); err != nil {
+				return err
+			}
+			return cli.emitCtx(ctx, "POST", "/v1/admin/users/"+url.PathEscape(args[0])+"/deposit", map[string]any{
+				"amount": amount, "reason": reason, "ref": ref,
+			}, output{money: moneyLedger})
+		},
+	}
+	cmd.Flags().StringVar(&ref, "ref", "", "The payment this records: your own record of it, or the transaction that carried it")
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
+	return cmd
+}
+
+// adminDepositsCmd is what this kernel is waiting on: payments received whose sender nobody has
+// registered, and the work it has delivered to foreign buyers and not been paid for. It reads —
+// a payment is credited by `admin user deposit`, and an obligation closes when its buyer pays.
+func adminDepositsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "deposits",
+		Short: "List money received that nobody has claimed, and work delivered unpaid",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
 			if err != nil {
 				return err
 			}
-			return apiEmit("POST", path, map[string]any{
-				"handle": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
-			})
+			// Two real lists rather than one flattened model, so each prints as its own rows —
+			// money included, since this is where an operator reads what is outstanding.
+			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel/deposits", nil, output{human: func(b []byte) error {
+				var a struct {
+					Deposits json.RawMessage `json:"deposits"`
+					Owed     json.RawMessage `json:"owed"`
+				}
+				if err := json.Unmarshal(b, &a); err != nil {
+					return err
+				}
+				fmt.Println("Payments received whose sender nobody has registered:")
+				if err := printFields(a.Deposits, moneyRail, net); err != nil {
+					return err
+				}
+				fmt.Println("Work delivered to foreign buyers and not yet paid for:")
+				return printFields(a.Owed, moneyOwed, net)
+			}})
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
-	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id of the outside payment; repeating the command with the same id never moves money twice")
-	return cmd
-}
-
-func adminDepositCmd() *cobra.Command {
-	return adjustCmd("deposit TARGET AMOUNT", "Add credits to an account or kernel", "/control/deposit")
-}
-
-func adminWithdrawCmd() *cobra.Command {
-	return adjustCmd("withdraw TARGET AMOUNT", "Deduct credits from an account or kernel", "/control/withdraw")
-}
-
-func adminSettleCmd() *cobra.Command {
-	var cash string
-	cmd := &cobra.Command{
-		Use:   "settle PEER",
-		Short: "Settle what this kernel owes a peer kernel",
-		Long: "Settle this kernel's debt to a peer. PEER is the peer's local name (petname) or its\n" +
-			"public key — both are shown by `admin peers`.\n\n" +
-			"The kernel only keeps the books; real money moves outside it, on whatever payment rail\n" +
-			"the two operators share. If the debt is at least `settlement_quantum` (config), the\n" +
-			"command prints the amount to pay and the exact `admin withdraw` command that records\n" +
-			"the payment. A smaller debt is settled by a fair random draw with the peer: usually\n" +
-			"the debt is cancelled outright and nothing is paid; with probability debt/quantum the\n" +
-			"full quantum becomes payable instead. Over many settlements this averages out exactly,\n" +
-			"so debts too small to pay economically still settle fairly.\n\n" +
-			"When a draw ends payable, pay the quantum on the rail, then record it with\n" +
-			"--cash SETTLEMENT_ID on both kernels.",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("POST", "/control/peers/settle", map[string]any{"handle": args[0], "settlement_id": cash})
-		},
-	}
-	cmd.Flags().StringVar(&cash, "cash", "", "Record the rail payment for a payable draw (takes the settlement_id printed earlier)")
-	return cmd
 }
 
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "inspect KEY|PETNAME",
+		Use:   "inspect PEER",
 		Short: "Inspect a remote kernel (by public key or bound petname)",
 		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and\n" +
 			"reachability. The petname is the local name this kernel gave the peer (`admin rename`);\n" +
@@ -279,162 +363,166 @@ func peerInspectCmd() *cobra.Command {
 			"name. An offline peer degrades to locally cached data.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			var out struct {
-				Petname   string `json:"petname"`
-				Nickname  string `json:"nickname"`
-				Handle    string `json:"handle"` // live pull: the kernel's own advertised name
-				PublicKey string `json:"public_key"`
-				About     string `json:"about"`
-				Actions   []struct {
-					Name        string `json:"name"`
-					Description string `json:"description"`
-					Price       int64  `json:"price"`
-				} `json:"actions"`
-				Evidence []kernel.SubjectEvidenceRow `json:"evidence"`
-				Account  *struct {
-					Available int64 `json:"available"`
-					Locked    int64 `json:"locked"`
-					Suspended bool  `json:"suspended"`
-				} `json:"account"`
-				Reachability struct {
-					Path      string `json:"path"`
-					RTTmillis int64  `json:"rtt_millis"`
-				} `json:"reachability"`
-				Source string `json:"source"`
-				Online bool   `json:"online"`
-				// Steps this peer has parked for THIS kernel: work awaiting us, and the ids
-				// `step complete ID --peer` takes (§13). A peer account holds no session token,
-				// so this is the only place an operator sees them.
-				Steps []struct {
-					ID           string          `json:"id"`
-					Price        int64           `json:"price"`
-					CreatedAt    time.Time       `json:"created_at"`
-					PartialArgs  json.RawMessage `json:"partial_args"`
-					AllowedInput json.RawMessage `json:"allowed_input"`
-				} `json:"steps"`
-			}
-			if err := apiCall(context.Background(), "GET", "/control/peers/inspect?key="+url.QueryEscape(args[0]), nil, &out); err != nil {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
 				return err
 			}
-			if flagJSON {
-				return printJSON(out)
-			}
-			// Petname is the name that resolves a reference here; the kernel's own label never
-			// does (§13), so they print as separate lines rather than one ambiguous "handle".
-			petname := out.Petname
-			if petname == "" {
-				petname = "— (unbound; call it by key)"
-			}
-			nickname := out.Nickname
-			if nickname == "" {
-				nickname = out.Handle
-			}
-			fmt.Printf("Petname:      %s\n", petname)
-			fmt.Printf("Nickname:     %s\n", nickname)
-			fmt.Printf("Public key:   %s\n", out.PublicKey)
-			if out.About != "" {
-				fmt.Printf("About:        %s\n", out.About)
-			}
-			reachLabel := out.Reachability.Path
-			if !out.Online {
-				reachLabel = "offline"
-			}
-			fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
-			if out.Account != nil {
-				susp := ""
-				if out.Account.Suspended {
-					susp = " [suspended]"
+			path := "/v1/admin/peers/" + url.PathEscape(args[0]) + "/inspect"
+			return cli.emitCtx(ctx, "GET", path, nil, output{id: "public_key", human: func(b []byte) error {
+				var out struct {
+					Petname   string `json:"petname"`
+					Nickname  string `json:"nickname"`
+					Handle    string `json:"handle"` // live pull: the kernel's own advertised name
+					PublicKey string `json:"public_key"`
+					About     string `json:"about"`
+					Actions   []struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+						Price       int64  `json:"price"`
+					} `json:"actions"`
+					Evidence []kernel.SubjectEvidenceRow `json:"evidence"`
+					Account  *struct {
+						Suspended bool `json:"suspended"`
+					} `json:"account"`
+					Reachability struct {
+						Path      string `json:"path"`
+						RTTmillis int64  `json:"rtt_millis"`
+					} `json:"reachability"`
+					Source string `json:"source"`
+					Online bool   `json:"online"`
+					// Steps this peer has parked for THIS kernel: work awaiting us, and the ids
+					// `step complete ID --peer` takes (§13). A peer account holds no session token,
+					// so this is the only place an operator sees them.
+					Steps []struct {
+						ID           string          `json:"id"`
+						Price        int64           `json:"price"`
+						CreatedAt    time.Time       `json:"created_at"`
+						PartialArgs  json.RawMessage `json:"partial_args"`
+						AllowedInput json.RawMessage `json:"allowed_input"`
+					} `json:"steps"`
+					StepsTruncated bool `json:"steps_truncated"`
 				}
-				fmt.Printf("Account:      available=%d locked=%d%s\n", out.Account.Available, out.Account.Locked, susp)
-			}
-			if out.Source == "none" {
-				fmt.Println("This peer is offline and not known locally (no cached data).")
+				if err := json.Unmarshal(b, &out); err != nil {
+					return err
+				}
+				// Petname is the name that resolves a reference here; the kernel's own label never
+				// does (§13), so they print as separate lines rather than one ambiguous "handle".
+				petname := out.Petname
+				if petname == "" {
+					petname = "— (unbound; call it by key)"
+				}
+				nickname := out.Nickname
+				if nickname == "" {
+					nickname = out.Handle
+				}
+				fmt.Printf("Petname:      %s\n", petname)
+				fmt.Printf("Nickname:     %s\n", nickname)
+				fmt.Printf("Public key:   %s\n", out.PublicKey)
+				if out.About != "" {
+					fmt.Printf("About:        %s\n", out.About)
+				}
+				reachLabel := out.Reachability.Path
+				if !out.Online {
+					reachLabel = "offline"
+				}
+				fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
+				if out.Account != nil {
+					susp := ""
+					if out.Account.Suspended {
+						susp = " [suspended]"
+					}
+					fmt.Printf("Traded here:  yes%s\n", susp)
+				}
+				if out.Source == "none" {
+					fmt.Println("This peer is offline and not known locally (no cached data).")
+					return nil
+				}
+				if len(out.Actions) > 0 {
+					label := "Public actions"
+					if out.Source == "local" {
+						label = "Actions (from discovery cache — peer offline)"
+					}
+					fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
+					for _, a := range out.Actions {
+						fmt.Printf("  %-30s  %s\n", a.Name, net.Amount(a.Price))
+						if a.Description != "" {
+							fmt.Printf("      %s\n", a.Description)
+						}
+					}
+				}
+				if len(out.Evidence) > 0 {
+					// Two views, never folded together: the subject's own execution summary (issuer ==
+					// subject), then per-issuer counterparty experience (every other issuer's direct
+					// interactions with the subject). A rating counts only when trade-backed (§13).
+					subjectName := out.Petname
+					if subjectName == "" {
+						subjectName = out.Nickname
+					}
+					if subjectName == "" {
+						subjectName = shortKey(out.PublicKey)
+					}
+					fmt.Printf("\nExecution reported by %s\n", subjectName)
+					own := false
+					for _, e := range out.Evidence {
+						if e.IssuerPublicKey != out.PublicKey {
+							continue
+						}
+						own = true
+						fmt.Printf("  action %s: %d executions, %d successful  ~%.0fms\n",
+							e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
+					}
+					if !own {
+						fmt.Println("  (none)")
+					}
+					header := false
+					for _, e := range out.Evidence {
+						if e.IssuerPublicKey == out.PublicKey {
+							continue
+						}
+						if !header {
+							fmt.Printf("\nCounterparty experience\n")
+							header = true
+						}
+						fmt.Printf("  From %s on %s: %d interactions, %d successful",
+							shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes)
+						// Corroboration tag on the interactions themselves (§13): [verified] when the
+						// two-kernel receipt link holds for all of them, a fraction when partial, else
+						// [unverified] — an issuer's self-attested claim is never shown as fact.
+						switch {
+						case e.Uses > 0 && e.CorroboratedUses == e.Uses:
+							fmt.Printf(" [verified]")
+						case e.CorroboratedUses > 0:
+							fmt.Printf(" [%d/%d verified]", e.CorroboratedUses, e.Uses)
+						default:
+							fmt.Printf(" [unverified]")
+						}
+						if e.RatingCount > 0 {
+							fmt.Printf("  rating %.2f", e.RatingMean)
+						}
+						if e.UnverifiedRatings > 0 {
+							fmt.Printf("  [+%d unverified rating]", e.UnverifiedRatings)
+						}
+						fmt.Println()
+					}
+				}
+				if len(out.Steps) > 0 {
+					fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete ID --peer %s\n",
+						len(out.Steps), args[0])
+					for _, st := range out.Steps {
+						fmt.Printf("  %s  price=%s  %s\n", st.ID, net.Amount(st.Price), st.CreatedAt.Format(time.RFC3339))
+						if len(st.PartialArgs) > 0 && string(st.PartialArgs) != "{}" {
+							fmt.Printf("      %s\n", st.PartialArgs)
+						}
+						// The derived completion schema (§14): what this kernel may supply, without
+						// having to read a target action it cannot see.
+						if len(st.AllowedInput) > 0 {
+							fmt.Printf("      allowed_input: %s\n", st.AllowedInput)
+						}
+					}
+				}
 				return nil
-			}
-			if len(out.Actions) > 0 {
-				label := "Public actions"
-				if out.Source == "local" {
-					label = "Actions (from discovery cache — peer offline)"
-				}
-				fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
-				for _, a := range out.Actions {
-					fmt.Printf("  %-30s  %d credits\n", a.Name, a.Price)
-					if a.Description != "" {
-						fmt.Printf("      %s\n", a.Description)
-					}
-				}
-			}
-			if len(out.Evidence) > 0 {
-				// Two views, never folded together: the subject's own execution summary (issuer ==
-				// subject), then per-issuer counterparty experience (every other issuer's direct
-				// interactions with the subject). A rating counts only when trade-backed (§13).
-				subjectName := out.Petname
-				if subjectName == "" {
-					subjectName = out.Nickname
-				}
-				if subjectName == "" {
-					subjectName = shortKey(out.PublicKey)
-				}
-				fmt.Printf("\nExecution reported by %s\n", subjectName)
-				own := false
-				for _, e := range out.Evidence {
-					if e.IssuerPublicKey != out.PublicKey {
-						continue
-					}
-					own = true
-					fmt.Printf("  action %s: %d executions, %d successful  ~%.0fms\n",
-						e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
-				}
-				if !own {
-					fmt.Println("  (none)")
-				}
-				header := false
-				for _, e := range out.Evidence {
-					if e.IssuerPublicKey == out.PublicKey {
-						continue
-					}
-					if !header {
-						fmt.Printf("\nCounterparty experience\n")
-						header = true
-					}
-					fmt.Printf("  From %s on %s: %d interactions, %d successful",
-						shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes)
-					// Corroboration tag on the interactions themselves (§13): [verified] when the
-					// two-kernel receipt link holds for all of them, a fraction when partial, else
-					// [unverified] — an issuer's self-attested claim is never shown as fact.
-					switch {
-					case e.Uses > 0 && e.CorroboratedUses == e.Uses:
-						fmt.Printf(" [verified]")
-					case e.CorroboratedUses > 0:
-						fmt.Printf(" [%d/%d verified]", e.CorroboratedUses, e.Uses)
-					default:
-						fmt.Printf(" [unverified]")
-					}
-					if e.RatingCount > 0 {
-						fmt.Printf("  rating %.2f", e.RatingMean)
-					}
-					if e.UnverifiedRatings > 0 {
-						fmt.Printf("  [+%d unverified rating]", e.UnverifiedRatings)
-					}
-					fmt.Println()
-				}
-			}
-			if len(out.Steps) > 0 {
-				fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete ID --peer %s\n",
-					len(out.Steps), args[0])
-				for _, st := range out.Steps {
-					fmt.Printf("  %s  price=%d  %s\n", st.ID, st.Price, st.CreatedAt.Format(time.RFC3339))
-					if len(st.PartialArgs) > 0 && string(st.PartialArgs) != "{}" {
-						fmt.Printf("      %s\n", st.PartialArgs)
-					}
-					// The derived completion schema (§14): what this kernel may supply, without
-					// having to read a target action it cannot see.
-					if len(st.AllowedInput) > 0 {
-						fmt.Printf("      allowed_input: %s\n", st.AllowedInput)
-					}
-				}
-			}
-			return nil
+			}})
 		},
 	}
 }
@@ -443,7 +531,7 @@ func peerListCmd() *cobra.Command {
 	var showAll bool
 	var limit, offset int
 	cmd := &cobra.Command{
-		Use:   "peers",
+		Use:   "list",
 		Short: "List known kernels (counterparties and discovery-only), merged by key",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -452,46 +540,41 @@ func peerListCmd() *cobra.Command {
 				q.Set("all", "1")
 			}
 			setLimitOffset(q, limit, offset)
-			path := "/control/peers"
+			path := "/v1/admin/peers"
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			var peers []*kernel.RemoteKernelView
-			if err := apiCall(context.Background(), "GET", path, nil, &peers); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(peers)
-			}
-			if len(peers) == 0 {
+			return cli.emit("GET", path, nil, output{id: "public_key", human: func(b []byte) error {
+				var peers []*kernel.RemoteKernelView
+				if err := json.Unmarshal(b, &peers); err != nil {
+					return err
+				}
+				if len(peers) == 0 {
+					return nil
+				}
+				// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
+				// calls itself and never resolves (§13). The public key always resolves, so an
+				// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
+				fmt.Printf("%-16s %-16s %8s %10s %12s %10s  %s\n",
+					"PETNAME", "NICKNAME", "TRADED", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
+				for _, p := range peers {
+					flags := ""
+					if p.SuspendedAt != nil {
+						flags += " [suspended]"
+					}
+					petname, traded := "—", "—"
+					if p.Petname != "" {
+						petname = p.Petname
+					}
+					if p.HasAccount {
+						traded = "yes"
+					}
+					fmt.Printf("%-16s %-16s %8s %10s %12s %10d  %s%s\n",
+						petname, p.Nickname, traded, lastSeenStr(p.LastSeen),
+						lastSeenStr(p.LastContactFailedAt), p.Actions, p.PublicKey, flags)
+				}
 				return nil
-			}
-			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
-			// calls itself and never resolves (§13). The public key always resolves, so an
-			// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
-			fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10s  %s\n",
-				"PETNAME", "NICKNAME", "ACCOUNT", "BALANCE", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
-			for _, p := range peers {
-				flags := ""
-				if p.SettlementDue {
-					flags += " [settle_due]"
-				}
-				if p.SuspendedAt != nil {
-					flags += " [suspended]"
-				}
-				petname, account, balance := "—", "—", "—"
-				if p.Petname != "" {
-					petname = p.Petname
-				}
-				if p.HasAccount {
-					account = "yes"
-					balance = fmt.Sprintf("%d", p.Available)
-				}
-				fmt.Printf("%-16s %-16s %8s %8s %10s %12s %10d  %s%s\n",
-					petname, p.Nickname, account, balance, lastSeenStr(p.LastSeen),
-					lastSeenStr(p.LastContactFailedAt), p.Actions, p.PublicKey, flags)
-			}
-			return nil
+			}})
 		},
 	}
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended counterparties")

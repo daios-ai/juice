@@ -33,7 +33,7 @@ const (
 	ProtocolResolve = "/juice/fed/resolve/1"
 	ProtocolGossip  = "/juice/fed/gossip/1"
 	ProtocolStep    = "/juice/fed/step/1"
-	ProtocolSettle  = "/juice/fed/settle/1"
+	ProtocolReveal  = "/juice/fed/settle/1"
 )
 
 // GossipRequest is the wire form of a /juice/fed/gossip/1 request (§13): the evidence cursor to
@@ -75,7 +75,11 @@ type CallRequest struct {
 	ExpectedContractHash string `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
 	IdempotencyKey       string `json:"idempotency_key"`        //
 	Timestamp            string `json:"timestamp"`              // RFC3339
-	// Signature is Ed25519 over JCS({action,args_hash,counterparty,expected_contract_hash,idempotency_key,recipient,timestamp}).
+	Commitment           string `json:"commitment,omitempty"`   // hash of the caller's half of the settlement draw (P10)
+	Lottery              int64  `json:"lottery,omitempty"`      // the ticket face value this call is dispatched under (P10)
+	RailAddress          string `json:"rail_address,omitempty"` // where a winning ticket will be paid from, proven by the rail key
+	RailProof            string `json:"rail_proof,omitempty"`   // that address's own signature over the caller's key (D23)
+	// Signature is Ed25519 over JCS({action,args_hash,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
 	// to a third kernel (§13, matching the step protocol).
@@ -98,9 +102,10 @@ type StepRequest struct {
 	StepID          string          `json:"step_id,omitempty"`          // complete only
 	IdempotencyKey  string          `json:"idempotency_key,omitempty"`  // complete only
 	Input           json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
-	ForUserID       string          `json:"for_user_id,omitempty"`      // complete: the completing user's stable id on the requesting kernel (§13)
+	ForUserID       string          `json:"for_user_id,omitempty"`      // list/complete: the acting user's stable id on the requesting kernel (§13)
 	UserAttestation string          `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
 	UserTimestamp   string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
+	UserSuperuser   bool            `json:"user_superuser,omitempty"`   // complete: the home kernel attests this user is its operator, the scope a kernel-addressed step demands
 }
 
 // StepResponse carries a step list or completion result. Unlike a call, a step completion parks
@@ -108,26 +113,21 @@ type StepRequest struct {
 // signed rejection receipt (§13).
 type StepResponse = Response
 
-// SettleRequest is the wire form of a /juice/fed/settle/1 request (§13): the debtor-driven two-party
-// commit/reveal that settles a sub-quantum residual debt probabilistically. Kind selects the round:
-// "open" asks the creditor to commit (returns a signed open record with H(s)); "finish" hands the
-// nonce back with the creditor's own open record so the creditor reveals s, computes the outcome, and
-// applies the three-way settlement; "reconcile" re-presents an expired open record so the creditor
-// applies the binding clear-for-zero (FIX 2). Signatures are over disjoint scoped payloads (§12).
-type SettleRequest struct {
-	Kind         string          `json:"kind"`             // "open" | "finish" | "reconcile"
-	Counterparty string          `json:"counterparty"`     // debtor's base64url Ed25519 public key
-	Timestamp    string          `json:"timestamp"`        // RFC3339
-	Signature    string          `json:"signature"`        // Ed25519 over the kind's scoped canonical payload
-	SettlementID string          `json:"settlement_id"`    // debtor-chosen unique id, binds the whole exchange
-	Amount       int64           `json:"amount,omitempty"` // open: the debt d the debtor owes (creditor checks == its receivable)
-	Nonce        string          `json:"nonce,omitempty"`  // finish: the debtor's committed nonce
-	Record       json.RawMessage `json:"record,omitempty"` // finish/reconcile: the creditor-signed open record carried back
+// RevealRequest is the wire form of a /juice/fed/settle/1 request (P10): the buyer tells the seller
+// how one obligation's draw came out. The secret makes the outcome checkable against the commitment
+// the seller already holds; a paying reveal also names the payment and proves the address it comes
+// from, since the seller credits cash by its finalized sender.
+type RevealRequest struct {
+	Counterparty string `json:"counterparty"`      // buyer's base64url Ed25519 public key
+	Timestamp    string `json:"timestamp"`         // RFC3339
+	Signature    string `json:"signature"`         // Ed25519 over the scoped canonical payload
+	TicketID     string `json:"ticket_id"`         // the call's idempotency key, naming the obligation
+	Secret       string `json:"secret"`            // the buyer's committed randomness, revealed
+	TxHash       string `json:"tx_hash,omitempty"` // paying only: the payment that settles it
 }
 
-// SettleResponse carries a signed SettlementRecord (open → commitment; finish/reconcile → final
-// record with outcome), or an error.
-type SettleResponse = Response
+// RevealResponse carries the ticket as the seller now holds it, or an error.
+type RevealResponse = Response
 
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
@@ -146,10 +146,10 @@ type Handlers interface {
 	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
 	// steps this peer is the required caller of (§10, §13).
 	OnStep(ctx context.Context, peerKey string, req StepRequest) StepResponse
-	// OnSettle handles an inbound /juice/fed/settle/1 request (§13): the creditor side of the
-	// two-party commit/reveal residual settlement. peerKey is the connection's authenticated key;
-	// the handler still verifies req.Signature against req.Counterparty per §13.
-	OnSettle(ctx context.Context, peerKey string, req SettleRequest) SettleResponse
+	// OnReveal handles an inbound /juice/fed/settle/1 request (P10): the seller side of one
+	// obligation's draw. peerKey is the connection's authenticated key; the handler still verifies
+	// req.Signature against req.Counterparty per §13.
+	OnReveal(ctx context.Context, peerKey string, req RevealRequest) RevealResponse
 }
 
 // Config configures a transport host.
@@ -161,4 +161,8 @@ type Config struct {
 	// AllowPrivateAddrs keeps loopback/private multiaddrs usable so the flow harness can run a
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).
 	AllowPrivateAddrs bool
+	// Namespace is the rendezvous string this kernel advertises and enumerates. It carries the
+	// network digest, so kernels of different worlds never find each other (D23). Empty is a
+	// configuration error, not a default: an unnamespaced kernel would meet every world at once.
+	Namespace string
 }

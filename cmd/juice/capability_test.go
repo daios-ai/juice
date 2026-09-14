@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -21,21 +20,15 @@ import (
 // point its callback URL at the server — exactly what runServer does from the listen address.
 func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store.DB) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "cap.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "cap-test-secret"
+	db := newTestStore(t)
+	cfg := testConfig("cap-test-secret")
 	logger := log.Discard()
 	box, err := newAESGCMBox(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
-	k := kernel.New(kernel.Dependencies{Store: db, HTTP: httpExec, Config: cfg, Logger: logger})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
@@ -312,7 +305,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	// A recording transport behind a real adapter: any federation dispatch shows up in lastStep.
 	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-peer"}`), stepStatus: 200}
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil)
+	adapter := newFedAdapter(self, nil, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 

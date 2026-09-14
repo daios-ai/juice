@@ -34,7 +34,7 @@ func captureStderr(t *testing.T, fn func()) string {
 func TestRenderError(t *testing.T) {
 	t.Cleanup(func() { flagVerbose = false })
 	cause := errors.New("dial tcp 127.0.0.1:4040: connect: connection refused")
-	kerr := kernel.ErrInvalidState.Wrap("cannot reach juice server (is `juice serve` running?)").Because(cause)
+	kerr := kernel.ErrInvalidState.Wrap("cannot reach juice server (is `juice kernel serve` running?)").Because(cause)
 
 	flagVerbose = false
 	out := captureStderr(t, func() { renderError(kerr) })
@@ -140,6 +140,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	selectTestLogin(t, "tester@k", "http://kernel:4040")
 
 	if err := saveToken("tok123"); err != nil {
 		t.Fatal(err)
@@ -238,72 +239,6 @@ func TestPromptNewPassword(t *testing.T) {
 // per-user default $JUICE_HOME/kernel/juice.db (JUICE_HOME defaulting to ~/.juice), never the
 // working directory. The fixed default is what stops `juice serve` from silently minting a new
 // kernel identity when run from an unexpected folder. initConfig co-locates the config beside
-// the DB and creates the home directory, so it is exercised end-to-end here against a temp HOME.
-func TestDBPathResolution(t *testing.T) {
-	home := t.TempDir()
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
-
-	// Isolate JUICE_HOME for the whole test; each case sets it explicitly.
-	origJH, hadJH := os.LookupEnv("JUICE_HOME")
-	os.Unsetenv("JUICE_HOME")
-	t.Cleanup(func() {
-		if hadJH {
-			os.Setenv("JUICE_HOME", origJH)
-		} else {
-			os.Unsetenv("JUICE_HOME")
-		}
-	})
-
-	// defaultDBPath is $JUICE_HOME/kernel/juice.db, i.e. ~/.juice/kernel/juice.db by default.
-	want := filepath.Join(home, ".juice", "kernel", "juice.db")
-	if got := defaultDBPath(); got != want {
-		t.Fatalf("defaultDBPath: got %q, want %q", got, want)
-	}
-
-	// Save/restore the globals initConfig mutates.
-	origDB, origConfig, origResolved := flagDB, flagConfig, resolvedConfigPath
-	t.Cleanup(func() { flagDB, flagConfig, resolvedConfigPath = origDB, origConfig, origResolved })
-
-	alt := t.TempDir() // stands in for a JUICE_HOME override root
-
-	cases := []struct {
-		name   string
-		flag   string
-		jhome  string // JUICE_HOME override ("" = unset, falls back to ~/.juice)
-		want   string
-		config string // expected co-located config path
-	}{
-		{"default", "", "", want, filepath.Join(home, ".juice", "kernel", "config.json")},
-		{"JUICE_HOME override", "", alt, filepath.Join(alt, "kernel", "juice.db"), filepath.Join(alt, "kernel", "config.json")},
-		{"flag wins over JUICE_HOME", filepath.Join(home, "flag", "f.db"), alt, filepath.Join(home, "flag", "f.db"), filepath.Join(home, "flag", "config.json")},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			flagDB, flagConfig = tc.flag, ""
-			if tc.jhome == "" {
-				os.Unsetenv("JUICE_HOME")
-			} else {
-				os.Setenv("JUICE_HOME", tc.jhome)
-			}
-			initConfig()
-			if flagDB != tc.want {
-				t.Errorf("flagDB: got %q, want %q", flagDB, tc.want)
-			}
-			if resolvedConfigPath != tc.config {
-				t.Errorf("config path: got %q, want %q", resolvedConfigPath, tc.config)
-			}
-			if _, err := os.Stat(filepath.Dir(tc.want)); err != nil {
-				t.Errorf("home dir not created: %v", err)
-			}
-		})
-	}
-}
-
-// TestJuiceHomeResolution pins the root resolution: JUICE_HOME is honored verbatim, with
-// kernel/ and cache/ hanging off it; unset falls back to ~/.juice. The fallback is fixed and
-// absolute so state never lands in the working directory.
 func TestJuiceHomeResolution(t *testing.T) {
 	origJH, hadJH := os.LookupEnv("JUICE_HOME")
 	t.Cleanup(func() {
@@ -319,10 +254,10 @@ func TestJuiceHomeResolution(t *testing.T) {
 	if got, want := juiceHome(), root; got != want {
 		t.Errorf("juiceHome: got %q, want %q", got, want)
 	}
-	if got, want := kernelHome(), filepath.Join(root, "kernel"); got != want {
+	if got, want := kernelHome(), filepath.Join(root, "kernels", kernelName); got != want {
 		t.Errorf("kernelHome: got %q, want %q", got, want)
 	}
-	if got, want := cacheDir(), filepath.Join(root, "kernel", "cache"); got != want {
+	if got, want := cacheDir(), filepath.Join(root, "kernels", kernelName, "cache"); got != want {
 		t.Errorf("cacheDir: got %q, want %q", got, want)
 	}
 
@@ -341,6 +276,7 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	selectTestLogin(t, "tester@k", "http://kernel:4040")
 
 	if err := saveRefreshToken("rt456"); err != nil {
 		t.Fatal(err)

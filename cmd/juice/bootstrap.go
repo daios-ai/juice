@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -11,62 +13,202 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/native"
-	"golang.org/x/term"
+	"github.com/daios-ai/juice/rail"
+	"github.com/daios-ai/juice/store"
 )
 
 const (
+	// configKeyWorldDigest records the network this database belongs to, written once and checked
+	// at every startup (D9, D23).
+	configKeyWorldDigest    = "world_digest"
 	configKeySuperuser      = "superuser_handle"
 	configKeySigningPublic  = "signing_public_key"
 	configKeySigningPrivate = "signing_private_key"
 	superuserHandle         = "sys"
 )
 
-// bootstrap runs idempotent startup tasks before the server accepts requests.
-// requireBareHandle rejects a kernel handle carrying a sigil or path separator; handles are bare
-// (§3, §14), and this one is concatenated into gossip and references, so it is validated — not
-// silently rewritten — wherever it enters (prompt, env, or config.json).
-func requireBareHandle(h string) error {
-	if strings.ContainsAny(h, "@/") {
-		return fmt.Errorf("kernel handle %q must be bare (no @ or /)", h)
+// firstBootConfig gathers the configuration of a kernel that does not exist yet. It asks and
+// nothing more: the caller writes, under the home's lock, which is the only write of config.json
+// there is — every later boot reads it and leaves it alone, so a runtime-only override
+// (JUICE_CREDENTIALS_KEY) never reaches the disk. What the operator pre-seeded stands; the rest is
+// asked, because these are the facts a kernel cannot revise.
+func firstBootConfig(name, home string) (ServerConfig, error) {
+	path := filepath.Join(home, "config.json")
+	cfg, err := LoadConfig(path)
+	if err != nil && !os.IsNotExist(err) {
+		return cfg, err
 	}
-	return nil
-}
-
-// requireKernelName resolves the handle this kernel presents to the network (§12, §13): the
-// configured value, else JUICE_BOOTSTRAP_KERNEL_HANDLE, else a prompt that repeats until a name is
-// given. There is no derived fallback — an unnamed kernel is a configuration error, not a default.
-func requireKernelName() (string, error) {
-	name := globalCfg.KernelHandle
-	if name == "" {
-		name = strings.TrimSpace(os.Getenv("JUICE_BOOTSTRAP_KERNEL_HANDLE"))
+	// A configuration file written in advance is the operator saying, in the only way a machine with
+	// no terminal can, that this kernel should exist. Without one, they are asked — and told what is
+	// already here, since a name that is not on that list is usually a name mistyped.
+	if os.IsNotExist(err) {
+		here := "No kernels here yet."
+		if others := kernelsHere(); len(others) > 0 {
+			here = "Kernels here: " + strings.Join(others, ", ") + "."
+		}
+		if !interactiveTTY() {
+			return cfg, fmt.Errorf("there is no kernel named %s, and no terminal to ask. %s\n"+
+				"       To create it without a terminal, write %s to %s and run this again",
+				name, here, worldChoices(), path)
+		}
+		fmt.Fprintf(os.Stderr, "There is no kernel named %s. %s\n", name, here)
+		if aerr := askYesNo(fmt.Sprintf("Create %s as a new kernel?", name)); aerr != nil {
+			return cfg, aerr
+		}
 	}
-	for name == "" && term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Fprint(os.Stderr, "Kernel name — the handle this kernel presents to the network (required): ")
-		var line string
-		fmt.Fscanln(os.Stdin, &line)
-		name = strings.TrimSpace(line)
+	if cfg.KernelHandle == "" {
+		cfg.KernelHandle = name
 	}
-	if name == "" {
-		return "", fmt.Errorf("kernel name is required: run interactively or set JUICE_BOOTSTRAP_KERNEL_HANDLE")
+	if cfg.World == "" {
+		w, aerr := askWorld(name, path)
+		if aerr != nil {
+			return cfg, aerr
+		}
+		cfg.World = w
 	}
-	return name, requireBareHandle(name)
-}
-
-// On first boot (no superuser configured), it prompts for credentials interactively.
-func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) error {
-	ctx := context.Background()
-
-	// The name is resolved BEFORE anything is written, so a boot that cannot be named leaves no
-	// half-created kernel behind: the next boot would find a superuser configured, skip first boot
-	// entirely, and have nowhere left to demand a name.
-	kernelName, err := requireKernelName()
+	world, err := rail.Load(cfg.World)
 	if err != nil {
-		return err
+		return cfg, err
 	}
-	if kernelName != globalCfg.KernelHandle {
-		globalCfg.KernelHandle = kernelName
-		_ = writeConfig(resolvedConfigPath, globalCfg)
+	if world.Chained() && cfg.RailRPC == "" {
+		rpc, aerr := ask(fmt.Sprintf("Where does this kernel reach the %s chain", world.Name), "rail_rpc", path)
+		if aerr != nil {
+			return cfg, aerr
+		}
+		cfg.RailRPC = rpc
 	}
+	if cfg.CredentialsKey == "" {
+		raw := make([]byte, 32)
+		if _, rerr := rand.Read(raw); rerr != nil {
+			return cfg, fmt.Errorf("generate credentials key: %w", rerr)
+		}
+		cfg.CredentialsKey = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return cfg, nil
+}
+
+// worldChoices writes the `world` key the way it goes in the file, so a refusal can be obeyed by
+// copying it rather than by translating a list of names into JSON.
+func worldChoices() string {
+	return `"world": "` + strings.Join(rail.Shipped, `", "`) + `"`
+}
+
+// askWorld asks which money a new kernel uses. The question is the operator's, not the code's: the
+// choice is permanent, and each world says in its own words what it means, so nobody has to know
+// that a network is called a world here or what is on the other end of the name.
+func askWorld(name, path string) (string, error) {
+	if !interactiveTTY() {
+		return "", fmt.Errorf("kernel %s: no %q in %s and there is no terminal to ask.\n"+
+			"       Write %s to that file and run this again", name, "world", path, worldChoices())
+	}
+	fmt.Fprintf(os.Stderr, "\nWhich money will %s use? This cannot be changed later.\n", name)
+	for _, w := range rail.Shipped {
+		world, err := rail.Load(w)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(os.Stderr, "  %-5s %s\n", w, world.Description)
+	}
+	for {
+		choice, err := ask("Choice ["+strings.Join(rail.Shipped, "/")+"]", "world", path)
+		if err != nil {
+			return "", err
+		}
+		if _, lerr := rail.Load(choice); lerr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", lerr)
+			continue
+		}
+		return choice, nil
+	}
+}
+
+// ask reads one answer from the terminal, or refuses off one naming the key and the file that would
+// have supplied it. A whole line is read, so an answer with a space reaches the validator that
+// refuses it rather than being silently truncated.
+func ask(prompt, key, path string) (string, error) {
+	if !interactiveTTY() {
+		return "", fmt.Errorf("no %q in %s, and no terminal to ask", key, path)
+	}
+	for {
+		fmt.Fprintf(os.Stderr, "%s: ", prompt)
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if v := strings.TrimSpace(line); v != "" {
+			return v, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("%s is required", key)
+		}
+	}
+}
+
+// worldFor decides which network this kernel serves. One kernel, one network, for life (D23):
+// balances, receipts and debts mean one thing only, so the answer is fixed the first time and read
+// from the database ever after. `configured` is config.json's `world`, needed only where the digest
+// alone cannot name the network — a first boot, or a world file this build does not ship — and
+// checked against the record wherever both exist.
+//
+// A kernel that already has a network is therefore never asked for one, which is what lets a
+// database made before `world` was written into config.json go on serving.
+func worldFor(ctx context.Context, db *store.DB, configured, configPath string) (rail.World, error) {
+	stored, _ := db.GetConfig(ctx, configKeyWorldDigest)
+	if made, _ := db.GetConfig(ctx, configKeySuperuser); stored == "" && made != "" {
+		// A kernel with a superuser but no digest was made before networks existed, and belongs to
+		// play, whose credits were always the operator's own records. Reading it as play's record
+		// rather than as a special case is what keeps binding it to a token world impossible: credits
+		// by fiat would become claims on a token.
+		play, err := rail.Load("play")
+		if err != nil {
+			return rail.World{}, err
+		}
+		stored = play.Network().Digest
+	}
+	if stored == "" { // a first boot: only the configuration can say
+		if configured == "" {
+			return rail.World{}, fmt.Errorf("no %q in %s", "world", configPath)
+		}
+		return rail.Load(configured)
+	}
+	was, known := shippedWorld(stored)
+	if configured == "" {
+		if !known {
+			return rail.World{}, fmt.Errorf(
+				"this kernel was created on a network this build does not ship; name its world file in %q of %s",
+				"world", configPath)
+		}
+		return was, nil
+	}
+	// Named as well as recorded: the two must be the same network. They are compared by digest, so
+	// the same world under a file path is the same network, and a different one is refused by name.
+	w, err := rail.Load(configured)
+	if err != nil {
+		return rail.World{}, err
+	}
+	if w.Network().Digest != stored {
+		name := "a world this build does not ship"
+		if known {
+			name = was.Name
+		}
+		return rail.World{}, fmt.Errorf("this kernel was created on network %s; config.json selects %s — "+
+			"one kernel serves one network for life, so serve it as %s or create a new kernel", name, w.Name, name)
+	}
+	return w, nil
+}
+
+// shippedWorld is the world whose digest this is, among those this build carries. A digest is a
+// hash, so naming the network it stands for is a lookup rather than a decoding.
+func shippedWorld(digest string) (rail.World, bool) {
+	for _, name := range rail.Shipped {
+		if w, err := rail.Load(name); err == nil && w.Network().Digest == digest {
+			return w, true
+		}
+	}
+	return rail.World{}, false
+}
+
+// bootstrap runs the idempotent startup tasks, and on a first boot (no superuser configured) asks
+// for the credentials that create one.
+func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, net kernel.Network) error {
+	ctx := context.Background()
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
@@ -125,15 +267,6 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec) er
 }
 
 func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
-	// Announce the location loudly: a first boot mints a NEW kernel identity and signing
-	// key, so an operator who launched against the wrong DB path (a fresh, unintended
-	// federation identity) sees it here — including in headless mode, before any prompt.
-	loc := flagDB
-	if abs, err := filepath.Abs(flagDB); err == nil {
-		loc = abs
-	}
-	fmt.Fprintf(os.Stderr, "First boot: creating a NEW kernel — new identity and signing key — at %s\n", loc)
-
 	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
 	if password == "" {
 		p, err := promptNewPassword("Superuser password: ")

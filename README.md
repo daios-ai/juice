@@ -21,42 +21,118 @@ network — you are never charged more than the price you saw.
 git clone https://github.com/daios-ai/juice.git
 cd juice
 make build          # or: go build -o juice ./cmd/juice/
-./juice serve --addr :4040
+./juice kernel serve acme --addr :4040
 ```
 
-Requires Go 1.25+. The first boot prompts for a kernel name and a superuser password,
-then creates the `sys` account, its signing keypair, and a JWT secret. It also prints a
-one-time 12-word recovery phrase for `sys` — **write it down**; it is the only way to
-reset the superuser password (`juice auth recover sys`). Subsequent boots are
-idempotent.
+Requires Go 1.25+. `acme` is the kernel's nickname: what it calls itself on the network,
+and the name of its directory. There is no kernel of that name yet, so `serve` says what
+is here, asks whether to create one, and asks the two things it can never revise:
 
-All state lives under `$JUICE_HOME/kernel/` (default `~/.juice/kernel/`): the database
-(which holds the signing key), `config.json`, and auth tokens. Set `JUICE_HOME` to
-relocate everything, or `--db ./juice.db` for a per-folder kernel. The `kernel/cache/`
-subdirectory is regenerable and safe to delete.
+```
+There is no kernel named acme. No kernels here yet.
+Create acme as a new kernel? [y/N] y
 
-The CLI is a pure client of the server (`--server`, default `http://localhost:4040`),
-so the commands below work against any kernel you can reach and log in to.
+Which money will acme use? This cannot be changed later.
+  play  no real money: you credit accounts yourself and keep the records
+  test  fake USDC on the Arbitrum Sepolia test chain
+  real  USDC on Arbitrum One
+Choice [play/test/real]: play
+Superuser password:
+Confirm password:
+sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+  bomb buffalo march shock slim obvious stairs time usage grace habit wear
+Press Enter once you have written it down:
+Superuser "sys" created.
+INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…
+```
+
+Declining, or interrupting before the money is chosen, leaves nothing behind. On a chain
+world one more question follows, for the endpoint that reaches it.
+
+**Write the phrase down**: it is the only way to reset the superuser password
+(`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
+the kernel's own database — and each repeats the ready line, which is where the kernel
+says which nickname, which network and which key answered.
+
+To boot without a terminal, write the configuration first and set the password in the
+environment. That file is the consent a machine with no terminal can give, so `serve`
+creates the kernel without asking:
+
+```bash
+mkdir -p ~/.juice/kernels/acme
+echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
+JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve acme
+```
+
+A kernel's whole state lives in that one directory: the database (which holds the signing
+key), `config.json`, and the rail's key and records. A second kernel is a second name, so
+it is a sibling of the first rather than a second installation; there is no `--db` and no
+`--config`. The `cache/` subdirectory is regenerable and safe to delete. A kernel made
+before kernels were named moves itself into `kernels/<its name>/` on first boot.
+
+Every command is `juice [admin] <noun> <verb>`, with `juice run` the one exception. The
+CLI is a pure client of the server: under `$JUICE_HOME/client/` it keeps the kernels it
+knows — each one's address, public key and network — and one file per *login*, written
+`handle@kernel`, which says both who a command acts as and which kernel it acts through.
+
+```bash
+./juice kernel add http://localhost:4040 work   # register it under the name "work"
+./juice user create alice@work                  # create an account on it
+./juice auth login alice@work                   # log in, and act as alice@work
+./juice kernel list                             # the kernels known, current one marked
+./juice auth list                               # the logins held, current one marked
+./juice auth use bot@work                       # switch to another login already held
+```
+
+Registering dials the server and records the key and network it presents; logging in and
+switching refuse a server that no longer presents them, so a command never reaches a
+kernel you did not mean, and a login travels only to the address recorded for its kernel.
+`--server` sets the endpoint for one invocation and carries no login. `--as alice@work`
+or `JUICE_AS` names a login for one command without switching, which is how an agent or a
+script says who it is; a name that is not a login here is refused rather than replaced by
+whoever happens to be logged in.
+`ecosystem-standard.md` describes the whole layout, including where agents, services and
+the interface keep their own state.
 
 ## Accounts and credits
 
 ```bash
-./juice user create alice        # prints alice's one-time recovery phrase
-./juice user create bob
-./juice auth login alice
+./juice user create alice@work   # prints alice's one-time recovery phrase
+./juice user create bob@work
+./juice auth login alice@work
 ./juice user me                  # handle, balance, locked funds
 ```
 
-Credits enter by operator deposit (reflecting a payment made outside the system) and
-move freely between local users:
+Credits enter only by operator deposit against a payment made outside the system, named
+by the fact that witnesses it, and then move freely between local users:
 
 ```bash
-./juice auth login sys
-./juice admin deposit alice 1000   # operator only
-./juice auth login alice
+./juice auth login sys@work
+./juice admin user deposit alice 1000 --ref wire-8823   # operator only
+./juice auth use alice@work
 ./juice user transfer bob 250      # alice pays bob directly, no fee
 ./juice user ledger                # every deposit, withdrawal, and transfer
 ```
+
+On `play` no crypto is involved at all. The operator records the payments they receive from
+people, `--ref` is whatever names one in their own books, and amounts have six decimal places like
+the other worlds, so the same number means the same amount everywhere. What
+another kernel owes needs no such record: its own signed message saying it paid is the payment
+here, so those debts close by themselves. `play` money is play money — it is backed by nothing,
+and is meant for trying the system out.
+
+On a world with a chain (`test`, `real`), money arrives and leaves over that chain, and
+amounts are written the way that token is written — `1.50`, not `1500000`:
+
+```bash
+./juice user deposit               # where to send money, and whether you are registered
+./juice user address 0xAbC...      # register a payout address, proving you control it
+./juice user withdraw 100 --yes    # pays out to that address
+./juice user withdrawals          # the ones you have made, and where each stands
+```
+
+Every command that moves money asks before it does, since none of them can be undone.
+`--yes` answers in advance, which is how a script says it meant it.
 
 If you lose your password, `juice auth recover <user>` restores the account from the
 recovery phrase. There is no email anywhere in the system.
@@ -202,42 +278,48 @@ The operator (`sys`) uses the same commands as users, widened in scope, plus the
 and trust verbs:
 
 ```bash
-./juice admin users                    # all local accounts
-./juice admin deposit carol 500        # credit/debit against outside payments
-./juice admin withdraw carol 200
-./juice admin suspend carol            # one reversible lever, humans and kernels alike
-./juice admin rename k-3f8a2c9d weather-farm # give a peer a memorable local name
-./juice admin peers                    # counterparties and discovered kernels, balances, last seen
-./juice admin inspect <key|petname>    # a peer's identity, catalog, trade evidence, reachability
-./juice admin identity                 # own key, addresses, exposure position
-./juice admin settle <peer>            # settle the bilateral balance over your chosen rail
+./juice admin user list                # all local accounts
+./juice admin user deposit carol 500 --ref wire-4471  # credit against a payment received
+./juice admin kernel deposits          # payments held for a sender nobody has registered
+./juice admin user suspend carol       # one reversible lever, humans and kernels alike
+./juice admin peer rename k-3f8a2c9d weather-farm # give a peer a memorable local name
+./juice admin peer list                # counterparties and discovered kernels, last seen
+./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
+./juice admin kernel show              # own key, addresses, rail position, money rules and credit
 ./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
 ```
 
-Serving strangers is bounded-risk by construction: a global exposure cap limits total
-unsecured credit across all peers at once, so minting identities buys an attacker
-nothing. `admin identity` shows the position; `admin settle` clears debts — including,
-below the configured quantum, by a provably fair coin flip that makes tiny debts
-economical to settle.
+Every cross-kernel call is paid for on its own. A charge too small to be worth a rail
+payment is settled by a ticket: it pays a fixed larger amount with the probability that
+makes the average payment the charge, so a stream of small calls costs a handful of
+payments rather than one apiece, and neither side can pick the outcome. Serving
+strangers is bounded-risk by construction: one credit limit bounds all the work this
+kernel has delivered and not been paid for, so minting identities buys an attacker
+nothing. `admin kernel show` shows the position.
 
 ## Configuration
 
-`config.json` sits next to the database; safe defaults apply when a key is absent.
+`config.json` sits next to the database, inside the kernel's own directory, and is written
+once by first boot; nothing rewrites it afterwards. Safe defaults apply when a key is
+absent, and a key that is not a key is a startup error rather than a silent default.
 The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
+| `fed_listen_addrs` | Where this kernel answers peers; give each kernel its own when running more than one (as `--addr` does for clients) |
+| `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
+| `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
-| `exposure_max` / `settlement_trigger` | Unsecured-credit cap across all peers, and the "please settle" threshold |
+| `lottery` / `lottery_max` / `credit_limit` | The ticket this kernel settles a cross-kernel charge by (`0` pays every charge exactly), the largest ticket it accepts from a buyer, and the ceiling on work delivered and unpaid |
 | `native.*` | Stdlib prices and LLM URL/models (`native.llm`) |
 | `allow_local_sources` | Permit private-network URLs for action sources (off by default; loopback always allowed) |
 | `log_level` / `log_file` / `log_format` | Structured logging |
 
 Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
 `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_BOOTSTRAP_KERNEL_HANDLE`, `JUICE_ALLOW_LOCAL_SOURCES`.
+`JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
 
 ## HTTP API
 
@@ -265,3 +347,43 @@ log/         Structured logging
 - [API.md](API.md) — the full HTTP/CLI reference.
 - [docs/oauth.md](docs/oauth.md) — wrapping APIs that need per-user consent.
 - [flows/](flows/) — runnable end-to-end shell flows (`flows_test.sh` drives them).
+
+## Testing
+
+Three cadences, by what each costs and what it answers.
+
+| | command | when |
+|---|---|---|
+| Unit, including the in-process federation simulator | `go test ./...` | every change |
+| End-to-end flows against the real binary | `JUICE=./juice bash flows/flows_test.sh` | before merging |
+| Network simulation: a five-kernel economy, with a report | `make netsim` (or `go run ./netsim`) | now and then, and after anything touching federation or money |
+
+The first two are gates: they fail a change. `make netsim` drives a whole economy across five
+kernels and writes what happened to `netsim-runs/<rail>-<timestamp>/`: every command and its output
+in `log.jsonl`, a full snapshot of each kernel in `checkpoints/`, and `report.md`. The report checks
+money in against money held, every call's charge against its advertised terms, every payment against
+the debt it moved, and reports latency, throughput and recovery. It exits non-zero when a check
+fails. **[docs/network-simulation.md](docs/network-simulation.md)** describes the economy it builds,
+what each measurement proves, and what it does not claim.
+`RAIL=anvil` runs the same economy against a local chain (needs Foundry) and `RAIL=sepolia` against
+the live testnet (needs `JUICE_SEPOLIA_RPC` and `JUICE_SEPOLIA_KEY_FILE`, mode 600); on both, money
+is real token transfers, credited at the world's settlement tag: `latest` on the shipped test world,
+so a credit lands in seconds; `finalized` waits for Ethereum.
+
+It is one economy on all three. The participants, actions, prices, trades, compositions, attacks
+and assertions are fixed in `netsim/story.go` and run unchanged everywhere; a rail supplies only
+how money enters, how a payment is made and becomes final, and what the run cost. A test fails if
+the story so much as names a rail. The one thing a rail chooses is how often the trading rounds
+repeat, because a live testnet charges for each round in gas and in a quarter of an hour of
+finality; every distinct event still happens at least once, and the report says which count it ran.
+Before spending anything, a rail prices what the story will ask of it and refuses if it does not
+fit, rather than running a cheaper economy under the same name.
+
+A run directory is git-ignored, and **it is not safe to hand to anyone**. Alongside the logs — which
+are redacted as they are written — it contains each kernel's whole home: its database, its signing
+key, its rail key and its issued tokens. Read it in place; publish `report.md` and `metrics.json`
+if you need to share something, and delete the directory when you are done with it.
+
+Two release gates are opt-in and need more than a laptop: `JUICE_RAIL_FLOWS=1` for the local-chain
+rail gate, and `JUICE_NETWORK_FLOWS=1` for the real-NAT federation gate, which needs a second host
+behind a different NAT.

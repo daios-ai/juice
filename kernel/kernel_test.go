@@ -19,6 +19,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
@@ -33,9 +34,24 @@ func TestMain(m *testing.M) {
 // All test kernels use this as their IssuerUserID so that receipt FK constraints pass.
 const testIssuerUserID = "00000000-0000-0000-0000-000000000001"
 
+// testNet is the play network every test signs on. The kernels these helpers build carry it too, so
+// a signature made in a test verifies in the kernel under test rather than by coincidence.
+var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+
+// newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
+// a test that funds an account twice must name two payments (U3).
+func newRef() string { return "test:" + uuid.NewString() }
+
 func newTestStore(t testing.TB) kernel.Store {
 	t.Helper()
-	db, err := store.Open(t.TempDir() + "/test.db")
+	return newTestStoreAt(t, t.TempDir()+"/test.db")
+}
+
+// newTestStoreAt opens the store at a known path, for a test that must reach the file behind the
+// store — to corrupt a row the way a disk or an operator could, which no store method may do.
+func newTestStoreAt(t testing.TB, path string) kernel.Store {
+	t.Helper()
+	db, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
@@ -58,22 +74,54 @@ func newTestStore(t testing.TB) kernel.Store {
 	return db
 }
 
-func newTestKernel(st kernel.Store) *kernel.Kernel {
+// testConfig is the policy every test kernel starts from; a test with another policy edits the copy.
+func testConfig() kernel.Config {
 	cfg := kernel.DefaultConfig()
+	cfg.Network = testNet
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = testIssuerUserID
 	cfg.FeeRecipientID = testIssuerUserID
 	cfg.SigningKey = testSigningKey()
-	return kernel.New(kernel.Dependencies{Store: st, Config: cfg, Logger: log.Default()})
+	return cfg
+}
+
+// testEconomy is the money policy every test kernel starts from; a test with another policy edits
+// the copy and passes it in deps. The lottery is off, so every obligation is paid exactly and the
+// arithmetic a test asserts is the one it wrote — a test about the draw turns it on deliberately.
+func testEconomy() kernel.Economy {
+	econ := kernel.DefaultEconomy()
+	// Exact payment, so a test asserting an amount gets the one it wrote; a test about the draw
+	// turns the lottery on deliberately.
+	econ.CreditLimit, econ.Lottery = 1000, 0
+	return econ
+}
+
+// newKernel builds a kernel from cfg and the adapters in deps. What every test wires the same way —
+// the logger, a double that also speaks federation, the manual rail (every world runs the same
+// money rules, and play's finalized facts are the operator's own records, D23) — is wired here, so
+// a new kernel dependency is added once rather than at each construction site.
+func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
+	deps.Config = cfg
+	if deps.Economy == (kernel.Economy{}) {
+		deps.Economy = testEconomy()
+	}
+	if deps.Logger == nil {
+		deps.Logger = log.Default()
+	}
+	if fc, ok := deps.HTTP.(kernel.FederationClient); ok && deps.Federation == nil {
+		deps.Federation = fc
+	}
+	k := kernel.New(deps)
+	k.SetRail(rail.NewManual())
+	return k
+}
+
+func newTestKernel(st kernel.Store) *kernel.Kernel {
+	return newKernel(testConfig(), kernel.Dependencies{Store: st})
 }
 
 func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	return kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg, Logger: log.Default()})
+	return newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec})
 }
 
 func testSigningKey() ed25519.PrivateKey {
@@ -157,7 +205,12 @@ func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price
 // Call this in any test that invokes RegisterRemoteKernel or ImportRemoteAction.
 func setupSys(t *testing.T, _ *kernel.Kernel, st kernel.Store) *kernel.Account {
 	t.Helper()
-	return setupUser(t, st, "sys", 0)
+	u := setupUser(t, st, "sys", 0)
+	// The operator account is named by config, which is how the rail's crossings find it (D23).
+	if err := st.SetConfig(context.Background(), "superuser_handle", "sys"); err != nil {
+		t.Fatalf("setupSys: %v", err)
+	}
+	return u
 }
 
 func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *kernel.Process {
@@ -203,10 +256,21 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		CreatedAt:     time.Now().UTC(),
 	}
 	// Mirror beginRun: a remote-proxy root trace carries its dispatch key, which the settlement path
-	// compares against a receipt's tx_id to tell a signed rejection from an execution (§6 P4).
+	// compares against a receipt's tx_id to tell a signed rejection from an execution (§6 P4), and
+	// the record that froze every pricing input for it, which settlement reads and nothing else does.
 	if action.Kind == kernel.KindRemoteProxy {
 		key := uuid.New().String()
 		tr.IdempotencyKey = &key
+		econ := testEconomy()
+		mp := action.Price
+		if action.BasePrice != nil {
+			mp = *action.BasePrice
+		}
+		var rbps int64
+		if action.RemoteBPS != nil {
+			rbps = *action.RemoteBPS
+		}
+		tr.DispatchJSON = kernel.DispatchRecordForTest(mp, action.Price, rbps, econ.ImportBPS, econ.Lottery, "")
 	}
 	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
@@ -1148,11 +1212,11 @@ func TestDepositNonSuperuserRejected(t *testing.T) {
 	recipient := setupUser(t, st, "recipient", 0)
 
 	// Superuser can deposit.
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 100, "ok", newRef()); err != nil {
 		t.Fatalf("superuser deposit: %v", err)
 	}
 	// Regular user cannot deposit.
-	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad", ""); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.Deposit(ctx, regular.ID, recipient.ID, 100, "bad", newRef()); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for non-superuser deposit, got %v", err)
 	}
 }
@@ -1244,34 +1308,43 @@ func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	}
 
 	// Empty key never dedups: both apply.
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, recipient.ID, 10, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	if balance() != 220 {
 		t.Errorf("balance after two empty-key deposits: got %d, want 220", balance())
 	}
 
-	// Withdraw replay returns the existing record before the available-balance guard:
-	// after the first debit drops the balance below amount, the replay still succeeds.
-	w, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	// A withdrawal carries the caller's own id, so a reply lost in transit is safe to ask for
+	// again: the same id returns the same row and moves nothing, even after the first debit has
+	// taken the balance below the amount (U51).
+	id := uuid.NewString()
+	wd, err := k.Withdraw(ctx, recipient.ID, id, 200, "redeem")
 	if err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
 	if balance() != 20 {
 		t.Fatalf("balance after withdraw: got %d, want 20", balance())
 	}
-	wReplay, err := k.Withdraw(ctx, su.ID, recipient.ID, 200, "redeem", "red-1")
+	again, err := k.Withdraw(ctx, recipient.ID, id, 200, "redeem")
 	if err != nil {
-		t.Fatalf("withdraw replay must not fail on dropped balance: %v", err)
+		t.Fatalf("replaying a withdrawal must not fail: %v", err)
 	}
-	if wReplay.ID != w.ID {
-		t.Errorf("withdraw replay returned a new record: got %s, want %s", wReplay.ID, w.ID)
+	if again.ID != wd.ID {
+		t.Errorf("replay made a second withdrawal: got %s, want %s", again.ID, wd.ID)
 	}
 	if balance() != 20 {
-		t.Errorf("balance after withdraw replay: got %d, want 20 (debited once)", balance())
+		t.Errorf("balance after replay: got %d, want 20 (debited once)", balance())
+	}
+	// The same id on other terms is a different intention, and is refused rather than guessed at.
+	if _, err := k.Withdraw(ctx, recipient.ID, id, 5, "redeem"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("same id, other amount: want ErrInvalidInput, got %v", err)
+	}
+	if _, err := k.Withdraw(ctx, recipient.ID, uuid.NewString(), 999, ""); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("withdrawing more than the balance: want ErrInsufficientFunds, got %v", err)
 	}
 }
 
@@ -1310,7 +1383,7 @@ func TestTransfer(t *testing.T) {
 	}
 
 	// Peer/proxy recipient (kernel_public_key set) rejected.
-	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{
@@ -1364,6 +1437,60 @@ func TestTransferIdempotent(t *testing.T) {
 	assertUserBalance(t, st, bob.ID, 40, 0)
 }
 
+// An idempotency token a client chose names that client's own movement and nothing else. The kernel
+// prefixes every key it mints; the caller's was the one name in that column nobody owned, so a
+// client could hand back a key it had merely read and be told money moved that never did, or occupy
+// a name the rail would later need for a real payment.
+func TestATransferKeyNamesOnlyItsOwnCallersMovement(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+
+	su := setupUser(t, st, "sys", 0)
+	alice := setupUser(t, st, "alice", 100)
+	bob := setupUser(t, st, "bob", 0)
+	mallory := setupUser(t, st, "mallory", 100)
+
+	// A payment the kernel booked under its own key.
+	if _, err := k.Deposit(ctx, su.ID, bob.ID, 50, "", "pay-1"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := st.ListLedgerByUser(ctx, bob.ID, 0, 0)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("ledger: %d %v", len(entries), err)
+	}
+	kernelKey := entries[0].ExternalKey
+	if kernelKey == "" {
+		t.Fatal("the kernel's own entry carries no key to try")
+	}
+
+	// A stranger naming it is not answered with it, and moves nothing.
+	before, _ := st.ReadUser(ctx, mallory.ID)
+	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 10, "", kernelKey); err != nil {
+		t.Fatalf("a caller's key lives in the caller's namespace, so this is an ordinary transfer: %v", err)
+	}
+	after, _ := st.ReadUser(ctx, mallory.ID)
+	if after.Available != before.Available-10 {
+		t.Errorf("the transfer did not move: %d then %d", before.Available, after.Available)
+	}
+
+	// Two callers may choose one word without naming each other's movement.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 20, "", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 30, "", "shared"); err != nil {
+		t.Fatalf("another caller's key must not be taken: %v", err)
+	}
+	assertUserBalance(t, st, alice.ID, 80, 0)
+	assertUserBalance(t, st, mallory.ID, 60, 0)
+
+	// One caller reusing their own key on other terms is refused, not answered with the old entry.
+	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 25, "", "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("the same key on other terms must be refused, got %v", err)
+	}
+	assertUserBalance(t, st, alice.ID, 80, 0)
+}
+
 func TestListLedger(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -1373,7 +1500,7 @@ func TestListLedger(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	bob := setupUser(t, st, "bob", 0)
 
-	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", ""); err != nil {
+	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "", ""); err != nil {
@@ -2135,17 +2262,7 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 }
 
 func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	deps := kernel.Dependencies{Store: st, HTTP: http, Config: cfg, Logger: log.Default()}
-	// A test double may play several adapter roles; wire the ones it actually implements.
-	if fc, ok := http.(kernel.FederationClient); ok {
-		deps.Federation = fc
-	}
-	return kernel.New(deps)
+	return newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: http})
 }
 
 // ---- Remote proxy execution test ----
@@ -2167,6 +2284,9 @@ type fakeFederationHTTP struct {
 	resolveUserID   string
 	resolveHandle   string
 	resolveErr      error
+	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
+	resolveRailAddress string
+	resolveRailProof   string
 	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt whose
 	// tx_id is the caller's idempotency_key — exactly how a real serving kernel refuses a call (§13), so
 	// a test can drive an ACTUAL rejection settlement.
@@ -2180,9 +2300,16 @@ type fakeFederationHTTP struct {
 	// root request has an empty name, so it reads as "owner/" (§13).
 	resolvedRefs []string
 	// sentAction / sentIdempotencyKey record what the kernel actually put on the wire (§13: the
-	// peer's stable action id, under the key parked with the dispatch).
+	// peer's stable action id, under the key parked with the dispatch); sentCommitment and
+	// sentLottery record the draw it committed to (P10).
 	sentAction         string
 	sentIdempotencyKey string
+	sentCommitment     string
+	sentLottery        int64
+	// revealed is every draw the kernel announced to a seller, and revealErr makes that announcement
+	// fail so a test can watch the worker resend it.
+	revealed  []kernel.RevealPayload
+	revealErr error
 	// Outbound step protocol (§13): the canned list/complete replies, and what the kernel sent.
 	stepListBody      string
 	stepBody          string
@@ -2192,12 +2319,18 @@ type fakeFederationHTTP struct {
 	stepForUserID     string
 }
 
-func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ActionManifest, error) {
+func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ResolvedAction, error) {
 	f.resolvedRefs = append(f.resolvedRefs, owner+"/"+name)
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}
-	return f.resolveManifest, nil
+	if f.resolveManifest == nil {
+		return nil, nil
+	}
+	// A world without payment addresses carries none, which is what the manual rail these tests run
+	// on reports; a test about paying a peer supplies one.
+	return &kernel.ResolvedAction{Manifest: f.resolveManifest,
+		RailAddress: f.resolveRailAddress, RailProof: f.resolveRailProof}, nil
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (string, string, error) {
@@ -2207,19 +2340,24 @@ func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (
 	return f.resolveUserID, f.resolveHandle, nil
 }
 
-// Settle completes kernel.FederationClient; residual settlement has its own dedicated fakes.
-func (f *fakeFederationHTTP) Settle(_ context.Context, _, _, _, _, _ string, _ int64, _ string, _ []byte) (int, []byte, error) {
-	return 0, nil, kernel.ErrPeerUnreachable.Wrap("settle not used in these tests")
+// revealed records every draw this double was asked to announce, so a test can assert what the
+// buyer told the seller without a transport.
+func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.RevealPayload, _ string) error {
+	if f.revealErr != nil {
+		return f.revealErr
+	}
+	f.revealed = append(f.revealed, p)
+	return nil
 }
 
 // stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
 // every unrelated test see an unreachable peer, which no call path consults.
-func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string) (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string, _ bool) (int, []byte, bool, error) {
 	f.stepInput, f.stepForUserID = string(input), forUserID
 	return f.stepReply()
 }
 
-func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _ string) (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _, _ string) (int, []byte, bool, error) {
 	if f.stepListBody == "" {
 		return 0, nil, true, nil // no listing configured: peer unreachable, so no payment descriptor
 	}
@@ -2241,8 +2379,9 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey string, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey, commitment string, lottery int64, _ map[string]any) (kernel.FederationResult, error) {
 	f.sentAction, f.sentIdempotencyKey = actionID, idempotencyKey
+	f.sentCommitment, f.sentLottery = commitment, lottery
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
@@ -2253,7 +2392,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
 			RefreshProxy: f.rejectRefreshProxy, StartedAt: now, CreatedAt: now,
 		}
-		payload, _ := kernel.ReceiptSigningBytes(r)
+		payload, _ := testNet.ReceiptSigningBytes(r)
 		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
 		b, _ := json.Marshal(r)
 		status := f.httpStatus // 403 by default: a refusal, not a funding condition
@@ -2289,10 +2428,14 @@ func jcsHashForTest(t *testing.T, jsonStr string) string {
 }
 
 // signReceiptForTest signs a Receipt using the same method as the kernel's signReceipt:
-// Ed25519 over CanonicalJSON of the receipt with Signature cleared.
+// Ed25519 over CanonicalJSON of the receipt with Signature cleared. A receipt carrying an
+// obligation gets the seller's half of the draw, since without one it is not settleable (P10).
 func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
 	t.Helper()
-	payload, err := kernel.ReceiptSigningBytes(r)
+	if r.Charge+r.Premium > 0 && r.Nonce == "" {
+		r.Nonce = "0011223344556677889900aabbccddeeff00112233445566778899aabbccddee"
+	}
+	payload, err := testNet.ReceiptSigningBytes(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2530,7 +2673,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "")
+	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}
@@ -2557,7 +2700,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer proxy user: a set kernel_public_key makes it a key account (a peer), funded so the denial is
 	// on visibility, not balance.
-	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{
@@ -2577,7 +2720,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "")
+	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
 	}
@@ -2585,6 +2728,254 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	if len(procs) != 0 {
 		t.Errorf("expected no process for a denied inbound local call, got %d", len(procs))
 	}
+}
+
+// TestRateInboundForeignCallRefused: a call this kernel served to a peer is funded and therefore
+// owned by the seller (§6 role law), so the plain buyer check would let a provider rate its own
+// work and gossip it as trade evidence. The payer is on the other kernel and rates its own proxy
+// transaction there. A step a peer completes here stays the local payer's to rate.
+func TestRateInboundForeignCallRefused(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	provider := setupUser(t, st, "rate-fed-provider", 0)
+	if err := st.UpsertKernel(ctx, "cmF0ZS1mZWQtcGVlcg", "rate-fed-peer", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer := &kernel.Account{
+		ID: uuid.New().String(), KernelPublicKey: "cmF0ZS1mZWQtcGVlcg",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateUser(ctx, peer); err != nil {
+		t.Fatal(err)
+	}
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "rate-fed-act",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		Source:      "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly as the federation handler admits a call: the inbound record exists before it runs.
+	rec := &kernel.IdempotencyRecord{
+		ID: uuid.New().String(), IdempotencyKey: "rate-fed-key", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatalf("ReadTransaction: %v", err)
+	}
+	if tx.OwnerUserID != provider.ID {
+		t.Fatalf("inbound call owner: got %q, want the seller %q", tx.OwnerUserID, provider.ID)
+	}
+	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("provider rating its own served call: want ErrUnauthorized, got %v", err)
+	}
+	// Retention purges the peer: its account row loses the kernel key but stays as ledger anchor
+	// (§13). The gate must not reopen for a transaction that has outlived its peer.
+	if err := st.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatalf("PurgePeerCascade: %v", err)
+	}
+	if anon, _ := st.ReadUser(ctx, peer.ID); anon == nil || anon.IsPeer() {
+		t.Fatalf("purge did not anonymize the peer account; the test would prove nothing")
+	}
+	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("provider rating a served call after the peer was purged: want ErrUnauthorized, got %v", err)
+	}
+	if ratings, lerr := st.ListRatings(ctx, a.ID, 10, 0); lerr == nil && len(ratings) != 0 {
+		t.Errorf("a refused rating still recorded %d row(s)", len(ratings))
+	}
+}
+
+// TestActionRatingsAdmitTradeBackedPeerRatings: a buyer who paid abroad rates on the kernel that
+// paid, and that rating reaches the provider's public projection only on D16's link — the rater's
+// kernel names one of this kernel's receipts for the action, and that receipt's call was made by
+// that very kernel. A rating attached to someone else's trade, to no trade, or by an equivocating
+// issuer is not admitted; a local rating sits beside the admitted one, each naming its source.
+func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	provider := setupUser(t, st, "prt-provider", 0)
+	const peerKey, strangerKey = "cHJ0LXBlZXI", "cHJ0LXN0cmFuZ2Vy"
+	for _, key := range []string{peerKey, strangerKey} {
+		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", "", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		acct := &kernel.Account{ID: uuid.New().String(), KernelPublicKey: key, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateUser(ctx, acct); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peer, _ := st.ReadAccountByKernelKey(ctx, peerKey)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	// The peer's call, served here: its receipt is what a remote rating must name.
+	rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served, _ := st.ReadReceiptByTxID(ctx, reply.TxID)
+	servedHash, err := kernel.ReceiptHash(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := k.PublicKeyB64()
+	now := time.Now().UTC().Truncate(time.Second)
+	rows := []*kernel.EvidenceRow{
+		ratingEvidence(t, peerKey, self, a.ID, "peer-own-1", servedHash, 1, now.Add(-time.Minute)), // admitted
+		ratingEvidence(t, strangerKey, self, a.ID, "str-own-1", servedHash, 0, now),                // not the caller
+		ratingEvidence(t, peerKey, self, a.ID, "peer-own-2", "not-our-receipt", 0, now),            // no trade
+		ratingEvidence(t, peerKey, self, "other-action", "peer-own-3", servedHash, 0, now),         // other action
+	}
+	for _, e := range rows {
+		if err := st.UpsertEvidence(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A local payer's rating, newer, sits beside it.
+	buyer := setupUser(t, st, "prt-buyer", 0)
+	_, tr := beginTestRun(t, st, buyer.ID, a)
+	local, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: buyer.ID, ExistingTraceID: tr.ID, TargetUserID: provider.ID, ActionName: a.Name, Args: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RateTransaction(ctx, buyer.ID, local.TxID, 1.0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := k.ActionRatings(ctx, a.ID, 50, 0)
+	if err != nil {
+		t.Fatalf("ActionRatings: %v", err)
+	}
+	if len(got) != 2 || got[0].Source != "local" || got[1].Source != "peer" || got[1].Value != 1 {
+		t.Fatalf("want [local, peer(1)] newest first, got %+v", got)
+	}
+	if page, _ := k.ActionRatings(ctx, a.ID, 1, 1); len(page) != 1 || page[0].Source != "peer" {
+		t.Errorf("paging over the merged projection: got %+v", page)
+	}
+	// A peer mints its own row keys, so it can gossip any number of rows naming our one receipt:
+	// agreeing rows are one rating.
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, a.ID, "peer-own-5", servedHash, 1, now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	peerRatings := func() int {
+		got, _ := k.ActionRatings(ctx, a.ID, 50, 0)
+		n := 0
+		for _, r := range got {
+			if r.Source == "peer" {
+				n++
+			}
+		}
+		return n
+	}
+	if n := peerRatings(); n != 1 {
+		t.Errorf("two agreeing rows on one trade: want 1 peer rating, got %d", n)
+	}
+	// A trade is judged with all its rows. A stored row outside the contract — a value that is no
+	// rating, or a note over the bound — voids it, as does an equivocated row: the issuer has told
+	// two stories about that trade. The same rule the inspect view applies.
+	long := strings.Repeat("n", 1025)
+	overlong := ratingEvidence(t, peerKey, self, a.ID, "peer-own-6", servedHash, 1, now)
+	overlong.RatingJSON = strings.Replace(overlong.RatingJSON, `"note":null`, `"note":"`+long+`"`, 1)
+	if err := st.UpsertEvidence(ctx, overlong); err != nil {
+		t.Fatal(err)
+	}
+	if n := peerRatings(); n != 0 {
+		t.Errorf("a stored overlong note on the trade: want it void, got %d peer rating(s)", n)
+	}
+	// Equivocation as the store detects it, on a fresh trade of another action so it is judged alone.
+	fresh := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act-2", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	rec2 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-2", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec2); err != nil {
+		t.Fatal(err)
+	}
+	reply2, err := k.RunFederated(ctx, peer.ID, provider.ID, fresh.Name, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served2, _ := st.ReadReceiptByTxID(ctx, reply2.TxID)
+	hash2, _ := kernel.ReceiptHash(served2)
+	// The note bound holds on read, alone: one stored row, agreeing with nothing but itself.
+	tooLong := ratingEvidence(t, peerKey, self, fresh.ID, "peer-own-8", hash2, 1, now)
+	tooLong.RatingJSON = strings.Replace(tooLong.RatingJSON, `"note":null`, `"note":"`+long+`"`, 1)
+	if err := st.UpsertEvidence(ctx, tooLong); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := k.ActionRatings(ctx, fresh.ID, 50, 0); len(got) != 0 {
+		t.Fatalf("a stored overlong note, alone on its trade: want not admitted, got %+v", got)
+	}
+	// Equivocation as the store detects it — two ratings under one row key — voids a trade even
+	// beside an honest row. On a third trade, so it is judged alone.
+	third := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act-3", Kind: kernel.KindWasm,
+		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	rec3 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-3", CounterpartyUserID: peer.ID,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := st.InsertPendingIdempotencyRecord(ctx, rec3); err != nil {
+		t.Fatal(err)
+	}
+	reply3, err := k.RunFederated(ctx, peer.ID, provider.ID, third.Name, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
+	if err != nil {
+		t.Fatalf("RunFederated: %v", err)
+	}
+	served3, _ := st.ReadReceiptByTxID(ctx, reply3.TxID)
+	hash3, _ := kernel.ReceiptHash(served3)
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, third.ID, "peer-own-9", hash3, 1, now)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 1 || got[0].Source != "peer" {
+		t.Fatalf("third trade: want its one peer rating, got %+v", got)
+	}
+	for _, val := range []float64{1, 0} {
+		if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, third.ID, "peer-own-10", hash3, val, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 0 {
+		t.Errorf("an equivocated row on the trade voids it even beside an honest one, got %+v", got)
+	}
+
 }
 
 // TestCallUsesActionIDNotOwnerName verifies Fix 1: when Call is invoked with ActionID set
@@ -2641,12 +3032,7 @@ func TestCallLogsTxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: &fakeScriptExec{result: `{"ok":true}`}, Config: cfg, Logger: logger})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: &fakeScriptExec{result: `{"ok":true}`}, Logger: logger})
 
 	ctx := context.Background()
 	alice := setupUser(t, st, "alice", 2000)

@@ -151,6 +151,73 @@ func TestUpsertEvidenceLateRatingTransitions(t *testing.T) {
 	}
 }
 
+// TestSubjectEvidenceOneRatingPerTrade: an issuer's rows are unique on hashes it mints itself, so
+// several can name one trade of the subject's. They are one rating when they agree, and none when
+// they do not — one purchase never buys more than one rating.
+func TestSubjectEvidenceOneRatingPerTrade(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	const A, B = "aaaa-issuer", "bbbb-subject"
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := st.UpsertEvidence(ctx, execEvidence(t, B, B, "act1", A, "H1", now)); err != nil {
+		t.Fatal(err)
+	}
+	for _, own := range []string{"H2", "H3", "H4"} {
+		if err := st.UpsertEvidence(ctx, ratingEvidence(t, A, B, "act1", own, "H1", 1, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := k.SubjectEvidence(ctx, B)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.IssuerPublicKey == A && (r.RatingCount != 1 || r.Uses != 1 || r.CorroboratedUses != 1) {
+			t.Errorf("three agreeing rows on one trade: want 1 rating, 1 use, 1 corroborated, got %d/%d/%d",
+				r.RatingCount, r.Uses, r.CorroboratedUses)
+		}
+	}
+	// The link is bound to the action: a rating for act2 naming act1's receipt is not trade-backed.
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, A, B, "act2", "H9", "H1", 1, now)); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = k.SubjectEvidence(ctx, B)
+	for _, r := range rows {
+		if r.IssuerPublicKey == A && r.SubjectActionID == "act2" && (r.RatingCount != 0 || r.UnverifiedRatings != 1 || r.CorroboratedUses != 0) {
+			t.Errorf("a rating on another action's receipt counted as trade-backed: %+v", r)
+		}
+	}
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, A, B, "act1", "H5", "H1", 0, now)); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = k.SubjectEvidence(ctx, B)
+	for _, r := range rows {
+		if r.IssuerPublicKey == A && r.RatingCount != 0 {
+			t.Errorf("a disagreeing row on the same trade: want 0 ratings, got %d", r.RatingCount)
+		}
+	}
+	// An equivocated row (two ratings under one row key) voids its trade even beside honest,
+	// agreeing rows: the issuer has told two stories about it.
+	if err := st.UpsertEvidence(ctx, execEvidence(t, B, B, "act3", A, "H7", now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertEvidence(ctx, ratingEvidence(t, A, B, "act3", "H8", "H7", 1, now)); err != nil {
+		t.Fatal(err)
+	}
+	for _, val := range []float64{1, 0} {
+		if err := st.UpsertEvidence(ctx, ratingEvidence(t, A, B, "act3", "H9e", "H7", val, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, _ = k.SubjectEvidence(ctx, B)
+	for _, r := range rows {
+		if r.IssuerPublicKey == A && r.SubjectActionID == "act3" && r.RatingCount != 0 {
+			t.Errorf("an equivocated sibling on the trade: want 0 ratings, got %d", r.RatingCount)
+		}
+	}
+}
+
 // TestAccumulateGossipIndexesVerifiedManifests: the receiver rebuilds a source kernel's discovery
 // docs from ONLY its validly-signed first-party manifests, skipping any with a bad signature (§13).
 func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
@@ -167,7 +234,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC(),
 	}
-	sig, err := kernel.SignManifest(peerPriv, good)
+	sig, err := testNet.SignManifest(peerPriv, good)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,12 +83,18 @@ func KernelErrorCode(err error) string {
 // ErrorFromCode maps a stored error code back to its sentinel, so a code that crossed a
 // process or kernel boundary can be re-raised as the same typed error. Unknown codes — an
 // older or newer peer — degrade to ErrExecutionFailed rather than being silently dropped.
+// ErrSettlementDeferred is returned by a settlement commit that refused because a trace beneath
+// the call is still unsettled (D3): the outcome was recorded in that same transaction, and the
+// sweep that follows the last child's settlement commits it. Compared by identity; it is a state,
+// not a client error, so it carries the invalid_state code and is never returned to a caller.
+var ErrSettlementDeferred = &KernelError{Code: "invalid_state", HTTP: 409, Message: "settlement deferred: work is still in flight beneath the call"}
+
 func ErrorFromCode(code string) *KernelError {
 	for _, sentinel := range []*KernelError{
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
 		ErrSchemaViolation, ErrTimeout, ErrInternal, ErrGrantRequired,
-		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged,
+		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged, ErrRailStopped,
 	} {
 		if sentinel.Code == code {
 			return sentinel
@@ -133,15 +139,21 @@ var (
 	// peer (§13 never-dispatched); the call is settled locally with a full refund. 502 (bad
 	// gateway), distinct from ErrTimeout's 504 (parked, awaiting a receipt). Meta["peer"] names it.
 	ErrPeerUnreachable = &KernelError{Code: "peer_unreachable", HTTP: 502}
-	// ErrPeerUnfunded: this kernel's prepaid credit on the peer is exhausted (§13); the peer
-	// signed a zero-charge rejection. An operator condition (out-of-band payment + admin deposit),
-	// never the caller's own balance — hence a distinct code carrying Meta["peer"], HTTP 402.
+	// ErrPeerUnfunded: the peer will not serve this kernel on credit (P10); the peer
+	// signed a zero-charge rejection. Its limit with us is reached, or it cannot fund the work at
+	// its own provider — an operator condition either way, never the caller's own balance, hence a
+	// distinct code carrying Meta["peer"], HTTP 402.
 	ErrPeerUnfunded = &KernelError{Code: "peer_unfunded", HTTP: 402}
 	// ErrTermsChanged: a run's quote pin no longer matches (§4 precondition 7). Distinct from
 	// ErrInvalidState, which it shares a status with, because the action is perfectly callable —
 	// only at a price the caller has not agreed to — and a client must tell "re-confirm the new
 	// terms" from "this action is disabled" by code, never by sniffing Meta.
 	ErrTermsChanged = &KernelError{Code: "terms_changed", HTTP: 409}
+	// ErrRailStopped: an outgoing rail operation is blocked — the rail refused to sign (a shortage
+	// it names), or the world's domain has not been verified yet. Distinct from the caller's own
+	// insufficient funds: nothing is wrong with the caller, and the condition clears on its own
+	// once the operator's balance or the endpoint recovers (D23).
+	ErrRailStopped = &KernelError{Code: "rail_stopped", HTTP: 503}
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
@@ -162,8 +174,8 @@ func PeerUnreachableError(ref string) *KernelError {
 // TermsChangedError refuses a run whose quote pin no longer matches (§4 precondition 7), before any
 // funds are locked. Meta carries the current hash AND price: the hash alone would let a client
 // blindly re-arm and retry, defeating the pin, while the price is what a human re-consents to.
-func TermsChangedError(currentHash string, currentPrice int64) error {
-	return ErrTermsChanged.Wrapf("the action's terms changed; it now costs %d", currentPrice).
+func TermsChangedError(net Network, currentHash string, currentPrice int64) error {
+	return ErrTermsChanged.Wrapf("the action's terms changed; it now costs %s", net.Amount(currentPrice)).
 		WithMeta("quote_hash", currentHash).WithMeta("price", strconv.FormatInt(currentPrice, 10))
 }
 

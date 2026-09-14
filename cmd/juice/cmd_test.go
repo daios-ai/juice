@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/script"
 	"github.com/daios-ai/juice/store"
 	"github.com/go-chi/chi/v5"
@@ -26,6 +28,55 @@ import (
 )
 
 // ---- CLI test helpers ----
+
+// testNet is the play network these tests sign on, matching what a kernel serves by default.
+var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+
+// newTestStore opens a fresh database that closes with the test.
+func newTestStore(t *testing.T) *store.DB {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// testConfig is the policy every test kernel starts from: the play network and the token secret
+// the test's environment names.
+func testConfig(secret string) kernel.Config {
+	cfg := kernel.DefaultConfig()
+	cfg.Network = testNet
+	cfg.TokenSecret = secret
+	return cfg
+}
+
+// testEconomy is the money policy every test kernel starts from. The lottery is off, so every
+// obligation is paid exactly and the arithmetic a test asserts is the one it wrote; a test about
+// the draw turns it on deliberately.
+func testEconomy() kernel.Economy {
+	econ := kernel.DefaultEconomy()
+	// Exact payment, so a test asserting an amount gets the one it wrote.
+	econ.CreditLimit, econ.Lottery = 100000, 0
+	return econ
+}
+
+// newKernel builds a kernel from cfg and the adapters in deps, with a discarded logger and the
+// manual rail, so what every test wires the same way is wired once.
+func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
+	deps.Config, deps.Logger = cfg, log.Discard()
+	if deps.Economy == (kernel.Economy{}) {
+		deps.Economy = testEconomy()
+	}
+	k := kernel.New(deps)
+	k.SetRail(rail.NewManual())
+	return k
+}
+
+// newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
+// a test that funds an account twice must name two payments (U3).
+func newRef() string { return "test:" + uuid.NewString() }
 
 type testEnv struct {
 	db  *store.DB
@@ -38,9 +89,9 @@ const cmdTestIssuerID = "00000000-0000-0000-0000-000000000001"
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
+	dbFile := filepath.Join(dir, "test.db")
 
-	db, err := store.Open(dbPath)
+	db, err := store.Open(dbFile)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -56,38 +107,75 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+	// A real kernel answers /health with its key and its network, and a client reads that banner
+	// before it will scale money or release a credential. A test kernel that cannot is not standing
+	// in for one.
+	if err := db.SetConfig(context.Background(), configKeySigningPublic,
+		base64.RawURLEncoding.EncodeToString(signingKey.Public().(ed25519.PublicKey))); err != nil {
+		t.Fatalf("newTestEnv: signing public key: %v", err)
+	}
 
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "cli-test-secret"
-	cfg.IssuerUserID = cmdTestIssuerID
-	cfg.FeeRecipientID = cmdTestIssuerID
-	cfg.SigningKey = signingKey
+	cfg := testConfig("cli-test-secret")
+	cfg.IssuerUserID, cfg.FeeRecipientID, cfg.SigningKey = cmdTestIssuerID, cmdTestIssuerID, signingKey
 	// Credential encryption is mandatory (§8): the production binary always wires a box,
 	// so tests do too. Without it, creating/activating an action with upstream auth fails closed.
 	box, _ := newAESGCMBox(make([]byte, 32))
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), allowLocal: true}
 	exec := script.New(script.Config{TimeoutMS: cfg.ScriptTimeout.Milliseconds(), MemoryBytes: cfg.ScriptMemory})
-	k := kernel.New(kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec, Config: cfg, Logger: log.Discard()})
+	k := newKernel(cfg, kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec})
 	k.SetSecretBox(box)
 	t.Setenv("JUICE_SECRET_KEY", "cli-test-secret")
 
 	t.Cleanup(func() { db.Close() })
 
-	origDB := flagDB
-	flagDB = dbPath
-	t.Cleanup(func() { flagDB = origDB })
+	origDB := dbPath
+	dbPath = dbFile
+	t.Cleanup(func() { dbPath = origDB })
 
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", dir)
 	t.Cleanup(func() { os.Setenv("HOME", origHome) })
 
-	// User-facing CLI commands are HTTP clients now: point them at a server backed by env.k.
+	// User-facing CLI commands are HTTP clients now: point them at a server backed by env.k, and
+	// select a login on it, since every command acts as one.
 	ts := mountTestServer(t, k)
 	origServer := flagServer
 	flagServer = ts.URL
 	t.Cleanup(func() { flagServer = origServer })
+	selectTestLogin(t, "tester@test", ts.URL)
 
 	return &testEnv{db: db, k: k, dir: dir}
+}
+
+// selectTestLogin records a kernel at endpoint and selects a login on it, which is what `kernel
+// add` and `auth login` do between them. Tests that store a token need one, because a token is
+// stored under the login that holds it.
+func selectTestLogin(t *testing.T, name, endpoint string) {
+	t.Helper()
+	l, err := parseLogin(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := flagAs
+	flagAs = ""
+	t.Setenv("JUICE_AS", "")
+	t.Cleanup(func() { flagAs = old })
+	cfg := loadClientConfig()
+	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: strings.TrimRight(endpoint, "/"), Network: "play"}
+	cfg.Current = l.String()
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatalf("select test login: %v", err)
+	}
+	// A login is a login once it holds a session: `auth login` stores one, and a selected name
+	// with no credentials is what a command refuses. Tests that need a real token overwrite this.
+	if err := withCredentials(l, func(c *credentials) (bool, error) {
+		if c.Token == "" {
+			c.Token = "test-session"
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("select test login: %v", err)
+	}
 }
 
 // mountTestServer starts an httptest server exposing the full route set backed by k, for
@@ -109,6 +197,7 @@ func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
 
 func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
 	t.Helper()
+	resetClient() // one client per command, as rootCmd's PersistentPreRun gives a real invocation
 	buf := &bytes.Buffer{}
 	cmd.SetOut(buf)
 	cmd.SetErr(buf)
@@ -316,7 +405,7 @@ func TestUserUpdateProxyUser(t *testing.T) {
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}
-	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", time.Now().UTC()); err != nil {
+	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.db.CreateUser(ctx, proxy); err != nil {
@@ -1435,28 +1524,13 @@ func TestCallInsufficientFunds(t *testing.T) {
 
 func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "remote_test.db")
-	db, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
+	db := newTestStore(t)
 	t.Setenv("JUICE_SECRET_KEY", "remote-test-secret")
-
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "remote-test-secret"
-	k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+	k := newKernel(testConfig("remote-test-secret"), kernel.Dependencies{Store: db})
 
 	if err := k.FirstBoot(t.Context(), "sys-pass", ""); err != nil {
 		t.Fatal(err)
 	}
-
-	origDB := flagDB
-	flagDB = dbPath
-	t.Cleanup(func() { flagDB = origDB })
-
 	return k, db
 }
 
@@ -1482,7 +1556,7 @@ func TestRemoteImport(t *testing.T) {
 		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
-	sig, err := kernel.SignManifest(priv, &m)
+	sig, err := testNet.SignManifest(priv, &m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1554,15 +1628,15 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 
 	t.Run("detail view prints the id", func(t *testing.T) {
 		out := captureStdout(t, func() error {
-			return emitRaw([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`))
+			return emit([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`), output{})
 		})
 		if out != "act-1\n" {
-			t.Errorf("emitRaw --quiet = %q, want %q", out, "act-1\n")
+			t.Errorf("emit --quiet = %q, want %q", out, "act-1\n")
 		}
 	})
 
 	t.Run("a response naming no resource prints nothing", func(t *testing.T) {
-		out := captureStdout(t, func() error { return emitRaw([]byte(`{"status":"ok"}`)) })
+		out := captureStdout(t, func() error { return emit([]byte(`{"status":"ok"}`), output{}) })
 		if out != "" {
 			t.Errorf("--quiet must suppress a response with no resource id, got %q", out)
 		}
@@ -1591,7 +1665,7 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 	})
 }
 
-// TestPrintTextParity asserts that printText surfaces every field the canonical JSON
+// TestPrintTextParity asserts that the field view surfaces every field the canonical JSON
 // (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
 // checks that structured values are rendered as indented JSON.
 func TestPrintTextParity(t *testing.T) {
@@ -1616,7 +1690,7 @@ func TestPrintTextParity(t *testing.T) {
 		if err := json.Unmarshal(raw, &fields); err != nil {
 			t.Fatal(err)
 		}
-		text := captureStdout(t, func() error { return printText(obj) })
+		text := captureStdout(t, func() error { return printFields(raw, nil, kernel.Network{}) })
 		for key := range fields {
 			if !strings.Contains(text, key+":") {
 				t.Errorf("%T text output missing field %q\n%s", obj, key, text)
@@ -1625,13 +1699,15 @@ func TestPrintTextParity(t *testing.T) {
 	}
 
 	// Structured values must appear as indented JSON, not be dropped.
-	text := captureStdout(t, func() error {
-		return printText(enrichAction(&kernel.Kernel{}, &kernel.Action{
-			ID: "a1", Name: "x", Kind: kernel.KindHTTP,
-			InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
-			OutputSchema: map[string]any{"type": "object"},
-		}, newAccountCache(&kernel.Kernel{}, context.Background())))
-	})
+	schemas, err := json.Marshal(enrichAction(&kernel.Kernel{}, &kernel.Action{
+		ID: "a1", Name: "x", Kind: kernel.KindHTTP,
+		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+		OutputSchema: map[string]any{"type": "object"},
+	}, newAccountCache(&kernel.Kernel{}, context.Background())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := captureStdout(t, func() error { return printFields(schemas, nil, kernel.Network{}) })
 	if !strings.Contains(text, "input_schema: {") || !strings.Contains(text, `"type": "object"`) {
 		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)
 	}
@@ -1715,8 +1791,12 @@ func TestCLIActionRatings(t *testing.T) {
 	}
 
 	// A public action's ratings are public evidence, readable with no session at all (§11) — the
-	// reference resolution the CLI performs first must not put a login in front of them.
-	if err := saveToken(""); err != nil {
+	// reference resolution the CLI performs first must not put a login in front of them. No
+	// session means no login selected: a login that IS selected and holds none is not a stranger,
+	// it is a broken session, and says so rather than reading as one (D20).
+	cfg := loadClientConfig()
+	cfg.Current = ""
+	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	anon := captureStdout(t, func() error {
@@ -1787,5 +1867,659 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	}
 	if _, err := execTestCmd(t, actionImportCmd(), "mail", specSrv.URL+"/other.json"); err == nil {
 		t.Error("re-binding a name to another document must be refused")
+	}
+}
+
+// An act that cannot be undone defaults to no. A bare Enter on a prompt about money must not move
+// it, declining must be an error so a script does not read silence as success, and off a terminal
+// there is nobody to ask.
+func TestConfirmDefaultsToNo(t *testing.T) {
+	orig := interactiveTTY
+	interactiveTTY = func() bool { return true }
+	t.Cleanup(func() { interactiveTTY = orig })
+
+	for _, tc := range []struct{ typed, want string }{
+		{"\n", "cancelled"}, {"n\n", "cancelled"}, {"no\n", "cancelled"},
+		{"y\n", ""}, {"YES\n", ""},
+	} {
+		withStdin(t, tc.typed)
+		err := confirm("Send everything?", false)
+		if tc.want == "" && err != nil {
+			t.Errorf("typed %q: got %v, want acceptance", tc.typed, err)
+		}
+		if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("typed %q: got %v, want %q", tc.typed, err, tc.want)
+		}
+	}
+	// --yes is the only way to confirm where nobody can be asked.
+	if err := confirm("Send everything?", true); err != nil {
+		t.Errorf("--yes: %v", err)
+	}
+	interactiveTTY = func() bool { return false }
+	if err := confirm("Send everything?", false); err == nil {
+		t.Error("a confirmation with no terminal to ask on was assumed")
+	}
+}
+
+// withStdin points os.Stdin at the given text for one check.
+func withStdin(t *testing.T, text string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig; r.Close() })
+}
+
+// TestEmitFollowsOneOutputPolicy pins the single rule every command's output obeys (§14 C8):
+// --json is the server's body exactly as it arrived, --quiet is ids one per line — a list yields
+// one per row, and a reply naming no resource yields nothing — and otherwise the command renders
+// it. One function decides this for every command, so no command can drift from the promise.
+func TestEmitFollowsOneOutputPolicy(t *testing.T) {
+	one := []byte(`{"id":"a-1","price":10}`)
+	many := []byte(`[{"id":"a-1"},{"id":"a-2"}]`)
+	run := []byte(`{"tx_id":"t-9","result":{}}`)
+	said := output{human: func([]byte) error { fmt.Println("done."); return nil }}
+	for _, c := range []struct {
+		name        string
+		json, quiet bool
+		body        []byte
+		out         output
+		want        string
+	}{
+		{"json relays the body", true, false, one, output{}, "{\n  \"id\": \"a-1\",\n  \"price\": 10\n}\n"},
+		{"json of an empty reply is nothing", true, false, nil, said, ""},
+		{"json ignores the command's own rendering", true, false, many, said, "[\n  {\n    \"id\": \"a-1\"\n  },\n  {\n    \"id\": \"a-2\"\n  }\n]\n"},
+		{"quiet prints one resource's id", false, true, one, output{}, "a-1\n"},
+		{"quiet prints a list's ids, one per line", false, true, many, output{}, "a-1\na-2\n"},
+		{"quiet prints the field the command names", false, true, run, output{id: "tx_id"}, "t-9\n"},
+		{"quiet prints nothing for a reply naming no resource", false, true, []byte(`{"status":"ok"}`), said, ""},
+		{"quiet prints nothing for an empty reply", false, true, nil, said, ""},
+		{"the command renders its own view", false, false, many, said, "done.\n"},
+		{"a rendering runs on an empty reply too", false, false, nil, said, "done.\n"},
+		{"without one, every field the reply carries is shown", false, false, one, output{}, "  id: a-1\n  price: 10\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			oldJSON, oldQuiet := flagJSON, flagQuiet
+			flagJSON, flagQuiet = c.json, c.quiet
+			t.Cleanup(func() { flagJSON, flagQuiet = oldJSON, oldQuiet })
+			if got := captureStdout(t, func() error { return emit(c.body, c.out) }); got != c.want {
+				t.Errorf("emit = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestTheFieldViewScalesOnlyTheFieldsItIsGiven: money is written and read in one unit, the world's
+// (D20), so a field view shows an amount the way the command that asked for it is written. Which
+// fields those are is named by the command, never guessed from a field's name — an action's own
+// arguments and results ride inside these replies, and a result that happens to carry "price" is
+// the action's own number, not this kernel's money.
+func TestTheFieldViewScalesOnlyTheFieldsItIsGiven(t *testing.T) {
+	body := []byte(`{"price":1500000,"result":{"price":1500000},"uses":1500000}`)
+	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
+	got := captureStdout(t, func() error { return printFields(body, moneyAction, net) })
+	if !strings.Contains(got, "price: 1.50 credits") {
+		t.Errorf("a named money field was not written in the world's unit:\n%s", got)
+	}
+	if !strings.Contains(got, `"price": 1500000`) {
+		t.Errorf("a field inside the action's own result was rewritten as money:\n%s", got)
+	}
+	if !strings.Contains(got, "uses: 1500000") {
+		t.Errorf("a field the command did not name was rewritten as money:\n%s", got)
+	}
+}
+
+// TestMoneyIsShownTheWayItIsWritten closes the loop over HTTP: a price given the way this kernel
+// writes money comes back the same way, while --json stays in the base units a program counts in.
+func TestMoneyIsShownTheWayItIsWritten(t *testing.T) {
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": "bob/echo", "price": 1500000})
+	})
+	for _, c := range []struct {
+		name string
+		json bool
+		want string
+	}{
+		{"a person reads it in the world's unit", false, "price: 1.50 credits"},
+		{"a program reads the base units", true, `"price": 1500000`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			old := flagJSON
+			flagJSON = c.json
+			t.Cleanup(func() { flagJSON = old })
+			got := captureStdout(t, func() error {
+				return freshClient().emit("GET", "/v1/actions/a-1", nil, output{money: moneyAction})
+			})
+			if !strings.Contains(got, c.want) {
+				t.Errorf("want %q in:\n%s", c.want, got)
+			}
+		})
+	}
+}
+
+// TestTheUnitIsReadBeforeTheRequest: a command that will show money reads the world's unit first,
+// so a unit it cannot read refuses before anything is sent. Reading it afterwards would report
+// "nothing was sent" about a write that had already committed.
+func TestTheUnitIsReadBeforeTheRequest(t *testing.T) {
+	sent := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		sent = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "w-1", "amount": 5})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	resetHealthCache()
+	t.Cleanup(resetHealthCache)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	selectTestLogin(t, "tester@stub", srv.URL)
+
+	if err := freshClient().emit("POST", "/v1/withdrawals", map[string]any{"amount": 5}, output{money: moneyRail}); err == nil {
+		t.Fatal("a command that could not read the world's unit went ahead anyway")
+	}
+	if sent {
+		t.Error("the request was sent before the unit it would be shown in could be read")
+	}
+}
+
+// TestARunsAdviceNamesCommandsThatExist: when a run fails, what the operator is told to do next is
+// the whole value of the message. A hint naming a command that has since been deleted — or renamed
+// — is worse than none, so every command any hint names is resolved against the command tree.
+func TestARunsAdviceNamesCommandsThatExist(t *testing.T) {
+	parked := &kernel.KernelError{Code: "timeout", Meta: map[string]string{"process_id": "p-1"}}
+	for _, c := range []struct {
+		name  string
+		err   error
+		quote string
+		want  string
+	}{
+		{"a call needing consent", kernel.ErrGrantRequired.Wrap("x"), "", "user connect"},
+		{"a peer that is offline", kernel.ErrPeerUnreachable.Wrap("x"), "", ""},
+		{"a peer that will not serve on credit", kernel.ErrPeerUnfunded.Wrap("x").WithMeta("peer", "other"), "", "admin peer inspect"},
+		{"terms that changed under a pin", (&kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2"}}), "h", ""},
+		{"money parked on a peer", parked, "", "process show"},
+		{"money parked with a refund date", parked.WithMeta("refund_eligible_at", "2026-01-01T00:00:00Z"), "", "process end"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hint := runHint(c.err, "bob/echo", c.quote)
+			if hint == "" {
+				t.Fatal("a failure an operator must act on said nothing")
+			}
+			if c.want != "" && !strings.Contains(hint, c.want) {
+				t.Errorf("hint does not mention %q:\n%s", c.want, hint)
+			}
+			for _, named := range namedCommands(hint) {
+				if !resolves(named) {
+					t.Errorf("the hint names `juice %s`, which is not a command:\n%s", strings.Join(named, " "), hint)
+				}
+			}
+		})
+	}
+}
+
+// namedCommands pulls every `juice ...` the text tells the operator to run, as the words following
+// it: a flag, a dash, or a reference ends one, since nothing past that addresses a command.
+func namedCommands(hint string) [][]string {
+	var out [][]string
+	for _, field := range strings.Split(hint, "juice ")[1:] {
+		var words []string
+		for _, w := range strings.Fields(field) {
+			w = strings.Trim(w, "`.,;:")
+			if w == "" || w == "—" || strings.HasPrefix(w, "-") || strings.ContainsAny(w, "/@") {
+				break
+			}
+			words = append(words, w)
+		}
+		if len(words) > 0 {
+			out = append(out, words)
+		}
+	}
+	return out
+}
+
+// resolves walks the command tree by name: every word must be a subcommand until one that has none
+// is reached, after which the rest are its arguments. Cobra's own Find answers "the deepest command
+// I could match", which would accept `admin deposit` for as long as `admin` exists — the very kind
+// of stale advice this checks for.
+func resolves(words []string) bool {
+	c := rootCmd
+	for _, w := range words {
+		if !c.HasSubCommands() {
+			return true // a leaf: what follows is an argument to it
+		}
+		next := (*cobra.Command)(nil)
+		for _, sub := range c.Commands() {
+			if sub.Name() == w || sub.HasAlias(w) {
+				next = sub
+				break
+			}
+		}
+		if next == nil {
+			return false
+		}
+		c = next
+	}
+	return c.Runnable()
+}
+
+// TestAdminKernelShowRelaysEveryFieldTheServerSent: the identity view is read whole — an operator
+// checks a kernel's network digest here before believing anything else it says. The CLI once kept
+// its own copy of the response shape, and the field it had not copied vanished from --json.
+func TestAdminKernelShowRelaysEveryFieldTheServerSent(t *testing.T) {
+	body := map[string]any{
+		"handle": "acme", "public_key": "KEY", "network": "play",
+		"network_digest": "5e0dcafe", "lottery": 1000000, "lottery_max": 5000000,
+		"credit_limit": 500000000, "exposure": 0, "fee_bps": 2000, "remote_bps": 500, "import_bps": 500,
+	}
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) })
+	old := flagJSON
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = old })
+
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, identityCmd()); return err })
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--json did not print JSON: %v\n%s", err, out)
+	}
+	for field := range body {
+		if _, ok := got[field]; !ok {
+			t.Errorf("--json dropped %q, which the server sent:\n%s", field, out)
+		}
+	}
+}
+
+// TestAWithdrawalIsNamedByTheCaller: the server returns the row a withdrawal id already made
+// rather than making a second one (U51), so repeating the command with the same id after a lost
+// reply recovers the first withdrawal. That is only true if the id is the caller's to repeat.
+func TestAWithdrawalIsNamedByTheCaller(t *testing.T) {
+	var ids []string
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var req struct {
+				ID string `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			ids = append(ids, req.ID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "w-1", "amount": 5000000, "status": "pending"})
+	})
+	for i := 0; i < 2; i++ {
+		if _, err := execTestCmd(t, userWithdrawCmd(), "5", "--yes", "--id", "7a3c"); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+	}
+	if len(ids) != 2 || ids[0] != "7a3c" || ids[1] != "7a3c" {
+		t.Fatalf("the id the caller gave was not the one sent: %v", ids)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := execTestCmd(t, userWithdrawCmd(), "5", "--yes"); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+	}
+	if len(ids) != 4 || ids[2] == ids[3] || ids[2] == "" {
+		t.Fatalf("without --id every run must mint its own: %v", ids)
+	}
+}
+
+// TestOnlyTheOutputPolicyReadsTheOutputFlags: "--json and --quiet mean the same thing on every
+// command" is a promise about the whole surface, and it holds only while one function decides it.
+// Each command that branched on the flags itself was a command that had drifted — one printing
+// prose under --json, another ignoring --quiet — so a new branch anywhere else is the defect
+// returning, not a detail.
+func TestOnlyTheOutputPolicyReadsTheOutputFlags(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || f == "main.go" { // main.go declares them
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if !strings.Contains(line, "flagJSON") && !strings.Contains(line, "flagQuiet") {
+				continue
+			}
+			if f == "cmd.go" {
+				continue // the policy itself
+			}
+			t.Errorf("%s:%d decides its own output instead of leaving it to emit:\n%s", f, i+1, line)
+		}
+	}
+}
+
+// TestAListOfResourcesReadsLikeOne: a reply of several rows is several resources, so it is shown
+// as resources — money included. A command whose reply happens to be a list (updating a whole
+// path of actions, listing withdrawals) was printing its amounts in base units while the same
+// reply for one row printed them in the world's unit.
+func TestAListOfResourcesReadsLikeOne(t *testing.T) {
+	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
+	got := captureStdout(t, func() error {
+		return printFields([]byte(`[{"id":"a-1","price":1500000},{"id":"a-2","price":2000000}]`), moneyAction, net)
+	})
+	if !strings.Contains(got, "price: 1.50 credits") || !strings.Contains(got, "price: 2.00 credits") {
+		t.Errorf("a list's money was not written in the world's unit:\n%s", got)
+	}
+	if !strings.Contains(got, "id: a-1") || !strings.Contains(got, "id: a-2") {
+		t.Errorf("a list lost its rows:\n%s", got)
+	}
+	// Something that is not resources at all still prints as it arrived.
+	plain := captureStdout(t, func() error { return printFields([]byte(`[1,2,3]`), moneyAction, net) })
+	if !strings.Contains(plain, "1,") && !strings.Contains(plain, "1\n") {
+		t.Errorf("a plain list was not printed: %q", plain)
+	}
+}
+
+// TestQuietFindsTheResourcesInsideAReplyThatWrapsThem: a peer answers with its page of steps beside
+// whether more are waiting, so the ids are one field in. The command names that field rather than
+// having every reply searched for something id-shaped.
+func TestQuietFindsTheResourcesInsideAReplyThatWrapsThem(t *testing.T) {
+	old := flagQuiet
+	flagQuiet = true
+	t.Cleanup(func() { flagQuiet = old })
+	body := []byte(`{"steps":[{"id":"s-1"},{"id":"s-2"}],"truncated":false}`)
+	if got := captureStdout(t, func() error { return emit(body, output{rows: "steps"}) }); got != "s-1\ns-2\n" {
+		t.Errorf("--quiet = %q, want the two step ids", got)
+	}
+	// Unnamed, the same reply names no resource of its own and prints nothing.
+	if got := captureStdout(t, func() error { return emit(body, output{}) }); got != "" {
+		t.Errorf("--quiet went looking for ids: %q", got)
+	}
+}
+
+// TestOnlyAHumanViewCostsAHealthRead: --json and --quiet carry base units, so a read that prints no
+// money for a person must not turn a working reply into a failed /health. A write that shows what
+// it moved still reads the unit before it acts.
+func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
+	var banners int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			banners++
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": "bob/echo", "price": 1500000}})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	resetHealthCache()
+	t.Cleanup(resetHealthCache)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	selectTestLogin(t, "tester@stub", srv.URL)
+
+	for _, f := range []*bool{&flagJSON, &flagQuiet} {
+		resetHealthCache()
+		banners = 0
+		oldFlag := *f
+		*f = true
+		_, err := execTestCmd(t, actionListCmd())
+		*f = oldFlag
+		if err != nil {
+			t.Errorf("a read that prints no money was refused because the banner was: %v", err)
+		}
+		if banners != 0 {
+			t.Errorf("the banner was read %d times for output that carries base units", banners)
+		}
+	}
+}
+
+// TestARunThatAuthorizesOnTheWayStillAnswersOnce: a run that meets a consent it can settle inline
+// does two things and answers with one — its own reply. The connection is a step on the way, so it
+// is reported as progress; anything else leaves --json printing two documents where a program
+// expects one, and nothing downstream can read it (§14 C8).
+func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
+	runs := 0
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/run":
+			runs++
+			if runs == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": "authorization required", "code": "grant_required",
+					"meta": map[string]string{"action": "bob/echo"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"ok": true}})
+		case strings.HasPrefix(r.URL.Path, "/v1/grants/plan"):
+			_ = json.NewEncoder(w).Encode(kernel.ConsentPlan{Groups: []kernel.ConsentGroup{{
+				Provider: "chat", ProviderKey: "pk", Scheme: kernel.AuthSchemeDelegatedBearer,
+				Connected: true, Covered: true,
+				Actions: []kernel.ConsentAction{{Action: "bob/echo"}},
+			}}})
+		default: // POST /v1/grants
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "granted", "actions": []string{"bob/echo"}})
+		}
+	})
+	// Somebody is at the terminal and says yes, which is what makes the run settle the consent
+	// itself rather than printing the command to run.
+	oldTTY := interactiveTTY
+	interactiveTTY = func() bool { return true }
+	t.Cleanup(func() { interactiveTTY = oldTTY })
+	in, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = in
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	oldJSON := flagJSON
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = oldJSON })
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, runCmd(), "bob/echo"); return err })
+
+	dec := json.NewDecoder(strings.NewReader(out))
+	var reply map[string]any
+	if err := dec.Decode(&reply); err != nil {
+		t.Fatalf("--json did not print JSON: %v\n%s", err, out)
+	}
+	if reply["tx_id"] != "t-1" {
+		t.Errorf("the one document is not the run's reply: %v", reply)
+	}
+	if err := dec.Decode(&reply); err == nil {
+		t.Errorf("a second document followed the reply; stdout carries one:\n%s", out)
+	}
+	if runs != 2 {
+		t.Errorf("the run was not retried after the consent: %d calls", runs)
+	}
+}
+
+// TestAVerbReadsOrWrites: a word means one thing. `user address` registers and `user withdraw`
+// pays; what each of them used to show with no argument is a verb of its own, so no command turns
+// from a read into a write because an argument appeared.
+func TestAVerbReadsOrWrites(t *testing.T) {
+	var paths []string
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/withdrawals") && r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "w-1", "amount": 5000000}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u", "rail_address": "0xabc", "amount": 1000000})
+	})
+	for _, c := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+	}{
+		{"showing an address is not this verb's job", userAddressCmd, nil},
+		{"withdrawing needs the amount it moves", userWithdrawCmd, nil},
+		{"listing withdrawals takes no amount", userWithdrawalsCmd, []string{"5"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := execTestCmd(t, c.cmd(), c.args...); err == nil {
+				t.Error("the command accepted an argument list it has no meaning for")
+			}
+		})
+	}
+	paths = nil
+	if _, err := execTestCmd(t, userWithdrawalsCmd()); err != nil {
+		t.Fatalf("withdrawals: %v", err)
+	}
+	if len(paths) != 1 || !strings.HasPrefix(paths[0], "GET /v1/withdrawals") {
+		t.Errorf("withdrawals read %v, want one GET of the list", paths)
+	}
+}
+
+// TestAdminRoutesNameTheirNoun: the route says which namespace the target belongs to, so the
+// server never has to guess and a parameter never has to carry it. A user route answers for users
+// alone, and nothing answers under the old unversioned prefix.
+func TestAdminRoutesNameTheirNoun(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "carol", Password: "password123"}); err != nil {
+		t.Fatal(err)
+	}
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := env.k.BindPetname(ctx, key, "shop", true); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := loginTokenFor(env.k, ctx, sys.Handle, "sys-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name, method, path string
+		want               int
+	}{
+		{"a user under users", "POST", "/v1/admin/users/carol/suspend", http.StatusOK},
+		{"a peer under users", "POST", "/v1/admin/users/shop/suspend", http.StatusNotFound},
+		{"a peer under peers", "POST", "/v1/admin/peers/shop/suspend", http.StatusOK},
+		{"a user under peers", "POST", "/v1/admin/peers/carol/suspend", http.StatusNotFound},
+		{"the old prefix answers nothing", "POST", "/control/users/carol/suspend", http.StatusNotFound},
+		{"nor does the old deposit", "POST", "/control/deposit", http.StatusNotFound},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body, status := tcpDo(t, tok, c.method, c.path, map[string]any{})
+			if status != c.want {
+				t.Errorf("%s %s: status %d, want %d: %s", c.method, c.path, status, c.want, body)
+			}
+		})
+	}
+	// What a verb changed is what it answers with, so an acknowledgement is worth reading and a
+	// caller needs no second request to see the result (API.md R5).
+	body, status := tcpDo(t, tok, "POST", "/v1/admin/users/carol/unsuspend", map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("unsuspend: %d %s", status, body)
+	}
+	shown, _ := tcpDo(t, tok, "GET", "/v1/admin/users/carol", nil)
+	if string(body) != string(shown) {
+		t.Errorf("a change answers with something other than the account:\n changed %s\n shown   %s", body, shown)
+	}
+}
+
+// TestWithdrawalsPageByOffset: a list is paginated, so the rows past the first page are reachable.
+// The handler read the limit and dropped the offset, which left older withdrawals unreachable.
+func TestWithdrawalsPageByOffset(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	u, tok := makeUser(t, env.k, "payer")
+	if err := env.db.SetRailAddress(ctx, u, "0xpayer", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.k.Deposit(ctx, sys.ID, u, 1000, "", newRef()); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i := 0; i < 3; i++ {
+		row, err := env.k.Withdraw(ctx, u, uuid.NewString(), 100, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, row.ID)
+	}
+	page := func(query string) []map[string]any {
+		body, status := tcpDo(t, tok, "GET", "/v1/withdrawals"+query, nil)
+		if status != http.StatusOK {
+			t.Fatalf("withdrawals%s: %d %s", query, status, body)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	if all := page(""); len(all) != 3 {
+		t.Fatalf("three withdrawals, got %d", len(all))
+	}
+	second := page("?limit=1&offset=1")
+	if len(second) != 1 || second[0]["id"] != ids[1] {
+		t.Errorf("the second page is not the second row: %v", second)
+	}
+	if last := page("?limit=1&offset=2"); len(last) != 1 || last[0]["id"] != ids[2] {
+		t.Errorf("the last row is unreachable by paging: %v", last)
+	}
+}
+
+// TestOnlyTheClientResolvesTheIdentity: one client per invocation is a promise the compiler cannot
+// keep for us — Go has no visibility boundary inside a package — so it is kept here. A command that
+// worked out for itself whom it acts as is how the identity a request carried, the account a prompt
+// named, and the login a retry refreshed came to disagree.
+//
+// Two rules, because two things are being kept apart. No command may decide the selection: that is
+// the client's, from the flags and the records, once. And no command but the ones whose subject IS
+// the client's records — `kernel add|list|forget`, `auth login|use|list|logout` — may read or dial
+// anything itself; those legitimately edit the records and dial an address before any identity
+// exists. The server's own outbound HTTP (action execution, OpenAPI, sys/web) is not the client's
+// and is not in scope.
+func TestOnlyTheClientResolvesTheIdentity(t *testing.T) {
+	selection := []string{"JUICE_AS", "flagServer", "flagAs"}
+	records := []string{"loadClientConfig(", "readCredentials(", "doHTTP(", "http.Get(", "http.Post("}
+	for _, c := range []struct {
+		file      string
+		forbidden []string
+	}{
+		{"cmd.go", append(selection, records...)},
+		{"cmd_superuser.go", append(selection, records...)},
+		{"connect.go", append(selection, records...)},
+		{"cmd_client.go", selection}, // the commands over the records, which they may read
+		{"main.go", records},         // where the flags are declared, and nothing else
+	} {
+		src, err := os.ReadFile(c.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			for _, forbidden := range c.forbidden {
+				if strings.Contains(line, forbidden) {
+					t.Errorf("%s:%d resolves its own identity or transport (%s):\n%s", c.file, i+1, forbidden, line)
+				}
+			}
+		}
 	}
 }

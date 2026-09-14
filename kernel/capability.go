@@ -20,7 +20,7 @@ func capPayload(traceID string) map[string]string { return map[string]string{"ca
 
 // IssueCapability mints a capability for a live trace. Requires a configured signing key.
 func (k *Kernel) IssueCapability(traceID string) (string, error) {
-	sig, err := signJCS(k.cfg.SigningKey, sigDomainCapability, capPayload(traceID))
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainCapability, capPayload(traceID))
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +42,7 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	if !ok {
 		return "", "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	if err := verifyJCS(pub, sigDomainCapability, capPayload(traceID), sig); err != nil {
+	if err := k.cfg.Network.verify(pub, sigDomainCapability, capPayload(traceID), sig); err != nil {
 		return "", "", ErrUnauthorized.Wrap("invalid capability")
 	}
 
@@ -50,6 +50,8 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	if err != nil || trace == nil {
 		return "", "", ErrUnauthorized.Wrap("capability trace not found")
 	}
+	// An early, readable refusal. The rule itself is enforced where it cannot go stale: the funding
+	// statement refuses a settled trace or a closed process in the same predicate as the funds (§9).
 	settled, err := k.store.TraceHasTransaction(ctx, traceID)
 	if err != nil {
 		return "", "", err

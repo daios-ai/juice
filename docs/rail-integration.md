@@ -28,7 +28,7 @@ holding the file can join.
 
 ## Kernels
 
-A kernel = one `juice serve` + one home: ledger, identity key, world file, port, and — on a
+A kernel = one `juice kernel serve` + one home: ledger, identity key, world file, port, and — on a
 chain rail — rail db and key. One kernel, one network, permanently; no switching, only
 separate kernels.
 First boot writes the digest into `juice.db`; startup refuses a mismatched world file (as D9
@@ -38,7 +38,8 @@ refuses missing keys).
 
 `kernel` owns the interface, imports no chain code; `juice-rail` is the first adaptor. One set
 of money rules runs everywhere; the defining part selects only the witness: no chain/token → the
-**manual** adaptor, whose finalized facts are the operator's own records (`Pay` confirms at
+**manual** adaptor, whose finalized facts are the operator's own records of what people pay and
+the buyer's own signed reveal of what a peer pays (`Pay` confirms at
 once, `Refills` is empty); present → a chain adaptor. Never `if world == real`, and never
 `if railed`.
 
@@ -47,7 +48,6 @@ The adaptor is a thin translation of the rail's actual outcomes — it adds none
 ```go
 type Rail interface {
     Address() string
-    Balances(ctx) (token int64, gas *big.Int, err)     // display only, never booked
     Pay(ctx, id, to string, amount int64) (Outcome, error) // idempotent
     Status(ctx, id string) (unknown|pending|confirmed|failed, txhash, err)
     Deposits(ctx) ([]Deposit, error)                   // finalized incoming
@@ -71,7 +71,8 @@ type Rail interface {
   enforced by the rail before anything is signed. It re-implements no reserve rule — the bound
   is an input to the rail's one rule.
 - Juice reproduces nothing the rail owns: no chain access, no amount handling, no deposit
-  observation, no gas decisions. Finalized facts only; gas amounts are big integers.
+  observation, no gas decisions. Finalized facts only — there is no live balance read; money
+  in flight is visible as rows. Gas amounts are big integers.
 
 ## Money rules
 
@@ -86,7 +87,7 @@ type Rail interface {
 - Backing, stated honestly: credits are backed by the vault **plus peer IOUs bounded by X**. In
   the worst case users jointly hold up to X more credits than the vault can pay. Deliberate,
   Sybil-proof, priced by `remote_bps`; the operator's accepted, bounded risk.
-- Solvency identity, checked periodically and on `admin identity`. Terms defined so no account
+- Solvency identity, checked periodically and on `admin kernel show`. Terms defined so no account
   appears twice: **liabilities** = each account's balance where positive (available + locked) —
   pending payouts and unattributed deposits sit inside it, on `sys`; **receivables** = each
   account's shortfall where negative (peer accounts only, ≤ X at admission):
@@ -97,9 +98,9 @@ type Rail interface {
 
   Equality holds at rest; the slack exists only between a refill's finality and its booking,
   bounded by the lock. `vault` is derived from the rail's finalized records — deposits, payment
-  outcomes, refill costs; the operator's records on the manual rail — never the live balance
-  read, which is display-only and would manufacture false alarms from work in flight. The
-  in-transit split of `sys` remains persisted rows (pending payouts = open `rail_transfers`;
+  outcomes, refill costs; the operator's records on the manual rail — never a live balance read,
+  which would manufacture false alarms from work in flight. The in-transit split of `sys`
+  remains persisted rows (pending payouts = open `rail_transfers`;
   unattributed deposits = the unassigned list), so a mismatch alarm always names its
   difference. What derived records alone cannot see — vault theft by the key outside the rail —
   is the custody audit: the derived vault compared against the rail's finalized-cut reads
@@ -115,8 +116,12 @@ type Rail interface {
     kernel persists a **stop signal**: outgoing rail operations stop, under their own typed
     error — never the caller's insufficient funds. Paid work, funding, deposits, reads, and
     reconciliation continue: local fees are what clear the stop, when `sys`
-    can fund a refill again. Once signed, the recorded maximum is locked from `sys` until
-    booking.
+    can fund a refill again. Before the rail is asked, everything `sys` could spend is locked,
+    so the reserve it is told to keep cannot go stale while it decides; once the purchase is
+    known the lock settles at its maximum and stays until booking. The purchase is durable
+    before it is broadcast, so a purchase that never went out is presented again rather than
+    repeated, and a purchase the ledger never bound is adopted from what the rail still holds,
+    or, once resolved, from the nonce it owns.
   - Booking: at finality juice asks the rail's refill-cost read for the **exact consumed
     amount**; `sys` is debited exactly that (`external_key` = refill tx) and the rest of the
     lock is released. The maximum is authorization, never cost — approximate books are
@@ -154,10 +159,10 @@ must know.
 - Registration attributes retroactively: `sys`-held deposits from that address transfer to the
   registrant, because attribution is a pure function of the address→account map over finalized
   facts.
-- One address, at most one account. Replacement requires current-password reauthentication —
-  the recovery key gains no direct payout-address authority (it never authenticates, per D4); a
-  user who lost the password completes the existing recovery flow first. Replacement freezes
-  withdrawals for a fixed period (stolen-session redirect defense) either way.
+- One address, at most one account. Replacement needs only a new signature by the incoming
+  address. A stolen session can already move the funds by transferring them to another account
+  it controls, so freezing withdrawals protected nothing; step-up authentication, if ever
+  wanted, must cover transfers and withdrawals together.
 - A chain-railed kernel identity **mandates** a proven rail address: an EIP-191 signature by
   the rail key over `(kernel key, address)`, domain-qualified. It authenticates the settlement
   destination; without it the identity is invalid on a chain rail. Juice custodies `rail.key`
@@ -190,7 +195,10 @@ manual rail's `Pay` confirms at once, collapsing each machine to its final state
      row first asks the refill's status before re-presenting.
   Lifecycle visible throughout: id, status, tx hash, age.
 - **Settlement** — the same pattern as every outgoing payment: reserve → sign → finalize or
-  compensate; on the manual rail the operator's confirmation is the finalized fact. The
+  compensate; on the manual rail the operator's confirmation is the finalized fact. A
+  probabilistic settlement is a row before it is a payment: the debtor records the draw — id,
+  nonce, then each round's answer — before the round it belongs to, and resumes it by id, so a
+  lost reply or a crash can only finish the draw the creditor already answered. The
   debtor's signed exact-settlement record snapshots `(settlement_id, amount,
   destination address)` on the settle stream — as the probabilistic open already does. Before
   paying, one commit reserves the internal sources: the peer row is debited with the pending
@@ -198,10 +206,13 @@ manual rail's `Pay` confirms at once, collapsing each machine to its final state
   external money never leaves before the books can cover it (a creditor spending down its
   balance, or `sys` dipping, mid-flight can no longer strand the booking). Then pay, intent id
   from `settlement_id`. After finality the debtor announces the binding `settlement_id →
-  (txhash, log index)`; the creditor verifies that finalized event against the snapshot
-  (sender, destination, amount) and books per P10; a finalized failure compensates the
-  reserving commit, never edits it. Matching by named chain fact, never by `(sender, amount)`
-  — two equal-amount settlements cannot collide. The rail remains unaware of settlements.
+  txhash`; the creditor closes the claim against a finalized payment of that transaction from
+  the debtor's proven address for the amount claimed, and books per P10; a finalized failure
+  compensates the reserving commit, never edits it. Matching by named chain fact, never by
+  `(sender, amount)`, and one payment closes at most one claim — two equal-amount settlements
+  cannot collide. The log index is not carried: the debtor's payment is a transfer from its own
+  proven address, which the sender and amount already single out, and the outcome the rail
+  reports names the transaction without a receipt read. The rail remains unaware of settlements.
 
 Outbound rows: `rail_transfers` (`id, kind ∈ {payout, settlement}, party, amount, status,
 tx_hash, refill_id, refill_tx, created_at, finalized_at`).
@@ -226,19 +237,20 @@ logic missing from the library.
 ## Client
 
 Pure client, the only thing spanning networks: named profiles (endpoint, token, label).
-`juice use <name>` switches **and verifies** — dials the kernel, checks the token, prints the
-server's name, key, world; fails loudly if unreachable. `juice use` lists; `auth login` stores
-what it creates. A `JUICE_PROFILE` env var overrides the sticky selection per invocation, for
-scripts. Withdraw and settle confirm before moving money, naming the world; paid runs are not
-pre-confirmed (agents are first-class). No per-command `--profile`.
+`juice auth use <handle>@<kernel>` switches **and verifies** — dials the kernel, checks its key
+and network, fails loudly if either has changed; `juice auth list` lists the logins held and
+`juice auth login` stores what it creates. `--as`/`JUICE_AS` name a login for one invocation, for
+scripts. Transfer, withdraw and deposit confirm before moving money, naming the login they act
+as; a run is itself consent to its price (agents are first-class).
 
 ## Operator surface
 
-`admin identity` gains rail address, balances, the split of `sys` into earnings and in-transit
+`admin kernel show` gains rail address, finalized holdings, the split of `sys` into earnings and in-transit
 (unattributed deposits, pending payouts), the solvency identity with its named terms, and the
-stop signal with its reason and age. `admin deposit` bare lists the unattributed money on
-`sys`; `--tx <hash>` attributes one deposit by transfer; on the manual rail `admin deposit
-<user> <amount> --ref <fact>` is the crossing-in fused with its transfer. There is no
+stop signal with its reason and age. `admin kernel deposits` lists the unattributed money on `sys`
+and every obligation still open; `admin user deposit <user> --ref <txhash>` attributes one
+received payment, and `admin user deposit <user> <amount> --ref <fact>` is the crossing-in fused
+with its transfer. There is no
 `admin withdraw`: money out is always the owner's `user withdraw`, `sys`'s profit included.
 Alarms: identity gap beyond active refill locks, custody-audit mismatch, stop signal set.
 Refill shows as a network cost; shortage shows as pending payout/settlement with age.
@@ -272,8 +284,9 @@ identity fields change lockstep.
    restart, refuses outgoing rail operations under its own typed error while paid work and
    deposits continue, and clears after funding; a settlement reserves its internal sources in one commit before paying and its
    finalized failure compensates that commit; a finalized withdrawal failure produces one
-   compensating transfer, never an edit; registration attributes prior `sys`-held deposits; one address one account; replacement
-   guarded and freezing; an identity without a proven rail address is invalid; unannounced peer
+   compensating transfer, never an edit; registration attributes prior `sys`-held deposits; one
+   address one account; replacement by signature alone, an in-flight withdrawal keeping its
+   snapshotted destination; an identity without a proven rail address is invalid; unannounced peer
    transfers settle nothing; two equal-amount settlements resolve by their bound chain facts; no
    re-pay under a new identity; the chain-vs-ledger reconciliation detects a deliberately broken
    invariant **and names the differing term**.
@@ -290,7 +303,7 @@ identity fields change lockstep.
 - U3 rewritten over the two primitives (crossing on `sys` against a finalized fact; transfer on
   the owner's authority; idempotency preserved); U33 narrowed to *the* rail; the stop signal
   joins the operator surface (U44).
-- D20 gains `use`, profiles, `user address`, `user deposit`, `user withdraw`, and the rail
+- D20 gains `user address`, `user deposit`, `user withdraw`/`withdrawals`, and the rail
   operator surface; `admin withdraw` and `--cash` are retired.
 
 ## Non-goals

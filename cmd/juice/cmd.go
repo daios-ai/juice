@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -102,33 +103,46 @@ func peerMetaHandle(err error) string {
 
 // interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
 // Prompts and progress go to stderr so stdout stays payload-only (§14).
-func interactiveTTY() bool {
+var interactiveTTY = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 }
 
-// promptYesNo asks a yes/no question on stderr (default yes) and reads one line from stdin.
-func promptYesNo(msg string) bool {
-	fmt.Fprintf(os.Stderr, "%s [Y/n] ", msg)
+// confirm gates an act that cannot be undone. The default is no: a bare Enter on a prompt about
+// money should not move it, and the one way to say yes is to say it. Declining is an error, so the
+// exit code says so too and a script does not read silence as success. Off a terminal there is
+// nobody to ask, so --yes is required rather than assumed.
+func confirm(msg string, yes bool) error {
+	if yes {
+		return nil
+	}
+	if !interactiveTTY() {
+		return kernel.ErrInvalidInput.Wrap("re-run with --yes to confirm (no terminal to ask on)")
+	}
+	return askYesNo(msg)
+}
+
+// askYesNo puts the question to whoever is at the terminal. Callers that have no --yes flag to
+// offer — first boot, where consent is a written configuration file rather than a flag — ask with
+// this after their own check that somebody is there.
+func askYesNo(msg string) error {
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", msg)
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	line = strings.ToLower(strings.TrimSpace(line))
-	return line == "" || line == "y" || line == "yes"
+	if l := strings.ToLower(strings.TrimSpace(line)); l == "y" || l == "yes" {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "cancelled")
+	return kernel.ErrInvalidInput.Wrap("cancelled")
 }
 
 // ---- output helpers ----
-
-func printJSON(v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(b))
-	return nil
-}
 
 // printJSONBytes indents already-marshaled JSON in place. json.Indent preserves the
 // source field order (unlike unmarshal-then-MarshalIndent, which would alphabetize map
 // keys), so server responses print in their declared order.
 func printJSONBytes(b []byte) error {
+	if len(b) == 0 {
+		return nil // a mutation that returns no resource has nothing to print
+	}
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, b, "", "  "); err != nil {
 		fmt.Println(string(b)) // not an object/array; print verbatim
@@ -138,58 +152,137 @@ func printJSONBytes(b []byte) error {
 	return nil
 }
 
-// emitRaw prints a server JSON response, preserving field order: canonical indented
-// JSON with --json, else the human field view. The client analogue of emit.
-func emitRaw(b []byte) error {
-	if flagJSON {
-		return printJSONBytes(b)
-	}
-	// --quiet is one rule on every command, reads included (§14 C8): print the resource's id and
-	// nothing else, so output pipes into the next command; a response naming no resource prints
-	// nothing at all, rather than falling back to the full view the flag exists to suppress.
-	if flagQuiet {
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(b, &obj) == nil {
-			var id string
-			if raw, ok := obj["id"]; ok && json.Unmarshal(raw, &id) == nil && id != "" {
-				fmt.Println(id)
-			}
-			return nil
-		}
-	}
-	return printTextBytes(b)
+// output is what one command adds to the single output policy: the field --quiet prints ("id"
+// when empty), the top-level fields the field view writes as money, and the command's own human
+// rendering (the field view when nil). A command that renders its own view formats its own money,
+// so money and human are never both set.
+type output struct {
+	id    string
+	rows  string // the field holding this reply's resources, when a reply wraps them in one
+	money []string
+	human func(body []byte) error
+	net   kernel.Network // the world's unit, read before the request by units()
 }
 
-// printText renders v as a complete, human-readable view of the SAME object the HTTP
-// API serializes. It marshals v to JSON, then prints one "key: value" line per
-// top-level field in declaration order; scalar values are printed plainly and
-// object/array values as compact inline JSON. Because the field set is derived from
-// the marshaled object, the text view can never silently drop a field the HTTP
-// response carries (CLI/HTTP parity, §14).
-func printText(v any) error {
-	b, err := json.Marshal(v)
+// units reads the world's money unit for a field view that will write money for a person. It runs
+// before the request, never while printing its reply: a unit that cannot be read must refuse
+// before anything is sent, rather than report "nothing was sent" about a write that committed.
+// --json and --quiet carry base units, so they read nothing. emitCtx calls this for every request
+// with the client that will make it; a command that emits without going through it calls this
+// itself, or its money prints in whatever unit an unread world has.
+func (o *output) units(ctx context.Context, c *client) error {
+	if len(o.money) == 0 || flagJSON || flagQuiet {
+		return nil
+	}
+	net, err := c.network(ctx)
 	if err != nil {
 		return err
 	}
-	return printTextBytes(b)
+	o.net = net
+	return nil
 }
 
-// printTextBytes renders already-marshaled JSON bytes as the human view, preserving
-// the source field order (so server responses print in their declared order, not
-// alphabetized). See printText for the field-view contract.
-func printTextBytes(b []byte) error {
-	// Non-object top levels (arrays, scalars) have no labeled fields; print as JSON.
-	trimmed := b
-	for len(trimmed) > 0 && (trimmed[0] == ' ' || trimmed[0] == '\n' || trimmed[0] == '\t') {
-		trimmed = trimmed[1:]
+// humanUnits reads the world's money unit for a command that renders its own view. Under --json
+// and --quiet it reads nothing and answers the zero world: those carry base units, and a read that
+// prints no money must not turn a working reply into a failed /health.
+func humanUnits(ctx context.Context) (kernel.Network, error) {
+	if flagJSON || flagQuiet {
+		return kernel.Network{}, nil
 	}
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return printJSONBytes(b)
+	return cli.network(ctx)
+}
+
+// emit is the one output policy every command ends in (§14 C8): --json prints the server's body
+// exactly as it arrived, --quiet prints the id of each resource one per line, and otherwise the
+// command renders it — by default the field view, which shows every field the response carries.
+func emit(body []byte, o output) error {
+	body = bytes.TrimSpace(body)
+	switch {
+	case flagJSON:
+		return printJSONBytes(body)
+	case flagQuiet:
+		return printIDs(o.resources(body), o.idField())
+	case o.human != nil:
+		return o.human(body)
 	}
-	// Re-decode preserving field order via the JSON object's marshaled byte order.
-	dec := json.NewDecoder(bytes.NewReader(b))
-	// consume opening '{'
-	if _, err := dec.Token(); err != nil {
+	return printFields(body, o.money, o.net)
+}
+
+func (o output) idField() string {
+	if o.id == "" {
+		return "id"
+	}
+	return o.id
+}
+
+// resources is the part of a reply that holds the resources it names. Most replies are a resource
+// or a list of them and are their own; one that wraps a list beside something else — a page of a
+// peer's steps beside whether more are waiting — names the field, rather than having every reply
+// searched for one.
+func (o output) resources(body []byte) []byte {
+	if o.rows == "" {
+		return body
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return body
+	}
+	return fields[o.rows]
+}
+
+// printIDs prints the identifier of every resource a response names, one per line, so output
+// pipes into the next command: a list yields one line per row, a single resource one line, and a
+// response naming no resource nothing at all (§14 C8).
+func printIDs(body []byte, field string) error {
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal(body, &rows) != nil {
+		var one map[string]json.RawMessage
+		if json.Unmarshal(body, &one) != nil {
+			return nil
+		}
+		rows = []map[string]json.RawMessage{one}
+	}
+	for _, row := range rows {
+		var id string
+		if json.Unmarshal(row[field], &id) == nil && id != "" {
+			fmt.Println(id)
+		}
+	}
+	return nil
+}
+
+// printFields renders a response as one "key: value" line per top-level field, in the order the
+// server sent them — so the text view can never silently drop a field the HTTP response carries
+// (CLI/HTTP parity, §14). The fields named as money are written the way this kernel writes money
+// (D20); every other value prints as it arrived, because an action's own arguments and results
+// ride inside these responses and are never reinterpreted.
+func printFields(body []byte, money []string, net kernel.Network) error {
+	if len(body) == 0 {
+		return nil
+	}
+	// A list is its rows, one field view each: a reply of several resources reads like a reply of
+	// one, money included. Anything else — a scalar, or a document that is not resources at all —
+	// has no labeled fields and prints as JSON.
+	if body[0] == '[' {
+		var rows []json.RawMessage
+		if json.Unmarshal(body, &rows) != nil {
+			return printJSONBytes(body)
+		}
+		for i, row := range rows {
+			if i > 0 {
+				fmt.Println()
+			}
+			if err := printFields(row, money, net); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if body[0] != '{' {
+		return printJSONBytes(body)
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if _, err := dec.Token(); err != nil { // the opening '{'
 		return err
 	}
 	for dec.More() {
@@ -202,10 +295,33 @@ func printTextBytes(b []byte) error {
 		if err := dec.Decode(&raw); err != nil {
 			return err
 		}
-		fmt.Printf("  %s: %s\n", key, renderValue(raw))
+		fmt.Printf("  %s: %s\n", key, renderField(key, raw, money, net))
 	}
 	return nil
 }
+
+// renderField formats one field: money in the world's unit, everything else as renderValue does.
+func renderField(key string, raw json.RawMessage, money []string, net kernel.Network) string {
+	for _, m := range money {
+		var amount int64
+		if m == key && json.Unmarshal(raw, &amount) == nil {
+			return net.Amount(amount)
+		}
+	}
+	return renderValue(raw)
+}
+
+// The money in each response the field view renders (D20). Named once because several responses
+// carry the same fields, and never guessed from a field's name at print time.
+var (
+	moneyAccount = []string{"available", "locked"}
+	moneyAction  = []string{"price", "base_price"}
+	moneyTx      = []string{"gross", "net", "fee", "refund"}
+	moneyRail    = []string{"amount", "credit"}
+	moneyLedger  = []string{"amount"}
+	moneyStep    = []string{"price"}
+	moneyOwed    = []string{"obligation", "amount"}
+)
 
 // renderValue formats one JSON value for text output: strings unquoted, objects and
 // arrays as indented JSON, everything else as-is.
@@ -238,19 +354,29 @@ func renderValue(raw json.RawMessage) string {
 
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
-	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(), userConnectCmd(), userDisconnectCmd())
+	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
+		userConnectCmd(), userDisconnectCmd(), userAddressCmd(), userDepositCmd(),
+		userWithdrawCmd(), userWithdrawalsCmd())
 	rootCmd.AddCommand(userCmd)
 }
 
 func userCreateCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "create USER",
-		Short: "Create a user account",
-		Long:  "Create a user account. USER is a bare handle — letters and digits, no @ or /.\n\nPrints a one-time recovery phrase; write it down. It is the only way to reset a lost\npassword (`juice auth recover`).",
-		Args:  cobra.ExactArgs(1),
+		Use:   "create USER@KERNEL",
+		Short: "Create a user account on a kernel",
+		Long: "Create the account USER on KERNEL, which is a kernel this client knows (`juice kernel\n" +
+			"list` shows them). Creating an account does not log you in: `juice auth login USER@KERNEL`\n" +
+			"does that.\n\n" +
+			"Prints a one-time recovery phrase; write it down. It is the only way to reset a lost\n" +
+			"password (`juice auth recover`).",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			user := args[0]
+			l, c, err := namedClient(args[0])
+			if err != nil {
+				return err
+			}
+			user := l.Handle
 			if password == "" {
 				p, err := promptNewPassword("Password: ")
 				if err != nil {
@@ -258,18 +384,23 @@ func userCreateCmd() *cobra.Command {
 				}
 				password = p
 			}
+			ctx := context.Background()
+			shown := output{money: moneyAccount}
+			if err := shown.units(ctx, c); err != nil {
+				return err
+			}
 			// Enroll a recovery phrase (§12): generated client-side, only the public key is
 			// sent — it is the sole recovery credential, and the server never sees it. The
 			// ceremony shows and acknowledges the phrase before committing.
-			var view json.RawMessage
+			var created json.RawMessage
 			if err := enrollRecovery("Recovery phrase", func(recoveryPub string) error {
-				return apiCall(context.Background(), "POST", "/v1/users", kernel.CreateUserRequest{
+				return c.call(ctx, "POST", "/v1/users", kernel.CreateUserRequest{
 					Handle: user, Password: password, RecoveryPublicKey: recoveryPub,
-				}, &view)
+				}, &created)
 			}); err != nil {
 				return err
 			}
-			return emitRaw(view)
+			return emit(created, shown)
 		},
 	}
 	cmd.Flags().StringVar(&password, "password", "", "Password (prompted if omitted)")
@@ -282,7 +413,7 @@ func userMeCmd() *cobra.Command {
 		Short: "Show your profile",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return apiEmit("GET", "/v1/me", nil)
+			return cli.emit("GET", "/v1/me", nil, output{money: moneyAccount})
 		},
 	}
 }
@@ -317,7 +448,7 @@ func userUpdateCmd() *cobra.Command {
 			if changePassword {
 				req.CurrentPassword, req.NewPassword = currentPassword, newPassword
 			}
-			return apiEmit("PUT", "/v1/me", req)
+			return cli.emit("PUT", "/v1/me", req, output{money: moneyAccount})
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New profile description (about); pass empty to clear")
@@ -327,23 +458,36 @@ func userUpdateCmd() *cobra.Command {
 
 func userTransferCmd() *cobra.Command {
 	var reason, externalKey string
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "transfer RECIPIENT AMOUNT",
-		Short: "Send credits to another user",
-		Long:  "Send credits to another user, directly and without fee. RECIPIENT is another user's\nhandle on this kernel (a public key also resolves a local account).",
-		Args:  cobra.ExactArgs(2),
+		Short: "Send money to another user",
+		Long: "Send money to another user, directly and without fee. RECIPIENT is another user's\n" +
+			"handle on this kernel (a public key also resolves a local account). AMOUNT is written\n" +
+			"the way this kernel's money is written, for example 1.50.\n\n" +
+			"A transfer cannot be undone: the recipient owns the money once it is sent.",
+		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			amount, err := parseAmount(args[1])
+			ctx := context.Background()
+			net, err := cli.network(ctx)
 			if err != nil {
 				return err
 			}
-			return apiEmit("POST", "/v1/transfers", map[string]any{
+			amount, err := parseAmount(args[1], net.Decimals)
+			if err != nil {
+				return err
+			}
+			if err := cli.confirm(fmt.Sprintf("Send %s to %s", net.Amount(amount), args[0]), yes); err != nil {
+				return err
+			}
+			return cli.emitCtx(ctx, "POST", "/v1/transfers", map[string]any{
 				"recipient": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
-			})
+			}, output{money: moneyLedger})
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id for this transfer; repeating the command with the same id never moves money twice")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
 }
 
@@ -354,34 +498,209 @@ func userLedgerCmd() *cobra.Command {
 		Short: "List your credit movements (deposits, withdrawals, transfers)",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			q := url.Values{}
-			setLimitOffset(q, limit, offset)
-			var entries []*ledgerView
-			if err := apiCall(context.Background(), "GET", "/v1/ledger?"+q.Encode(), nil, &entries); err != nil {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
 				return err
 			}
-			if flagJSON {
-				return printJSON(entries)
-			}
-			if flagQuiet {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			return cli.emitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: func(b []byte) error {
+				var entries []*ledgerView
+				if err := json.Unmarshal(b, &entries); err != nil {
+					return err
+				}
 				for _, e := range entries {
-					fmt.Println(e.ID)
+					from, to := e.FromHandle, e.ToHandle
+					if from == "" {
+						from = "—"
+					}
+					if to == "" {
+						to = "—"
+					}
+					fmt.Printf("[%s] amount:%-10s  from:%-12s  to:%-12s  %s\n",
+						e.CreatedAt.Format(time.RFC3339),
+						net.Amount(e.Amount), from, to, e.Reason)
 				}
 				return nil
+			}})
+		},
+	}
+	addPagingFlags(cmd, &limit, &offset)
+	return cmd
+}
+
+// meView is the caller's own record, the only place a client reads its own id and payout address.
+type meView struct {
+	ID          string `json:"id"`
+	Handle      string `json:"handle"`
+	RailAddress string `json:"rail_address"`
+}
+
+func readMe(ctx context.Context) (*meView, error) {
+	var me meView
+	if err := cli.call(ctx, "GET", "/v1/me", nil, &me); err != nil {
+		return nil, err
+	}
+	return &me, nil
+}
+
+// userAddressCmd registers where the caller is paid. The kernel credits money to whoever finally
+// sent it, so an account is paid out only to an address its holder has proved is theirs: the proof
+// is a signature over a message naming this kernel, this account, and that address, and nothing
+// else. The signing happens in the wallet, not here — this command composes the message and takes
+// the signature back.
+func userAddressCmd() *cobra.Command {
+	var signature string
+	cmd := &cobra.Command{
+		Use:   "address [ADDRESS]",
+		Short: "Register the address you are paid at",
+		Long: "Register ADDRESS as the address you are paid at; `juice user me` shows the one\n" +
+			"registered.\n\n" +
+			"It is yours only once you prove it: this command prints a message naming this kernel,\n" +
+			"your account, and the address; sign that message with the wallet that holds the address\n" +
+			"and paste the signature back, or pass it with --signature. Registering also credits you\n" +
+			"for payments already received from that address.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ctx := context.Background()
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
 			}
-			for _, e := range entries {
-				from, to := e.FromHandle, e.ToHandle
-				if from == "" {
-					from = "—"
-				}
-				if to == "" {
-					to = "—"
-				}
-				fmt.Printf("[%s] amount:%-6d  from:%-12s  to:%-12s  %s\n",
-					e.CreatedAt.Format(time.RFC3339),
-					e.Amount, from, to, e.Reason)
+			h, err := cli.banner(ctx)
+			if err != nil {
+				return err
 			}
-			return nil
+			if signature == "" {
+				if !interactiveTTY() {
+					return kernel.ErrInvalidInput.Wrap("--signature is required when nobody is at the terminal to sign")
+				}
+				fmt.Fprintf(os.Stderr, "Sign this message with the wallet holding %s:\n\n%s\n\n",
+					args[0], string(kernel.RailAddressMessage(h.PublicKey, me.ID, args[0])))
+				fmt.Fprint(os.Stderr, "Signature: ")
+				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+				signature = strings.TrimSpace(line)
+			}
+			return cli.emitCtx(ctx, "PUT", "/v1/me/address", map[string]any{
+				"address": args[0], "signature": signature,
+			}, output{id: "address"})
+		},
+	}
+	cmd.Flags().StringVar(&signature, "signature", "", "Signature of the registration message, produced by the wallet holding the address")
+	return cmd
+}
+
+// userDepositCmd answers "how do I put money in?" and writes nothing. The answer depends on the
+// world this kernel serves, so it is composed from what the server says about itself and about the
+// caller rather than from anything stored here.
+func userDepositCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "deposit",
+		Short: "Show how to put money into your account",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			ctx := context.Background()
+			h, err := cli.banner(ctx)
+			if err != nil {
+				return err
+			}
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
+			}
+			facts, err := json.Marshal(map[string]string{
+				"network": h.Network, "kernel_address": h.RailAddress, "your_address": me.RailAddress})
+			if err != nil {
+				return err
+			}
+			return emit(facts, output{human: func([]byte) error {
+				if h.RailAddress == "" {
+					fmt.Printf("Money on the %s network has no addresses to send to.\n", h.Network)
+					fmt.Println("The operator of this kernel records payments here; there is nothing to send from your side.")
+					return nil
+				}
+				fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.RailAddress)
+				if me.RailAddress == "" {
+					fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
+					fmt.Println("Register the address you will pay from first:  juice user address ADDRESS")
+					return nil
+				}
+				fmt.Printf("Pay from your registered address:\n  %s\n\n", me.RailAddress)
+				fmt.Println("Money is credited to whoever finally sent it, so it must arrive from that address.")
+				fmt.Println("An exchange paying this kernel on your behalf would be crediting itself, not you:")
+				fmt.Println("withdraw to your own wallet first, then pay from there.")
+				return nil
+			}})
+		},
+	}
+}
+
+// userWithdrawCmd sends the caller's own credits back out, and bare lists what they have sent.
+// The id names the withdrawal on the server, which returns the row it already made rather than
+// making a second one — so a caller who repeats the command with the same id after a lost reply
+// recovers the first withdrawal instead of sending twice (U51).
+func userWithdrawCmd() *cobra.Command {
+	var reason, id string
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "withdraw AMOUNT",
+		Short: "Withdraw your credits",
+		Long: "Withdraw AMOUNT to the address you registered with `juice user address`; `juice user\n" +
+			"withdrawals` lists the ones you have made and where each stands.\n\n" +
+			"A withdrawal fixes its destination when it is made, so registering another address later\n" +
+			"never redirects one already under way.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			ctx := context.Background()
+			if id == "" {
+				id = uuid.NewString()
+			}
+			net, err := cli.network(ctx)
+			if err != nil {
+				return err
+			}
+			amount, err := parseAmount(args[0], net.Decimals)
+			if err != nil {
+				return err
+			}
+			me, err := readMe(ctx)
+			if err != nil {
+				return err
+			}
+			// Name the destination when there is one. Whether this world needs one is the rail's rule,
+			// not the client's, so a withdrawal with nowhere to go is refused by the server that knows.
+			where := ""
+			if me.RailAddress != "" {
+				where = " to " + me.RailAddress
+			}
+			if err := cli.confirm(fmt.Sprintf("Withdraw %s on %s%s", net.Amount(amount), net.Name, where), yes); err != nil {
+				return err
+			}
+			return cli.emitCtx(ctx, "POST", "/v1/withdrawals", map[string]any{
+				"id": id, "amount": amount, "reason": reason,
+			}, output{money: moneyRail})
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
+	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
+	cmd.Flags().StringVar(&id, "id", "", "An identifier for this withdrawal. Running the command again with the same --id does not withdraw twice. Chosen for you if omitted.")
+	return cmd
+}
+
+// userWithdrawalsCmd lists what the caller has sent out and where each stands. A verb that reads
+// and a verb that moves money are two words, never one word with and without an argument.
+func userWithdrawalsCmd() *cobra.Command {
+	var limit, offset int
+	cmd := &cobra.Command{
+		Use:   "withdrawals",
+		Short: "List the withdrawals you have made",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			return cli.emitCtx(context.Background(), "GET", "/v1/withdrawals?"+q.Encode(), nil,
+				output{money: moneyRail})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -407,6 +726,17 @@ func init() {
 	rootCmd.AddCommand(actionCmd)
 }
 
+// priceIn reads a price the way every other money input is written: in the world's own unit, so
+// what a command takes is what it shows (D20). A price may be nothing, which is the one way it
+// differs from an amount to move; a command that was given no price at all does not call here.
+func priceIn(price string) (int64, error) {
+	net, err := cli.network(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	return parseUnits(price, net.Decimals)
+}
+
 // Shared placeholder definitions for the action commands' help.
 const (
 	actionPathHelp = "ACTION is an action id or owner/name; owner/path also matches every action beneath\nthat path (bob/mail covers bob/mail/send, never bob/mailer)."
@@ -414,15 +744,14 @@ const (
 )
 
 func actionCreateCmd() *cobra.Command {
-	var kind, source, description, artifact, method string
+	var kind, source, description, artifact, method, price string
 	var params []string
-	var price int64
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "create NAME",
 		Short: "Create an action",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			name := args[0]
 			inputSchema := map[string]any{}
 			if inputSchemaStr != "" {
@@ -451,12 +780,18 @@ func actionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return apiEmit("POST", "/v1/actions", kernel.CreateActionRequest{
-				Name: name, Kind: kernel.ActionKind(kind), Price: price, Description: description,
+			var amount int64
+			if c.Flags().Changed("price") {
+				if amount, err = priceIn(price); err != nil {
+					return err
+				}
+			}
+			return cli.emit("POST", "/v1/actions", kernel.CreateActionRequest{
+				Name: name, Kind: kernel.ActionKind(kind), Price: amount, Description: description,
 				InputSchema: inputSchema, OutputSchema: outputSchema,
 				Source: srcData, WasmArtifact: artData,
 				Method: method, Params: httpParams, Auth: auth,
-			})
+			}, output{money: moneyAction})
 		},
 	}
 	cmd.Flags().StringVar(&kind, "kind", "http", "Action kind: http or wasm")
@@ -465,7 +800,7 @@ func actionCreateCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 WASM artifact or file path")
 	cmd.Flags().StringVar(&description, "description", "", "Description")
-	cmd.Flags().Int64Var(&price, "price", 0, "Price in credits")
+	cmd.Flags().StringVar(&price, "price", "", "Price, written the way this kernel shows money (for example 1.50)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "JSON Schema for outputs (or @file.json)")
 	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json)")
@@ -473,9 +808,8 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var description, source, method, artifact string
+	var description, source, method, artifact, price string
 	var params []string
-	var price int64
 	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
@@ -511,7 +845,11 @@ func actionUpdateCmd() *cobra.Command {
 				req.Params = &httpParams
 			}
 			if c.Flags().Changed("price") {
-				req.Price = &price
+				amount, err := priceIn(price)
+				if err != nil {
+					return err
+				}
+				req.Price = &amount
 			}
 			if c.Flags().Changed("visibility") {
 				v := kernel.ActionVisibility(visibility)
@@ -533,7 +871,7 @@ func actionUpdateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
 			}
-			return apiEmit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req})
+			return cli.emit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, output{money: moneyAction})
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
@@ -541,7 +879,7 @@ func actionUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&artifact, "artifact", "", "New base64 WASM artifact or file path")
 	cmd.Flags().StringVar(&method, "method", "", "New HTTP verb")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
-	cmd.Flags().Int64Var(&price, "price", 0, "New price in credits")
+	cmd.Flags().StringVar(&price, "price", "", "New price, written the way this kernel shows money (for example 1.50)")
 	cmd.Flags().StringVar(&visibility, "visibility", "", "Set visibility: private|local|public")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "New JSON Schema for inputs (or @file.json)")
 	cmd.Flags().StringVar(&outputSchemaStr, "output-schema", "", "New JSON Schema for outputs (or @file.json)")
@@ -565,15 +903,18 @@ type targetRequest struct {
 	kernel.UpdateActionRequest
 }
 
-// reportActions prints the rows a mutation touched, named rather than counted.
-func reportActions(as []actionResp, verb string) error {
-	if flagJSON {
-		return printJSON(as)
-	}
-	for _, a := range as {
-		fmt.Printf("%s %s\n", verb, a.ActionRef)
-	}
-	return nil
+// reportActions names the rows a mutation touched rather than counting them.
+func reportActions(verb string) output {
+	return output{human: func(b []byte) error {
+		var as []actionResp
+		if err := json.Unmarshal(b, &as); err != nil {
+			return err
+		}
+		for _, a := range as {
+			fmt.Printf("%s %s\n", verb, a.ActionRef)
+		}
+		return nil
+	}}
 }
 
 // actionRunE adapts a command body that needs the resolved action id: every action subcommand
@@ -581,7 +922,7 @@ func reportActions(as []actionResp, verb string) error {
 func actionRunE(fn func(ctx context.Context, id, ref string) error) func(*cobra.Command, []string) error {
 	return func(_ *cobra.Command, args []string) error {
 		ctx := context.Background()
-		id, err := resolveActionID(ctx, args[0])
+		id, err := cli.resolveActionID(ctx, args[0])
 		if err != nil {
 			return err
 		}
@@ -598,12 +939,8 @@ func actionActiveCmd(use, short, suffix, pastTense string, active bool) *cobra.C
 		Long:  short + ".\n\n" + actionPathHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			var as []actionResp
-			if err := apiCall(context.Background(), "POST", "/v1/actions/"+suffix,
-				map[string]string{"target": args[0]}, &as); err != nil {
-				return err
-			}
-			return reportActions(as, pastTense)
+			return cli.emit("POST", "/v1/actions/"+suffix,
+				map[string]string{"target": args[0]}, reportActions(pastTense))
 		},
 	}
 }
@@ -628,6 +965,10 @@ func actionListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
+				return err
+			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
 			// Default is active-only (like `docker ps`); --all includes inactive/private rows in
@@ -641,34 +982,29 @@ func actionListCmd() *cobra.Command {
 			if name != "" {
 				q.Set("name", name)
 			}
-			var actions []actionResp
-			if err := apiCall(ctx, "GET", "/v1/actions?"+q.Encode(), nil, &actions); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(actions)
-			}
-			for _, a := range actions {
-				if flagQuiet {
-					fmt.Println(a.ID) // ids only, one per line: pipeable (§14 C8)
-					continue
+			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: func(b []byte) error {
+				var actions []actionResp
+				if err := json.Unmarshal(b, &actions); err != nil {
+					return err
 				}
-				grant := ""
-				if a.RequiresGrant {
-					grant = " [grant]" // caller must connect their own credential first (§8)
-				}
-				// The ref already contains the name; one padded reference column in both branches.
-				if all {
-					active := " "
-					if a.Active {
-						active = "*"
+				for _, a := range actions {
+					grant := ""
+					if a.RequiresGrant {
+						grant = " [grant]" // caller must connect their own credential first (§8)
 					}
-					fmt.Printf("[%s] %-30s  %d credits%s\n", active, a.ActionRef, a.Price, grant)
-				} else {
-					fmt.Printf("  %-30s  %d credits%s\n", a.ActionRef, a.Price, grant)
+					// The ref already contains the name; one padded reference column in both branches.
+					if all {
+						active := " "
+						if a.Active {
+							active = "*"
+						}
+						fmt.Printf("[%s] %-30s  %s%s\n", active, a.ActionRef, net.Amount(a.Price), grant)
+					} else {
+						fmt.Printf("  %-30s  %s%s\n", a.ActionRef, net.Amount(a.Price), grant)
+					}
 				}
-			}
-			return nil
+				return nil
+			}})
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include inactive and private actions (a superuser sees every owner's)")
@@ -685,7 +1021,7 @@ func actionShowCmd() *cobra.Command {
 		Long:  "Show action details.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			return apiEmit("GET", "/v1/actions/"+id, nil)
+			return cli.emitCtx(ctx, "GET", "/v1/actions/"+id, nil, output{money: moneyAction})
 		}),
 	}
 }
@@ -698,11 +1034,7 @@ func actionDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			q := url.Values{"target": {args[0]}}
-			var as []actionResp
-			if err := apiCall(context.Background(), "DELETE", "/v1/actions?"+q.Encode(), nil, &as); err != nil {
-				return err
-			}
-			return reportActions(as, "deleted")
+			return cli.emit("DELETE", "/v1/actions?"+q.Encode(), nil, reportActions("deleted"))
 		},
 	}
 }
@@ -729,42 +1061,41 @@ func actionImportCmd() *cobra.Command {
 				}
 				body["auth"] = auth
 			}
-			var result kernel.ImportResult
-			if err := apiCall(context.Background(), "POST", "/v1/actions/import", body, &result); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(result)
-			}
-			var counts []string
-			for _, group := range []struct {
-				verb string
-				rows []*kernel.Action
-			}{
-				{"imported", result.Created},
-				{"updated", result.Updated},
-				{"unchanged", result.Unchanged},
-				{"deactivated (no longer in the document)", result.Deactivated},
-			} {
-				for _, a := range group.rows {
-					fmt.Printf("%s %s\n", group.verb, a.Name)
+			return cli.emit("POST", "/v1/actions/import", body, output{human: func(b []byte) error {
+				var result importResp
+				if err := json.Unmarshal(b, &result); err != nil {
+					return err
 				}
-				if len(group.rows) > 0 {
-					counts = append(counts, fmt.Sprintf("%d %s", len(group.rows), group.verb))
+				var counts []string
+				for _, group := range []struct {
+					verb string
+					rows []actionResp
+				}{
+					{"imported", result.Created},
+					{"updated", result.Updated},
+					{"unchanged", result.Unchanged},
+					{"deactivated (no longer in the document)", result.Deactivated},
+				} {
+					for _, a := range group.rows {
+						fmt.Printf("%s %s\n", group.verb, a.Name)
+					}
+					if len(group.rows) > 0 {
+						counts = append(counts, fmt.Sprintf("%d %s", len(group.rows), group.verb))
+					}
 				}
-			}
-			for _, r := range result.Rejected {
-				fmt.Printf("skipped %s: %s\n", r.Key, r.Reason)
-			}
-			if len(result.Rejected) > 0 {
-				counts = append(counts, fmt.Sprintf("%d skipped", len(result.Rejected)))
-			}
-			if len(counts) == 0 {
-				fmt.Printf("%s: nothing to do.\n", args[0])
+				for _, r := range result.Rejected {
+					fmt.Printf("skipped %s: %s\n", r.Key, r.Reason)
+				}
+				if len(result.Rejected) > 0 {
+					counts = append(counts, fmt.Sprintf("%d skipped", len(result.Rejected)))
+				}
+				if len(counts) == 0 {
+					fmt.Printf("%s: nothing to do.\n", args[0])
+					return nil
+				}
+				fmt.Printf("%s: %s.\n", args[0], strings.Join(counts, ", "))
 				return nil
-			}
-			fmt.Printf("%s: %s.\n", args[0], strings.Join(counts, ", "))
-			return nil
+			}})
 		},
 	}
 	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json), applied to every operation")
@@ -778,18 +1109,13 @@ func actionStatsCmd() *cobra.Command {
 		Long:  "Show an action's statistics.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			var raw json.RawMessage
-			if err := apiCall(ctx, "GET", "/v1/stats/"+id, nil, &raw); err != nil {
-				return err
-			}
-			if len(raw) == 0 || string(raw) == "null" {
-				if flagJSON {
-					return printJSON(nil)
+			return cli.emitCtx(ctx, "GET", "/v1/stats/"+id, nil, output{human: func(b []byte) error {
+				if len(b) == 0 || string(b) == "null" {
+					fmt.Println("No statistics yet.")
+					return nil
 				}
-				fmt.Println("No statistics yet.")
-				return nil
-			}
-			return emitRaw(raw)
+				return printFields(b, nil, kernel.Network{})
+			}})
 		}),
 	}
 }
@@ -808,29 +1134,25 @@ func actionRatingsCmd() *cobra.Command {
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			var raw json.RawMessage
-			if err := apiCall(ctx, "GET", path, nil, &raw); err != nil {
-				return err
-			}
-			if flagJSON {
-				return emitRaw(raw)
-			}
-			var ratings []struct {
-				Value   int     `json:"value"`
-				Note    *string `json:"note"`
-				Created string  `json:"created_at"`
-			}
-			if err := json.Unmarshal(raw, &ratings); err != nil {
-				return err
-			}
-			for _, rt := range ratings {
-				note := ""
-				if rt.Note != nil {
-					note = "  " + *rt.Note
+			return cli.emitCtx(ctx, "GET", path, nil, output{human: func(b []byte) error {
+				var ratings []struct {
+					Value   int     `json:"value"`
+					Note    *string `json:"note"`
+					Created string  `json:"created_at"`
+					Source  string  `json:"source"`
 				}
-				fmt.Printf("%d  %s%s\n", rt.Value, rt.Created, note)
-			}
-			return nil
+				if err := json.Unmarshal(b, &ratings); err != nil {
+					return err
+				}
+				for _, rt := range ratings {
+					note := ""
+					if rt.Note != nil {
+						note = "  " + *rt.Note
+					}
+					fmt.Printf("%d  %s%s\n", rt.Value, rt.Created, note)
+				}
+				return nil
+			}})
 		}),
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -852,30 +1174,28 @@ func processListCmd() *cobra.Command {
 		Short: "List processes",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			q := url.Values{}
-			setLimitOffset(q, limit, offset)
-			var processes []*processView
-			if err := apiCall(context.Background(), "GET", "/v1/processes?"+q.Encode(), nil, &processes); err != nil {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
 				return err
 			}
-			if flagJSON {
-				return printJSON(processes)
-			}
-			if flagQuiet {
+			q := url.Values{}
+			setLimitOffset(q, limit, offset)
+			return cli.emitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: func(b []byte) error {
+				var processes []*processView
+				if err := json.Unmarshal(b, &processes); err != nil {
+					return err
+				}
 				for _, p := range processes {
-					fmt.Println(p.ID)
+					awaiting := ""
+					if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
+						awaiting = fmt.Sprintf("  awaiting-receipt since %s", p.AwaitingReceiptSince.Format(time.RFC3339))
+					}
+					fmt.Printf("%s  %-6s  available:%-12s  locked:%-12s%s\n",
+						p.ID, p.Status, net.Amount(p.Available), net.Amount(p.Locked), awaiting)
 				}
 				return nil
-			}
-			for _, p := range processes {
-				awaiting := ""
-				if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
-					awaiting = fmt.Sprintf("  awaiting-receipt since %s", p.AwaitingReceiptSince.Format(time.RFC3339))
-				}
-				fmt.Printf("%s  %-6s  available:%-6d  locked:%-6d%s\n",
-					p.ID, p.Status, p.Available, p.Locked, awaiting)
-			}
-			return nil
+			}})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -888,11 +1208,10 @@ func processEndCmd() *cobra.Command {
 		Short: "End a process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if err := apiCall(context.Background(), "POST", "/v1/processes/"+args[0]+"/end", nil, nil); err != nil {
-				return err
-			}
-			fmt.Printf("Process %s ended.\n", args[0])
-			return nil
+			return cli.emit("POST", "/v1/processes/"+args[0]+"/end", nil, output{human: func([]byte) error {
+				fmt.Printf("Process %s ended.\n", args[0])
+				return nil
+			}})
 		},
 	}
 }
@@ -903,7 +1222,7 @@ func processShowCmd() *cobra.Command {
 		Short: "Show process details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/processes/"+args[0], nil)
+			return cli.emit("GET", "/v1/processes/"+args[0], nil, output{money: moneyAccount})
 		},
 	}
 }
@@ -938,17 +1257,7 @@ func stepCreateCmd() *cobra.Command {
 				RequiredCaller: requiredCaller,
 				PartialArgs:    pa,
 			}
-			if flagQuiet {
-				var view struct {
-					ID string `json:"id"`
-				}
-				if err := apiCall(context.Background(), "POST", "/v1/steps", body, &view); err != nil {
-					return err
-				}
-				fmt.Println(view.ID)
-				return nil
-			}
-			return apiEmit("POST", "/v1/steps", body)
+			return cli.emit("POST", "/v1/steps", body, output{money: moneyStep})
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the step (required)")
@@ -960,14 +1269,44 @@ func stepCreateCmd() *cobra.Command {
 }
 
 func stepListCmd() *cobra.Command {
-	var processID, status string
+	var processID, status, peer string
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List steps",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := url.Values{}
+			// A peer holds the step and answers for it, so the reply carries only what it may
+			// disclose: the id to complete, what is already filled in, and what you may supply.
+			if peer != "" {
+				if cmd.Flags().Changed("process") || cmd.Flags().Changed("status") ||
+					cmd.Flags().Changed("limit") || cmd.Flags().Changed("offset") {
+					return fmt.Errorf("--peer lists the one page of steps a peer holds for you; it takes no filter or paging flag")
+				}
+				q.Set("peer", peer)
+				ctx := context.Background()
+				net, err := humanUnits(ctx)
+				if err != nil {
+					return err
+				}
+				return cli.emitCtx(ctx, "GET", "/v1/steps?"+q.Encode(), nil, output{rows: "steps", human: func(b []byte) error {
+					var held kernel.PeerStepList
+					if err := json.Unmarshal(b, &held); err != nil {
+						return err
+					}
+					for _, h := range held.Steps {
+						fmt.Printf("%s  price=%s  %s\n", h.ID, net.Amount(h.Price), h.CreatedAt.Format(time.RFC3339))
+						if len(h.PartialArgs) > 0 && string(h.PartialArgs) != "{}" {
+							fmt.Printf("      %s\n", h.PartialArgs)
+						}
+					}
+					if held.Truncated {
+						fmt.Println("more steps are waiting than one page carries; complete some and ask again")
+					}
+					return nil
+				}})
+			}
 			if processID != "" {
 				q.Set("process_id", processID)
 			}
@@ -975,35 +1314,29 @@ func stepListCmd() *cobra.Command {
 				q.Set("status", status)
 			}
 			setLimitOffset(q, limit, offset)
-			var steps []stepWithAction
-			if err := apiCall(context.Background(), "GET", "/v1/steps?"+q.Encode(), nil, &steps); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(steps)
-			}
-			if flagQuiet {
+			return cli.emit("GET", "/v1/steps?"+q.Encode(), nil, output{human: func(b []byte) error {
+				var steps []stepWithAction
+				if err := json.Unmarshal(b, &steps); err != nil {
+					return err
+				}
 				for _, s := range steps {
-					fmt.Println(s.ID)
+					marker := ""
+					if s.WaitingOnPeer {
+						marker = "  waiting-on-peer"
+					}
+					label := s.Action
+					if s.CreatedBy != "" {
+						label = s.CreatedBy + " → " + s.Action
+					}
+					fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, label, marker)
 				}
 				return nil
-			}
-			for _, s := range steps {
-				marker := ""
-				if s.WaitingOnPeer {
-					marker = "  waiting-on-peer"
-				}
-				label := s.Action
-				if s.CreatedBy != "" {
-					label = s.CreatedBy + " → " + s.Action
-				}
-				fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, label, marker)
-			}
-			return nil
+			}})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
+	cmd.Flags().StringVar(&peer, "peer", "", "List steps this peer (handle or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1014,7 +1347,7 @@ func stepShowCmd() *cobra.Command {
 		Short: "Show step details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/steps/"+args[0], nil)
+			return cli.emit("GET", "/v1/steps/"+args[0], nil, output{money: moneyStep})
 		},
 	}
 }
@@ -1035,24 +1368,11 @@ func stepCompleteCmd() *cobra.Command {
 			if err != nil {
 				return kernel.ErrInvalidInput.Wrapf("invalid input: %v", err)
 			}
-			var reply json.RawMessage
 			body := map[string]any{"args": input}
 			if peer != "" {
 				body["peer"] = peer
 			}
-			if err := apiCall(context.Background(), "POST", "/v1/steps/"+args[0]+"/complete",
-				body, &reply); err != nil {
-				return err
-			}
-			if flagQuiet {
-				var r struct {
-					TxID string `json:"tx_id"`
-				}
-				_ = json.Unmarshal(reply, &r)
-				fmt.Println(r.TxID)
-				return nil
-			}
-			return emitRaw(reply)
+			return cli.emit("POST", "/v1/steps/"+args[0]+"/complete", body, output{id: "tx_id"})
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (handle or key), over federation")
@@ -1075,30 +1395,28 @@ func txListCmd() *cobra.Command {
 		Short: "List transactions",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
+				return err
+			}
 			q := url.Values{}
 			if processID != "" {
 				q.Set("process_id", processID)
 			}
 			setLimitOffset(q, limit, offset)
-			var txs []*kernel.TransactionView
-			if err := apiCall(context.Background(), "GET", "/v1/transactions?"+q.Encode(), nil, &txs); err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(txs)
-			}
-			if flagQuiet {
+			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: func(b []byte) error {
+				var txs []*txSummary
+				if err := json.Unmarshal(b, &txs); err != nil {
+					return err
+				}
 				for _, tx := range txs {
-					fmt.Println(tx.ID)
+					fmt.Printf("[%s] %s  status:%s  gross:%s\n",
+						tx.StartedAt.Format(time.RFC3339),
+						tx.ID, tx.Status, net.Amount(tx.Gross))
 				}
 				return nil
-			}
-			for _, tx := range txs {
-				fmt.Printf("[%s] %s  status:%s  gross:%d\n",
-					tx.StartedAt.Format(time.RFC3339),
-					tx.ID, tx.Status, tx.Gross)
-			}
-			return nil
+			}})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -1112,7 +1430,7 @@ func txShowCmd() *cobra.Command {
 		Short: "Show transaction details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/transactions/"+args[0], nil)
+			return cli.emit("GET", "/v1/transactions/"+args[0], nil, output{money: moneyTx})
 		},
 	}
 }
@@ -1120,10 +1438,10 @@ func txShowCmd() *cobra.Command {
 func txVerifyReceiptCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "verify ID",
-		Short: "Verify a transaction's remote receipt",
+		Short: "Verify a transaction's signed receipt offline",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return apiEmit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil)
+			return cli.emit("GET", "/v1/transactions/"+args[0]+"/receipt-verification", nil, output{})
 		},
 	}
 }
@@ -1144,11 +1462,53 @@ func txRateCmd() *cobra.Command {
 			if note != "" {
 				body["note"] = note
 			}
-			return apiEmit("POST", "/v1/transactions/"+args[0]+"/rate", body)
+			return cli.emit("POST", "/v1/transactions/"+args[0]+"/rate", body, output{})
 		},
 	}
 	cmd.Flags().StringVar(&note, "note", "", "Optional justification note")
 	return cmd
+}
+
+// runHint is everything a failed run tells the operator beyond the error itself: what was charged,
+// where the money stands, and which command answers the question next. It is one function rather
+// than a paragraph at each branch so the advice can be read — and tested — as a whole, which is
+// what keeps it from outliving the commands it names.
+func runHint(err error, ref, quoteHash string) string {
+	ke := (*kernel.KernelError)(nil)
+	errors.As(err, &ke)
+	switch {
+	case errors.Is(err, kernel.ErrGrantRequired):
+		return fmt.Sprintf("\nAuthorize with:\n  juice user connect %s\n", directorySelector(grantActionRef(err, ref)))
+	// Federation-relationship failures (§13): the caller's own balance is fine — say so, and point
+	// at the operator remedy instead of a caller one.
+	case errors.Is(err, kernel.ErrPeerUnreachable):
+		return "\nThe peer is offline; your funds were not charged. Try again when it is online.\n"
+	case errors.Is(err, kernel.ErrPeerUnfunded):
+		peer := peerMetaHandle(err)
+		return fmt.Sprintf("\nYour balance is fine. The kernel %q refused this call because it will not serve this\n"+
+			"kernel on credit right now: either it has lent us as much as it allows, or it cannot pay its\n"+
+			"own provider for the work.\n"+
+			"This is for the operator of your kernel to look into:\n"+
+			"  juice admin kernel show  — how much this kernel owes and is owed\n"+
+			"  juice admin peer inspect %s — this kernel's standing with %q\n", peer, peer, peer)
+	// A pinned run refused for changed terms: nothing was charged, and the current number is what
+	// the caller must re-consent to (§4 precondition 7).
+	case quoteHash != "" && ke != nil && ke.Meta["quote_hash"] != "":
+		return fmt.Sprintf("\nNothing was charged. The action's terms changed since you quoted them; its price is now %s.\n"+
+			"Re-read the action and pass --quote-hash %s to accept the new terms.\n", ke.Meta["price"], ke.Meta["quote_hash"])
+	// A parked remote call: the money is reserved, not spent, and the process is the handle to
+	// follow it by (§13). Say so — a bare "pending" reads as a lost charge.
+	case ke != nil && ke.Meta["process_id"] != "":
+		id := ke.Meta["process_id"]
+		hint := fmt.Sprintf("\nYour funds are reserved, not spent, on process %s.\nFollow it with:\n  juice process show %s\n", id, id)
+		if at := ke.Meta["refund_eligible_at"]; at != "" {
+			return hint + fmt.Sprintf("It retries automatically. From %s it becomes eligible for an automatic refund, "+
+				"which a later retry pass applies; `juice process end` refunds it sooner.\n", at)
+		}
+		return hint + "Work is still running beneath the call; the receipt follows when it settles. " +
+			"`juice process end` settles it now.\n"
+	}
+	return ""
 }
 
 // ---- run ----
@@ -1175,58 +1535,26 @@ func runCmd() *cobra.Command {
 			}
 			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
-			err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
+			err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
 			// offer it inline and re-run once, so the user issues a single `juice run`. Non-TTY
 			// callers (scripts, agents) get the structured error + hint instead — no browser.
 			if errors.Is(err, kernel.ErrGrantRequired) {
 				action := grantActionRef(err, cmdArgs[0])
-				if interactiveTTY() && promptYesNo(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action)) {
-					if cerr := connectSelector(action, false, true); cerr != nil {
+				if interactiveTTY() && confirm(fmt.Sprintf("This action needs your authorization. Authorize %s now?", action), false) == nil {
+					connected, cerr := connectSelector(action, false, true)
+					if cerr != nil {
 						return cerr
 					}
-					err = apiCall(context.Background(), "POST", "/v1/run", reqBody, &raw)
-				} else {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", directorySelector(action))
-					return err
+					fmt.Fprintf(os.Stderr, "Connected %s.\n", strings.Join(connected, ", "))
+					err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
 				}
 			}
 			if err != nil {
-				if errors.Is(err, kernel.ErrGrantRequired) {
-					fmt.Fprintf(os.Stderr, "\nAuthorize with:\n  juice user connect %s\n", directorySelector(grantActionRef(err, cmdArgs[0])))
-				}
-				// Federation-relationship failures (§13): the caller's own balance is fine — say so,
-				// and point at the operator remedy instead of a caller one.
-				if errors.Is(err, kernel.ErrPeerUnreachable) {
-					fmt.Fprintf(os.Stderr, "\nThe peer is offline; your funds were not charged. Try again when it is online.\n")
-				}
-				// A parked remote call: the money is reserved, not spent, and the process is the
-				// handle to follow it by (§13). Say so — a bare "pending" reads as a lost charge.
-				if ke := (*kernel.KernelError)(nil); errors.As(err, &ke) && ke.Meta["process_id"] != "" {
-					fmt.Fprintf(os.Stderr, "\nYour funds are reserved, not spent, on process %s.\nFollow it with:\n  juice process show %s\nIt retries automatically. From %s it becomes eligible for an automatic refund, which a later retry pass applies; `juice process end` refunds it sooner.\n",
-						ke.Meta["process_id"], ke.Meta["process_id"], ke.Meta["refund_eligible_at"])
-				}
-				if errors.Is(err, kernel.ErrPeerUnfunded) {
-					fmt.Fprintf(os.Stderr, "\nYour balance is fine; this kernel's credit with peer %s is exhausted.\nOperator remedy: pay the peer out of band and have its operator run `admin deposit`.\n", peerMetaHandle(err))
-				}
-				// A pinned run refused for changed terms: nothing was charged, and the current
-				// number is what the caller must re-consent to (§4 precondition 7).
-				if quoteHash != "" {
-					if ke := (*kernel.KernelError)(nil); errors.As(err, &ke) && ke.Meta["quote_hash"] != "" {
-						fmt.Fprintf(os.Stderr, "\nNothing was charged. The action's terms changed since you quoted them; its price is now %s.\nRe-read the action and pass --quote-hash %s to accept the new terms.\n", ke.Meta["price"], ke.Meta["quote_hash"])
-					}
-				}
+				fmt.Fprint(os.Stderr, runHint(err, cmdArgs[0], quoteHash))
 				return err
 			}
-			if flagQuiet {
-				var r struct {
-					TxID string `json:"tx_id"`
-				}
-				_ = json.Unmarshal(raw, &r)
-				fmt.Println(r.TxID)
-				return nil
-			}
-			return emitRaw(raw)
+			return emit(raw, output{id: "tx_id"})
 		},
 	}
 	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Fingerprint of the terms you saw (quote_hash on the action); the run is refused before any charge if the terms have changed since")

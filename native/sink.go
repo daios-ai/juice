@@ -13,7 +13,7 @@ func Sink() Spec {
 		Description:  "Universal no-op sink; accepts any input and returns {}",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeSink()
 			}

@@ -54,6 +54,10 @@ func Open(path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.backfillReceiptHashes(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -94,6 +98,14 @@ func (s *DB) migrate() error {
 	if err != nil {
 		return err
 	}
+	// A database carrying a migration this build does not ship was written by a newer juice. Running
+	// an older binary against it would read a schema it does not know, silently, so it is refused —
+	// the same judgement reconcileBaseline makes one function up about a schema it cannot place.
+	if ahead, aerr := s.migrationAhead(files); aerr != nil {
+		return aerr
+	} else if ahead != "" {
+		return fmt.Errorf("this database is at migration %s, which this juice does not ship; use a newer juice", ahead)
+	}
 	for _, file := range files {
 		version := strings.TrimSuffix(path.Base(file), ".sql")
 		applied, err := s.migrationApplied(version)
@@ -112,6 +124,28 @@ func (s *DB) migrate() error {
 		}
 	}
 	return nil
+}
+
+// migrationAhead names a recorded migration that sorts after every migration this build ships, or
+// "" when the database is at or behind this binary. Versions sort by their numbered prefix, so the
+// folded legacy chain, all of it below the shipped range, is behind rather than ahead.
+func (s *DB) migrationAhead(files []string) (string, error) {
+	newest := ""
+	for _, f := range files {
+		if v := strings.TrimSuffix(path.Base(f), ".sql"); v > newest {
+			newest = v
+		}
+	}
+	var ahead string
+	err := s.db.QueryRow(
+		`SELECT version FROM schema_migrations WHERE version > ? ORDER BY version DESC LIMIT 1`, newest).Scan(&ahead)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", dbErr(err, "read schema_migrations")
+	}
+	return ahead, nil
 }
 
 // reconcileBaseline decides which of the three supported states this database is in, and rejects
@@ -292,7 +326,7 @@ func strVal(s *string) string {
 
 // ---- Accounts ----
 
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,rail_address,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.Account) error {
 	_, err := s.db.ExecContext(ctx,
@@ -368,6 +402,19 @@ WHERE u.kernel_public_key IS NOT NULL AND u.kernel_public_key != ''
          WHERE s.status IN ('waiting','running')
            AND (s.required_caller_user_id=u.id
                 OR s.action_id IN (SELECT id FROM actions WHERE owner_user_id=u.id)))
+  -- Nothing owed either way: no call it made is still unrevealed or unpaid here, and no call we
+  -- made to it is still waiting to tell it how the draw came out. Purging would drop the account
+  -- the reveal or the payment is keyed on, and the obligation could never close (P10).
+  AND NOT EXISTS (SELECT 1 FROM traces ot`+unresolvedTrace+` AND ot.caller_user_id=u.id)
+  AND NOT EXISTS (
+        SELECT 1 FROM transactions x JOIN traces t ON t.id = x.trace_id
+         WHERE x.target_user_id=u.id AND x.net > 0 AND t.revealed = 0)
+  -- Nor a call made to it still awaiting its receipt: the retry settles through the proxy this
+  -- peer owns, and purging would take that proxy with it.
+  AND NOT EXISTS (
+        SELECT 1 FROM traces t
+         WHERE t.action_owner_id=u.id AND t.idempotency_key IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id = t.id))
 ORDER BY u.id`, timeToStr(cutoff))
 	if err != nil {
 		return nil, dbErr(err, "list purgeable peers")
@@ -478,12 +525,13 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, er
 func scanUserFn(scan func(...any) error) (*kernel.Account, error) {
 	var u kernel.Account
 	var createdAt, updatedAt string
-	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey *string
+	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey, railAddress *string
 	if err := scan(&u.ID, &handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey,
+		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey, &railAddress,
 		&createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	u.RailAddress = strVal(railAddress)
 	u.Handle = strVal(handle)
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.KernelPublicKey = strVal(kernelPublicKey)
@@ -541,21 +589,16 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 // credit when none was reported. A plain UPDATE: an unknown key is a no-op, because observing a
 // kernel creates nothing (§13). updated_at is intentionally untouched — contact is a display cache,
 // not peer activity for retention, or a zombie would be immortal.
-func (s *DB) RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time, credit *int64) error {
+func (s *DB) RecordKernelContact(ctx context.Context, publicKey string, ok bool, at time.Time) error {
 	col := "last_contact_failed_at"
 	if ok {
 		col = "last_seen"
 	}
-	var cr any
-	if ok && credit != nil {
-		cr = *credit
-	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE kernels
-		    SET `+col+` = CASE WHEN `+col+` IS NULL OR julianday(`+col+`) < julianday(?) THEN ? ELSE `+col+` END,
-		        peer_credit = COALESCE(?, peer_credit)
+		    SET `+col+` = CASE WHEN `+col+` IS NULL OR julianday(`+col+`) < julianday(?) THEN ? ELSE `+col+` END
 		  WHERE public_key = ?`,
-		timeToStr(at), timeToStr(at), cr, publicKey)
+		timeToStr(at), timeToStr(at), publicKey)
 	return dbErr(err, "record kernel contact")
 }
 
@@ -802,30 +845,16 @@ func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON,
 
 // BeginRun atomically debits price from owner.available→locked, creates the process
 // with available=0/locked=price, and creates the root trace with available=price.
-// lockReserveTx atomically debits `amount` from userID.available into userID.locked, guarded by the
-// §13 admission rule (factored so both the execution reserve and the value-transfer reserve use it):
-//
-//	ordinary user (kernel_public_key IS NULL): must be prepaid (available ≥ amount); the exposure clause is
-//	  short-circuited true.
-//	peer (kernel_public_key set): admitted when the draw does not increase this peer's own debt
-//	  (max(0,amount−available) ≤ max(0,−available)), or when the projected global gross receivables
-//	  (Σ over OTHER peer rows of max(0,−available) + this peer's post-debit debt) stay ≤ exposureMax.
-//	  Own row's current debt is excluded and replaced by its projected value — the cap is on the whole
-//	  book (Sybil-proof); SQLite serializes writers, so G ≤ X holds as an invariant.
-//
-// A zero amount is a no-op. Returns ErrInsufficientFunds when the guard rejects (0 rows).
-func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount, exposureMax int64) error {
+// lockReserveTx atomically debits `amount` from userID.available into userID.locked. Every account
+// is prepaid — a peer row funds nothing (P10), so there is no admission clause and no row may go
+// negative. A zero amount is a no-op. Returns ErrInsufficientFunds when the balance is short.
+func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount int64) error {
 	if amount == 0 {
 		return nil
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET available=available-?, locked=locked+? WHERE id=?
-		   AND (kernel_public_key IS NOT NULL OR available >= ?)
-		   AND (kernel_public_key IS NULL OR ? = 0
-		     OR MAX(0, ? - available) <= MAX(0, -available)
-		     OR ((SELECT COALESCE(SUM(MAX(0,-available)),0) FROM accounts WHERE kernel_public_key IS NOT NULL AND id <> ?)
-		         + MAX(0, ? - available)) <= ?)`,
-		amount, amount, userID, amount, amount, amount, userID, amount, exposureMax,
+		`UPDATE accounts SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
+		amount, amount, userID, amount,
 	)
 	if err != nil {
 		return dbErr(err, "lock reserve: deduct user")
@@ -836,16 +865,54 @@ func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount, expos
 	return nil
 }
 
-func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, price, premiumReserve, exposureMax int64) error {
+// admitExposure raises the kernel's unpaid-delivered-service counter by `amount`, but only while the
+// result stays inside `limit`. The check and the write are one statement, so two calls arriving
+// together cannot both pass a limit that admits only one (D14).
+func admitExposure(ctx context.Context, tx *sql.Tx, amount, limit int64) error {
+	if amount == 0 {
+		return nil
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE exposure SET value=value+? WHERE id=1 AND value+? <= ?`, amount, amount, limit)
+	if err != nil {
+		return dbErr(err, "admit exposure")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrInsufficientFunds.Wrap("credit limit reached")
+	}
+	return nil
+}
+
+// moveExposure corrects the counter by a signed delta: to the actual charge when a call commits,
+// and downward when cash arrives. Unlike admission it is never refused — the service is already
+// delivered, and refusing to record it would misstate what the kernel is owed.
+func moveExposure(ctx context.Context, tx *sql.Tx, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE exposure SET value=value+? WHERE id=1`, delta)
+	return dbErr(err, "move exposure")
+}
+
+func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, ownerID string, price, reserve, limit int64) error {
 	return s.withTx(ctx, "begin run", func(tx *sql.Tx) error {
-		// Execution reserve on the process owner P (price + serving-markup reserve).
-		if err := lockReserveTx(ctx, tx, ownerID, price+premiumReserve, exposureMax); err != nil {
+		// An inbound foreign call is admitted against the credit limit before anything is funded. The
+		// trace written below carries the same reserve in its frozen terms, so a crash between
+		// admission and settlement leaves the exposure recoverable from the one record (D14, P10).
+		if reserve > 0 {
+			if err := admitExposure(ctx, tx, reserve, limit); err != nil {
+				return err
+			}
+		}
+		// The execution reserve on the process owner P. For a foreign call P is the seller, who funds
+		// its own work and is repaid when the buyer's obligation settles (P10).
+		if err := lockReserveTx(ctx, tx, ownerID, price); err != nil {
 			return err
 		}
-		// Transfer value on the immediate caller C (t.CallerUserID) from C's OWN balance, atomic with
-		// the execution reserve (§13). For a root call C == P; a composed subcall differs. C is always
-		// a local ordinary account — a peer funds no transfer — so it prepays (exposureMax 0).
-		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value, 0); err != nil {
+		// The immediate caller C's own two stakes, atomic with the execution reserve: the transfer
+		// value it delivers, and the lottery stake that funds a winning ticket. For a root call
+		// C == P; a composed subcall differs.
+		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -878,33 +945,68 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 }
 
 func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTraceID *string, price int64) error {
+	// revealed is written explicitly: the column defaults to 1 so the calls that predate the draw are
+	// never queued for a reveal they have no secret for, but every call made since owes one.
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,value,value_to,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.PremiumBPS, t.PremiumParked, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_rail_address,value,value_to,created_at)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedRailAddress, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
 
 // BeginSubcall atomically deducts price from parent_trace.available into parent_trace.locked
 // and creates the child trace with available=price.
+// fundFromTrace is the one funding boundary inside a computation: it moves price from a trace's
+// available into its locked for a child call or a parked step. The statement itself carries the
+// rules a spend depends on — the trace is unsettled and its process open — in the same predicate
+// as the funds, so nothing checked before the write can go stale between the check and the write
+// (§6, §9): a capability that expired a moment ago, or a process closed a moment ago, is refused
+// here whatever price is asked, zero included. A refused write is classified by re-reading the row.
+func fundFromTrace(ctx context.Context, tx *sql.Tx, traceID string, price int64, op string) error {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE traces SET available=available-?, locked=locked+?
+		 WHERE id=? AND available>=?
+		   AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=traces.id)
+		   AND EXISTS (SELECT 1 FROM processes WHERE id=traces.process_id AND status='open')`,
+		price, price, traceID, price,
+	)
+	if err != nil {
+		return dbErr(err, op+": fund from trace")
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var available int64
+	var settled int
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT t.available, EXISTS(SELECT 1 FROM transactions WHERE trace_id=t.id), p.status
+		 FROM traces t JOIN processes p ON p.id=t.process_id WHERE t.id=?`, traceID).Scan(&available, &settled, &status)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return kernel.ErrNotFound.Wrap(op + ": trace not found")
+	case err != nil:
+		return dbErr(err, op+": classify refusal")
+	case settled == 1:
+		return kernel.ErrInvalidState.Wrap(op + ": the call has already settled")
+	case status != string(kernel.ProcessOpen):
+		return kernel.ErrInvalidState.Wrap(op + ": process is closed")
+	default:
+		return kernel.ErrInsufficientFunds.Wrapf("%s: trace has %d credits, %d needed", op, available, price)
+	}
+}
+
 func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.Trace, price int64) error {
 	return s.withTx(ctx, "begin subcall", func(tx *sql.Tx) error {
 		// Execution reserve: the subcall's price comes from the parent trace's budget (process funds).
-		res, err := tx.ExecContext(ctx,
-			`UPDATE traces SET available=available-?, locked=locked+?
-			 WHERE id=? AND available>=?`,
-			price, price, parentTraceID, price,
-		)
-		if err != nil {
-			return dbErr(err, "begin subcall: lock parent trace funds")
+		if err := fundFromTrace(ctx, tx, parentTraceID, price, "begin subcall"); err != nil {
+			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInsufficientFunds.Wrap("parent trace has insufficient available funds")
-		}
-		// Transfer value on the immediate caller C from C's OWN balance — a composed transfer (an action
-		// subcalls sys/transfer) pays the value from the composing action owner, not the process budget.
-		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value, 0); err != nil {
+		// The immediate caller C's own stakes from C's OWN balance — a composed transfer (an action
+		// subcalls sys/transfer) pays the value from the composing action owner, not the process
+		// budget, and a composed remote call stakes its own lottery ticket the same way.
+		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
 			return err
 		}
 		return insertTraceTx(ctx, tx, t, &parentTraceID, price)
@@ -914,7 +1016,7 @@ func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.T
 // BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
 // parent_trace.available (consuming the park), claims the step waiting→running, and creates
 // a new trace with available=step.price funded from the released lock.
-func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace, exposureMax int64) error {
+func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) error {
 	return s.withTx(ctx, "begin step call", func(tx *sql.Tx) error {
 		// Read step to get price and parent_trace_id.
 		var price int64
@@ -945,10 +1047,10 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace, 
 				return kernel.ErrInvalidState.Wrap("step park invariant violated: parent trace locked < step price")
 			}
 		}
-		// Value transfer (§13): the completer C funds the delivered value from its OWN balance, atomic
-		// with claiming the step — the step's execution price stays creator-parked above. C is local (a
-		// peer funds no transfer), so it prepays.
-		if err = lockReserveTx(ctx, tx, t.CallerUserID, t.Value, 0); err != nil {
+		// The completer C funds its own stakes — the delivered value, and a lottery ticket when the
+		// completion reaches a remote action — atomic with claiming the step; the step's execution
+		// price stays creator-parked above.
+		if err = lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
 			return err
 		}
 		// Insert the completion trace first so the FK on steps.completion_trace_id is satisfied.
@@ -974,28 +1076,33 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
-		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON,
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSignerKey),
 		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
+	}
+	// P9's receipt hash is written with the receipt: the one fact every join to it needs.
+	hash, err := kernel.ReceiptHash(receipt)
+	if err != nil {
+		return err
 	}
 	if receipt == nil {
 		return dbErr(fmt.Errorf("receipt is required"), label)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,value,value_to,reason,started_at,created_at,signature)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,value_to,reason,started_at,created_at,signature,hash)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
 		receipt.CallerUserID, receipt.ProcessID,
 		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
-		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Premium, receipt.Value, nullStr(receipt.ValueTo), receipt.Reason,
-		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature,
+		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Premium, receipt.Nonce, receipt.Value, nullStr(receipt.ValueTo), receipt.Reason,
+		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature, hash,
 	); err != nil {
 		return dbErr(err, label+": insert receipt")
 	}
@@ -1080,35 +1187,33 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 // closeProcessTx closes a process within an existing transaction if it is quiescent:
 // no waiting/running steps and no traces without a committed transaction.
 // If not quiescent it is a no-op. Returns any remaining process.available to the owner.
+// processQuiescent reports whether nothing is in flight in a process: no step waiting or running,
+// no trace without a transaction. Automatic closure closes only then; forced closure refuses
+// otherwise, since a call that started between its settlement pass and its close would settle
+// into a closed process, and a refund landing there is never returned to anyone (§5).
+func processQuiescent(ctx context.Context, tx *sql.Tx, processID string) (bool, error) {
+	var open int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id
+		          WHERE t.process_id=? AND s.status IN ('waiting','running'))
+		      + (SELECT COUNT(*) FROM traces t WHERE t.process_id=?
+		          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))`,
+		processID, processID).Scan(&open); err != nil {
+		return false, dbErr(err, "process quiescence")
+	}
+	return open == 0, nil
+}
+
 func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) error {
 	// Count open steps.
-	var openSteps int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status IN ('waiting','running')`,
-		processID,
-	).Scan(&openSteps); err != nil {
-		return dbErr(err, "close process: count open steps")
-	}
-	if openSteps > 0 {
-		return nil
-	}
-	// Count traces with no committed transaction (in-flight calls).
-	var orphanTraces int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM traces t
-		 WHERE t.process_id=?
-		 AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id)`,
-		processID,
-	).Scan(&orphanTraces); err != nil {
-		return dbErr(err, "close process: count orphan traces")
-	}
-	if orphanTraces > 0 {
-		return nil
+	quiet, err := processQuiescent(ctx, tx, processID)
+	if err != nil || !quiet {
+		return err
 	}
 	// Quiescent: close and return remaining available to owner.
 	var ownerID string
 	var available int64
-	err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT owner_user_id, available FROM processes WHERE id=? AND status='open'`,
 		processID,
 	).Scan(&ownerID, &available)
@@ -1145,7 +1250,7 @@ WITH RECURSIVE sub(id) AS (
 )
 SELECT COALESCE(SUM(price),0) FROM steps
 WHERE parent_trace_id IN (SELECT id FROM sub)
-  AND status IN ('waiting','running')`, traceID).Scan(&total)
+  AND status='waiting'`, traceID).Scan(&total)
 	if err != nil {
 		return 0, dbErr(err, "cancel step subtree: sum prices")
 	}
@@ -1157,7 +1262,7 @@ WITH RECURSIVE sub(id) AS (
 )
 UPDATE steps SET status='cancelled'
 WHERE parent_trace_id IN (SELECT id FROM sub)
-  AND status IN ('waiting','running')`, traceID)
+  AND status='waiting'`, traceID)
 	if err != nil {
 		return 0, dbErr(err, "cancel step subtree: cancel steps")
 	}
@@ -1173,41 +1278,27 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 // callerWalletKind controls the lock release: CallerProcess (process.locked),
 // CallerTrace (parent trace.locked), or CallerStep (no lock to release; BeginStepCall
 // already consumed it — refund would go to process on failure).
-// applyPremiumLegs releases the serving-markup reserve the peer owner parked in its locked balance at
-// admission (§13). It is read from the trace snapshot (premium_parked) rather than caller arguments, so
-// EVERY settlement path — commit, failure, crash recovery, forced closure — releases it without the
-// in-memory request (a no-op when nothing is parked). The whole parked amount leaves owner.locked; the
-// actual `premium` goes to sys and the unused remainder refunds to the owner. The value-transfer channel
-// is settled separately on the caller's own reserve (settleTransferReserve), never here.
-func applyPremiumLegs(ctx context.Context, tx *sql.Tx, traceID, ownerID, sysID string, premium int64) error {
-	var reserve int64
+// releaseStake returns a lottery stake to the caller who locked it. What is released is read from
+// the trace, not from a caller argument, so every settlement path — commit, failure, crash recovery,
+// forced closure — releases exactly what was locked (P10). A no-op when nothing was staked.
+func releaseStake(ctx context.Context, tx *sql.Tx, traceID string) error {
+	var callerC string
+	var stake int64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(premium_parked,0) FROM traces WHERE id=?`, traceID,
-	).Scan(&reserve); err != nil {
-		return dbErr(err, "premium legs: read reserve")
+		`SELECT COALESCE(ticket,0), caller_user_id FROM traces WHERE id=?`, traceID,
+	).Scan(&stake, &callerC); err != nil {
+		return dbErr(err, "release stake: read trace")
 	}
-	if reserve == 0 {
+	if stake == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET locked=locked-? WHERE id=?`, reserve, ownerID); err != nil {
-		return dbErr(err, "premium legs: release owner reserve")
+	res, err := tx.ExecContext(ctx,
+		`UPDATE accounts SET locked=locked-?, available=available+? WHERE id=?`, stake, stake, callerC)
+	if err != nil {
+		return dbErr(err, "release stake")
 	}
-	if refund := reserve - premium; refund > 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, refund, ownerID); err != nil {
-			return dbErr(err, "premium legs: refund unused reserve")
-		}
-	}
-	if premium > 0 {
-		if sysID == "" {
-			return fmt.Errorf("premium legs: premium %d > 0 but sysID is empty: funds would be destroyed", premium)
-		}
-		res, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, premium, sysID)
-		if err != nil {
-			return dbErr(err, "premium legs: credit sys premium")
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
-			return fmt.Errorf("premium legs: sys recipient %q not found: funds would be destroyed", sysID)
-		}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("release stake: caller %q not found: funds would be destroyed", callerC)
 	}
 	return nil
 }
@@ -1289,12 +1380,24 @@ func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error
 }
 
 func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
-	return s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
+	deferred := false
+	err := s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
+		var err error
+		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+			return err
+		}
+		// The taxable the caller computed must be what the row holds now — a child settling in
+		// between moves it — so the statement that zeroes it says so; otherwise the outcome is
+		// recorded and the sweep settles from fresh numbers.
 		taxable := net + fee
-		// Zero out trace.available (taxable flows out; the rest was consumed by subcalls/steps).
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE traces SET available=0 WHERE id=? AND available=?`, traceID, taxable)
+		if err != nil {
 			return dbErr(err, "commit call: zero trace available")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			deferred = true
+			return recordOutcome(ctx, tx, ktx, stepID)
 		}
 		// Release the full gross from the caller's lock row (per callerWalletKind, see doc above).
 		// Each settled subcall already released its own gross from this row, so it now holds
@@ -1340,14 +1443,19 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
 			}
 		}
-		// Serving-markup premium (§13): release the execution reserve snapshotted on the trace, credit
-		// receipt.Premium to sys, refund the remainder. No-op for local calls/subcalls.
-		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
+		// The lottery stake goes back to whoever locked it: the draw's own outcome is settled by
+		// CommitRemoteSettlement, which is the only path that wins one. No-op for a local call.
+		if err := releaseStake(ctx, tx, traceID); err != nil {
 			return err
 		}
 		// Value channel (§13): a local/inbound transfer credits its beneficiary from the caller C's own
-		// reserve, untaxed and on a different wallet than the execution premium above. No-op otherwise.
+		// reserve, untaxed and on a different wallet than the execution above. No-op otherwise.
 		if err := commitTraceTransferEffect(ctx, tx, traceID, ktx.ID, receipt.CreatedAt); err != nil {
+			return err
+		}
+		// A foreign buyer now owes what this call charged, and the exposure admission reserved is
+		// corrected to it (P10, D14). A no-op for a local call.
+		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
 		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
@@ -1355,6 +1463,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
 	})
+	return deferredOr(deferred, err)
 }
 
 // CommitFailedCall settles a failed call:
@@ -1362,7 +1471,12 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 //   - total refund = trace.available + step prices
 //   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
 func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
-	return s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
+	deferred := false
+	err := s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
+		var err error
+		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+			return err
+		}
 		// Read trace.available before zeroing.
 		var traceAvailable int64
 		if err := tx.QueryRowContext(ctx,
@@ -1392,43 +1506,27 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
 			return dbErr(err, "commit failed call: zero trace available")
 		}
-		// Return refund to caller wallet and release the gross lock.
-		switch callerWalletKind {
-		case kernel.CallerProcess:
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`,
-				refund, gross, callerWalletID); err != nil {
-				return dbErr(err, "commit failed call: refund process")
-			}
-		case kernel.CallerTrace:
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`,
-				refund, gross, callerWalletID); err != nil {
-				return dbErr(err, "commit failed call: refund parent trace")
-			}
-		case kernel.CallerStep:
-			// BeginStepCall already released the parent trace lock. Return refund to process.
-			if refund > 0 {
-				if _, err = tx.ExecContext(ctx,
-					`UPDATE processes SET available=available+? WHERE id=?`,
-					refund, ktx.ProcessID); err != nil {
-					return dbErr(err, "commit failed call: refund step to process")
-				}
-			}
+		if err = refundCaller(ctx, tx, callerWalletKind, callerWalletID, ktx.ProcessID, refund, gross, "commit failed call"); err != nil {
+			return err
 		}
 		// NOTE: user.locked is NOT decremented here. Permanent outflows were already
 		// debited by CommitCall for each successful subcall. The refunded amount will be
 		// returned to user.available (via EndProcess or caller wallet propagation) and
 		// user.locked will be decremented then. Touching it here would double-count.
-		// The serving-markup premium reserve is a separate parked amount (not part of the process
-		// budget or the refund flow above), so it is released here in full — receipt.Premium (on the
-		// actual failed charge) to sys, the remainder back to the peer owner. No-op for local calls.
-		if err := applyPremiumLegs(ctx, tx, traceID, ktx.OwnerUserID, feeRecipientID, receipt.Premium); err != nil {
+		// The stake is a separate parked amount, not part of the process budget or the refund above,
+		// so it returns whole to the caller who locked it. No-op for local calls.
+		if err := releaseStake(ctx, tx, traceID); err != nil {
 			return err
 		}
 		// Value channel (§13): a failed/never-dispatched transfer delivers nothing, so the whole value
 		// reserve returns to the caller C. No-op for non-transfer calls.
 		if err := refundTransferEffect(ctx, tx, traceID); err != nil {
+			return err
+		}
+		// A failure still charges for whatever settled beneath it (P7), so a foreign buyer can owe for
+		// one; a charge of nothing gives back the exposure admission reserved. Taken from the receipt
+		// just signed, so the obligation and the record that names it can never disagree.
+		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
 		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
@@ -1437,46 +1535,32 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
 	})
+	return deferredOr(deferred, err)
 }
 
-// CommitRemoteSettlement settles an outbound remote-proxy call with economics distinct from local
-// calls (§13): the gross q (= the two-step local price sr + ceil(sr·import_bps)) was locked; paid
-// (= the peer's charge + serving premium) flows to the proxy user as the bilateral payable, the
-// origin's import fee to @sys, and the remainder (refund = q−paid−importFee) returns to the caller
-// wallet. Unlike CommitCall, taxable = paid+importFee (not gross), so the refund must be explicit.
-func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, proxyUserID, feeRecipientID string, paid, importFee int64, stats *kernel.Stats, idempotencyRecordID, stepID, errorCode string) error {
-	return s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
+// CommitRemoteSettlement settles an outbound remote-proxy call (P7, P10). The economics differ from
+// a local call in two ways. The budget pays only the obligation and the import fee, so the refund
+// (q − obligation − importFee) is explicit rather than implied. And the obligation itself does not
+// land on a peer row — a peer row holds no money — it returns to the caller C, whose own stake then
+// carries the draw: a losing ticket leaves C exactly the obligation better off than the refund
+// alone, and a winning one reserves the face value from C for the rail to send.
+func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, stepID, errorCode string) error {
+	deferred := false
+	err := s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
+		var err error
+		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+			return err
+		}
 		q := ktx.Gross // full locked amount (two-step local price)
-		taxable := paid + importFee
-		refund := q - paid - importFee
+		taxable := obligation + importFee
+		refund := q - taxable
 		ktx.Refund = refund
 		// Zero trace.available.
 		if _, err := tx.ExecContext(ctx, `UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
 			return dbErr(err, "commit remote settlement: zero trace available")
 		}
-		// Release caller wallet lock and return refund.
-		switch callerWalletKind {
-		case kernel.CallerProcess:
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE processes SET locked=locked-?, available=available+? WHERE id=?`,
-				q, refund, callerWalletID); err != nil {
-				return dbErr(err, "commit remote settlement: release process lock")
-			}
-		case kernel.CallerTrace:
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE traces SET locked=locked-?, available=available+? WHERE id=?`,
-				q, refund, callerWalletID); err != nil {
-				return dbErr(err, "commit remote settlement: release parent trace lock")
-			}
-		case kernel.CallerStep:
-			// BeginStepCall already released the parent trace lock.
-			if refund > 0 {
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE processes SET available=available+? WHERE id=?`,
-					refund, ktx.ProcessID); err != nil {
-					return dbErr(err, "commit remote settlement: refund step to process")
-				}
-			}
+		if err := refundCaller(ctx, tx, callerWalletKind, callerWalletID, ktx.ProcessID, refund, q, "commit remote settlement"); err != nil {
+			return err
 		}
 		// Decrement owner.locked by taxable (permanently committed portion).
 		if taxable > 0 {
@@ -1485,12 +1569,18 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 				return dbErr(err, "commit remote settlement: debit owner locked")
 			}
 		}
-		// Pay paid (charge + serving premium) to the proxy user — the bilateral payable to the peer.
-		if paid > 0 {
+		// The obligation leaves the budget and returns to the caller C, who owes it on the rail rather
+		// than through any local row; the payout below takes back exactly what the draw says must be
+		// sent. The stake is released from the trace's own snapshot, so it comes back on every path —
+		// including a rejection, which owes nothing and would otherwise strand it.
+		if obligation > 0 {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, paid, proxyUserID); err != nil {
-				return dbErr(err, "commit remote settlement: credit proxy user")
+				`UPDATE accounts SET available=available+? WHERE id=?`, obligation, ktx.CallerUserID); err != nil {
+				return dbErr(err, "commit remote settlement: return obligation to caller")
 			}
+		}
+		if err := releaseStake(ctx, tx, traceID); err != nil {
+			return err
 		}
 		// Retain the import fee locally on the origin's @sys.
 		if importFee > 0 {
@@ -1500,6 +1590,13 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE accounts SET available=available+? WHERE id=?`, importFee, feeRecipientID); err != nil {
 				return dbErr(err, "commit remote settlement: credit fee recipient")
+			}
+		}
+		// A won draw is money leaving: reserved from C into the operator's hold now, so the amount is
+		// committed before the rail is ever asked, and journalled where every crossing is.
+		if payout != nil {
+			if err := reserveRailTx(ctx, tx, feeRecipientID, payout, payout.Party, payout.Amount, time.Now().UTC()); err != nil {
+				return err
 			}
 		}
 		// A remote FAILURE has no ReplyJSON (settleRemoteCall sets it only on success), so storing
@@ -1516,6 +1613,7 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
 	})
+	return deferredOr(deferred, err)
 }
 
 // scanProcessFn is the queryList adapter for process lists.
@@ -1575,9 +1673,22 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
-		// Running step-completion traces are settled as failed calls (transaction + receipt)
-		// by kernel.EndProcess via recoverTrace before this runs, so by now no step is in
-		// the running state. This method only cancels waiting steps and returns funds.
+		// The kernel settled every unsettled trace it saw before calling here; a call or a step
+		// completion that started since is in flight and must not be closed over. Checked in this
+		// transaction, against the rows this transaction will change — waiting steps are what this
+		// method cancels, so only running ones and unsettled traces count.
+		var inFlight int
+		if err = tx.QueryRowContext(ctx,
+			`SELECT (SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id
+			          WHERE t.process_id=? AND s.status='running')
+			      + (SELECT COUNT(*) FROM traces t WHERE t.process_id=?
+			          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))`,
+			processID, processID).Scan(&inFlight); err != nil {
+			return dbErr(err, "end process: in-flight check")
+		}
+		if inFlight > 0 {
+			return kernel.ErrInvalidState.Wrap("a call started while the process was being ended; end it again once it settles")
+		}
 		// Cancel all waiting steps and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
@@ -1650,20 +1761,22 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,premium_bps,premium_parked,value,value_to,created_at`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,created_at,outcome_json`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
-	var parentID, idempotencyKey, dispatchJSON, recordID, valueTo sql.NullString
-	var premiumBPS, premiumParked, value sql.NullInt64
+	var parentID, idempotencyKey, dispatchJSON, recordID, valueTo, outcome sql.NullString
+	var ticket, value sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &premiumBPS, &premiumParked, &value, &valueTo, &createdAt)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &createdAt, &outcome)
 	if err != nil {
 		return err
 	}
+	if outcome.Valid {
+		t.OutcomeJSON = &outcome.String
+	}
 	t.CreatedAt = strToTime(createdAt)
-	t.PremiumBPS = premiumBPS.Int64
-	t.PremiumParked = premiumParked.Int64
+	t.Ticket = ticket.Int64
 	t.Value = value.Int64
 	t.ValueTo = valueTo.String
 	if parentID.Valid {
@@ -1731,7 +1844,7 @@ func (s *DB) TraceHasTransaction(ctx context.Context, traceID string) (bool, err
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
-	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,started_at,ended_at`
+	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer_key,''),started_at,ended_at`
 
 // scanTx scans one transaction row using the provided scan function.
 // scan must be called with exactly the destinations expected by txColumns.
@@ -1742,7 +1855,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName, &tx.RemoteActionID,
 		&argsJSON, &replyJSON, &status,
-		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON,
+		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON, &tx.RemoteSignerKey,
 		&startedAt, &endedAt); err != nil {
 		return tx, err
 	}
@@ -1856,38 +1969,33 @@ func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 // available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
 func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
 	return s.withTx(ctx, "create step", func(tx *sql.Tx) error {
-		if step.ParentTraceID != nil && step.Price > 0 {
-			res, err := tx.ExecContext(ctx,
-				`UPDATE traces SET available=available-?, locked=locked+?
-				 WHERE id=? AND available>=?`,
-				step.Price, step.Price, *step.ParentTraceID, step.Price,
-			)
-			if err != nil {
-				return dbErr(err, "create step: park price")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInsufficientFunds.Wrap("parent trace has insufficient available funds for step")
+		// Parked from the funding trace at any price, zero included: the statement is also what
+		// refuses a settled trace or a closed process, which no step may be parked in.
+		if step.ParentTraceID != nil {
+			if err := fundFromTrace(ctx, tx, *step.ParentTraceID, step.Price, "create step"); err != nil {
+				return err
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,
+			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,
+			                    required_caller_handle,action_id,
 			                    partial_args,price,import_bps,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 			step.ID, step.ParentTraceID, step.RequiredCallerUserID, step.RequiredCallerRemoteID,
-			step.ActionID, rawJSONStr(step.PartialArgs),
+			step.RequiredCallerHandle, step.ActionID, rawJSONStr(step.PartialArgs),
 			step.Price, step.ImportBPS, string(step.Status), timeToStr(step.CreatedAt),
 		)
 		return dbErr(err, "create step: insert")
 	})
 }
 
-const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
+const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
 
 func scanStep(step *kernel.Step, scanFn func(...any) error) error {
 	var parentTraceID, txID, completionTraceID, remoteID *string
 	var createdAt, partialArgs, status string
 	var importBPS sql.NullInt64
-	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID,
+	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID, &step.RequiredCallerHandle,
 		&step.ActionID, &partialArgs, &step.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return err
 	}
@@ -2067,14 +2175,28 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 				`UPDATE traces SET locked=locked+? WHERE id=?`, price, *parentTraceID); err != nil {
 				return dbErr(err, "reset step and repark: repark to parent trace")
 			}
-			// Delete the empty completion trace.
+		}
+		// The step's reference to its completion trace goes first: the row it names is deleted next,
+		// and the foreign key on it is restrictive.
+		if _, err = tx.ExecContext(ctx,
+			`UPDATE steps SET status='waiting', completion_trace_id=NULL WHERE id=? AND status='running'`, stepID); err != nil {
+			return dbErr(err, "reset step and repark: reset step")
+		}
+		// The claim locked the completer's stake and transfer value on their own account; the trace
+		// that records them is about to go, so they are released here, by the helpers every failed
+		// settlement uses. Then the empty completion trace goes, at any price.
+		if completionTraceID != nil {
+			if err = releaseStake(ctx, tx, *completionTraceID); err != nil {
+				return err
+			}
+			if err = refundTransferEffect(ctx, tx, *completionTraceID); err != nil {
+				return err
+			}
 			if _, err = tx.ExecContext(ctx, `DELETE FROM traces WHERE id=?`, *completionTraceID); err != nil {
 				return dbErr(err, "reset step and repark: delete completion trace")
 			}
 		}
-		_, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='waiting', completion_trace_id=NULL WHERE id=?`, stepID)
-		return dbErr(err, "reset step and repark: reset step")
+		return nil
 	})
 }
 
@@ -2084,20 +2206,13 @@ func (s *DB) ResetRunningSteps(ctx context.Context) error {
 	return dbErr(err, "reset running steps")
 }
 
-// ListStepsAwaitingCaller returns the waiting steps a given user is the required caller of,
-// oldest first. Deliberately narrow: ListSteps' visibility predicate is a disjunction that also
-// matches every step inside a process the caller owns, so filtering it in Go after the query's
-// row cap can discard the whole page — and for a peer, the steps it can actually complete are
-// exactly the ones its own inbound calls would crowd out (§13). Oldest-first because the longest
-// stranded are the ones an operator needs to see. No superuser widening: this answers "what awaits
-// me", which is never wider than one user.
-// Steps a caller is the required completer of, oldest first. Deliberately narrow: ListSteps'
-// visibility predicate is a disjunction that also matches every step inside a process the caller
-// owns, so filtering it in Go after the query's row cap can discard the whole page — and for a
-// peer, the steps it can actually complete are exactly the ones its own inbound calls would crowd
-// out (§13). Oldest-first because the longest stranded are the ones an operator needs to see.
-// No superuser widening: this answers "what awaits me", which is never wider than one user.
-func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID string, limit int) ([]*kernel.Step, error) {
+// ListStepsAwaitingCaller returns the waiting steps one counterparty may complete, oldest first —
+// the longest stranded are what an operator needs to see. Scoped in the query: ListSteps' visibility
+// predicate also matches every step inside a process the caller owns, so filtering it in Go after
+// the row cap could discard the whole page, and for a peer those are exactly the steps its own
+// inbound calls would crowd out (§13). remoteUserID narrows to one principal on that kernel; empty
+// returns every step the kernel may complete, its users' included, which is what an operator sees.
+func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*kernel.Step, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -2105,8 +2220,9 @@ func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID s
 		`SELECT `+stepCols+`
 		 FROM steps
 		 WHERE required_caller_user_id=? AND status='waiting'
+		   AND (?='' OR required_caller_remote_id=?)
 		 ORDER BY created_at ASC, id ASC LIMIT ?`,
-		requiredCallerUserID, limit)
+		requiredCallerUserID, remoteUserID, remoteUserID, limit)
 	if err != nil {
 		return nil, dbErr(err, "list steps awaiting caller")
 	}
@@ -2168,15 +2284,7 @@ func (s *DB) ListOrphanTraces(ctx context.Context) ([]*kernel.Trace, error) {
 		   SELECT MAX(d) FROM depth
 		 ) ASC`)
 	if err != nil {
-		// Fallback: simpler ordering without depth CTE for SQLite versions that struggle.
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT `+traceCols+` FROM traces t
-			 WHERE idempotency_key IS NULL
-			 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)
-			 ORDER BY created_at DESC`)
-		if err != nil {
-			return nil, dbErr(err, "list orphan traces")
-		}
+		return nil, dbErr(err, "list orphan traces")
 	}
 	return queryList(rows, "list orphan traces", scanTracePtr)
 }
@@ -2194,16 +2302,104 @@ func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, erro
 	return queryList(rows, "list pending remote traces", scanTracePtr)
 }
 
-func (s *DB) ListDirectUnsettledChildren(ctx context.Context, parentTraceID string) ([]*kernel.Trace, error) {
+// refundCaller returns one settled call's refund to the wallet that funded it and releases the
+// lock that call held there, the single rule every settlement path uses (§6).
+func refundCaller(ctx context.Context, tx *sql.Tx, kind, walletID, processID string, refund, gross int64, op string) error {
+	switch kind {
+	case kernel.CallerProcess:
+		_, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`, refund, gross, walletID)
+		return dbErr(err, op+": refund process")
+	case kernel.CallerTrace:
+		// The caller trace is unsettled by construction: a trace settles only after every trace
+		// beneath it (D3), so this refund always finds a live wallet to return to.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`, refund, gross, walletID)
+		return dbErr(err, op+": refund parent trace")
+	case kernel.CallerStep:
+		// BeginStepCall already released the parent trace lock. Return refund to the process.
+		if refund == 0 {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE processes SET available=available+? WHERE id=?`, refund, processID)
+		return dbErr(err, op+": refund step to process")
+	}
+	return nil
+}
+
+// settleGuard is the order every settlement commit obeys (D3): a trace settles only after every
+// trace beneath it. Inside the commit's own transaction it refuses while a child is unsettled and
+// records the outcome the caller brought, so the settlement that follows the last child commits
+// exactly this. Because the record and the refusal are one transaction, serialized against every
+// child's commit, a child that settles before it finds no outcome and a child that settles after it
+// finds one — there is no third case, and no lock.
+//
+// A refusal is a COMMITTED transaction — the record must persist — so the guard reports it with
+// a flag the commit returns as ErrSettlementDeferred after committing, never as an error inside
+// the transaction, which would roll the record back.
+func settleGuard(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, stepID string) (deferred bool, err error) {
+	var inFlight int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=?
+		   AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=c.id))`, ktx.TraceID).Scan(&inFlight); err != nil {
+		return false, dbErr(err, "settle guard")
+	}
+	if inFlight == 0 {
+		return false, nil
+	}
+	return true, recordOutcome(ctx, tx, ktx, stepID)
+}
+
+func recordOutcome(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, stepID string) error {
+	b, _ := json.Marshal(kernel.TraceOutcome{Status: ktx.Status, Gross: ktx.Gross, Reason: ktx.Reason,
+		Args: ktx.ArgsJSON, Reply: ktx.ReplyJSON, EndedAt: ktx.EndedAt, StepID: stepID})
+	_, err := tx.ExecContext(ctx, `UPDATE traces SET outcome_json=? WHERE id=?`, string(b), ktx.TraceID)
+	return dbErr(err, "record outcome")
+}
+
+// deferredOr turns a committed refusal into the error the kernel branches on.
+func deferredOr(deferred bool, err error) error {
+	if err != nil {
+		return err
+	}
+	if deferred {
+		return kernel.ErrSettlementDeferred
+	}
+	return nil
+}
+
+// ListReadyTraces returns the traces whose outcome is recorded, that have no transaction, and no
+// trace beneath them still unsettled: settleable at any moment, since a recorded outcome means
+// the call's execution has ended. Deepest first, so one pass climbs.
+func (s *DB) ListReadyTraces(ctx context.Context) ([]*kernel.Trace, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+traceCols+` FROM traces t
-		 WHERE t.parent_trace_id=?
-		 AND NOT EXISTS (SELECT 1 FROM transactions tx WHERE tx.trace_id=t.id)`,
-		parentTraceID)
+		 WHERE t.outcome_json IS NOT NULL
+		 AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=t.id)
+		 AND NOT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=t.id
+		   AND NOT EXISTS (SELECT 1 FROM transactions y WHERE y.trace_id=c.id))
+		 ORDER BY (
+		   WITH RECURSIVE depth(id, d) AS (
+		     SELECT t.id, 0
+		     UNION ALL
+		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
+		   )
+		   SELECT MAX(d) FROM depth
+		 ) ASC`)
 	if err != nil {
-		return nil, dbErr(err, "list direct unsettled children")
+		return nil, dbErr(err, "list ready traces")
 	}
-	return queryList(rows, "list direct unsettled children", scanTracePtr)
+	return queryList(rows, "list ready traces", scanTracePtr)
+}
+
+func (s *DB) ConsumedByChildren(ctx context.Context, traceID string) (int64, error) {
+	var consumed int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(gross - refund), 0) FROM transactions WHERE parent_trace_id=?`, traceID).Scan(&consumed); err != nil {
+		return 0, dbErr(err, "consumed by children")
+	}
+	return consumed, nil
 }
 
 func (s *DB) ListUnsettledTracesForProcess(ctx context.Context, processID string) ([]*kernel.Trace, error) {
@@ -2554,6 +2750,13 @@ func (s *DB) CreateLedgerEntry(ctx context.Context, e *kernel.LedgerEntry) error
 				return err
 			}
 			if existing != nil {
+				// A key names one movement. Answering a request that asks for a different one with
+				// this entry would report money moved that never did, so the mismatch is refused
+				// here — like a withdrawal replayed on other terms, and inside the same transaction
+				// the insert would run in.
+				if existing.FromUserID != e.FromUserID || existing.ToUserID != e.ToUserID || existing.Amount != e.Amount {
+					return kernel.ErrInvalidInput.Wrapf("%s already names a different movement", e.ExternalKey)
+				}
 				*e = *existing
 				return nil
 			}
@@ -2582,7 +2785,7 @@ func (s *DB) CreateLedgerEntry(ctx context.Context, e *kernel.LedgerEntry) error
 }
 
 // insertLedgerRow writes one ledger record inside an open transaction — the single INSERT behind
-// every entry class (deposit/withdraw/transfer, settlement record, transfer-effect delivery). It
+// every entry class (deposit/withdraw/transfer, ticket credit, refill, transfer-effect delivery). It
 // inserts what it is given and decides nothing: the nullable columns go through nullStr, so an
 // empty external_key lands as SQL NULL rather than colliding on the unique index.
 func insertLedgerRow(ctx context.Context, tx *sql.Tx, e *kernel.LedgerEntry) error {
@@ -2619,7 +2822,18 @@ func (s *DB) ListLedgerByUser(ctx context.Context, userID string, limit, offset 
 	})
 }
 
-func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string) (*kernel.LedgerEntry, error) {
+// ReadLedgerByExternalKey is the out-of-transaction form of readLedgerByExternalKey, for a caller
+// answering a replay rather than committing one.
+func (s *DB) ReadLedgerByExternalKey(ctx context.Context, externalKey string) (*kernel.LedgerEntry, error) {
+	return readLedgerByExternalKey(ctx, s.db, externalKey)
+}
+
+// rowQuerier is what readLedgerByExternalKey needs of a connection or a transaction.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readLedgerByExternalKey(ctx context.Context, tx rowQuerier, externalKey string) (*kernel.LedgerEntry, error) {
 	var e kernel.LedgerEntry
 	var createdAt string
 	err := tx.QueryRowContext(ctx,
@@ -2634,97 +2848,6 @@ func readLedgerByExternalKey(ctx context.Context, tx *sql.Tx, externalKey string
 	}
 	e.CreatedAt = strToTime(createdAt)
 	return &e, nil
-}
-
-// commitSettlementRow applies a settlement's balance legs and records one idempotent ledger row (§13).
-// externalKey is the idempotency key (a replay returns the stored record with no balance change —
-// anti-grinding); ledgerAmt>0 is the debt/cash magnitude for the audit row; conserve requires
-// dClear+variance==0 (internal-only outcome records — clear applies ±d/∓d, a pending pay applies
-// 0/0). A cash finalization sets conserve=false, since it is the point where external cash Q enters
-// (dClear+variance==Q). A negative sys variance is guarded like lockReserveTx: a reserve short of
-// it refuses ErrInsufficientFunds, rolling the whole tx back → the settlement stays pending, no partial writes.
-func (s *DB) commitSettlementRow(ctx context.Context, externalKey, rowUserID, sysID string, dClear, variance, ledgerAmt int64, recordJSON string, conserve bool) (string, error) {
-	if conserve && dClear+variance != 0 {
-		return "", fmt.Errorf("commit settlement: non-conservative outcome (dClear=%d variance=%d)", dClear, variance)
-	}
-	var stored string
-	err := s.withTx(ctx, "commit settlement", func(tx *sql.Tx) error {
-		existing, err := readLedgerByExternalKey(ctx, tx, externalKey)
-		if err != nil {
-			return err
-		}
-		if existing != nil {
-			stored = existing.Reason
-			return nil
-		}
-		if dClear != 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, dClear, rowUserID); err != nil {
-				return dbErr(err, "commit settlement: clear row")
-			}
-		}
-		if variance != 0 {
-			res, err := tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=? AND available >= ?`, variance, sysID, -variance)
-			if err != nil {
-				return dbErr(err, "commit settlement: sys variance")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInsufficientFunds.Wrap("operator reserve below settlement variance")
-			}
-		}
-		// to_user_id names the settled peer/proxy row (non-null from/to CHECK + attribution); the
-		// signed balance change is applied above; reason carries the record JSON.
-		return insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
-			ID: "st_" + externalKey, OperatorUserID: sysID, ToUserID: rowUserID,
-			Amount: ledgerAmt, Reason: recordJSON, ExternalKey: externalKey, CreatedAt: time.Now().UTC(),
-		})
-	})
-	return stored, err
-}
-
-// CommitSettlement records a finish outcome (§13): clear applies ±d/∓d and extinguishes the debt; a
-// pending pay applies no legs (dClear=variance=0) and leaves the debt on the row until the cash record.
-func (s *DB) CommitSettlement(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, debt int64, recordJSON string) (string, error) {
-	return s.commitSettlementRow(ctx, settlementID, rowUserID, sysID, dClear, variance, debt, recordJSON, true)
-}
-
-// CommitSettlementCash finalizes a paid probabilistic outcome (§13): it clears the debt d on the row,
-// books the variance ±(Q−d) on sys, and records the external cash Q under settlementID.cash — the
-// only settlement move that is not internally conservative, because it is where cash crosses the rail.
-func (s *DB) CommitSettlementCash(ctx context.Context, settlementID, rowUserID, sysID string, dClear, variance, q int64, recordJSON string) (string, error) {
-	return s.commitSettlementRow(ctx, settlementID+".cash", rowUserID, sysID, dClear, variance, q, recordJSON, false)
-}
-
-// ReadSettlementRecord returns the stored final record for settlementID, or "" if none exists.
-func (s *DB) ReadSettlementRecord(ctx context.Context, settlementID string) (string, error) {
-	var reason string
-	err := s.db.QueryRowContext(ctx, `SELECT reason FROM ledger WHERE external_key=?`, settlementID).Scan(&reason)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return reason, dbErr(err, "read settlement record")
-}
-
-// HasPendingSettlement reports whether peerID has a paid probabilistic outcome awaiting its rail
-// record (§13): a settlement row with outcome "pay" and no companion .cash finalization. The serving
-// side gates obligation-increasing calls on this; the debtor side reports it instead of re-flipping.
-func (s *DB) HasPendingSettlement(ctx context.Context, peerID string) (bool, error) {
-	var exists int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(
-		   SELECT 1 FROM ledger l
-		   WHERE l.to_user_id=? AND l.external_key IS NOT NULL AND l.external_key NOT LIKE '%.cash'
-		     AND l.reason LIKE '%"outcome":"pay"%'
-		     AND NOT EXISTS (SELECT 1 FROM ledger c WHERE c.external_key = l.external_key || '.cash'))`,
-		peerID).Scan(&exists)
-	return exists == 1, dbErr(err, "has pending settlement")
-}
-
-// GrossReceivables returns Σ over peer rows of max(0, −available) (§13).
-func (s *DB) GrossReceivables(ctx context.Context) (int64, error) {
-	var g int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(MAX(0,-available)),0) FROM accounts WHERE kernel_public_key IS NOT NULL`).Scan(&g)
-	return g, dbErr(err, "gross receivables")
 }
 
 // ---- Embeddings ----
@@ -2807,18 +2930,20 @@ func ftsMatchQuery(query string) string {
 
 // UpsertKernel records an observation of a remote kernel (§13): its self-asserted nickname, its
 // about, and the timestamps. It writes NEITHER the petname (assigned locally, only on our own
-// outbound act) NOR gossip_cursor/last_seen/peer_credit, each of which has its own narrow path that
+// outbound act) NOR gossip_cursor/last_seen, each of which has its own narrow path that
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
-func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about string, now time.Time) error {
+func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO kernels (public_key,nickname,about,first_seen,updated_at)
-		 VALUES (?,?,?,?,?)
+		`INSERT INTO kernels (public_key,nickname,about,rail_address,rail_proof,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
+		   rail_address=CASE WHEN excluded.rail_address != '' THEN excluded.rail_address ELSE kernels.rail_address END,
+		   rail_proof=CASE WHEN excluded.rail_proof != '' THEN excluded.rail_proof ELSE kernels.rail_proof END,
 		   updated_at=excluded.updated_at`,
-		publicKey, nickname, about, timeToStr(now), timeToStr(now),
+		publicKey, nickname, about, railAddress, railProof, timeToStr(now), timeToStr(now),
 	)
 	return dbErr(err, "upsert kernel")
 }
@@ -2905,9 +3030,8 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT k.public_key, COALESCE(k.petname,''), k.nickname, k.about,
-		        CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END,
-		        COALESCE(a.available,0), COALESCE(a.locked,0), a.suspended_at,
-		        k.peer_credit, k.last_seen, k.last_contact_failed_at,
+		        CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END, a.suspended_at,
+		        k.last_seen, k.last_contact_failed_at,
 		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key)
 		 FROM kernels k LEFT JOIN accounts a ON a.kernel_public_key = k.public_key
 		 WHERE k.public_key != ? AND (? OR a.suspended_at IS NULL)
@@ -2921,7 +3045,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 		var hasAccount int
 		var suspendedAt, lastSeen, failedAt *string
 		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &hasAccount,
-			&v.Available, &v.Locked, &suspendedAt, &v.PeerCredit, &lastSeen, &failedAt, &v.Actions); err != nil {
+			&suspendedAt, &lastSeen, &failedAt, &v.Actions); err != nil {
 			return nil, err
 		}
 		v.HasAccount = hasAccount == 1
@@ -2948,10 +3072,10 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	var firstSeen, updatedAt string
 	var lastSeen, failedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,gossip_cursor,last_seen,last_contact_failed_at,peer_credit,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,rail_address,rail_proof,gossip_cursor,last_seen,last_contact_failed_at,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
-		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.GossipCursor,
-			&lastSeen, &failedAt, &k.PeerCredit, &firstSeen, &updatedAt)
+		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.RailAddress, &k.RailProof, &k.GossipCursor,
+			&lastSeen, &failedAt, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3260,7 +3384,7 @@ func firstErr(errs ...error) error {
 // conflict. Every other unique key is kernel-minted, so its collision is a broken invariant and
 // stays internal — unlisted keys fail closed. ledger.external_key never reaches the index (§12).
 var callerUnique = []string{
-	"accounts.handle", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
+	"accounts.handle", "accounts.rail_address", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
 	"connections.user_id", "grants.grantor_user_id",
 	"idempotency_records.idempotency_key",
 }
@@ -3287,9 +3411,6 @@ func dbErr(err error, op string) error {
 	return kernel.ErrInternal.Wrapf("%s: %v", op, err)
 }
 
-// rowScan adapts a single-row query to the scan-function shape the scanners take.
-func rowScan(row *sql.Row) func(...any) error { return row.Scan }
-
 // scanID is the queryList adapter for a single-column id/key list.
 func scanID(scan func(...any) error) (string, error) {
 	var id string
@@ -3300,7 +3421,10 @@ func scanID(scan func(...any) error) (string, error) {
 // queryList collects rows into a slice using the provided scan function.
 func queryList[T any](rows *sql.Rows, op string, scan func(func(...any) error) (T, error)) ([]T, error) {
 	defer rows.Close()
-	var out []T
+	// Never nil: a list with no rows is an empty list, and an empty list serialises as [] wherever
+	// it is handed to a client (API.md R6). Deciding that here once is what keeps every list
+	// endpoint from having to remember it.
+	out := make([]T, 0)
 	for rows.Next() {
 		v, err := scan(rows.Scan)
 		if err != nil {
@@ -3328,25 +3452,105 @@ func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) e
 // ---- Receipts ----
 
 const receiptSelectCols = `id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,charge,premium,value,COALESCE(value_to,''),reason,started_at,created_at,signature`
+		        args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,COALESCE(value_to,''),reason,started_at,created_at,signature`
 
 func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
-	var r kernel.Receipt
-	var status, startedAt, createdAt string
-	err := row.Scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
-		&r.CallerUserID, &r.ProcessID,
-		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Value, &r.ValueTo, &r.Reason, &startedAt, &createdAt, &r.Signature)
+	r, err := scanReceiptFn(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("receipt not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, op)
 	}
+	return r, nil
+}
+
+func scanReceiptFn(scan func(...any) error) (*kernel.Receipt, error) {
+	var r kernel.Receipt
+	var status, startedAt, createdAt string
+	if err := scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
+		&r.CallerUserID, &r.ProcessID,
+		&r.ArgsHash, &r.ReplyHash, &status,
+		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Nonce, &r.Value, &r.ValueTo, &r.Reason, &startedAt, &createdAt, &r.Signature); err != nil {
+		return nil, err
+	}
 	r.Status = kernel.TxStatus(status)
 	r.StartedAt = strToTime(startedAt)
 	r.CreatedAt = strToTime(createdAt)
 	return &r, nil
+}
+
+// backfillReceiptHashes writes P9's hash onto every receipt that predates the column (migration
+// 050). It is the one migration step that cannot be SQL, since the hash is a canonical
+// serialization; idempotent, so a crash mid-way costs nothing but a second pass.
+func (s *DB) backfillReceiptHashes(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+receiptSelectCols+` FROM receipts WHERE hash IS NULL`)
+	if err != nil {
+		return dbErr(err, "backfill receipt hashes")
+	}
+	pending, err := queryList(rows, "backfill receipt hashes", scanReceiptFn)
+	if err != nil {
+		return err
+	}
+	for _, r := range pending {
+		h, err := kernel.ReceiptHash(r)
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE receipts SET hash=? WHERE id=?`, h, r.ID); err != nil {
+			return dbErr(err, "backfill receipt hash")
+		}
+	}
+	return nil
+}
+
+// ListPublicRatings is one action's public ratings projection (§11), newest first, paged in the
+// query: the ratings its local payers gave, and the ratings its remote payers gave on their own
+// kernels, each admitted on D16's link and nothing weaker — the rater's kernel names one of THIS
+// kernel's receipts for the action, by the hash written with the receipt, and that receipt's call
+// was made by that very kernel. An issuer's several rows naming one trade are one rating when they
+// agree and none when they do not, since the issuer mints its own row keys; an equivocating row
+// contributes nothing.
+func (s *DB) ListPublicRatings(ctx context.Context, actionID, selfKey string, limit, offset int) ([]kernel.PublicRating, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT value, note, created_at, source FROM (
+		  SELECT r.rating AS value, r.note AS note, r.created_at AS created_at, 'local' AS source
+		  FROM ratings r JOIN transactions t ON t.id=r.rated_tx_id WHERE t.action_id=?
+		  UNION ALL
+		  SELECT MIN(json_extract(e.rating_json,'$.rating')), MIN(json_extract(e.rating_json,'$.note')),
+		         MIN(json_extract(e.rating_json,'$.created_at')), 'peer'
+		  FROM evidence e
+		  JOIN receipts rc ON rc.hash=e.remote_receipt_hash
+		  JOIN transactions t ON t.id=rc.tx_id
+		  JOIN accounts a ON a.id=t.caller_user_id
+		  WHERE e.subject_kernel_public_key=? AND e.subject_action_id=? AND t.action_id=?
+		    AND a.kernel_public_key=e.issuer_public_key
+		    AND e.rating_json<>''
+		  GROUP BY e.issuer_public_key, e.remote_receipt_hash
+		  HAVING COUNT(DISTINCT json_extract(e.rating_json,'$.rating') || '|' || COALESCE(json_extract(e.rating_json,'$.note'),'')) = 1
+		     AND SUM(e.equivocated) = 0
+		     AND MIN(json_extract(e.rating_json,'$.rating')) IN (0,1)
+		     AND COALESCE(MAX(length(json_extract(e.rating_json,'$.note'))),0) <= 1024
+		)
+		ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		actionID, selfKey, actionID, actionID, limit, offset)
+	if err != nil {
+		return nil, dbErr(err, "list public ratings")
+	}
+	return queryList(rows, "list public ratings", func(scan func(...any) error) (kernel.PublicRating, error) {
+		var pr kernel.PublicRating
+		var value float64
+		var note *string
+		var created string
+		if err := scan(&value, &note, &created, &pr.Source); err != nil {
+			return pr, err
+		}
+		pr.Value, pr.Note, pr.CreatedAt = int(value), note, strToTime(created)
+		return pr, nil
+	})
 }
 
 func (s *DB) ReadReceiptByTxID(ctx context.Context, txID string) (*kernel.Receipt, error) {
@@ -3431,9 +3635,9 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 
 func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,created_at,expires_at)
-		 VALUES (?,?,?,NULL,'pending','',?,?)`,
-		r.ID, r.IdempotencyKey, r.CounterpartyUserID,
+		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,created_at,expires_at)
+		 VALUES (?,?,?,NULL,'pending',?,'',?,?)`,
+		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ArgsJSON,
 		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
 	)
 	return dbErr(err, "insert pending idempotency record")
@@ -3487,15 +3691,24 @@ func (s *DB) ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
+	return s.readIdempotencyRecord(ctx,
+		`idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`, key, counterpartyUserID)
+}
+
+// ReadIdempotencyRecordByID reads a record whatever its age: recovery settles what it finds, and a
+// record older than its expiry still names an inbound call whose caller may be waiting.
+func (s *DB) ReadIdempotencyRecordByID(ctx context.Context, id string) (*kernel.IdempotencyRecord, error) {
+	return s.readIdempotencyRecord(ctx, `id=?`, id)
+}
+
+func (s *DB) readIdempotencyRecord(ctx context.Context, where string, args ...any) (*kernel.IdempotencyRecord, error) {
 	var r kernel.IdempotencyRecord
 	var receiptID *string
 	var createdAt, expiresAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,result_json,receipt_json,created_at,expires_at
-		 FROM idempotency_records
-		 WHERE idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`,
-		key, counterpartyUserID,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
+		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,receipt_json,created_at,expires_at
+		 FROM idempotency_records WHERE `+where, args...,
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ArgsJSON, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
 	}
@@ -3514,4 +3727,10 @@ func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID 
 func (s *DB) ExecForTest(ctx context.Context, query string, args ...any) error {
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
+}
+
+// QueryRowForTest reads one row of one column, for the same reason: a test asserting on state the
+// kernel's own reads do not expose. Not used in production.
+func (s *DB) QueryRowForTest(ctx context.Context, query string, arg any, into any) error {
+	return s.db.QueryRowContext(ctx, query, arg).Scan(into)
 }

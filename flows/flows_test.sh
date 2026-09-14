@@ -13,6 +13,12 @@
 #
 # Opt-in suites (excluded from the default run; each needs a heavy external toolchain):
 #   JUICE_TINYGO_FLOWS=1 ... — @sys/tinygo/compile (real TinyGo toolchain on PATH)
+#   JUICE_RAIL_FLOWS=1 ...   — the rail against a local chain (Foundry + juice-rail's mocks)
+#   JUICE_SEPOLIA_FLOWS=1 ...— the rail against live Arbitrum Sepolia; needs JUICE_SEPOLIA_RPC and
+#                              JUICE_SEPOLIA_KEY_FILE (mode 600). Takes ~20 minutes: it waits out
+#                              real L1 finality, which is the property it exists to test.
+#   JUICE_NETWORK_FLOWS=1 ...— the real-NAT federation gate; needs a second host behind a different
+#                              NAT (see flows_network.sh).
 #
 # Via the Go suite:  go test -tags integration ./cmd/juice/ -run TestFlowsIntegration
 #
@@ -27,6 +33,8 @@ source "$here/flows_calls.sh"
 source "$here/flows_wasm.sh"
 source "$here/flows_remote.sh"
 source "$here/flows_federation.sh"
+source "$here/flows_rail.sh"
+source "$here/flows_rail_chain.sh"
 source "$here/flows_network.sh"
 source "$here/flows_admin.sh"
 
@@ -34,6 +42,19 @@ source "$here/flows_admin.sh"
 if [ "${JUICE_NETWORK_FLOWS:-0}" = "1" ]; then
     echo "=== real-network federation check ONLY (JUICE_NETWORK_FLOWS=1) ==="
     run_flows flow_network_reachability
+    exit $?
+fi
+
+# Opt-in: the rail's local-chain release gate (Foundry on PATH; juice-rail's compiled mocks).
+if [ "${JUICE_SEPOLIA_FLOWS:-0}" = "1" ]; then
+    echo "=== live-testnet rail gate ONLY (JUICE_SEPOLIA_FLOWS=1) ==="
+    run_flows flow_rail_sepolia
+    exit $?
+fi
+
+if [ "${JUICE_RAIL_FLOWS:-0}" = "1" ]; then
+    echo "=== rail local-chain gate ONLY (JUICE_RAIL_FLOWS=1) ==="
+    run_flows flow_rail_chain flow_rail_chain_settlement flow_rail_chain_refill_and_halt
     exit $?
 fi
 
@@ -46,6 +67,10 @@ fi
 
 # Default suite. Excludes flow_tinygo_compile (opt-in above).
 run_flows \
+    flow_rail_onboard flow_rail_withdraw flow_rail_settlement flow_rail_isolation \
+    flow_rail_world_mismatch flow_rail_lock flow_rail_profile flow_rail_economic_loop \
+    flow_two_kernels flow_home_migration flow_first_boot flow_money_reads_as_money \
+    flow_one_output_policy \
     flow_bootstrap flow_signup_errors flow_local_auth flow_recovery flow_suspension flow_deposits flow_transfers \
     flow_action_lifecycle flow_action_owner_visibility \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \
@@ -59,7 +84,8 @@ run_flows \
     flow_federation_import_execute flow_federation_changed_reimport flow_fed_rename \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
-    flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_peer_sync flow_fed_inspect_read_only \
-    flow_fed_step_complete flow_settlement flow_transfer \
-    flow_transaction_access flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
+    flow_fed_gossip_discovery flow_fed_discovery flow_fed_offline flow_fed_provider_crash_recovery flow_fed_peer_sync flow_fed_inspect_read_only \
+    flow_fed_step_complete flow_ticket flow_ticket_too_large flow_transfer \
+    flow_compose_remote_child flow_compose_partial_refund flow_compose_through_kernel flow_compose_returns_home flow_compose_ticket flow_compose_underfunded flow_compose_inner_unreachable flow_compose_middle_cannot_stake flow_compose_middle_crash flow_compose_cycle \
+    flow_transaction_access flow_list_projections flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

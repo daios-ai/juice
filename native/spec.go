@@ -1,6 +1,11 @@
 package native
 
-import "github.com/daios-ai/juice/kernel"
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/daios-ai/juice/kernel"
+)
 
 // Spec is one native action's self-description: everything the platform stdlib entry declares
 // about itself (§9) — its name, privileged effect, natural-language description, schemas, and the
@@ -15,13 +20,26 @@ type Spec struct {
 	Description  string
 	InputSchema  map[string]any
 	OutputSchema map[string]any
-	// Handler builds the action's runtime handler. It takes the kernel because several natives
-	// compose through it (lookup ranks, message parks a Step) using the same public entry points
-	// available to any action — never a private kernel interface.
-	Handler func(*kernel.Kernel) kernel.NativeFunc
+	// Handler builds the action's runtime handler over the capabilities a native may reach. It is
+	// an interface, not the kernel, so the confinement §9 states is checked by the compiler: a
+	// native composes through the same public entry points any action has, and can reach nothing
+	// else — not the ledger, not configuration, not the signing keys.
+	Handler func(Host) kernel.NativeFunc
 	// Value, when set, extracts (amount, beneficiary) for a value-bearing effect (§13). Registered
 	// under Effect, so the kernel binds the effect without ever naming the action.
 	Value kernel.ValueFunc
+}
+
+// Host is everything a running native may ask of the kernel: resolve an action, read one it may
+// call, rank the catalogue, name a peer, park a step. *kernel.Kernel satisfies it, and nothing in
+// this package can widen it — adding a capability is an edit here, in the open.
+type Host interface {
+	Lookup(ctx context.Context, req kernel.LookupRequest) ([]*kernel.LookupResult, error)
+	KernelName(ctx context.Context, publicKey string) string
+	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)
+	ReadCallableAction(ctx context.Context, ref, callerID string) (*kernel.Action, error)
+	ResolveRequiredCaller(ctx context.Context, ref string) (kernel.RequiredCaller, error)
+	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.RequiredCaller) (*kernel.Step, error)
 }
 
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a
@@ -49,8 +67,9 @@ func All(d Deps) []Spec {
 // Register wires each Spec's handler (and value extractor, if any) onto k. It is the sole
 // registration path, so a native cannot be shipped without its contract.
 func Register(k *kernel.Kernel, specs []Spec) {
+	var host Host = k // the fence: a handler is built over the interface, never the kernel
 	for _, s := range specs {
-		k.RegisterNativeHandler(s.Name, s.Handler(k))
+		k.RegisterNativeHandler(s.Name, s.Handler(host))
 		if s.Value != nil {
 			k.RegisterValueAction(s.Effect, s.Value)
 		}

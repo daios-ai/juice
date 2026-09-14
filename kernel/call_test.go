@@ -112,13 +112,9 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 
 	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "inner"}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeBPS = 2000
+	cfg := testConfig()
 	cfg.FeeRecipientID = feeUser.ID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	_, tr := beginTestRun(t, st, carol.ID, outer)
 
@@ -1024,13 +1020,9 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	_ = st.CreateAction(ctx, outer)
 
 	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeBPS = 2000
+	cfg := testConfig()
 	cfg.FeeRecipientID = feeUser.ID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Scripts: exec, Config: cfg})
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
 
@@ -1198,7 +1190,7 @@ func TestComputeFee(t *testing.T) {
 		{100, 10000, 0, 100},
 	}
 	for _, tc := range tests {
-		net, fee := kernel.ComputeFee(tc.taxable, tc.feeBPS)
+		net, fee := (kernel.Economy{FeeBPS: tc.feeBPS}).Fee(tc.taxable)
 		if net != tc.wantNet || fee != tc.wantFee {
 			t.Errorf("ComputeFee(%d, %d) = (%d, %d), want (%d, %d)",
 				tc.taxable, tc.feeBPS, net, fee, tc.wantNet, tc.wantFee)
@@ -1211,7 +1203,7 @@ func TestComputeFee(t *testing.T) {
 
 func TestComputeFeeInvariant(t *testing.T) {
 	for taxable := int64(0); taxable <= 10000; taxable++ {
-		net, fee := kernel.ComputeFee(taxable, 2000)
+		net, fee := (kernel.Economy{FeeBPS: 2000}).Fee(taxable)
 		if net+fee != taxable {
 			t.Fatalf("taxable=%d: net(%d)+fee(%d) != taxable", taxable, net, fee)
 		}
@@ -1503,12 +1495,7 @@ func (f *fakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.Ch
 }
 
 func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel {
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "test-secret"
-	cfg.IssuerUserID = testIssuerUserID
-	cfg.FeeRecipientID = testIssuerUserID
-	cfg.SigningKey = testSigningKey()
-	k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st})
 	native.Register(k, []native.Spec{native.Chat(c)})
 	return k
 }
@@ -1632,9 +1619,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("missing recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
-		cfg.FeeBPS = 2000 // 20% fee — no FeeRecipientID set
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		cfg := testConfig()
+		cfg.FeeRecipientID = "" // 20% fee — no recipient set
+		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for fee_bps>0 with empty recipient, got %v", err)
 		}
@@ -1642,10 +1629,9 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("nonexistent recipient rejected at startup", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
-		cfg.FeeBPS = 2000
+		cfg := testConfig()
 		cfg.FeeRecipientID = "no-such-user"
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		k := newKernel(cfg, kernel.Dependencies{Store: st})
 		if err := k.ValidateFeeRecipient(ctx); !errors.Is(err, kernel.ErrInvalidState) {
 			t.Errorf("expected ErrInvalidState for unknown fee recipient, got %v", err)
 		}
@@ -1653,9 +1639,10 @@ func TestCallWithFeeAndNoRecipientRejected(t *testing.T) {
 
 	t.Run("zero fee_bps passes with no recipient", func(t *testing.T) {
 		st := newTestStore(t)
-		cfg := kernel.DefaultConfig()
-		cfg.FeeBPS = 0
-		k := kernel.New(kernel.Dependencies{Store: st, Config: cfg})
+		cfg := testConfig()
+		econ := testEconomy()
+		econ.FeeBPS = 0
+		k := newKernel(cfg, kernel.Dependencies{Store: st, Economy: econ})
 		if err := k.ValidateFeeRecipient(ctx); err != nil {
 			t.Errorf("expected no error when fee_bps=0, got %v", err)
 		}
@@ -1848,7 +1835,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	exec := &subcallThenFailExec{targetUser: provider.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
-	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "")
+	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "", kernel.BuyerTerms{})
 	if err == nil {
 		t.Fatal("expected outer call to fail")
 	}
@@ -1904,7 +1891,7 @@ func TestResolveUser(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	// A key account, to exercise public-key resolution.
 	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	if err := st.UpsertKernel(ctx, pub, "peer", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, pub, "peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer := &kernel.Account{
@@ -2056,7 +2043,7 @@ func TestHostStepCompleteIsTraceConfined(t *testing.T) {
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
 	exec := &stepCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, mallory.ID, "")
+	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, kernel.RequiredCaller{UserID: mallory.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}

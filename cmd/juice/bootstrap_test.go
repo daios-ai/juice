@@ -2,36 +2,138 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/native"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/store"
 )
 
-// TestFirstBootRequiresKernelName: a headless first boot with no kernel name configured must fail
-// (never silently name the kernel); providing the name via env lets it boot and persists it.
-func TestFirstBootRequiresKernelName(t *testing.T) {
-	saved := globalCfg.KernelHandle
-	t.Cleanup(func() { globalCfg.KernelHandle = saved })
-	t.Setenv("JUICE_BOOTSTRAP_PASSWORD", "pw")
+// TestServeRequiresAKernelName: the kernel is named positionally, so there is no path on which a
+// kernel is created unnamed. Cobra refuses the bare command; what may name one is
+// TestKernelNameValidation's subject.
+func TestServeRequiresAKernelName(t *testing.T) {
+	if _, err := execTestCmd(t, kernelServeCmd()); err == nil {
+		t.Fatal("juice serve with no name was accepted")
+	}
+}
 
-	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err == nil ||
-		!strings.Contains(err.Error(), "kernel name is required") {
-		t.Fatalf("headless boot with no name: want required-name error, got %v", err)
+// TestFirstBootConfigAsksOrRefuses: a kernel joins one network for life, so first boot takes the
+// world from what the operator already wrote, and refuses off a terminal rather than choosing.
+func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
+	home := t.TempDir()
+	// No file and nobody to ask: creating a kernel is the operator's act, so it is refused, and the
+	// refusal says what to write and where.
+	_, err := firstBootConfig("acme", home)
+	if err == nil {
+		t.Fatal("a headless first boot with no configuration was accepted")
+	}
+	for _, want := range []string{"no kernel named acme", "no terminal", `"world"`, filepath.Join(home, "config.json")} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %s: %v", want, err)
+		}
 	}
 
-	t.Setenv("JUICE_BOOTSTRAP_KERNEL_HANDLE", "acme")
-	globalCfg.KernelHandle = ""
-	if err := bootstrap(newTestKernel(t), DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
-		t.Fatalf("boot with name via env: %v", err)
+	// A file with no world is consent to create, but not an answer to the one question that cannot
+	// be revised.
+	seeded := filepath.Join(home, "config.json")
+	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"acme"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if globalCfg.KernelHandle != "acme" {
-		t.Errorf("kernel handle = %q, want @acme", globalCfg.KernelHandle)
+	if _, err := firstBootConfig("acme", home); err == nil || !strings.Contains(err.Error(), `"world"`) {
+		t.Errorf("a seeded file with no world must be refused, naming the key: %v", err)
+	}
+
+	// Pre-seeded in full, as a headless install does it: the answers are taken and nothing is asked.
+	if err := os.WriteFile(seeded, []byte(`{"world":"play"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := firstBootConfig("acme", home)
+	if err != nil {
+		t.Fatalf("seeded first boot: %v", err)
+	}
+	if cfg.World != "play" || cfg.KernelHandle != "acme" {
+		t.Fatalf("config: world=%q handle=%q", cfg.World, cfg.KernelHandle)
+	}
+	if cfg.CredentialsKey == "" {
+		t.Error("first boot must mint the credentials key, since nothing later may write the file")
+	}
+	// Asking writes nothing: the caller writes, under the lock that makes one kernel one server.
+	if entries, rerr := os.ReadDir(home); rerr != nil || len(entries) != 1 {
+		t.Errorf("first boot must leave only the file it was given: %v %v", entries, rerr)
+	}
+	// What it produces must survive the strict loader, since that is what every later boot reads.
+	if err := writeConfig(seeded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if again, lerr := LoadConfig(seeded); lerr != nil || again.World != "play" {
+		t.Fatalf("reload: %+v %v", again.World, lerr)
+	}
+}
+
+// TestWorldForReadsTheRecord: a kernel's network is fixed the first time and read from its own
+// database ever after, so one made before `world` was written into config.json goes on serving.
+func TestWorldForReadsTheRecord(t *testing.T) {
+	ctx := context.Background()
+	play, err := rail.Load("play")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	fresh := func() *store.DB {
+		db, derr := store.Open(filepath.Join(t.TempDir(), "juice.db"))
+		if derr != nil {
+			t.Fatal(derr)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	recorded := func(digest string) *store.DB {
+		db := fresh()
+		if serr := db.SetConfig(ctx, configKeyWorldDigest, digest); serr != nil {
+			t.Fatal(serr)
+		}
+		return db
+	}
+
+	// The record answers, with nothing in the configuration to ask.
+	if w, werr := worldFor(ctx, recorded(play.Network().Digest), "", cfgPath); werr != nil || w.Name != "play" {
+		t.Errorf("recorded network: %q %v", w.Name, werr)
+	}
+	// A configuration that disagrees with the record is refused, naming both.
+	test, err := rail.Load("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = worldFor(ctx, recorded(test.Network().Digest), "play", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "test") || !strings.Contains(err.Error(), "play") {
+		t.Errorf("a configuration against the record must be refused, naming both: %v", err)
+	}
+	// A digest this build cannot place needs the world file named, and says so.
+	_, err = worldFor(ctx, recorded("00ff"), "", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), "does not ship") {
+		t.Errorf("an unplaceable digest must be refused: %v", err)
+	}
+	// A database that predates the rail belongs to play, and may not be moved onto a token world.
+	made := fresh()
+	if serr := made.SetConfig(ctx, configKeySuperuser, "sys"); serr != nil {
+		t.Fatal(serr)
+	}
+	if w, werr := worldFor(ctx, made, "", cfgPath); werr != nil || w.Name != "play" {
+		t.Errorf("pre-rail database: %q %v", w.Name, werr)
+	}
+	if _, werr := worldFor(ctx, made, "test", cfgPath); werr == nil {
+		t.Error("a pre-rail database must not be bound to a token world")
+	}
+	// Nothing recorded and nothing configured is a first boot with no answer: refused, naming key
+	// and file rather than falling back to a network nobody chose.
+	_, err = worldFor(ctx, fresh(), "", cfgPath)
+	if err == nil || !strings.Contains(err.Error(), `"world"`) || !strings.Contains(err.Error(), cfgPath) {
+		t.Errorf("an unanswered first boot must be refused, naming the key and the file: %v", err)
 	}
 }
 
@@ -75,15 +177,9 @@ func TestFirstBootAtomic(t *testing.T) {
 
 func newTestKernel(t *testing.T) *kernel.Kernel {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "bootstrap_test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "bootstrap-test-secret"
-	return kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+	db := newTestStore(t)
+	cfg := testConfig("bootstrap-test-secret")
+	return newKernel(cfg, kernel.Dependencies{Store: db})
 }
 
 // sysSpec returns the shipped native.Spec for name, with the configured default price (§9/§14).
@@ -192,7 +288,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	}
 
 	// bootstrap must reject the mismatch.
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err == nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
 		t.Error("expected error for mismatched signing keys, got nil")
 	}
 }
@@ -259,16 +355,10 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 // Distinct kernel instances over one shared DB simulate successive builds (registered handlers differ).
 func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "reintro.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	cfg := kernel.DefaultConfig()
-	cfg.TokenSecret = "bootstrap-test-secret"
+	db := newTestStore(t)
+	cfg := testConfig("bootstrap-test-secret")
 	newBuild := func(withWidget bool) *kernel.Kernel {
-		k := kernel.New(kernel.Dependencies{Store: db, Config: cfg, Logger: log.Discard()})
+		k := newKernel(cfg, kernel.Dependencies{Store: db})
 		if withWidget {
 			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return map[string]any{}, nil
@@ -278,7 +368,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	}
 	schema := map[string]any{"type": "object"}
 	spec := native.Spec{Name: "widget", Description: "a widget native", InputSchema: schema, OutputSchema: schema,
-		Handler: func(*kernel.Kernel) kernel.NativeFunc { return nil }}
+		Handler: func(native.Host) kernel.NativeFunc { return nil }}
 	const widgetPrice int64 = 7
 
 	// Build 1 ships "widget".
@@ -349,7 +439,7 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -383,7 +473,7 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{})); err != nil {
+	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 

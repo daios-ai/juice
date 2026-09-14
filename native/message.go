@@ -17,7 +17,7 @@ func Message() Spec {
 			"message": str("Message body"),
 		}, "to", "message"),
 		OutputSchema: obj(map[string]any{"step_id": str("ID of the created step")}),
-		Handler: func(k *kernel.Kernel) kernel.NativeFunc {
+		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
 				return executeMessage(ctx, args, callerID, parentTraceID, k)
 			}
@@ -25,7 +25,7 @@ func Message() Spec {
 	}
 }
 
-func executeMessage(ctx context.Context, args map[string]any, callerID, parentTraceID string, k *kernel.Kernel) (map[string]any, error) {
+func executeMessage(ctx context.Context, args map[string]any, callerID, parentTraceID string, k Host) (map[string]any, error) {
 	to, _ := args["to"].(string)
 	if to == "" {
 		return nil, kernel.ErrInvalidInput.Wrap("message requires to")
@@ -35,9 +35,9 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 		return nil, kernel.ErrInvalidInput.Wrap("message requires message")
 	}
 
-	// `to` may be a local handle or a remote user@kernel (§13): resolve to the routing account id
-	// plus the completer's stable remote id (empty for a local recipient).
-	recipientID, remoteID, err := k.ResolveRequiredCaller(ctx, to)
+	// `to` may be a local handle or a remote user@kernel (§13): resolve to the routing account, plus
+	// the completer's stable remote id and display handle (both empty for a local recipient).
+	recipient, err := k.ResolveRequiredCaller(ctx, to)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("to %q not found", to)
 	}
@@ -49,7 +49,7 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 
 	partialArgs, _ := json.Marshal(map[string]any{"message": msg})
 
-	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipientID, remoteID)
+	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient)
 	if err != nil {
 		return nil, err
 	}

@@ -23,7 +23,7 @@ func Chat(chatter kernel.Chatter) Spec {
 				"content": str("Text content of the reply"),
 			}),
 		}),
-		Handler: func(*kernel.Kernel) kernel.NativeFunc {
+		Handler: func(Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 				return executeChat(ctx, args, chatter)
 			}

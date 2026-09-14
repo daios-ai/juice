@@ -164,6 +164,22 @@ func TestEnrichStep(t *testing.T) {
 		t.Errorf("enrichStep: RequiredCallerHandle = %q, want @peer", v2.RequiredCallerHandle)
 	}
 
+	// A step parked for a principal on a peer names that principal beneath the peer's local name.
+	// The handle it went by when the step was made is display; the stable id underneath is what
+	// authorises the completion, so a rename there leaves the step addressed and only this stales.
+	remoteID := "u-9f2c"
+	named := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+		RequiredCallerRemoteID: &remoteID, RequiredCallerHandle: "bob"}
+	if got := enrichStep(nil, context.Background(), named, nil, uc).RequiredCallerHandle; got != "bob@peer" {
+		t.Errorf("enrichStep: RequiredCallerHandle = %q, want bob@peer", got)
+	}
+	// A row parked before the handle was kept still renders, by the id it does hold.
+	unnamed := &kernel.Step{ID: "s4", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+		RequiredCallerRemoteID: &remoteID}
+	if got := enrichStep(nil, context.Background(), unnamed, nil, uc).RequiredCallerHandle; got != "u-9f2c@peer" {
+		t.Errorf("enrichStep(no handle): RequiredCallerHandle = %q, want u-9f2c@peer", got)
+	}
+
 	// A waiting step carries allowed_input = input_schema \ keys(partial_args): the target's declared
 	// property `units` is exposed for completion, while the pre-bound `city` is dropped. This lets a
 	// required caller who cannot read a private target action still see what to submit.
@@ -734,7 +750,7 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	}
 	// Left inactive (never enabled).
 
-	has := func(resps []actionResp) bool {
+	has := func(resps []actionSummary) bool {
 		for _, r := range resps {
 			if r.ID == a.ID {
 				return true
@@ -752,10 +768,11 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	}
 }
 
-// TestResolveMixedNamespaces: only the six mixed admin commands consult both namespaces, and a bare
-// name matching a handle and a petname is refused rather than guessed — money and moderation must
-// never pick a target silently (§14).
-func TestResolveMixedNamespaces(t *testing.T) {
+// TestATargetIsWhatItsNounNames: every admin route says which namespace its target belongs to, so
+// a name is resolved as that kind or not at all — a petname equal to a handle can no more take a
+// deposit than be mistaken for the account that owns it, and nothing is ever guessed from a name's
+// shape (§14).
+func TestATargetIsWhatItsNounNames(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 
@@ -768,30 +785,44 @@ func TestResolveMixedNamespaces(t *testing.T) {
 	if _, err := k.BindPetname(ctx, key, "kernelonly", true); err != nil {
 		t.Fatal(err)
 	}
-
-	// Unambiguous: the local handle resolves to the account, the petname to the kernel.
-	if acct, gotKey, err := resolveMixed(k, ctx, "shared"); err != nil || acct == nil || acct.ID != local.ID || gotKey != "" {
-		t.Errorf("handle: got acct=%v key=%q err=%v", acct, gotKey, err)
-	}
-	if _, gotKey, err := resolveMixed(k, ctx, "kernelonly"); err != nil || gotKey != key {
-		t.Errorf("petname: got key=%q err=%v, want %s", gotKey, err, key)
-	}
-	// A raw key is self-identifying and always names the kernel.
-	if _, gotKey, err := resolveMixed(k, ctx, key); err != nil || gotKey != key {
-		t.Errorf("raw key: got key=%q err=%v", gotKey, err)
-	}
-
-	// Now make the name ambiguous by binding the same string in the kernel namespace.
+	// The same string is both a handle and a petname here, which is exactly the case the noun
+	// settles: neither route has to ask which was meant.
 	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
 	if _, err := k.BindPetname(ctx, key2, "shared", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("ambiguous bare name: want ErrInvalidInput, got %v", err)
-	}
-	if _, _, err := resolveMixed(k, ctx, "nobody"); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("unknown name: want ErrNotFound, got %v", err)
+
+	for _, c := range []struct {
+		name, ident, noun string
+		wantAcct, wantKey string
+	}{
+		{"a handle under users", "shared", "user", local.ID, ""},
+		{"a petname under peers", "kernelonly", "peer", "", key},
+		{"a raw key under peers", key, "peer", "", key},
+		{"a petname under users", "kernelonly", "user", "", ""},
+		{"a raw key under users", key, "user", "", ""},
+		{"one name, two namespaces: the noun decides", "shared", "peer", "", key2},
+		{"a name that is neither", "nobody", "user", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			acct, gotKey, err := resolveTarget(k, ctx, c.ident, c.noun)
+			if c.wantAcct == "" && c.wantKey == "" {
+				if err == nil {
+					t.Fatalf("%s resolved as a %s: acct=%v key=%q", c.ident, c.noun, acct, gotKey)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if c.wantKey != "" && gotKey != c.wantKey {
+				t.Errorf("key: got %q, want %q", gotKey, c.wantKey)
+			}
+			if c.wantAcct != "" && (acct == nil || acct.ID != c.wantAcct) {
+				t.Errorf("account: got %v, want %s", acct, c.wantAcct)
+			}
+		})
 	}
 }
 
@@ -819,9 +850,9 @@ func TestAccountCacheReferenceRendersKernels(t *testing.T) {
 	}
 }
 
-// TestResolveMixedRefusesTombstones: the mixed admin commands take an id, so the purged-peer anchor
+// TestATargetIsNeverATombstone: the mixed admin commands take an id, so the purged-peer anchor
 // must be refused there too — it names no live entity (§13).
-func TestResolveMixedRefusesTombstones(t *testing.T) {
+func TestATargetIsNeverATombstone(t *testing.T) {
 	k, st := newRemoteTestKernel(t)
 	ctx := context.Background()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -832,7 +863,63 @@ func TestResolveMixedRefusesTombstones(t *testing.T) {
 	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveMixed(k, ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, _, err := resolveTarget(k, ctx, acct.ID, "user"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
+	}
+}
+
+// A list is a summary. What a detail read carries beyond it — an action's authored source and
+// compiled artifact, a call's arguments and result — is fetched by id, never paged: a page of
+// fifty wasm actions would otherwise carry fifty compiled modules. The projections are checked on
+// what they serialize, which is what a client sees.
+func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
+	a := actionResp{Action: &kernel.Action{ID: "w", Name: "calc", Kind: kernel.KindWasm,
+		Source: "package main", WasmArtifact: "AGFzbQ"}}
+	detail, _ := json.Marshal(a)
+	list, _ := json.Marshal(actionSummary{actionResp: a})
+	for _, key := range []string{`"source"`, `"wasm_artifact"`} {
+		if !strings.Contains(string(detail), key) {
+			t.Errorf("a detail read lost %s", key)
+		}
+		if strings.Contains(string(list), key) {
+			t.Errorf("a list row carries %s", key)
+		}
+	}
+	if !strings.Contains(string(list), `"name":"calc"`) {
+		t.Error("the list row lost the fields it should keep")
+	}
+
+	tv := &txView{TransactionView: &kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t",
+		ArgsJSON: json.RawMessage(`{"big":1}`), ReplyJSON: json.RawMessage(`{"big":2}`),
+		RemoteReceiptJSON: `{"charge":1}`}}, OwnerHandle: "bob"}
+	txDetail, _ := json.Marshal(tv)
+	txList, _ := json.Marshal(txSummary{txView: *tv})
+	for _, key := range []string{`"args"`, `"result"`} {
+		if !strings.Contains(string(txDetail), key) {
+			t.Errorf("a transaction detail read lost %s", key)
+		}
+		if strings.Contains(string(txList), key) {
+			t.Errorf("a transaction list row carries %s", key)
+		}
+	}
+	// The receipt is evidence, not payload, and stays on the row; the handle stays, the id does not.
+	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner_handle":"bob"`) {
+		t.Error("the transaction list row lost its receipt or its handle")
+	}
+	if strings.Contains(string(txList), `"owner_user_id"`) {
+		t.Error("the transaction list row carries a raw user id")
+	}
+	// The CLI decodes these rows and relays them; a shape it cannot decode prints nothing, which is
+	// how `tx list` came to show an empty list for a kernel with transactions.
+	var back []*txSummary
+	if err := json.Unmarshal([]byte("["+string(txList)+"]"), &back); err != nil {
+		t.Fatalf("the CLI cannot decode a list row: %v", err)
+	}
+	if len(back) != 1 || back[0].ID != "t" || back[0].OwnerHandle != "bob" {
+		t.Errorf("the row did not survive the CLI round-trip: %+v", back)
+	}
+	var actions []actionSummary
+	if err := json.Unmarshal([]byte("["+string(list)+"]"), &actions); err != nil || len(actions) != 1 || actions[0].Name != "calc" {
+		t.Errorf("the CLI cannot decode an action list row: %v %+v", err, actions)
 	}
 }

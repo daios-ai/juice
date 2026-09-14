@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -147,8 +148,20 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, userConnectCmd(), "chatcli/chat", "--token", "ghp_x"); err != nil {
-		t.Fatalf("user connect --token: %v", err)
+	// Connecting is several acts and one answer, under the one output policy like every other
+	// command: --json is what it granted, not the running commentary of the ceremony (§14 C8).
+	old := flagJSON
+	flagJSON = true
+	out := captureStdout(t, func() error {
+		_, err := execTestCmd(t, userConnectCmd(), "chatcli/chat", "--token", "ghp_x")
+		return err
+	})
+	flagJSON = old
+	var reply struct {
+		Connected []string `json:"connected"`
+	}
+	if err := json.Unmarshal([]byte(out), &reply); err != nil || len(reply.Connected) != 2 {
+		t.Fatalf("user connect --json = %q (%v)", out, err)
 	}
 	conns, _ := env.k.ListConnectionViews(ctx, uid)
 	if len(conns) != 1 || conns[0].Actions != 2 {

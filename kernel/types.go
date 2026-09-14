@@ -50,9 +50,11 @@ type Account struct {
 	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
 	// creation from a client-held seed phrase; the server stores only the public half and never
 	// the mnemonic (§12).
-	RecoveryPublicKey string    `json:"-"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	RecoveryPublicKey string `json:"-"`
+	// RailAddress is where this account is paid on the rail, proven and canonical (D23).
+	RailAddress string    `json:"rail_address,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // IsPeer reports whether a is a remote kernel's account (§13): it authenticates by federation
@@ -216,13 +218,17 @@ const (
 // Core invariant: CompleteStep(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
 // The allowed completion input is derived live as action.input_schema \ keys(partial_args).
 type Step struct {
-	ID                     string          `json:"id"`
-	ParentTraceID          *string         `json:"parent_trace_id,omitempty"`
-	RequiredCallerUserID   string          `json:"required_caller_user_id"`
-	RequiredCallerRemoteID *string         `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
-	ActionID               string          `json:"action_id"`
-	PartialArgs            json.RawMessage `json:"partial_args"`
-	Price                  int64           `json:"price"`
+	ID                     string  `json:"id"`
+	ParentTraceID          *string `json:"parent_trace_id,omitempty"`
+	RequiredCallerUserID   string  `json:"required_caller_user_id"`
+	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
+	// RequiredCallerHandle is what that remote principal was called when the step was made. Display
+	// only, exactly like a proxy's owner_handle (P6): the id above stays the identity, so a rename
+	// on the peer leaves the step addressed correctly and only this line goes stale.
+	RequiredCallerHandle string          `json:"required_caller_handle,omitempty"`
+	ActionID             string          `json:"action_id"`
+	PartialArgs          json.RawMessage `json:"partial_args"`
+	Price                int64           `json:"price"`
 	// ImportBPS freezes the origin fee this Step was funded under: CreateStep parks Price and the
 	// Step may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy steps
 	// only; nil = parked before 041, settling from live config as before.
@@ -271,13 +277,18 @@ type Trace struct {
 	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
 	// record, so a crashed or parked federated call never strands its requester.
 	IdempotencyRecordID *string `json:"idempotency_record_id,omitempty"`
-	// PremiumBPS and PremiumParked snapshot the serving-markup admitted for an inbound federated root
-	// call (§13): the rate the receipt levies on the actual charge, and the reserve parked in the
-	// owner's locked at admission. Persisting them on the trace lets EVERY settlement path — commit,
-	// failure, crash recovery, forced closure — release the reserve without the in-memory request,
-	// and pins the rate against a mid-call config change. 0 on local calls and subcalls.
-	PremiumBPS    int64 `json:"premium_bps,omitempty"`
-	PremiumParked int64 `json:"premium_parked,omitempty"`
+	// OutcomeJSON is the outcome a call reached while a trace beneath it was still in flight: a
+	// trace settles only after every trace beneath it (D3), so the outcome waits here and the last
+	// child's settlement commits it. Nil while executing, and once settled.
+	OutcomeJSON *string `json:"-"`
+	// Ticket is the lottery stake a cross-kernel call holds from its immediate caller C's own
+	// balance (P10): the face value, locked at dispatch so a winning draw is funded when it lands,
+	// and released by whichever settlement resolves the trace. 0 on every other call.
+	Ticket int64 `json:"ticket,omitempty"`
+	// OwedRailAddress is where a foreign buyer proved it pays from, frozen when its call was admitted
+	// (P4): the payment closing this call's obligation must come from here, and a payment from here
+	// is never anyone else's while the obligation is unresolved. Empty on a local call.
+	OwedRailAddress string `json:"-"`
 	// Value and ValueTo snapshot a TransferEffect on a call whose caller C funds a transfer (§13): the
 	// amount locked from C.available at admission and the beneficiary it is delivered to at settlement
 	// (refunded to C on failure). Sourced from C, not the trace budget, and untaxed, so locked and
@@ -311,6 +322,7 @@ type Transaction struct {
 	Reason            string          `json:"reason"`
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
+	RemoteSignerKey   string          `json:"remote_signer_key,omitempty"`   // the key the receipt verified under at settlement, stored with it so verification outlives the peer (G7, U36)
 	StartedAt         time.Time       `json:"started_at"`
 	EndedAt           time.Time       `json:"ended_at"`
 }
@@ -345,42 +357,25 @@ type LedgerEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-// SettlementRecord is the creditor-signed evidence of one residual settlement (§13). An *open*
-// record carries only the commitment H(s); a *final* record adds the revealed secret, the debtor's
-// nonce, and the outcome. It is JCS-signed by the creditor over all fields with Signature="", and its
-// key-set (creditor+debtor+quantum+commitment) is disjoint from every other signed payload (§12).
-type SettlementRecord struct {
-	SettlementID string    `json:"settlement_id"`
-	Creditor     string    `json:"creditor"`          // creditor kernel public key (base64url)
-	Debtor       string    `json:"debtor"`            // debtor kernel public key (base64url)
-	Amount       int64     `json:"amount"`            // d, the residual debt being settled
-	Quantum      int64     `json:"quantum"`           // Q, the creditor's fee-rational quantum
-	Mode         string    `json:"mode"`              // "probabilistic"
-	Commitment   string    `json:"commitment"`        // SHA-256(secret) hex — binds the creditor before the nonce
-	Nonce        string    `json:"nonce,omitempty"`   // final only: the debtor's committed nonce
-	Secret       string    `json:"secret,omitempty"`  // final only: revealed secret s (hex)
-	Outcome      string    `json:"outcome,omitempty"` // final only: "pay" | "clear"
-	ExpiresAt    time.Time `json:"expires_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	Signature    string    `json:"signature"`
-}
-
 // RemoteKernel is a known remote kernel: one row per public key, whether or not it holds an
 // account here (§3). It owns Stiegler naming state — the self-certifying key, the Nickname the
 // remote asserts about itself (never resolves a reference), and the Petname assigned locally
 // (resolves). GossipCursor is the persisted evidence high-watermark (§13 peer sync), advanced only
 // after a page is verified and committed, so it is never written by ordinary observation.
-// LastSeen, LastContactFailedAt, and PeerCredit are the contact display cache: the latest successful
-// and latest failed contact, each only ever moving forward, plus the credit a peer last reported.
+// LastSeen and LastContactFailedAt are the contact display cache: the latest successful and latest
+// failed contact, each only ever moving forward.
 type RemoteKernel struct {
-	PublicKey           string     `json:"public_key"`
-	Petname             string     `json:"petname,omitempty"`
-	Nickname            string     `json:"nickname,omitempty"`
+	PublicKey string `json:"public_key"`
+	Petname   string `json:"petname,omitempty"`
+	Nickname  string `json:"nickname,omitempty"`
+	// RailAddress is where this peer is paid, with RailProof its signature proving control of it.
+	// A merely declared address could name a stranger's and claim their payment (D23).
+	RailAddress         string     `json:"rail_address,omitempty"`
+	RailProof           string     `json:"-"`
 	About               string     `json:"about,omitempty"`
 	GossipCursor        string     `json:"gossip_cursor,omitempty"`
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
 	LastContactFailedAt *time.Time `json:"last_contact_failed_at,omitempty"`
-	PeerCredit          *int64     `json:"peer_credit,omitempty"`
 	FirstSeen           time.Time  `json:"first_seen"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }
@@ -426,6 +421,11 @@ type Receipt struct {
 	// it out of the JCS signature for all local and pre-v0.12 receipts (Premium=0), so those verify
 	// unchanged; nonzero only on a receipt the serving kernel issues for an inbound federated call.
 	Premium int64 `json:"premium,omitempty"`
+	// Nonce is the serving kernel's half of the settlement draw (P10), minted after the work is done
+	// and before the buyer's secret is known, so neither side can select the outcome. Hex, 32 bytes.
+	// omitempty keeps it out of the JCS signature on every local and free receipt, which carry no
+	// obligation to draw for and so verify unchanged.
+	Nonce string `json:"nonce,omitempty"`
 	// Value and ValueTo are the transfer channel, kept distinct from the execution channel
 	// (Charge/Premium) so the two never mix (§13): the delivered amount — all-or-nothing, so a
 	// partial-charge failure never dilutes delivery — and the beneficiary. The channel is local to a
@@ -469,11 +469,14 @@ type EmbeddedRating struct {
 	Note  *string `json:"note"`
 }
 
-// TransactionView is a Transaction with its associated rating embedded.
-// Rating is null when the transaction has not been rated.
+// TransactionView is a Transaction with its associated rating and, for a cross-kernel call, the name
+// of the obligation that settles it. Rating is null when the transaction has not been rated.
 type TransactionView struct {
 	*Transaction
 	Rating *EmbeddedRating `json:"rating"`
+	// TicketID names the obligation this call settles, so a party can follow it and an operator
+	// recording its payment can name it. The obligation itself lives on the side that is owed.
+	TicketID string `json:"ticket_id,omitempty"`
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.
@@ -484,6 +487,7 @@ type IdempotencyRecord struct {
 	CounterpartyUserID string
 	ReceiptID          *string
 	Status             string // "pending" | "complete"
+	ArgsJSON           string // the request's exact argument bytes, so recovery can sign over them
 	ResultJSON         string // JSON-encoded result, set on completion
 	ReceiptJSON        string // JSON of the receipt, stored for idempotent replay
 	CreatedAt          time.Time
@@ -549,32 +553,63 @@ type ActionManifest struct {
 	Signature    string         `json:"signature"` // base64url Ed25519 signature
 }
 
-// ReceiptVerification is the result of VerifyRemoteReceipt.
-type ReceiptVerification struct {
-	TransactionID         string `json:"transaction_id"`
-	Valid                 bool   `json:"valid"`
-	RemoteKernelHandle    string `json:"remote_kernel_handle"`
-	RemoteKernelPublicKey string `json:"remote_kernel_public_key"`
-	// SignatureVersion is which signing scheme verified the stored receipt: 2 = v0.13
-	// domain-prefixed, 1 = legacy undomained (a pre-v0.13 audit record, still authentic), 0 = none.
-	SignatureVersion int           `json:"signature_version"`
-	Checks           ReceiptChecks `json:"checks"`
-	Receipt          *Receipt      `json:"receipt"`
+// ResolvedAction is what a resolve reply carries: the signed manifest, and where the serving kernel
+// is paid with its own proof of that address. The two are separate because they answer separate
+// questions — what the action is, and how its kernel is paid — and only the first is the contract a
+// buyer pins. A world without payment addresses carries neither.
+type ResolvedAction struct {
+	Manifest    *ActionManifest `json:"manifest"`
+	RailAddress string          `json:"rail_address,omitempty"`
+	RailProof   string          `json:"rail_proof,omitempty"`
 }
 
-// ReceiptChecks holds the per-field results of a remote receipt verification.
-type ReceiptChecks struct {
-	ReceiptHash        bool `json:"receipt_hash"`
-	Signature          bool `json:"signature"`
-	ActionID           bool `json:"action_id"`
-	Status             bool `json:"status"`
-	Charge             bool `json:"charge"`              // execution obligation (tx.net) == receipt.charge + receipt.premium
-	Premium            bool `json:"premium"`             // receipt.premium == ceil(receipt.charge * remote_bps / 10000)
-	SettlementArith    bool `json:"settlement_arith"`    // tx.fee == ceil(tx.net * import_bps / 10000) on success, 0 on failure
-	ChargeCeiling      bool `json:"charge_ceiling"`      // receipt.charge + receipt.premium <= tx.gross, the authenticated ceiling (§13)
-	RefundConservation bool `json:"refund_conservation"` // tx.Refund == tx.Gross - tx.Net - tx.Fee (exact equality)
-	ArgsHash           bool `json:"args_hash"`
-	ReplyHash          bool `json:"reply_hash"`
+// PublicRating is the market-facing projection of one rating (§11, U39): value, note, when — and
+// where it was given, since a rating a remote payer gave on the kernel that paid is admitted here
+// only as trade-backed evidence (D16), and a reader may weigh the two differently.
+type PublicRating struct {
+	Value     int       `json:"value"`
+	Note      *string   `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+	Source    string    `json:"source"` // "local" or "peer"
+}
+
+// TraceOutcome is what a call reached, recorded on its trace by the settlement commit that refused
+// because a child was still in flight (D3). The sweep that settles the trace later commits exactly
+// this; nothing is re-derived from execution.
+type TraceOutcome struct {
+	Status  TxStatus        `json:"status"`
+	Gross   int64           `json:"gross"` // the call's allocation, which what is left on the trace no longer shows
+	Reason  string          `json:"reason,omitempty"`
+	Args    json.RawMessage `json:"args,omitempty"`
+	Reply   json.RawMessage `json:"reply,omitempty"`
+	EndedAt time.Time       `json:"ended_at"`
+	StepID  string          `json:"step_id,omitempty"` // the step this trace completes, if any
+}
+
+// ReceiptVerification is the result of VerifyReceipt.
+type ReceiptVerification struct {
+	TransactionID         string        `json:"transaction_id"`
+	Valid                 bool          `json:"valid"`
+	RemoteKernelHandle    string        `json:"remote_kernel_handle,omitempty"`
+	RemoteKernelPublicKey string        `json:"remote_kernel_public_key,omitempty"`
+	Checks                ReceiptChecks `json:"checks"`
+	Receipt               *Receipt      `json:"receipt"`
+}
+
+// ReceiptChecks names each audit a receipt verification ran and whether it held (§11). A local and
+// a remote receipt are answerable against different facts — a cross-kernel one adds the peer's key,
+// the rates its dispatch froze and the draw (P7, P10) — so a check that does not apply is absent
+// rather than reported as passing.
+type ReceiptChecks map[string]bool
+
+// allHeld reports whether every check that ran held. A verification that ran none is not one.
+func (c ReceiptChecks) allHeld() bool {
+	for _, held := range c {
+		if !held {
+			return false
+		}
+	}
+	return len(c) > 0
 }
 
 // CallerWalletKind identifies the funding source for CommitCall/CommitFailedCall.
@@ -595,23 +630,17 @@ type RemoteKernelView struct {
 	Petname   string `json:"petname,omitempty"`
 	Nickname  string `json:"nickname,omitempty"`
 	About     string `json:"about,omitempty"`
-	// HasAccount is true iff a bilateral financial account exists here. It is false for a
-	// discovery-only kernel, whose Available/Locked/PeerCredit are meaningless.
+	// HasAccount is true iff this kernel has ever been a counterparty here — it has called us or we
+	// have called it. False for a kernel known only from discovery.
 	HasAccount bool `json:"has_account"`
 	// Actions is the kernel's cached public-action count (from discovery docs), 0 when unknown.
 	Actions     int        `json:"actions"`
-	Available   int64      `json:"available"`
-	Locked      int64      `json:"locked"`
 	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
-	// PeerCredit, LastSeen, and LastContactFailedAt are the contact cache (§13): our credit on the
-	// peer, when we last reached it, and when a contact last failed. Display-only — a consumer
-	// compares the two timestamps and applies its own freshness policy; the kernel judges neither.
-	PeerCredit          *int64     `json:"peer_credit,omitempty"`
+	// LastSeen and LastContactFailedAt are the contact cache (§13): when we last reached the peer,
+	// and when a contact last failed. Display-only — a consumer compares the two and applies its own
+	// freshness policy; the kernel judges neither.
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
 	LastContactFailedAt *time.Time `json:"last_contact_failed_at,omitempty"`
-	// SettlementDue flags a debtor peer when this kernel's global gross receivables have reached the
-	// settlement trigger Y (§13): information for the operator, never authority — computed live.
-	SettlementDue bool `json:"settlement_due,omitempty"`
 }
 
 // EvidenceReceipt is a wire-only signed projection of a committed call, gossiped as trade
@@ -670,15 +699,19 @@ type EvidenceBundle struct {
 // ordered by effective time (a rating's created_at when rated, else the receipt's) so a late
 // rating re-surfaces its bundle. NextCursor is the exclusive high-watermark to send on the next pull.
 type GossipResponse struct {
-	PublicKey       string            `json:"public_key"`
-	Handle          string            `json:"handle"`
+	PublicKey string `json:"public_key"`
+	Handle    string `json:"handle"`
+	// Network and NetworkDigest name the world this kernel serves. A reply from another network is
+	// not accumulated: its artifacts could never verify here anyway (P9, D23).
+	Network       string `json:"network,omitempty"`
+	NetworkDigest string `json:"network_digest,omitempty"`
+	// RailAddress is where this kernel is paid, with RailProof its own rail key's signature over it.
+	RailAddress     string            `json:"rail_address,omitempty"`
+	RailProof       string            `json:"rail_proof,omitempty"`
 	About           string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
 	ActionManifests []*ActionManifest `json:"action_manifests,omitempty"`
 	Evidence        []EvidenceBundle  `json:"evidence,omitempty"`
 	NextCursor      string            `json:"next_cursor,omitempty"`
-	// CounterpartyBalance is the requesting peer's credit on this kernel (§13 peer sync),
-	// set only for a known non-suspended requester; nil otherwise. Information, never authority.
-	CounterpartyBalance *int64 `json:"counterparty_balance,omitempty"`
 }
 
 // GossipReceiptRow is one gossip-eligible receipt row assembled by the evidence sender (§13): the

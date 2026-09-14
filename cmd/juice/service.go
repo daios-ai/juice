@@ -60,6 +60,31 @@ type txView struct {
 	TargetHandle string `json:"target_handle"`
 }
 
+// txSummary is the list shape of a transaction. A call's arguments and result are read by id;
+// paging them would make a list of fifty calls carry fifty payloads.
+type txSummary struct {
+	txView                    // by value: encoding/json will not allocate an embedded pointer to an unexported type on decode, and the CLI decodes these rows
+	ArgsJSON  json.RawMessage `json:"args,omitempty"`
+	ReplyJSON json.RawMessage `json:"result,omitempty"`
+}
+
+// actionSummary is the list shape of an action. What a detail read carries beyond it — the authored
+// source and the compiled artifact — is fetched by id, never paged (API.md: a wasm action's detail
+// read still carries its source).
+type actionSummary struct {
+	actionResp
+	Source       string `json:"source,omitempty"`
+	WasmArtifact string `json:"wasm_artifact,omitempty"`
+}
+
+func summaries(resps []actionResp) []actionSummary {
+	out := make([]actionSummary, len(resps))
+	for i, r := range resps {
+		out[i] = actionSummary{actionResp: r}
+	}
+	return out
+}
+
 // actionResp wraps an action with the computed @owner/name reference field and,
 // for kind=http, a decomposed view of the request shape so manual and
 // OpenAPI-imported actions read identically and round-trip with create/update.
@@ -67,6 +92,7 @@ type txView struct {
 type actionResp struct {
 	*kernel.Action
 	OwnerUserID   string    `json:"owner_user_id,omitempty"`
+	RemoteOwnerID string    `json:"remote_owner_id,omitempty"` // a proxy's match key (D13), not a read
 	ActionRef     string    `json:"action"`
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
@@ -137,6 +163,18 @@ func (c *accountCache) isPeer(id string) bool {
 
 func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, uc *accountCache) *stepWithAction {
 	v := &stepWithAction{Step: step, RequiredCallerHandle: uc.reference(step.RequiredCallerUserID)}
+	// A step addressed to a principal on a peer names that principal, not merely the kernel that
+	// hosts them (§13): the completer is who may complete it, and completion already demands their
+	// attested id. Rendered the way every remote reference is, beneath the peer's local name.
+	if step.RequiredCallerRemoteID != nil {
+		// The principal, beneath the peer's local name — its handle when the step was made, or its
+		// stable id where a row predates that being kept.
+		who := step.RequiredCallerHandle
+		if who == "" {
+			who = *step.RequiredCallerRemoteID
+		}
+		v.RequiredCallerHandle = who + "@" + uc.reference(step.RequiredCallerUserID)
+	}
 	if action != nil {
 		v.Action = actionRef(action, uc)
 	}
@@ -171,18 +209,84 @@ func enrichProcess(p *kernel.Process, since map[string]time.Time, uc *accountCac
 }
 
 // ledgerView renders a ledger entry (deposit, withdrawal, or transfer) with the operator,
-// source, and destination @handles instead of raw user UUIDs; the record's own id is dropped
-// too (no command consumes it — external_key is the idempotency handle). from_handle is absent
-// on a deposit (no source) and to_handle on a withdrawal (no destination).
+// source, and destination @handles instead of raw user UUIDs. The record's own id is dropped (no
+// command consumes it), and so is external_key: it is the writer's own idempotency token, which the
+// writer already holds, and publishing it invited a reader to hand back a name that was never
+// theirs. from_handle is absent on a deposit (no source) and to_handle on a withdrawal (no
+// destination).
 type ledgerView struct {
 	*kernel.LedgerEntry
 	ID             string `json:"id,omitempty"`
+	ExternalKey    string `json:"external_key,omitempty"`
 	OperatorUserID string `json:"operator_user_id,omitempty"`
 	FromUserID     string `json:"from_user_id,omitempty"`
 	ToUserID       string `json:"to_user_id,omitempty"`
 	OperatorHandle string `json:"operator_handle"`
 	FromHandle     string `json:"from_handle,omitempty"`
 	ToHandle       string `json:"to_handle,omitempty"`
+}
+
+// ratingView withholds the rater's id: the rater is the caller, and a party is never a raw id
+// (D20). The ratings listing already answers this way.
+type ratingView struct {
+	*kernel.Rating
+	RaterUserID string `json:"rater_user_id,omitempty"`
+}
+
+// accountView withholds an account's own id: a user is addressed by its handle, never by an id, and
+// only GET /v1/me answers with the caller's own (D20). The handle is already on the account.
+type accountView struct {
+	*kernel.Account
+	ID string `json:"id,omitempty"`
+}
+
+func accountViews(as []*kernel.Account) []accountView {
+	out := make([]accountView, 0, len(as))
+	for _, a := range as {
+		out = append(out, accountView{Account: a})
+	}
+	return out
+}
+
+// railTransferView renders one external movement the way a person reads it: the party by name, and
+// the internal account id withheld (§14).
+type railTransferView struct {
+	*kernel.RailTransfer
+	Party     string `json:"party,omitempty"`
+	PartyName string `json:"party_handle,omitempty"`
+}
+
+// railTransferViews names the party on each row: a withdrawal's is the account it leaves.
+func railTransferViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.RailTransfer) []*railTransferView {
+	uc := newAccountCache(k, ctx)
+	out := make([]*railTransferView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, &railTransferView{RailTransfer: r, PartyName: uc.reference(r.Party)})
+	}
+	return out
+}
+
+// awaiting is what the operator has still to act on, in two real lists rather than a third model
+// that flattens them: payments that arrived from a sender nobody has registered, and obligations a
+// buyer says it paid whose money has not been seen. Each row is named by the `id` that closes it.
+type awaiting struct {
+	Deposits []*railTransferView `json:"deposits"`
+	Owed     []*owedView         `json:"owed"`
+}
+
+// owedView renders the buyer as a reference: a raw account id is never a surface value (D20).
+type owedView struct {
+	*kernel.Owed
+	Peer string `json:"peer"`
+}
+
+func owedViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Owed) []*owedView {
+	uc := newAccountCache(k, ctx)
+	out := make([]*owedView, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, &owedView{Owed: r, Peer: uc.reference(r.PeerUserID)})
+	}
+	return out
 }
 
 func enrichLedger(e *kernel.LedgerEntry, uc *accountCache) *ledgerView {
@@ -266,53 +370,49 @@ func parseParams(specs []string) ([]kernel.HTTPParam, error) {
 }
 
 func userView(u *kernel.Account) map[string]any {
-	return map[string]any{
+	v := map[string]any{
 		"id":          u.ID,
 		"handle":      u.Handle,
 		"description": u.Description,
 		"available":   u.Available,
 		"locked":      u.Locked,
 	}
+	if u.RailAddress != "" {
+		v["rail_address"] = u.RailAddress
+	}
+	return v
 }
 
 // ---- Resolution helpers ----
 
-// resolveMixed resolves a target that may name either namespace — the only commands that need it are
-// show, rename, suspend/unsuspend, and deposit/withdraw (§14). It returns an account for a local
-// user and a public key for a kernel; the shapes are self-identifying, so only a bare name can be
-// ambiguous, and a bare name matching both a handle and a petname is refused rather than guessed:
-// money and moderation must never pick a target silently. Kernel-only commands (settle, inspect,
-// step --peer) call the kernel resolver directly instead.
-func resolveMixed(k *kernel.Kernel, ctx context.Context, ident string) (*kernel.Account, string, error) {
+// resolveTarget turns an admin target into the thing its noun names, and never the other. The noun
+// is the route the request arrived on — `users` or `peers` — so a petname that happens to equal a
+// handle can no more take a deposit than be mistaken for the account that owns it, and nothing has
+// to guess from the shape of a name (D15, D20).
+func resolveTarget(k *kernel.Kernel, ctx context.Context, ident, noun string) (*kernel.Account, string, error) {
 	ident = strings.TrimSpace(ident)
 	if ident == "" {
-		return nil, "", kernel.ErrInvalidInput.Wrap("a user handle, kernel petname, or public key is required")
+		return nil, "", kernel.ErrInvalidInput.Wrapf("name the %s", noun)
 	}
-	if kernel.IsPublicKey(ident) {
-		key, acct, err := k.ResolveKernelKey(ctx, ident)
+	if noun == "user" {
+		// A user is named by handle or id alone, so a key never resolves here however well it
+		// would; a purged account's tombstone resolves but names no live target (§13 Retention).
+		acct, err := k.ResolveUser(ctx, ident)
 		if err != nil {
 			return nil, "", err
 		}
-		return acct, key, nil
+		if !acct.IsLiveUser() {
+			return nil, "", kernel.ErrNotFound.Wrapf("%s is not a user here", ident)
+		}
+		return acct, "", nil
 	}
-	acct, aerr := k.ResolveUser(ctx, ident)
-	if aerr == nil && !acct.IsLiveUser() && !acct.IsPeer() {
-		// A purged peer's tombstone still carries a resolvable id, but it names no live entity
-		// (§13 Retention): it must never become the target of a rename, a deposit, or a suspend.
-		return nil, "", kernel.ErrNotFound.Wrapf("%s is a purged account, not a live target", ident)
+	// A peer is named by its public key or the petname this kernel gave it; its account exists
+	// only once money has been involved, so a nil one is ordinary (D15).
+	key, acct, err := k.ResolveKernelKey(ctx, ident)
+	if err != nil {
+		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or public key", ident)
 	}
-	rk, rerr := k.ReadKernelByPetname(ctx, ident)
-	switch {
-	case aerr == nil && rk != nil && rerr == nil && acct.KernelPublicKey != rk.PublicKey:
-		return nil, "", kernel.ErrInvalidInput.Wrapf(
-			"%q names both a local user and a kernel; use the account id or the kernel's public key", ident)
-	case rk != nil && rerr == nil:
-		kacct, _ := k.ReadAccountByKernelKey(ctx, rk.PublicKey)
-		return kacct, rk.PublicKey, nil
-	case aerr == nil:
-		return acct, acct.KernelPublicKey, nil
-	}
-	return nil, "", kernel.ErrNotFound.Wrapf("%s not found", ident)
+	return acct, key, nil
 }
 
 // ---- User operations ----
@@ -339,7 +439,7 @@ type connectorView struct {
 // directoryOf returns the folder a granted action belongs to: its ref up to the LAST "/", so
 // @chat/inbox/send and @chat/inbox/read both group under @chat/inbox (not a flat @chat). A
 // top-level action like @chat/create-room groups under @chat. Falls back to the whole ref when the
-// action did not resolve to @owner/name (an unbackfilled legacy grant showing a raw id).
+// action did not resolve to @owner/name.
 func directoryOf(actionRef string) string {
 	if i := strings.LastIndexByte(actionRef, '/'); i >= 0 {
 		return actionRef[:i]
@@ -361,9 +461,6 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	conns, err := k.ListConnectionViews(ctx, callerID)
 	if err != nil {
 		return nil, err
-	}
-	if conns == nil {
-		conns = []*kernel.ConnectionView{}
 	}
 	connByKey := make(map[string]*kernel.ConnectionView, len(conns))
 	for _, c := range conns {
@@ -581,25 +678,54 @@ func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (acti
 // kernel's own resolver, so a reference means here exactly what it means when called, then read
 // back through the ordinary per-row gate. A miss is an empty list rather than an error, matching
 // every other filter on this endpoint.
-func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref string) ([]actionResp, error) {
+func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref string) ([]actionSummary, error) {
 	a, err := k.ResolveAction(ctx, ref)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) {
-			return []actionResp{}, nil
+			return []actionSummary{}, nil
 		}
 		return nil, err
 	}
 	a, err = k.ReadActionForSubject(ctx, callerID, a.ID)
 	if err != nil {
 		if errors.Is(err, kernel.ErrNotFound) || errors.Is(err, kernel.ErrUnauthorized) {
-			return []actionResp{}, nil
+			return []actionSummary{}, nil
 		}
 		return nil, err
 	}
-	return []actionResp{enrichAction(k, a, newAccountCache(k, ctx))}, nil
+	return summaries([]actionResp{enrichAction(k, a, newAccountCache(k, ctx))}), nil
 }
 
 // enrichActions projects the rows one mutation touched, in the order they were written.
+// importResp is the wire shape of an import: the same projection every action read uses, grouped by
+// what the reconciliation did to each row. The kernel's ImportResult stays internal, as Action does.
+type importResp struct {
+	Created     []actionResp      `json:"created"`
+	Unchanged   []actionResp      `json:"unchanged"`
+	Updated     []actionResp      `json:"updated"`
+	Deactivated []actionResp      `json:"deactivated"`
+	Rejected    []importRejection `json:"rejected"`
+}
+
+type importRejection struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
+}
+
+func enrichImport(k *kernel.Kernel, ctx context.Context, r *kernel.ImportResult) importResp {
+	out := importResp{
+		Created:     enrichActions(k, ctx, r.Created),
+		Unchanged:   enrichActions(k, ctx, r.Unchanged),
+		Updated:     enrichActions(k, ctx, r.Updated),
+		Deactivated: enrichActions(k, ctx, r.Deactivated),
+		Rejected:    make([]importRejection, 0, len(r.Rejected)),
+	}
+	for _, rj := range r.Rejected {
+		out.Rejected = append(out.Rejected, importRejection{Key: rj.Key, Reason: rj.Reason})
+	}
+	return out
+}
+
 func enrichActions(k *kernel.Kernel, ctx context.Context, as []*kernel.Action) []actionResp {
 	cache := newAccountCache(k, ctx)
 	out := make([]actionResp, 0, len(as))
@@ -638,7 +764,7 @@ func deleteActions(k *kernel.Kernel, ctx context.Context, callerID, target strin
 // Authenticated (no owner filter): active public+local actions union caller's own active actions, deduplicated.
 // Authenticated with owner filter resolving to caller: all their actions regardless of active/visibility.
 // Source and ArtifactHash are stripped from all results.
-func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionResp, error) {
+func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionSummary, error) {
 	// The superuser sees every owner's rows (supervision is scope on the normal endpoint, §14);
 	// everyone else starts from the public+active set and unions their own below. Inactive rows are
 	// dropped at the end unless includeInactive (the `all` param / `--all`) is set — so the default
@@ -665,7 +791,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 			if _, acct, kerr := k.ResolveKernelKey(ctx, ownerHandle); kerr == nil && acct != nil {
 				u = acct
 			} else {
-				return []actionResp{}, nil
+				return []actionSummary{}, nil
 			}
 		}
 		if !superuser && callerID != "" && callerID == u.ID {
@@ -735,7 +861,7 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 	if resps == nil {
 		resps = []actionResp{}
 	}
-	return resps, nil
+	return summaries(resps), nil
 }
 
 // ---- Process operations ----
@@ -797,8 +923,8 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 		return nil, err
 	}
 	// RequiredCaller may be a local handle or a remote user@kernel (§13): resolve to the routing
-	// account id plus the completer's stable remote id (empty for a local recipient).
-	requiredCallerID, remoteID, err := k.ResolveRequiredCaller(ctx, p.RequiredCaller)
+	// account, plus the completer's stable remote id and display handle (both empty when local).
+	caller, err := k.ResolveRequiredCaller(ctx, p.RequiredCaller)
 	if err != nil {
 		return nil, fmt.Errorf("required_caller not found: %w", err)
 	}
@@ -809,7 +935,7 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 			return nil, err
 		}
 	}
-	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, requiredCallerID, remoteID)
+	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -841,15 +967,15 @@ func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepW
 
 // ---- Transaction operations ----
 
-func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txView, error) {
+func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txSummary, error) {
 	txs, err := k.ListTransactions(ctx, callerID, f)
 	if err != nil {
 		return nil, err
 	}
 	uc := newAccountCache(k, ctx)
-	views := make([]*txView, len(txs))
+	views := make([]*txSummary, len(txs))
 	for i, tv := range txs {
-		views[i] = enrichTx(tv, uc)
+		views[i] = &txSummary{txView: *enrichTx(tv, uc)}
 	}
 	return views, nil
 }

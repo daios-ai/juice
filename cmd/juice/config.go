@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/daios-ai/juice/kernel"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/daios-ai/juice/kernel"
 )
 
 // NativeLLMConfig holds configuration for the @sys/llm/* native actions.
@@ -84,11 +87,11 @@ type ServerConfig struct {
 	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
 	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
 	FeeBPS                     int64        `json:"fee_bps"`
-	RemoteBPS                  int64        `json:"remote_bps"`         // serving-side markup on inbound remote calls (§13)
-	ImportBPS                  int64        `json:"import_bps"`         // origin-side import fee on outbound remote calls, retained locally (§13)
-	ExposureMax                int64        `json:"exposure_max"`       // X: max gross unsecured receivables across all peers (§13); 0 = prepaid-only
-	SettlementTrigger          int64        `json:"settlement_trigger"` // Y: gross-receivables level flagging settlement_due (§13); 0 < Y < X when X > 0
-	SettlementQuantum          int64        `json:"settlement_quantum"` // Q: smallest fee-rational external payment (§13); 0 disables the probabilistic path
+	RemoteBPS                  int64        `json:"remote_bps"`   // serving-side markup on inbound remote calls (§13)
+	ImportBPS                  int64        `json:"import_bps"`   // origin-side import fee on outbound remote calls, retained locally (§13)
+	Lottery                    *int64       `json:"lottery"`      // L: the ticket this kernel writes (P10); 0 = pay every obligation exactly
+	LotteryMax                 *int64       `json:"lottery_max"`  // the largest ticket this kernel accepts from a buyer (P10)
+	CreditLimit                *int64       `json:"credit_limit"` // E_max: most unpaid delivered service carried at once (P10)
 	TokenTTL                   string       `json:"token_ttl"`
 	AuthIssuer                 string       `json:"auth_issuer"`
 	AuthAudience               string       `json:"auth_audience"`
@@ -98,7 +101,10 @@ type ServerConfig struct {
 	AllowLocalSources          bool         `json:"allow_local_sources"`
 	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
+	World                      string       `json:"world"`                         // the network this kernel serves: play, test, real, or a world file's path (D23)
+	RailRPC                    string       `json:"rail_rpc"`                      // endpoint the chain adaptor dials; required where the world has a chain
 	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
+	FedListenAddrs             []string     `json:"fed_listen_addrs"`              // multiaddrs the peer transport binds; empty = OS-assigned ports; a public node pins one so peers find it at the same address after a restart (§13)
 	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
 	PeerRetentionDays          int64        `json:"peer_retention_days"`           // days a peer may stay idle at zero balance before purge (§13); <=0 → disabled
@@ -145,18 +151,15 @@ func DefaultServerConfig() ServerConfig {
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
+		// World has no default. A kernel joins one network for life, so which one is the operator's
+		// to state (first boot asks); a default here would answer it for them, silently and once.
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
 		RemoteBPS:         500,
 		ImportBPS:         500,
-		// A fresh kernel serves remote paid calls out of the box (§13): X=1000 caps the total
-		// unsecured credit it extends across all peers (a bounded, Sybil-proof maximum loss),
-		// flagged for settlement at Y=500. Set exposure_max=0 to opt into prepaid-only. Q stays 0
-		// (rail-dependent; the operator sets it from F/r to enable the probabilistic residual path).
-		ExposureMax:       1000,
-		SettlementTrigger: 500,
-		SettlementQuantum: 0,
+		// The three money amounts are left unset here so they come from one place, the shipped
+		// economy (kernel.DefaultEconomy), which a written-out file then shows the operator.
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",
@@ -164,7 +167,7 @@ func DefaultServerConfig() ServerConfig {
 		LogFile:           "",
 		LogFormat:         "text",
 		AllowLocalSources: false,
-		// The public daios.ai node is the default meeting point, so a fresh `juice serve` joins
+		// The public daios.ai node is the default meeting point, so a fresh `juice kernel serve` joins
 		// the network out of the box (it listens on the standard port 31313, §13). Override or
 		// extend for a private network; clear it to run standalone.
 		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWJ5ZwPSAV17q2hv6ttZ8J3hHsTMNaSC61kbVbvxvtArjK"},
@@ -174,23 +177,22 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
-// LoadOrCreateConfig reads the JSON config file at path.
-// If the file does not exist it is created with defaults and the defaults are returned.
-// Missing fields in an existing file are filled with defaults.
-func LoadOrCreateConfig(path string) (ServerConfig, error) {
+// LoadConfig reads the JSON config file at path onto the defaults. Missing fields keep their
+// default; an absent file returns os.ErrNotExist, which is a first boot and nothing else, since
+// first boot is this file's only writer. An unknown field is refused rather than ignored: a
+// misspelled key reads exactly like one never written, and the setting the operator meant to
+// change silently keeps its default.
+func LoadConfig(path string) (ServerConfig, error) {
 	cfg := DefaultServerConfig()
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			if writeErr := writeConfig(path, cfg); writeErr != nil {
-				return cfg, fmt.Errorf("create default config %q: %w", path, writeErr)
-			}
-			return cfg, nil
-		}
-		return cfg, fmt.Errorf("read config %q: %w", path, err)
+		return cfg, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse config %q: %w", path, err)
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
@@ -229,7 +231,8 @@ func writeConfig(path string, cfg ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	// 0600: this file holds credentials_key, which seals every stored upstream credential.
+	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
 // KernelConfig translates the JSON (wire) configuration into the kernel's runtime Config and
@@ -242,34 +245,6 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	if tokenSecret != "" {
 		cfg.TokenSecret = tokenSecret
 	}
-
-	for _, bps := range []struct {
-		name  string
-		value int64
-		dst   *int64
-	}{
-		{"fee_bps", c.FeeBPS, &cfg.FeeBPS},
-		{"remote_bps", c.RemoteBPS, &cfg.RemoteBPS},
-		{"import_bps", c.ImportBPS, &cfg.ImportBPS},
-	} {
-		if bps.value < 0 || bps.value > 10000 {
-			return kernel.Config{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
-		}
-		*bps.dst = bps.value
-	}
-
-	// Global exposure policy (§13): X ≥ 0; when X > 0 the settlement trigger must sit strictly inside
-	// it (0 < Y < X) so a flagged peer is still below the hard cap; Q ≥ 0 (0 disables the residual path).
-	if c.ExposureMax < 0 || c.SettlementQuantum < 0 {
-		return kernel.Config{}, fmt.Errorf("exposure_max and settlement_quantum must be non-negative")
-	}
-	if c.ExposureMax > 0 && !(c.SettlementTrigger > 0 && c.SettlementTrigger < c.ExposureMax) {
-		return kernel.Config{}, fmt.Errorf("settlement_trigger must satisfy 0 < settlement_trigger < exposure_max when exposure_max > 0")
-	}
-	cfg.ExposureMax = c.ExposureMax
-	cfg.SettlementTrigger = c.SettlementTrigger
-	cfg.SettlementQuantum = c.SettlementQuantum
-
 	tokenTTL, err := time.ParseDuration(c.TokenTTL)
 	if err != nil {
 		return kernel.Config{}, fmt.Errorf("token_ttl invalid: %w", err)
@@ -283,4 +258,152 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	cfg.PeerRetention = c.peerRetention()
 	cfg.DiscoveryInterval = c.discoveryInterval()
 	return cfg, nil
+}
+
+// Economy assembles the money rules from this configuration alone (P10): the ticket this kernel
+// writes, the largest it will accept from a buyer, and how much unpaid work it will carry. All
+// three are the operator's own, defaulted from the shipped economy.
+func (c ServerConfig) Economy() (kernel.Economy, error) {
+	econ := kernel.DefaultEconomy()
+	for _, bps := range []struct {
+		name  string
+		value int64
+		dst   *int64
+	}{
+		{"fee_bps", c.FeeBPS, &econ.FeeBPS},
+		{"remote_bps", c.RemoteBPS, &econ.RemoteBPS},
+		{"import_bps", c.ImportBPS, &econ.ImportBPS},
+	} {
+		if bps.value < 0 || bps.value > 10000 {
+			return kernel.Economy{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
+		}
+		*bps.dst = bps.value
+	}
+	for _, amount := range []struct {
+		name  string
+		value *int64
+		dst   *int64
+	}{
+		{"lottery", c.Lottery, &econ.Lottery},
+		{"lottery_max", c.LotteryMax, &econ.LotteryMax},
+		{"credit_limit", c.CreditLimit, &econ.CreditLimit},
+	} {
+		if amount.value == nil {
+			continue
+		}
+		if *amount.value < 0 {
+			return kernel.Economy{}, fmt.Errorf("%s must not be negative", amount.name)
+		}
+		*amount.dst = *amount.value
+	}
+	// A kernel that would not accept its own ticket could never be paid for what it sells.
+	if econ.Lottery > econ.LotteryMax {
+		return kernel.Economy{}, fmt.Errorf("lottery %d is above this kernel's own lottery_max of %d", econ.Lottery, econ.LotteryMax)
+	}
+	return econ, nil
+}
+
+// kernelName is the nickname of the kernel this process serves, given positionally to `serve`: what
+// it calls itself on the network (D15) and, being the one name chosen by the time a home is created,
+// that home's directory name. The directory may be renamed without the network noticing.
+var kernelName string
+
+// validateLocalName accepts the labels this installation may turn into one file or directory name:
+// a kernel under kernels/, a context under client/. The rules are the filesystem's, not the
+// kernel's — a local label has no relation to a handle, so it borrows no validator from the account
+// namespace — and they are one rule rather than two because both end up as a path segment, where a
+// name free to hold a separator or a dot could address something other than its own.
+// kind names the thing in the message, so an operator is told which label was refused.
+func validateLocalName(kind, name string) error {
+	if name == "" {
+		return kernel.ErrInvalidInput.Wrapf("%s name is required", kind)
+	}
+	if len(name) > 64 {
+		return kernel.ErrInvalidInput.Wrapf("%s name must be at most 64 characters", kind)
+	}
+	if strings.HasPrefix(name, ".") {
+		return kernel.ErrInvalidInput.Wrapf("%s name must not begin with a dot", kind)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return kernel.ErrInvalidInput.Wrapf("%s name may hold only letters, digits, dot, dash and underscore", kind)
+		}
+	}
+	return nil
+}
+
+// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<name>/, holding the database
+// (and with it the signing key), config.json, the rail key and its records, the single-server lock
+// and the purgeable cache. Everything that binds a kernel to its identity sits in this one
+// directory, so it backs up, moves and locks as a unit, and a second kernel on the machine is a
+// sibling of the first rather than a second installation.
+func kernelHome() string { return filepath.Join(juiceHome(), "kernels", kernelName) }
+
+// exists reports whether a path is there, which for a kernel's database is the whole of "has this
+// kernel been created".
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// kernelsHere names the kernels of this installation: the directories under kernels/ that hold a
+// database. A directory without one is a boot that was answered and then abandoned, and naming it
+// as a kernel would be a lie.
+func kernelsHere() []string {
+	root := filepath.Join(juiceHome(), "kernels")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && exists(filepath.Join(root, e.Name(), "juice.db")) {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// legacyKernelHome is the layout before kernels were named, where the root held exactly one. It is
+// read only by migrateLegacyHome.
+func legacyKernelHome() string { return filepath.Join(juiceHome(), "kernel") }
+
+// migrateLegacyHome moves an unnamed legacy kernel into the named home and is the only writer of that
+// path. Both directories live under one root, so the move is a single rename: it either happened or
+// it did not, and an interrupted boot leaves no half-moved ledger. It refuses rather than merges
+// when a server still holds the old home or when the destination already exists, since either case
+// means two kernels are in play and only the operator can say which is wanted. Running it again
+// finds nothing to move.
+func migrateLegacyHome() error {
+	legacy := legacyKernelHome()
+	if _, err := os.Stat(filepath.Join(legacy, "juice.db")); err != nil {
+		return nil // no legacy kernel here
+	}
+	dest := kernelHome()
+	if _, err := os.Stat(dest); err == nil {
+		return kernel.ErrInvalidState.Wrapf(
+			"both %s and %s hold a kernel; move or remove one, since only you can say which this installation serves", legacy, dest)
+	}
+	// The old home's own lock is what a running server holds. Taking it proves nothing is serving
+	// that ledger, so the rename cannot pull the database out from under a live process.
+	lock, err := os.OpenFile(filepath.Join(legacy, "serve.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return kernel.ErrInvalidState.Wrapf("lock %s: %v", legacy, err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return kernel.ErrInvalidState.Wrapf("a server is still running for %s; stop it before this kernel moves to %s", legacy, dest)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if err := os.MkdirAll(filepath.Join(juiceHome(), "kernels"), 0o700); err != nil {
+		return kernel.ErrInvalidState.Wrapf("create %s: %v", filepath.Dir(dest), err)
+	}
+	if err := os.Rename(legacy, dest); err != nil {
+		return kernel.ErrInvalidState.Wrapf("move %s to %s: %v", legacy, dest, err)
+	}
+	fmt.Fprintf(os.Stderr, "moved kernel home %s to %s\n", legacy, dest)
+	return nil
 }

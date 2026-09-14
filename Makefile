@@ -20,6 +20,14 @@ install: build
 	mkdir -p $(PREFIX)/bin
 	install -m 755 $(BINARY) $(PREFIX)/bin/$(BINARY)
 
-# Removes the installed binary only; $JUICE_HOME/kernel/ data (signing key, config) is left intact.
+# Removes the installed binary only; $JUICE_HOME/kernels/ data (signing keys, configs) is left intact.
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)
+
+# The network suite: a five-kernel economy driven end to end over a real network. Not the commit
+# gate — run it after anything that touches federation or money. Writes its log, checkpoints and
+# metrics to netsim-runs/<rail>-<timestamp>/. RAIL=anvil needs Foundry; RAIL=sepolia needs an RPC
+# and a funded key. See docs/network-simulation.md.
+.PHONY: netsim
+netsim:
+	go run ./netsim -rail $(or $(RAIL),play) $(if $(ROUNDS),-rounds $(ROUNDS),)

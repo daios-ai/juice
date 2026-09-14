@@ -110,7 +110,9 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 		return *rej
 	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
-		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, []byte(req.Args))
+		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, kernel.BuyerTerms{
+			Commitment: req.Commitment, Lottery: req.Lottery, RailAddress: req.RailAddress, RailProof: req.RailProof,
+		}, []byte(req.Args))
 	if err != nil {
 		// No receipt to settle on → the caller treats this as pending (retry).
 		return fedError(err)
@@ -130,14 +132,14 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	var err error
 	switch req.Kind {
 	case "list":
-		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature)
+		status, body, err = handleFederationStepList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.ForUserID)
 	case "complete":
 		input := []byte(req.Input)
 		if len(input) == 0 {
 			input = []byte("{}")
 		}
 		status, body, err = handleFederationStepComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
-			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp)
+			req.IdempotencyKey, req.StepID, req.Signature, input, req.ForUserID, req.UserAttestation, req.UserTimestamp, req.UserSuperuser)
 	default:
 		return fedError(kernel.ErrInvalidInput.Wrap("unknown step request kind"))
 	}
@@ -147,22 +149,31 @@ func (h *fedHandlers) OnStep(ctx context.Context, peerKey string, req fed.StepRe
 	return fedOK(status, body)
 }
 
-// OnSettle answers the /juice/fed/settle/1 residual-settlement exchange (§13): the creditor side of
-// the two-party commit/reveal. The connection-key check and freshness window mirror OnCall/OnStep;
-// the kernel verifies the debtor's scoped signature and applies the three-way legs idempotently.
-func (h *fedHandlers) OnSettle(ctx context.Context, peerKey string, req fed.SettleRequest) fed.SettleResponse {
+// ownKey is this kernel's own public key, the recipient every inbound signature is bound to.
+func (h *fedHandlers) ownKey(ctx context.Context) string {
+	k, _ := h.kernel.GetConfig(ctx, configKeySigningPublic)
+	return k
+}
+
+// OnReveal answers the /juice/fed/settle/1 protocol (P10): the seller side of one obligation's
+// draw. The connection-key check and freshness window mirror OnCall/OnStep; the kernel verifies the
+// buyer's signature, recomputes the outcome from the revealed secret, and applies it idempotently.
+func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.RevealRequest) fed.RevealResponse {
 	if rej := h.admit(req.Counterparty, peerKey, false); rej != nil {
 		return *rej
 	}
 	if err := checkFederationTimestamp(req.Timestamp); err != nil {
 		return fedError(err)
 	}
-	status, body, err := h.kernel.HandleSettle(ctx, req.Counterparty, req.Kind, req.Timestamp, req.Signature,
-		req.SettlementID, req.Amount, req.Nonce, []byte(req.Record))
+	t, err := h.kernel.HandleReveal(ctx, req.Counterparty, kernel.RevealPayload{
+		Counterparty: req.Counterparty, Recipient: h.ownKey(ctx), Secret: req.Secret,
+		TicketID: req.TicketID, Timestamp: req.Timestamp, TxHash: req.TxHash,
+	}, req.Signature)
 	if err != nil {
 		return fedError(err)
 	}
-	return fed.Response{Status: status, Body: body}
+	body, _ := json.Marshal(t)
+	return fed.Response{Status: http.StatusOK, Body: body}
 }
 
 // OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
@@ -191,7 +202,12 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 		if err != nil {
 			return fedError(err)
 		}
-		return fedOK(http.StatusOK, m)
+		// The reply carries where this kernel is paid, with its own proof. A buyer takes on an
+		// obligation the moment it calls, so it must know how to pay before it does — and one cold
+		// resolve is all a first call has (P10). It rides beside the manifest rather than inside it:
+		// the contract is what the action is, not where its kernel banks.
+		addr, proof := h.kernel.RailIdentity(ctx)
+		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, RailAddress: addr, RailProof: proof})
 	case "user":
 		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
 		if err != nil {
@@ -204,8 +220,7 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 }
 
 // OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
-// public key; GetGossip uses it to report the requesting peer its credit here (counterparty_balance,
-// §13 peer sync). req.Cursor resumes the evidence stream.
+// public key. req.Cursor resumes the evidence stream.
 func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
 	g, err := h.kernel.GetGossip(ctx, peerKey, req.Cursor)
 	if err != nil {
@@ -244,12 +259,13 @@ const maxPeerStepPage = 200
 // the two callers build their own replies from `existing`, because a completed step replay and a
 // completed call replay carry different shapes. Only a uniqueness collision counts as "seen": any
 // other store failure is a fault, and answering it as a replay would silently mis-serve the peer.
-func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID string) (rec, existing *kernel.IdempotencyRecord, err error) {
+func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID, argsJSON string) (rec, existing *kernel.IdempotencyRecord, err error) {
 	now := time.Now().UTC()
 	rec = &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     key,
 		CounterpartyUserID: counterpartyID,
+		ArgsJSON:           argsJSON,
 		CreatedAt:          now,
 		ExpiresAt:          now.Add(24 * time.Hour),
 	}
@@ -270,7 +286,7 @@ func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID
 // handleFederationStepList returns the waiting steps whose required caller is the requesting peer
 // (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
 // — provisioning is reserved for a call, which is what actually creates a billing relationship.
-func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr string) (int, map[string]any, error) {
+func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr, forUserID string) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -278,7 +294,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	if err != nil || self == "" {
 		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := kernel.VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, sigStr); err != nil {
+	if err := k.Network().VerifyStepListSignature(cpPubKey, cpPubKey, self, tsStr, forUserID, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A store failure must not read as "nothing is parked for you" — that is precisely the
@@ -293,9 +309,14 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	// Scoped in SQL, oldest first: ListSteps' predicate also matches every step inside a process
 	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
 	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
-	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, maxPeerStepPage)
+	// One past the page: a page exactly full reports more only when there is more.
+	steps, err := k.ListStepsAwaitingCaller(ctx, peer.ID, forUserID, maxPeerStepPage+1)
 	if err != nil {
 		return 0, nil, err
+	}
+	truncated := len(steps) > maxPeerStepPage
+	if truncated {
+		steps = steps[:maxPeerStepPage]
 	}
 	views := make([]*kernel.PeerStepView, len(steps))
 	for i, s := range steps {
@@ -305,7 +326,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 	body := map[string]any{"steps": views}
 	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
 	// pending cross-kernel approvals, not a corpus.
-	if len(views) == maxPeerStepPage {
+	if truncated {
 		body["truncated"] = true
 	}
 	return http.StatusOK, body, nil
@@ -314,7 +335,7 @@ func handleFederationStepList(k *kernel.Kernel, ctx context.Context, cpPubKey, t
 // handleFederationStepComplete resumes a waiting step on behalf of the requesting peer (§10, §13).
 // Unlike a call, the requester parks nothing locally — the step's price was parked here at creation
 // — so failures are plain typed errors: there is no remote trace awaiting a signed rejection.
-func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte, forUserID, userAttestation, userTimestamp string) (int, map[string]any, error) {
+func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, stepID, sigStr string, rawInput []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (int, map[string]any, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return 0, nil, err
 	}
@@ -322,7 +343,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	if err != nil || self == "" {
 		return 0, nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := kernel.VerifyStepSignature(cpPubKey, stepID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), sigStr); err != nil {
+	if err := k.Network().VerifyStepSignature(cpPubKey, stepID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A stranger can hold no step here: CreateStep resolves required_caller to an existing user,
@@ -339,18 +360,33 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	// step_auth attestation naming that user. A missing attestation is a pre-upgrade home kernel,
 	// reported as a typed unauthorized so the requester can surface "upgrade required" rather than a
 	// generic failure. A kernel-level step (no remote id) keeps today's wire/behavior unchanged.
-	if remoteID, rerr := k.StepRemoteRequiredCaller(ctx, stepID); rerr == nil && remoteID != nil {
-		if forUserID == "" || userAttestation == "" || userTimestamp == "" {
-			return 0, nil, kernel.ErrUnauthorized.Wrap("this step requires a home-kernel user attestation (upgrade required)")
+	// Scope must match (§13): a step addressed to one principal on the peer is completed by that
+	// principal, attested by its home kernel; a step addressed to the peer kernel itself is
+	// completed by that kernel — its own bare signature, or a user its home kernel attests is its
+	// operator. Neither scope reaches the other, and a read that fails refuses rather than skips.
+	remoteID, err := k.StepRemoteRequiredCaller(ctx, stepID)
+	if err != nil {
+		return 0, nil, err
+	}
+	if forUserID == "" {
+		if remoteID != nil {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("this step is addressed to a user of your kernel; complete it as that user")
+		}
+	} else {
+		if userAttestation == "" || userTimestamp == "" {
+			return 0, nil, kernel.ErrUnauthorized.Wrap("a completion as a user requires a home-kernel attestation")
 		}
 		if err := checkFederationTimestamp(userTimestamp); err != nil {
 			return 0, nil, err
 		}
-		if err := kernel.VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userAttestation); err != nil {
+		if err := k.Network().VerifyStepAuthSignature(cpPubKey, cpPubKey, self, forUserID, stepID, userTimestamp, userSuperuser, userAttestation); err != nil {
 			return 0, nil, err
 		}
-		if forUserID != *remoteID {
+		switch {
+		case remoteID != nil && forUserID != *remoteID:
 			return 0, nil, kernel.ErrUnauthorized.Wrap("attested user is not the step's required caller")
+		case remoteID == nil && !userSuperuser:
+			return 0, nil, kernel.ErrUnauthorized.Wrap("this step is addressed to your kernel; only its operator completes it")
 		}
 	}
 
@@ -362,7 +398,7 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step and input")
 	}
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID)
+	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID, string(rawInput))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -387,7 +423,8 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 			// commit now completes the record. Leave it PENDING so a replay honestly reports a
 			// duplicate in flight rather than claiming an outcome that has not happened yet.
 		case reply != nil:
-			// A transaction committed and then failed; the commit already completed the record.
+			// A transaction committed and then failed, or the outcome waits on a call beneath it
+			// (D3): either way the commit completes the record.
 		default:
 			// Nothing settled and the step is waiting again: no commit will ever complete this
 			// record, so drop it — otherwise a corrected retry is locked out by a key that
@@ -427,7 +464,7 @@ func replayStepRecord(rec *kernel.IdempotencyRecord, stepID string) (int, map[st
 	if receipt.Status != kernel.TxSuccess {
 		// A settled FAILURE still charged the caller, so the replay carries the same ids the fresh
 		// response did — otherwise a retry after a dropped connection loses the only pointer to the
-		// transaction it paid for, which is the loss withSettlementMeta exists to prevent.
+		// transaction it paid for, which is the loss this branch exists to prevent.
 		body["error"], body["code"] = result["error"], result["code"]
 		body["meta"] = map[string]string{
 			"step_id": stepID, "tx_id": receipt.TxID,
@@ -480,7 +517,7 @@ func settleIdempotencyWithReceipt(k *kernel.Kernel, ctx context.Context, recID, 
 
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
-func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, rawBody []byte) (int, map[string]any, error) {
+func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, buyer kernel.BuyerTerms, rawBody []byte) (int, map[string]any, error) {
 	argsHash := sha256HexBytes(rawBody)
 
 	if err := checkFederationTimestamp(tsStr); err != nil {
@@ -490,7 +527,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
 	// transport-authenticated caller key (OnCall proved connection key == counterparty).
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	if err := kernel.VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, sigStr); err != nil {
+	if err := k.Network().VerifyFederationSignature(cpPubKey, actionParam, cpPubKey, ownKey, expectedContractHash, idempotencyKey, tsStr, argsHash, buyer.Commitment, buyer.Lottery, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
@@ -531,7 +568,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// Only a genuinely absent/unverifiable action stays a plain error (its ID can't match the
 	// caller's stored RemoteActionID, so a receipt there would just re-pin the caller).
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, counterparty.ID)
+	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, counterparty.ID, string(rawBody))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -567,13 +604,13 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 	}
 
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID)
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID, buyer)
 	if callErr != nil {
 		wireCode, wireMsg := wireError(callErr)
 		errJSON, _ := json.Marshal(map[string]string{"error": wireMsg, "code": wireCode})
 		// A committed transaction (reply carries a receipt) means the call settled — possibly
 		// with charge > 0 from settled descendants. Return THAT receipt so the caller settles
-		// the real charge, preserving bilateral conservation rather than under-paying with 0.
+		// the real charge, so the two kernels agree on what was charged rather than under-paying with 0.
 		if reply != nil && reply.ReceiptID != "" {
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
 			receiptJSON, _ := json.Marshal(receipt)
@@ -582,8 +619,9 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 		// A parked remote dispatch has committed nothing yet and may still settle with a real
 		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
-		// here would answer the peer with an outcome that has not happened.
-		if errors.Is(callErr, kernel.ErrTimeout) {
+		// here would answer the peer with an outcome that has not happened. The same holds for an
+		// outcome deferred behind a call still running beneath it (D3): its charge is not final.
+		if errors.Is(callErr, kernel.ErrTimeout) || reply.Deferred() {
 			return 0, nil, callErr
 		}
 		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a

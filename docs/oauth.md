@@ -137,8 +137,8 @@ That is the whole experience. `run` notices the missing connection, walks the us
 **4 · confirm and (later) disconnect**
 
 ```bash
-$ juice user me         # grants: [ { action: "@owner/inbox", scopes: "gmail.readonly", … } ]
-$ juice user disconnect @owner/inbox
+$ juice user me         # grants: [ { action: "owner/inbox", scopes: "gmail.readonly", … } ]
+$ juice user disconnect owner/inbox
 ```
 
 > **Works behind a home router** — The provider redirects the user's *browser* back to the client — nothing has to reach the Juice server from outside. No port forwarding, no public address, no `.well-known`.
@@ -156,7 +156,7 @@ juice action create issues --kind http \
 juice action enable <id>
 
 # each caller: paste their own token once (omit the value to be prompted without echo)
-juice user connect @owner/issues --token ghp_yourPersonalToken
+juice user connect owner/issues --token ghp_yourPersonalToken
 
 # then just run — the action calls GitHub with your token
 juice run @owner/issues
@@ -233,8 +233,8 @@ Juice signs an **RS256** assertion with your stored private key and trades it fo
 ## 8. Managing grants
 
 - **See your connections:** `juice user me` lists your grants — action, scopes, and when you connected. Never any token material.
-- **Disconnect one:** `juice user disconnect @owner/inbox`. The next run asks to reconnect.
-- **Pre-connect:** `juice user connect @owner/inbox` connects ahead of time without running. Add `--device` for the headless OAuth code-entry flow, or `--token <key>` to store a `delegated_bearer` API key (omit the value and you're prompted for it without echo, keeping it out of your shell history).
+- **Disconnect one:** `juice user disconnect owner/inbox`. The next run asks to reconnect.
+- **Pre-connect:** `juice user connect owner/inbox` connects ahead of time without running. Add `--device` for the headless OAuth code-entry flow, or `--token <key>` to store a `delegated_bearer` API key (omit the value and you're prompted for it without echo, keeping it out of your shell history).
 - **Contract changes revoke consent:** if the owner changes the action's price, schema, source, or credentials — anything that deactivates it — every standing grant is dropped. Consent never silently carries over to changed code. A plain enable/disable does not touch grants.
 
 ## 9. Federation & delegated actions
@@ -257,7 +257,7 @@ A delegated action needs a specific human's own credential — a browser sign-in
 
 ### `grant_required` keeps coming back
 
-Either you revoked it, the provider expired it (`invalid_grant` auto-removes the grant), or the owner changed the action's contract. Reconnect: `juice user connect @owner/inbox`, or just run and say yes.
+Either you revoked it, the provider expired it (`invalid_grant` auto-removes the grant), or the owner changed the action's contract. Reconnect: `juice user connect owner/inbox`, or just run and say yes.
 
 ### Error 401: `invalid_client` on the provider's page
 
@@ -277,9 +277,9 @@ The client must be able to receive the redirect. For the CLI that means a local 
 
 | Command | Does |
 |---|---|
-| `juice run @owner/name` | run; offers inline consent if a grant is needed (on a terminal) |
-| `juice user connect @owner/name` | connect ahead of time; `--device` for headless OAuth, `--token <key>` to paste a `delegated_bearer` key (prompted without echo if omitted) |
-| `juice user disconnect @owner/name` | disconnect (delete the grant) |
+| `juice run owner/name` | run; offers inline consent if a grant is needed (on a terminal) |
+| `juice user connect owner/name` | connect ahead of time; `--device` for headless OAuth, `--token <key>` to paste a `delegated_bearer` key (prompted without echo if omitted) |
+| `juice user disconnect owner/name` | disconnect (delete the grant) |
 | `juice user me` | your account, including your `grants` |
 
 ### HTTP

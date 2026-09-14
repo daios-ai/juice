@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,13 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 // TestFedStep_PeerCompletesLocalAction covers the case the old rule forbade — a non-public target.
 func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey string) string {
 	t.Helper()
+	return parkStepForPeerUser(t, k, db, peerKey, "")
+}
+
+// parkStepForPeerUser addresses the step to one principal on that peer rather than to the kernel
+// itself, which is what a remote handle resolves to (§13).
+func parkStepForPeerUser(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey, remoteUserID string) string {
+	t.Helper()
 	ctx := context.Background()
 	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
@@ -55,7 +63,7 @@ func parkStepForPeer(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey strin
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), peer.ID, "")
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), parkStepAction(t, k), json.RawMessage(`{}`), kernel.RequiredCaller{UserID: peer.ID, RemoteID: remoteUserID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -107,13 +115,20 @@ func parkStepAction(t *testing.T, k *kernel.Kernel) string {
 
 func fedStepList(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey) (int, map[string]any, error) {
 	t.Helper()
+	return fedStepListFor(t, k, priv, "")
+}
+
+// fedStepListFor asks the same question on one principal's behalf, as a peer does when a user
+// rather than its operator wants to see the work parked for them (§13).
+func fedStepListFor(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, forUserID string) (int, map[string]any, error) {
+	t.Helper()
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := kernel.SignStepListPayload(priv, cp, selfKey(t, k), ts)
+	sig, err := testNet.SignStepListPayload(priv, cp, selfKey(t, k), ts, forUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handleFederationStepList(k, context.Background(), cp, ts, sig)
+	return handleFederationStepList(k, context.Background(), cp, ts, sig, forUserID)
 }
 
 // derivedStepKey computes the payment-bound completion idempotency key (§13) the serving kernel now
@@ -128,11 +143,137 @@ func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, st
 	t.Helper()
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := kernel.SignStepPayload(priv, stepID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input))
+	sig, err := testNet.SignStepPayload(priv, stepID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input, "", "", "")
+	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input, "", "", "", false)
+}
+
+// fedStepCompleteAs completes as one attested principal of the peer: the step payload signed by the
+// peer kernel, and its attestation that userID asked — and, when superuser, that userID is its
+// operator — as the wire carries them.
+func fedStepCompleteAs(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, stepID, idempKey string, input []byte, userID string, superuser bool) (int, map[string]any, error) {
+	t.Helper()
+	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	self := selfKey(t, k)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig, err := testNet.SignStepPayload(priv, stepID, cp, self, idempKey, ts, sha256HexBytes(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	att, err := testNet.SignStepAuthPayload(priv, cp, self, userID, stepID, ts, superuser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handleFederationStepComplete(k, context.Background(), cp, ts, idempKey, stepID, sig, input, userID, att, ts, superuser)
+}
+
+// readStepFails is a store whose FIRST step read fails — the one the scope check makes — and
+// counts every read after it: a check that skipped on the failure reads the step again to act.
+type readStepFails struct {
+	kernel.Store
+	reads int
+}
+
+func (r *readStepFails) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
+	r.reads++
+	if r.reads == 1 {
+		return nil, errors.New("disk gone")
+	}
+	return r.Store.ReadStep(ctx, id)
+}
+
+// TestFedStep_CompletionScopeMustMatch: a step addressed to one principal of the peer is completed
+// by that principal alone; a step addressed to the peer kernel by that kernel — its own bare
+// signature, or a user its home kernel attests is the operator — and by no ordinary user, whatever
+// they know. A failed read of the step's addressing refuses rather than falling open.
+func TestFedStep_CompletionScopeMustMatch(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	keyA, privA := fedPeer(t, k, "peer-scope")
+	const alice, opsy = "alice-remote-id", "sys-remote-id"
+	key := func(stepID string, input []byte) string {
+		return kernel.StepIdempotencyKey(selfKey(t, k), stepID, sha256HexBytes(input))
+	}
+	in := []byte(`{}`)
+
+	// Kernel-addressed: an attested ordinary user is refused; an attested operator, and the bare
+	// kernel, complete.
+	forKernel := parkStepForPeer(t, k, db, keyA)
+	if _, _, err := fedStepCompleteAs(t, k, privA, forKernel, key(forKernel, in), in, alice, false); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("ordinary user completing a kernel-addressed step: want ErrUnauthorized, got %v", err)
+	}
+	if s, _ := db.ReadStep(context.Background(), forKernel); s.Status != kernel.StepWaiting {
+		t.Fatalf("the refused completion moved the step to %q", s.Status)
+	}
+	if _, _, err := fedStepCompleteAs(t, k, privA, forKernel, key(forKernel, in), in, opsy, true); err != nil {
+		t.Errorf("attested operator completing a kernel-addressed step: %v", err)
+	}
+	bare := parkStepForPeer(t, k, db, keyA)
+	if _, _, err := fedStepComplete(t, k, privA, bare, key(bare, in), in); err != nil {
+		t.Errorf("the kernel itself completing a kernel-addressed step: %v", err)
+	}
+
+	// User-addressed: the bare kernel and another user are refused; that user completes, and so
+	// does the operator when the step is addressed to the operator's own id.
+	forAlice := parkStepForPeerUser(t, k, db, keyA, alice)
+	if _, _, err := fedStepComplete(t, k, privA, forAlice, key(forAlice, in), in); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("the bare kernel completing a user-addressed step: want ErrUnauthorized, got %v", err)
+	}
+	if _, _, err := fedStepCompleteAs(t, k, privA, forAlice, key(forAlice, in), in, opsy, true); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("the operator completing another user's step: want ErrUnauthorized, got %v", err)
+	}
+	if _, _, err := fedStepCompleteAs(t, k, privA, forAlice, key(forAlice, in), in, alice, false); err != nil {
+		t.Errorf("the addressed user completing their step: %v", err)
+	}
+	forOps := parkStepForPeerUser(t, k, db, keyA, opsy)
+	if _, _, err := fedStepCompleteAs(t, k, privA, forOps, key(forOps, in), in, opsy, true); err != nil {
+		t.Errorf("the operator completing a step addressed to their own id: %v", err)
+	}
+
+	// An attestation that claims the operator scope without the home kernel's signature over it.
+	forKernel2 := parkStepForPeer(t, k, db, keyA)
+	cp := keyA
+	self := selfKey(t, k)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig, _ := testNet.SignStepPayload(privA, forKernel2, cp, self, key(forKernel2, in), ts, sha256HexBytes(in))
+	att, _ := testNet.SignStepAuthPayload(privA, cp, self, alice, forKernel2, ts, false) // signed as NOT operator
+	if _, _, err := handleFederationStepComplete(k, context.Background(), cp, ts, key(forKernel2, in), forKernel2, sig, in, alice, att, ts, true); err == nil {
+		t.Error("a forged operator scope was accepted")
+	}
+
+	// The read of the step's addressing fails: refuse, never skip.
+	blindStore := &readStepFails{Store: db}
+	blind := newKernel(testConfig("scope-test-secret"), kernel.Dependencies{Store: blindStore})
+	if _, _, err := fedStepCompleteAs(t, blind, privA, forKernel2, key(forKernel2, in), in, opsy, true); err == nil {
+		t.Error("a failed read of the step's addressing must be an error")
+	}
+	if blindStore.reads != 1 {
+		t.Errorf("the failed read was skipped over: the handler read the step %d times, want to stop at the first", blindStore.reads)
+	}
+}
+
+// TestFedStep_ExactlyFullPageIsNotTruncated: the flag says more is waiting only when more is.
+func TestFedStep_ExactlyFullPageIsNotTruncated(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	keyA, privA := fedPeer(t, k, "peer-page")
+	for i := 0; i < maxPeerStepPage; i++ {
+		parkStepForPeer(t, k, db, keyA)
+	}
+	_, body, err := fedStepList(t, k, privA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps, _ := body["steps"].([]*kernel.PeerStepView); len(steps) != maxPeerStepPage || body["truncated"] != nil {
+		t.Fatalf("exactly one page: want %d steps and no truncation, got %d and %v", maxPeerStepPage, len(steps), body["truncated"])
+	}
+	parkStepForPeer(t, k, db, keyA)
+	_, body, _ = fedStepList(t, k, privA)
+	if steps, _ := body["steps"].([]*kernel.PeerStepView); len(steps) != maxPeerStepPage || body["truncated"] != true {
+		t.Fatalf("one past the page: want %d steps and truncated, got %d and %v", maxPeerStepPage, len(steps), body["truncated"])
+	}
 }
 
 // TestWireErrorShieldsInternal: the one wire boundary sends code + concise message; an internal
@@ -185,6 +326,64 @@ func TestFedStep_ListShowsOnlyOwnWaitingSteps(t *testing.T) {
 	}
 }
 
+// TestFedStep_ListIsUserScoped: listing and completing must have the same granularity. A step
+// addressed to one principal on the peer is listed to that principal, and never to another; the
+// operator's kernel-level ask still sees every step it may complete, user-addressed ones included,
+// which is the only place a peer-held step is visible to them.
+func TestFedStep_ListIsUserScoped(t *testing.T) {
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+
+	keyA, privA := fedPeer(t, k, "peer-scoped")
+	const alice, bob = "alice-remote-id", "bob-remote-id"
+	forAlice := parkStepForPeerUser(t, k, db, keyA, alice)
+	forKernel := parkStepForPeer(t, k, db, keyA)
+
+	ids := func(body map[string]any) []string {
+		steps, _ := body["steps"].([]*kernel.PeerStepView)
+		out := make([]string, len(steps))
+		for i, s := range steps {
+			out[i] = s.ID
+		}
+		return out
+	}
+
+	_, aliceBody, err := fedStepListFor(t, k, privA, alice)
+	if err != nil {
+		t.Fatalf("list for alice: %v", err)
+	}
+	if got := ids(aliceBody); len(got) != 1 || got[0] != forAlice {
+		t.Fatalf("alice must see exactly the step addressed to her, got %v", got)
+	}
+
+	_, bobBody, err := fedStepListFor(t, k, privA, bob)
+	if err != nil {
+		t.Fatalf("list for bob: %v", err)
+	}
+	if got := ids(bobBody); len(got) != 0 {
+		t.Errorf("bob must see none of alice's steps, got %v", got)
+	}
+
+	// The operator asks as the whole kernel and sees both — omitting the user must never filter.
+	_, allBody, err := fedStepList(t, k, privA)
+	if err != nil {
+		t.Fatalf("kernel-level list: %v", err)
+	}
+	got := ids(allBody)
+	if len(got) != 2 {
+		t.Fatalf("the operator must see every step this kernel may complete, got %v", got)
+	}
+	steps, _ := allBody["steps"].([]*kernel.PeerStepView)
+	for _, s := range steps {
+		if s.ID == forAlice && s.RequiredCaller != alice {
+			t.Errorf("a user-addressed step must name its principal, got %q", s.RequiredCaller)
+		}
+		if s.ID == forKernel && s.RequiredCaller != "" {
+			t.Errorf("a kernel-addressed step names no principal, got %q", s.RequiredCaller)
+		}
+	}
+}
+
 // A signature-valid stranger is not provisioned an account by a read; it simply has no steps.
 func TestFedStep_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
@@ -219,30 +418,30 @@ func TestFedStep_RequestsAreRejected(t *testing.T) {
 	}{
 		{"bad list signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, _ string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			_, _, err := handleFederationStepList(k, ctx, keyA, ts, "bogus")
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, "bogus", "")
 			return err
 		}},
 		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-1", stepID, "bogus", []byte("{}"), "", "", "")
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-1", stepID, "bogus", []byte("{}"), "", "", "", false)
 			return err
 		}},
 		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
 			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-			sig, _ := kernel.SignStepListPayload(privA, keyA, selfKey(t, k), stale)
-			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig)
+			sig, _ := testNet.SignStepListPayload(privA, keyA, selfKey(t, k), stale, "")
+			_, _, err := handleFederationStepList(k, ctx, keyA, stale, sig, "")
 			return err
 		}},
 		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := kernel.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
-			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`), "", "", "")
+			sig, _ := testNet.SignStepPayload(privA, stepID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)))
+			_, _, err := handleFederationStepComplete(k, ctx, keyA, ts, "idem-t", stepID, sig, []byte(`{"ok":false}`), "", "", "", false)
 			return err
 		}},
 		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, stepID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := kernel.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts)
-			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig)
+			sig, _ := testNet.SignStepListPayload(privA, keyA, "some-other-kernels-key", ts, "")
+			_, _, err := handleFederationStepList(k, ctx, keyA, ts, sig, "")
 			return err
 		}},
 		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, stepID string) error {
@@ -371,7 +570,7 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), peer.ID, "")
+	step, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: peer.ID})
 	if err != nil {
 		t.Fatalf("CreateStep parking a local action for a peer: %v", err)
 	}
@@ -403,7 +602,7 @@ func TestFedStep_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
 	action := parkStepAction(t, k)
 	for i := 0; i < 60; i++ {
 		p := setupProcessHTTP(t, db, peer.ID, 0)
-		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), local.ID, ""); err != nil {
+		if _, err := k.CreateStep(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), kernel.RequiredCaller{UserID: local.ID}); err != nil {
 			t.Fatalf("seed step %d: %v", i, err)
 		}
 	}
@@ -499,28 +698,28 @@ func TestFedStep_SignatureDomainsAreDisjoint(t *testing.T) {
 	const hash = "abc123"
 
 	const rcpt = "recipient-kernel-key"
-	stepSig, _ := kernel.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
-	listSig, _ := kernel.SignStepListPayload(priv, cp, rcpt, ts)
-	callSig, _ := kernel.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash)
+	stepSig, _ := testNet.SignStepPayload(priv, "step-1", cp, rcpt, "idem-1", ts, hash)
+	listSig, _ := testNet.SignStepListPayload(priv, cp, rcpt, ts, "")
+	callSig, _ := testNet.SignFederationPayload(priv, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, "", 0)
 
 	// A call signature must not pass as a step signature, nor either step kind as the other.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, callSig); err == nil {
 		t.Error("a federation call signature must not verify as a step completion")
 	}
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, listSig); err == nil {
 		t.Error("a step list signature must not verify as a step completion")
 	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, stepSig); err == nil {
+	if err := testNet.VerifyStepListSignature(cp, cp, rcpt, ts, "", stepSig); err == nil {
 		t.Error("a step completion signature must not verify as a step list")
 	}
-	if err := kernel.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, stepSig); err == nil {
+	if err := testNet.VerifyFederationSignature(cp, "act-id", cp, rcpt, "chash", "idem-1", ts, hash, "", 0, stepSig); err == nil {
 		t.Error("a step signature must not verify as a federation call")
 	}
 	// Sanity: each verifies under its own domain.
-	if err := kernel.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
+	if err := testNet.VerifyStepSignature(cp, "step-1", cp, rcpt, "idem-1", ts, hash, stepSig); err != nil {
 		t.Errorf("step signature should verify in its own domain: %v", err)
 	}
-	if err := kernel.VerifyStepListSignature(cp, cp, rcpt, ts, listSig); err != nil {
+	if err := testNet.VerifyStepListSignature(cp, cp, rcpt, ts, "", listSig); err != nil {
 		t.Errorf("list signature should verify in its own domain: %v", err)
 	}
 }

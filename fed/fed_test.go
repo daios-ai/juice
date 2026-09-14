@@ -14,18 +14,18 @@ import (
 
 // fakeHandlers records the last inbound request and returns canned responses.
 type fakeHandlers struct {
-	lastCallPeer string
-	lastCall     CallRequest
-	callBody     json.RawMessage
-	gossip       json.RawMessage
-	gossipErr    error
-	resolveBody  json.RawMessage
-	lastStepPeer string
-	lastStep     StepRequest
-	stepBody     json.RawMessage
-	lastSettlePeer string
-	lastSettle     SettleRequest
-	settleBody     json.RawMessage
+	lastCallPeer   string
+	lastCall       CallRequest
+	callBody       json.RawMessage
+	gossip         json.RawMessage
+	gossipErr      error
+	resolveBody    json.RawMessage
+	lastStepPeer   string
+	lastStep       StepRequest
+	stepBody       json.RawMessage
+	lastRevealPeer string
+	lastReveal     RevealRequest
+	revealBody     json.RawMessage
 }
 
 func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest) CallResponse {
@@ -44,16 +44,17 @@ func (f *fakeHandlers) OnStep(_ context.Context, peerKey string, req StepRequest
 	f.lastStep = req
 	return StepResponse{Status: 200, Body: f.stepBody}
 }
-func (f *fakeHandlers) OnSettle(_ context.Context, peerKey string, req SettleRequest) SettleResponse {
-	f.lastSettlePeer = peerKey
-	f.lastSettle = req
-	return SettleResponse{Status: 200, Body: f.settleBody}
+func (f *fakeHandlers) OnReveal(_ context.Context, peerKey string, req RevealRequest) RevealResponse {
+	f.lastRevealPeer = peerKey
+	f.lastReveal = req
+	return RevealResponse{Status: 200, Body: f.revealBody}
 }
 
 func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tr, err := New(context.Background(), Config{
+		Namespace:         testNamespace,
 		SigningKey:        priv,
 		ListenAddrs:       []string{"/ip4/127.0.0.1/tcp/0"},
 		BootstrapPeers:    bootstrap,
@@ -74,6 +75,7 @@ func newTestTransportMode(t *testing.T, h Handlers, bootstrap []string, mode dht
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	tr, err := newTransport(context.Background(), Config{
+		Namespace:         testNamespace,
 		SigningKey:        priv,
 		ListenAddrs:       []string{"/ip4/127.0.0.1/tcp/0"},
 		BootstrapPeers:    bootstrap,
@@ -89,6 +91,10 @@ func newTestTransportMode(t *testing.T, h Handlers, bootstrap []string, mode dht
 
 // A full round-trip over real libp2p streams on loopback: B resolves A by key (via the
 // bootstrap connection) and every protocol returns the server's canned payload.
+// testNamespace stands for one network's rendezvous string: kernels of different worlds carry
+// different ones and so never meet (D23).
+const testNamespace = "juice/fed/discovery/1/test"
+
 func TestTransportRoundTrip(t *testing.T) {
 	srv := &fakeHandlers{
 		callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`),

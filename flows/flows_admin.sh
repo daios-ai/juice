@@ -4,11 +4,12 @@
 # Dedupe note: user-facing CLI commands are HTTP clients, so `tx list` IS GET
 # /v1/transactions, `run` IS POST /v1/run, `step complete` IS POST /v1/steps/{id}/complete,
 # `user me` IS GET /v1/me. The old curl mirrors re-asserted state the CLI already exercised;
-# they are dropped. admin/* run locally against --db by design.
+# they are dropped. admin/* are HTTP clients too: they call /v1/admin/users|peers|kernel on the
+# same TCP API, gated by requireSuperuserMW, the noun they were given being the route itself.
 
 flow_transaction_access() {
     echo "=== FLOW transaction_access ==="
-    local dir db hs ha hb hc bport; dir=$(new_dir); db="$dir/juice.db"
+    local dir db hs ha hb hc bport; dir=$(new_dir); db="$(kdb "$dir")"
     hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
     make_admin "$db" "$hs" || { fail "tx_access.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -21,7 +22,7 @@ flow_transaction_access() {
     # alice (seller) publishes a paid action (price=10) callable by anyone.
     local aid
     aid=$(strfield "$(jj "$db" "$ha" action create pvd-action --kind http \
-        --source "http://127.0.0.1:${bport}/pvd" --price 10 --description "tx access test")" id)
+        --source "http://127.0.0.1:${bport}/pvd" --price "$(units 10)" --description "tx access test")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
 
@@ -42,44 +43,109 @@ flow_transaction_access() {
     # carol is not a party — sees none, and `tx show` is denied.
     assert_eq "tx_access.non_party_sees_none" 0 "$(list_len "$(jj "$db" "$hc" tx list)")"
     assert_fails "tx_access.non_party_denied" "not found\|error" -- j "$db" "$hc" tx show "$last_tx"
+
+    # A party is a handle everywhere it is rendered (§14): "Outputs render handle/owner-name/petname,
+    # never raw user ids", and API.md is explicit that the raw *_user_id UUIDs are not returned. The
+    # detail view obeys this; the list must too, or a provider reconciling its earnings (U15) has to
+    # fetch every row again just to learn who paid.
+    local one_tx list_keys
+    one_tx=$(jj "$db" "$ha" tx show "$last_tx")
+    assert_contains "tx_access.show_renders_handles" "owner_handle" "$one_tx"
+    assert_not_contains "tx_access.show_hides_ids"  "owner_user_id" "$one_tx"
+
+    list_keys=$(python3 -c "import sys,json; print(' '.join(sorted(json.loads(sys.argv[1])[0].keys())))" "$alice_txs" 2>/dev/null)
+    assert_contains     "tx_access.list_renders_handles" "owner_handle"  "$list_keys"
+    assert_not_contains "tx_access.list_hides_ids"       "owner_user_id" "$list_keys"
+}
+
+# A list is a summary (§14: "Detail views expose the full HTTP shape; lists summarize"), and R6 caps
+# a page so "no single response is unbounded". Both are about the same thing: a page must stay a
+# page. These assert the two places the drive of 2026-09-03 found them not to be — a compiled WASM
+# artifact served to anonymous callers, and full argument/reply bodies in a transaction list.
+flow_list_projections() {
+    echo "=== FLOW list_projections ==="
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"
+    hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" || { fail "listproj.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 500
+
+    # A wasm action carries the largest thing an action owns: its compiled artifact.
+    make_echo_wasm "$dir/echo.wasm"
+    local aid
+    aid=$(strfield "$(jj "$db" "$ha" action create wasm-big --kind wasm --artifact "$dir/echo.wasm" \
+        --description "a compiled action" --price "$(units 1)")" id)
+    j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
+    j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
+
+    # An anonymous caller may see that a public action exists — never the provider's compiled
+    # implementation. A federation manifest deliberately carries artifact_hash and not the artifact
+    # (§13 P6), so the local HTTP surface must not hand out what a peer across the network cannot get.
+    local anon
+    anon=$(curl -s "$(url "$db")/v1/actions")
+    assert_contains     "listproj.anon_sees_the_action" "wasm-big"      "$anon"
+    assert_not_contains "listproj.anon_gets_no_artifact" "wasm_artifact" "$anon"
+
+    # The owner's own list is a summary too: the artifact belongs to the detail read.
+    assert_not_contains "listproj.owner_list_is_a_summary" "wasm_artifact" "$(jj "$db" "$ha" action list --all)"
+
+    # A transaction list must not carry whole request and reply bodies. Drive a call whose reply is
+    # large, then require the list to stay small while the detail read still has everything.
+    local bport; bport=$(backend_port)
+    start_backend "$bport" 200 "{\"blob\":\"$(head -c 20000 /dev/zero | tr '\0' 'x')\"}"
+    local hid
+    hid=$(strfield "$(jj "$db" "$ha" action create bulky --kind http --source "http://127.0.0.1:${bport}/b" \
+        --description "returns a large reply" --price "$(units 1)")" id)
+    j "$db" "$ha" action enable "$hid" >/dev/null 2>&1
+    local i; for i in 1 2 3 4 5; do j "$db" "$ha" run alice/bulky '{}' >/dev/null 2>&1; done
+
+    local list_bytes
+    list_bytes=$(jj "$db" "$ha" tx list --limit 50 | wc -c)
+    echo "  tx list --limit 50 over 5 large replies: ${list_bytes} bytes"
+    assert_eq "listproj.tx_list_is_a_summary" yes "$([ "$list_bytes" -lt 20000 ] && echo yes || echo no)"
+
+    # And the default command must simply work: a user listing their own transactions cannot be
+    # asked to guess a smaller --limit.
+    assert_nonempty "listproj.default_tx_list_works" "$(jj "$db" "$ha" tx list)"
 }
 
 flow_admin_supervision() {
     echo "=== FLOW admin_supervision ==="
-    local dir db hs ha bport; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha bport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    # admin users lists sys and alice; admin show returns alice.
-    assert_contains "admin.user_list" "alice" "$(jj "$db" "$hs" admin users)"
-    assert_contains "admin.user_list_sys" "sys" "$(jj "$db" "$hs" admin users)"
-    assert_json "admin.user_show" "$(jj "$db" "$hs" admin show alice)" handle alice
+    # admin user list lists sys and alice; admin user show returns alice.
+    assert_contains "admin.user_list" "alice" "$(jj "$db" "$hs" admin user list)"
+    assert_contains "admin.user_list_sys" "sys" "$(jj "$db" "$hs" admin user list)"
+    assert_json "admin.user_show" "$(jj "$db" "$hs" admin user show alice)" handle alice
 
     # Suspend blocks alice's session; unsuspend restores it.
-    j "$db" "$hs" admin suspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user suspend alice >/dev/null 2>&1
     assert_fails "admin.suspend_blocks_alice" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
-    j "$db" "$hs" admin unsuspend alice >/dev/null 2>&1
-    j "$db" "$ha" auth login alice --password userpass >/dev/null 2>&1
+    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
+    know "$db" "$ha"
+    j "$db" "$ha" auth login alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
     assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" handle alice
 
     # Superuser rename vacates the old handle; the freed name is reusable by a distinct account,
     # and sys's own handle cannot be renamed.
     local hb; hb=$(home "$dir" bob)
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin rename bob bob-retired >/dev/null 2>&1
-    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin show bob-retired)" handle bob-retired
-    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin show bob
+    j "$db" "$hs" admin user rename bob bob-retired >/dev/null 2>&1
+    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin user show bob-retired)" handle bob-retired
+    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin user show bob
     # The freed handle is reusable by a fresh account.
     make_user "$db" "$hs" "$hb" bob
-    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin show bob)" handle bob
-    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin rename sys root
+    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin user show bob)" handle bob
+    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin user rename sys root
 
     # Supervision is scope on the normal commands: sys sees any owner's actions/processes/txs
     # and may disable any action, all over the standard TCP API (no separate admin surface).
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     local aid
     aid=$(strfield "$(jj "$db" "$ha" action create test --kind http \
-        --source "http://127.0.0.1:$bport" --description "alice's action" --price 0)" id)
+        --source "http://127.0.0.1:$bport" --description "alice's action" --price "$(units 0)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
     # sys `action list` shows alice's action (system-wide scope).
@@ -100,12 +166,12 @@ flow_admin_supervision() {
         "$([ "$(list_len "$(jj "$db" "$hs" tx list)")" -ge 1 ] && echo yes || echo no)"
 
     # A non-superuser is rejected from the operator commands.
-    assert_fails "admin.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$ha" admin users
+    assert_fails "admin.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$ha" admin user list
 }
 
 flow_time() {
     echo "=== FLOW time ==="
-    local dir db hs ha; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -125,7 +191,7 @@ except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 
 flow_message() {
     echo "=== FLOW message ==="
-    local dir db hs ha hb; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
     make_admin "$db" "$hs" || { fail "message.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
@@ -148,7 +214,7 @@ flow_message() {
 
 flow_native_orphan_purge() {
     echo "=== FLOW native_orphan_purge ==="
-    local dir db hs; dir=$(new_dir); db="$dir/juice.db"; hs=$(home "$dir" sys)
+    local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "orphan.boot" "server did not start"; return; }
 
     # Baseline: a real native is present.
