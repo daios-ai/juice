@@ -1,0 +1,26 @@
+title: Juice manual
+description: How to use, provide, automate and operate Juice.
+
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-remote-theme
+
+# Set baseurl to the path the site is served from when it is not the domain root,
+# for example "/juice" for a project site at https://<user>.github.io/juice.
+baseurl: ""
+
+repository: daios-ai/juice
+aux_links:
+  Repository:
+    - https://github.com/daios-ai/juice
+
+search_enabled: true
+heading_anchors: true
+nav_sort: case_insensitive
+
+color_scheme: light
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor

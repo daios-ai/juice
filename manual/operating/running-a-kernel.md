@@ -1,0 +1,153 @@
+---
+title: Running a kernel
+parent: Operating a kernel
+nav_order: 1
+---
+
+# Running a kernel
+
+## Starting one
+
+```
+$ juice kernel serve acme --addr :4040
+```
+
+`acme` names the kernel. It is the nickname the kernel reports on the network and
+the name of the directory holding its state. `--addr` is where it answers HTTP
+clients.
+
+The first time, the command asks two things it cannot revise later, and creates
+nothing until they are answered:
+
+```
+There is no kernel named acme. No kernels here yet.
+Create acme as a new kernel? [y/N] y
+
+Which money will acme use? This cannot be changed later.
+  play  no real money: you credit accounts yourself and keep the records
+  test  fake USDC on the Arbitrum Sepolia test chain
+  real  USDC on Arbitrum One
+Choice [play/test/real]: play
+Superuser password:
+Confirm password:
+sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+  depart motion moon climb useless hole learn usage delay fish brand lab
+Press Enter once you have written it down:
+Superuser "sys" created.
+INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
+```
+
+On a network with a chain there is one further question, for the endpoint that
+reaches it.
+
+Declining, or stopping before the network is chosen, leaves nothing on disk.
+
+The network is the one permanent choice. It is recorded in the database once the
+kernel has verified it, and from then on the database is what says which network
+this kernel serves. Everything else — the address, the fees, the peers, the chain
+endpoint — is configuration you can change.
+
+Save the recovery phrase. It is the only way to reset the `sys` password, with
+`juice auth recover sys@acme`.
+
+Later boots ask nothing and print the ready line, which names the nickname, the
+network and the public key that answered.
+
+## Starting without a terminal
+
+Write the answers into the configuration first. That file is the consent a machine
+with no terminal can give.
+
+```
+$ mkdir -p ~/.juice/kernels/acme
+$ echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
+$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve acme --addr :4040
+```
+
+Without both of those, a kernel with no terminal refuses to start and names the
+key and the file that would have answered.
+
+## The kernel's home
+
+Everything a kernel is lives in one directory:
+
+```
+~/.juice/kernels/acme/
+  juice.db        accounts, actions, ledger, and the signing key
+  config.json     configuration, written once at first boot
+  serve.lock      held by the running server
+  cache/          regenerable; safe to delete
+```
+
+On a network with a chain, the rail key and its records are here too.
+
+The ledger, the key that signs its receipts, the key that settles them and the
+network all three belong to are only meaningful together, which is why they live
+in one directory. Back it up, move it and lock it as a unit.
+
+A second kernel is a second name beside the first, not a second installation:
+
+```
+$ juice kernel serve beta --addr :4242
+```
+
+Each needs its own HTTP address and its own `fed_listen_addrs`. Nothing allocates
+ports; a collision is a startup failure.
+
+One server runs per kernel, enforced by the lock.
+
+There is no `--db` and no `--config`. A kernel is its directory.
+
+## Stopping, backing up, upgrading
+
+`SIGINT` or `SIGTERM` stops accepting new requests, drains what is running, and
+exits. There is no `juice stop`.
+
+To back a kernel up, stop the server and copy the directory. Copying it while the
+server runs is not a supported way to take a consistent snapshot.
+
+To upgrade, stop the server, replace the binary, and start it again. Migrations run
+forward at startup. A database recording a migration newer than the binary knows is
+refused rather than opened.
+
+Removing a kernel is not a command. Its directory holds a ledger, two keys, and
+possibly obligations that have not settled, so archive or destroy it deliberately.
+
+## Joining the network
+
+Kernels find each other by public key over their own transport. Joining requires
+nothing beyond starting with the default `bootstrap_peers`; serving requires
+nothing beyond marking an action `public`.
+
+A kernel behind a home NAT federates like any other. It advertises no address and
+needs no port forwarding: it is found by key, and reached directly, by hole
+punching, or through a relay.
+
+A kernel on a public host is also the network's bootstrap node and relay. Those
+bind port 31313 by convention.
+
+Kernels on different networks never meet. `play`, `test` and `real` discover each
+other in separate namespaces.
+
+```
+$ juice admin kernel show
+…
+Listen addresses:
+  /ip4/127.0.0.1/tcp/31401/p2p/12D3KooWJHdK…
+```
+
+## Checking it is up
+
+```
+$ juice kernel health acme
+ok  acme  network play  fdlMi64P…
+```
+
+Unauthenticated, and the thing a client should check before trusting a server.
+
+## Logs
+
+Logs go to stderr, and to a file if one is configured. Only an action's output goes
+to stdout. Every kernel transition logs its start and end with the request, caller,
+process, trace, action and transaction ids, so one call can be followed end to end.
+Secrets are never logged.
