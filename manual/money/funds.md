@@ -6,10 +6,11 @@ nav_order: 1
 
 # Funds
 
-Money already inside a kernel: what your balance consists of, how amounts are
-written, sending money to somebody else on the same kernel, and the record of it
-all. Getting money in and taking it out are the next chapter,
-[Deposits and withdrawals](deposits-and-withdrawals.html).
+Once money has reached your account, you can spend it on actions or transfer it
+to another user of the same kernel. This chapter explains how the balance
+reflects those commitments and where their records appear. The next chapter,
+[Deposits and withdrawals](deposits-and-withdrawals.html), covers payments
+between your account and the outside world.
 
 ## Available and locked
 
@@ -20,32 +21,33 @@ $ juice user me
   locked: 0.00 credits
 ```
 
-**Available** money can be spent. **Locked** money is committed to work that has
-not finished: the price of a call in progress, the price parked for a step waiting
-on somebody, and the stake held against a call to another kernel.
+The **available** balance is the amount you can spend. The **locked** balance
+is reserved for existing commitments: running calls, steps awaiting input, and
+stakes for calls to other kernels.
 
-When you start a paid action, the kernel moves its price from available to locked.
-On success that reservation pays for the work. If the call fails, the part that was
-not spent returns to available. Either way, nothing stays locked once the work has
-settled.
+Starting a paid action moves its price from available to locked. Successful
+settlement pays for the work from that reservation; failure returns the portion
+that was not consumed. A step can keep funds reserved after the creating action
+has returned, because its future execution still needs a budget.
 
-Locked money is not lost. If you see a balance locked with nothing running,
-`juice process list` shows which processes still hold it, and the owner of a
-process can end it to release what it holds. See
-[Creating steps and managing processes](../providing/steps.html).
+If funds remain locked, inspect `juice process list` to find outstanding work.
+The process owner can end abandoned work and recover unused reservations,
+although a remote call awaiting a receipt is normally best left to settle.
+See [Steps and processes](../providing/steps.html) before forcing closure.
 
 ## Amounts
 
-Every amount is written in the unit of the kernel's network. The three shipped
-networks — `play`, `test` and `real` — all have six decimal places, so the same
-number means the same amount everywhere. The command line takes and shows display
-units: `0.50 credits`. The HTTP API and the JSON arguments of an action use base
-units: `500000`.
+The command line accepts amounts in the network's display unit, such as
+`0.50 credits` on `play`. The HTTP API and action JSON use integer base units.
+All three shipped networks use six decimal places, so `500000` base units
+represent half a credit or token. Equal numeric amounts on different networks
+do not imply equal monetary value.
 
 ## Sending money to another user
 
-A transfer moves money between two accounts on the same kernel. It is direct, has
-no fee, and is not an action call.
+A local transfer debits your available balance and credits the recipient by the
+same amount. It has no fee and creates a ledger entry rather than an execution
+transaction:
 
 ```
 $ juice user transfer bob 1 --reason "thanks"
@@ -62,18 +64,19 @@ Send 1.00 credits to bob, acting as alice@acme? This cannot be undone. [y/N] y
 > A transfer is final. There is no reversal and no dispute: check the handle before
 > you confirm.
 
-`transfer` and `withdraw` ask for confirmation before they act, because neither
-can be undone; `--yes` answers in advance and belongs in scripts. Running a
-value-bearing action does not ask, because issuing the run is the authorisation —
-see [Moving money through an action](#moving-money-through-an-action).
+Both `transfer` and `withdraw` ask you to confirm the movement. An unattended
+program supplies `--yes` to give that confirmation in advance. A value-bearing
+action uses different consent semantics, described under
+[Moving money through an action](#moving-money-through-an-action).
 
-Transfers are local to one kernel. There is no transfer to an account on another
-kernel; money crosses a kernel boundary only as payment for work. See
+The recipient must be on the same kernel. Payments between kernels arise from
+service purchases and follow the settlement procedure in
 [The network economy](../operating/network-economy.html).
 
 ## The ledger
 
-The ledger is the record of money entering, leaving, and moving between accounts.
+The account ledger records money entering, leaving, and moving between accounts.
+Use `user ledger` to read entries involving your account:
 
 ```
 $ juice user ledger
@@ -81,15 +84,15 @@ $ juice user ledger
 [2026-09-14T12:04:54Z] amount:10.00 credits from:sys    to:alice
 ```
 
-Deposits, withdrawals, transfers and value delivered by an action appear here.
-Payments for executing actions do not: those are transactions, listed with
-`juice tx list`. The distinction is that the ledger records money moving between
-account holders, while a transaction records a call and what it cost.
+Deposits, withdrawals, transfers, and value delivered by an action appear in
+this list. Execution charges are recorded separately as call transactions,
+available through `juice tx list`. Reading both gives you the account movements
+and the work for which it paid or earned money.
 
 ## Moving money through an action
 
-Some actions deliver money as part of what they do. The standard library's
-`sys/transfer` is the simplest:
+An action may deliver money in addition to charging for its execution. The
+built-in `sys/transfer` illustrates the distinction:
 
 ```
 $ juice run sys/transfer '{"target":"bob","amount":1500000}'
@@ -97,19 +100,18 @@ $ juice run sys/transfer '{"target":"bob","amount":1500000}'
 
 The amount is in base units, because it is part of an action's JSON input.
 
-Two things move separately in such a call. The execution price is charged the
-usual way. The value is taken from the account of whoever called the action
-directly, delivered whole to the named recipient, and not taxed. The transfer is
-all-or-nothing: if the call fails, nothing is delivered.
+The execution price follows ordinary call accounting. The amount to deliver is
+reserved separately from the immediate caller's account and transferred whole
+to the recipient on success, without tax. Failure returns that reservation.
+If a composing action calls `sys/transfer`, the immediate caller is the
+composing action's owner, so the value comes from that owner's balance.
 
 {: .warning }
 > Running a value-bearing action authorises the payment its arguments name. The
 > confirmation you get for `user transfer` does not apply here: the run itself is
 > the consent.
 
-An action can only deliver value if its contract declares it, which only the
-kernel can do when it registers the action. No action you create can move a
-caller's money.
-
-Value delivery is local to one kernel. The recipient must be an ordinary active
-account on the same kernel.
+Only the kernel can register an action with the contract declaration that
+authorizes value delivery. A provider cannot add that declaration to a custom
+action or use composition to debit the funding user's balance. Delivery is
+local: the recipient must be an ordinary, unsuspended account on the same kernel.

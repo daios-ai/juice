@@ -6,20 +6,21 @@ nav_order: 2
 
 # Deposits and withdrawals
 
-A deposit brings money into your account from outside the system. A withdrawal
-takes it back out. They are the two acts you perform yourself to move money across
-that edge; transfers, charges for the calls you make, and what you earn all move
-money that is already inside.
+A deposit credits your account against an external payment; a withdrawal sends
+funds out of that account. Their external form depends on the kernel's network.
+On `play`, they are records of play credits. On a chain network, they correspond
+to token payments confirmed by the blockchain.
 
-How you do either depends on the kernel's network, so this chapter covers `play`
-first and then the two chain networks.
+This chapter first covers `play`, then follows a chain deposit from address
+registration to the resulting account credit. See
 [What differs between the three networks](index.html#what-differs-between-the-three-networks)
-compares them at a glance.
+for an overview of their payment arrangements.
 
 ## On `play`
 
-There is nothing to send and nothing to install. The operator credits accounts
-against payments they received outside the system and recorded themselves.
+On `play`, the operator records deposits using references from their own books.
+No wallet or blockchain transaction is involved. The deposit command explains
+this arrangement:
 
 ```
 $ juice user deposit
@@ -27,43 +28,41 @@ Money on the play network has no addresses to send to.
 The operator of this kernel records payments here; there is nothing to send from your side.
 ```
 
-Ask them, and they credit you with `admin user deposit`, naming the payment it
-stands for. Withdrawing works, and is an entry in the kernel's books rather than a
-payment anywhere.
-
-`play` credits are backed by nothing and mean nothing outside that kernel. They
-exist so the system can be used and learned without real money.
+Ask the operator to credit your account. They use `admin user deposit` with a
+reference identifying the deposit. A withdrawal likewise updates the kernel's
+records without making an external payment. These credits have no real monetary
+value, allowing you to learn and test the system without handling funds on a
+blockchain.
 
 ## On `test` and `real`
 
-Money arrives as a payment on a blockchain and leaves the same way: USDC on
-Arbitrum Sepolia for `test`, USDC on Arbitrum One for `real`.
+On `test` and `real`, deposits and withdrawals use the token specified by the
+network: a test token on Arbitrum Sepolia, or USDC on Arbitrum One.
 
-The examples below were run against a local chain standing in for Arbitrum. The
-commands, the questions they ask and the messages they print are what you will
-see. The addresses are not, and neither are the waiting times, which are given
-here from each network's own settings.
+The following examples use a local chain to demonstrate the commands and their
+output. Substitute the addresses returned by your kernel and wallet. The
+waiting periods described in the prose refer to the shipped networks rather
+than the local demonstration chain.
 
 ### The two assets
 
-You need two things in your wallet, and they do different jobs.
+Your wallet needs the network's token for the deposit and ETH for the
+transaction fee. They serve different purposes.
 
-**USDC is the money.** It is what you deposit, what your balance is denominated
-in, and what you withdraw. On `real` it is a dollar stablecoin, so a balance of
-`250.00 USDC` is two hundred and fifty dollars. On `test` it is a worthless copy
-of one, used for rehearsal.
+**USDC** is the unit used for account balances on `real`. A deposit of
+`250.00 USDC` credits that amount to the account, and a withdrawal pays USDC
+back to the registered address. The `test` network uses a test token with no
+real monetary value.
 
-**ETH pays transaction fees.** You need a small amount to pay for your own
-transfer into the kernel. It is not money you are depositing, and it never reaches
-your balance. Every transaction on an Ethereum network works this way; it is not
-something Juice arranges.
+**ETH** pays the blockchain fee for sending the deposit. This fee is spent by
+your wallet in addition to the token amount and is not credited to your Juice
+balance. The kernel pays its own blockchain fees when sending withdrawals.
 
 ### What you need before you start
 
-A wallet on the right chain. Arbitrum One and Arbitrum Sepolia are Ethereum
-networks, so any ordinary Ethereum wallet works once you point it at the right
-one. You need to be able to do two things with it: sign a message, and send a
-token.
+Use a wallet configured for the kernel's chain that can sign a message and
+send the required token. Message signing proves ownership of your address;
+the token transfer supplies the deposit.
 
 | | `test` | `real` |
 |---|---|---|
@@ -71,22 +70,21 @@ token.
 | The money | a test token, worth nothing | USDC, real dollars |
 | Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDC |
 
-If you cannot get test funds yourself, ask the operator to send you some. On a
-chain nobody can add to your balance without a payment the chain has witnessed,
-so there is no way for them to credit you directly; what they can do is pay you,
-or pay in on your behalf and attribute it.
+If you need test funds, the operator may be able to supply them. Even on `test`,
+an account credit must be supported by a witnessed payment. The operator can
+send you tokens or arrange and attribute a payment on your behalf.
 
 {: .warning }
-> A symbol is not an identity. Several tokens on a chain call themselves USDC, and
-> money sent in the wrong one cannot be recovered. Before your first deposit, get
-> the exact token contract address from the kernel's operator and check that your
-> wallet is sending that token. The kernel does not yet print it.
+> Check the token's contract address before sending a deposit. A token symbol
+> such as USDC does not uniquely identify it. Obtain the exact address from the
+> operator, since the kernel's deposit instructions do not yet print it.
+> Payments in another token are not credited through this deposit procedure.
 
 ### Step 1: register the address you will pay from
 
-The kernel credits whoever the chain says sent the money, so it has to know which
-sending address is yours. You establish that by signing a message with the wallet
-that holds the address.
+The kernel attributes a deposit by its sender address. Register the address you
+will pay from before sending funds, proving control by signing the kernel's
+registration message with that wallet:
 
 ```
 $ juice user address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
@@ -100,9 +98,9 @@ address: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 Signature:
 ```
 
-Copy the message into your wallet's "sign message" function, and paste the
-signature it returns at the prompt. The command answers with the address it has
-recorded, and with any payments already received from it:
+Copy the complete message into your wallet's message-signing function, then
+paste the resulting signature at the prompt. The response confirms the
+registered address and lists any held deposits attributed to it:
 
 ```
   address: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
@@ -113,8 +111,9 @@ A program supplies the signature with `--signature` instead of being asked. If y
 work at a command line, `cast wallet sign --private-key … "$MESSAGE"` produces the
 same thing.
 
-One address serves one account. To change it, register a new one; a withdrawal
-already on its way keeps the destination it was created with.
+An address can be registered to only one account. Registering a replacement
+changes the destination of future withdrawals; an existing withdrawal retains
+the address recorded when it was requested.
 
 ### Step 2: find out where to send
 
@@ -131,8 +130,8 @@ An exchange paying this kernel on your behalf would be crediting itself, not you
 withdraw to your own wallet first, then pay from there.
 ```
 
-Before you have registered an address the same command says so, and nothing else
-is needed from you first.
+You can also run this command before registration. It will report that a sender
+address still needs to be registered.
 
 ### Step 3: send the USDC
 
@@ -140,32 +139,28 @@ From your own wallet, on that chain, send USDC to the kernel's address. You pay
 the transaction fee in ETH, as you would for any transfer.
 
 {: .warning }
-> Send USDC, not ETH. The kernel's address takes both, and they are not the same
-> thing: USDC is credited to your balance, while ETH pays the kernel's own
-> transaction fees and reaches no account at all. Your wallet spends a little ETH
-> as the fee for the transfer, which is normal; the amount you *send* must be
-> USDC.
+> Select the network's USDC token as the asset to send. Your wallet will also
+> spend ETH on the transaction fee, but ETH sent directly to the kernel supplies
+> its fuel and does not credit your account.
 
 {: .warning }
-> Send from the address you registered, and only from it. Money that arrives from
-> any other sender is held, not credited, until somebody registers that address.
-> Withdrawing straight from an exchange does not work, because the exchange is the
-> sender and its address is not yours: the payment sits held until the operator
-> sorts it out. Move the money to your own wallet first and send it from there.
+> Send from your registered address. A direct withdrawal from an exchange names
+> the exchange as sender, leaving the payment held for attribution. Withdraw to
+> your own wallet first, then send the deposit from that wallet.
 
 {: .warning }
-> Send it on the chain the kernel named. The right token on a different chain, or
-> a different token altogether, does not reach the kernel and cannot be recovered
-> through it.
+> Check that the wallet is using the kernel's chain. A payment on another chain
+> will not be recognized as a deposit by this kernel.
 
 ### Step 4: wait
 
-Nothing further is required of you. The kernel watches the chain and credits the
-account that registered the sending address, once the payment is final.
+After sending the token, the kernel detects the payment and waits for the
+network's required confirmation. It then credits the account registered to the
+sender address without a further command from you.
 
-"Final" is the network's own rule. On `test` a payment counts as soon as it is in
-a block, which is seconds. On `real` the kernel waits for the block to be
-finalised, which takes about a quarter of an hour.
+The shipped `test` world accepts a payment once it is included in a block.
+The `real` world waits for finality, so confirmation takes longer. Actual
+waiting times depend on the chain and the kernel's progress reading it.
 
 ```
 $ juice user me
@@ -173,9 +168,9 @@ $ juice user me
   …
 ```
 
-The credit appears with no further command. If it has not appeared after the
-waiting time, the usual reason is that the sender was not the registered address;
-the money is held and the operator can see it.
+If the expected credit has not appeared, check that the payment used the right
+chain, token, destination, and registered sender. The operator can inspect held
+payments and the kernel's view of chain progress.
 
 ## Taking money out
 
@@ -192,9 +187,10 @@ Withdraw 50.00 USDC on real to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, actin
   party_handle: alice
 ```
 
-On a chain the money goes to the address you registered, and the kernel drives the
-payment to completion by itself: you do not confirm it again or push it along. On
-`play` the same command moves an entry in the kernel's books and completes at once.
+On a chain network, the withdrawal reserves the amount from your balance and
+uses your registered address as its destination. The kernel sends and confirms
+the payment automatically. On `play`, the same operation completes through the
+manual payment records. Use `user withdrawals` to follow the outcome:
 
 ```
 $ juice user withdrawals
@@ -205,19 +201,18 @@ $ juice user withdrawals
   …
 ```
 
-A withdrawal is `pending` before it is sent, `submitted` once it is on the chain,
-and `confirmed` when it is final. `failed` means it did not go through and the
-money is back in your balance. `blocked` means the kernel cannot pay right now;
-see below.
+A withdrawal begins as `pending`, becomes `submitted` after submission to the
+rail, and reaches `confirmed` when payment is final. A finalized failure returns
+the reservation to your balance. The `blocked` status means the kernel cannot
+currently proceed, as described below.
 
 {: .warning }
 > Withdrawals cannot be undone or recalled. Check the destination in the
 > confirmation line before answering it.
 
-`transfer` and `withdraw` ask before acting, because neither can be undone;
-`--yes` answers in advance and belongs in scripts rather than at a terminal.
-Running a value-bearing action does not ask, because issuing the run is the
-authorisation.
+For unattended withdrawals, `--yes` supplies the confirmation in advance.
+This is the same convention used for local transfers. Calls to value-bearing
+actions differ: issuing `run` itself authorizes the value named in its input.
 
 ## When a payment does not go out
 
@@ -229,11 +224,12 @@ A kernel that cannot pay reports it on the withdrawal itself:
           — send native currency to 0xcAf2a882aF8730C6ad92D76361b1952C71C0453F
 ```
 
-This is the kernel's own problem, not yours. It has run out of the ETH it needs to
-pay transaction fees, which its operator supplies. Your money is not lost and your
-withdrawal is not cancelled: it is re-presented unchanged and goes out as soon as
-the kernel is topped up. See
+In this example, the kernel lacks enough ETH to pay its transaction fees.
+The withdrawal remains reserved and is retried when the cause clears; you
+should not submit a second withdrawal to replace it. The operator can inspect
+and address the cause using the procedures in
 [Money on a chain](../operating/duties.html#money-on-a-chain).
 
-Deposits, calls and every read carry on normally while payments are blocked. Only
-outgoing money waits.
+Other causes include the cost of a fuel purchase or insufficient operator funds
+for it. A halt affects outgoing rail work, while deposits, calls, and reads
+continue.

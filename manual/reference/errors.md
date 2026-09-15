@@ -6,15 +6,14 @@ nav_order: 3
 
 # Errors
 
-An error reaches you in two forms. From the command line it is a line of prose on
-stderr plus an exit code; `--json` does not change that. Over HTTP it is a JSON
-body carrying a stable `code`, a message, and sometimes `meta`.
-
-Branch on the code or the exit status, never on the message.
+The command line reports errors as messages on stderr with an exit status,
+including when `--json` is selected. HTTP errors contain a JSON body with a
+stable `code`, a message, and any relevant `meta` fields. Programs should
+classify errors by status or code; message wording is intended for people.
 
 | Code | Exit | HTTP | Meaning and what to do |
 |---|---|---|---|
-| `unauthenticated` | 2 | 401 | No valid session, or the account is suspended. Log in again; if it persists, the account is suspended and the operator must lift it. |
+| `unauthenticated` | 2 | 401 | No valid session, or the account is suspended. Check the credentials or refresh the session; contact the operator if suspension is reported. |
 | `unauthorized` | 3 | 403 | Authenticated, but not permitted. You are not the owner, the payer, or the named party. |
 | `not_found` | 4 | 404 | No such action, transaction, step or process — or you may not see it. A reference that names nothing and has no `index` child lands here. |
 | `invalid_input` | 5 | 422 | The request is malformed: a bad handle, a duplicate name, a non-positive amount. Nothing happened. |
@@ -38,21 +37,21 @@ Branch on the code or the exit status, never on the message.
 | `peer` | `peer_unreachable`, `peer_unfunded`, `unauthorized` from a peer | the petname if one is bound, otherwise the public key |
 | `process_id` | a parked run | the process to follow |
 | `pending_since` | a parked run | when the call was dispatched |
-| `refund_eligible_at` | a parked run | when it will settle if nothing arrives; eligibility, not a settlement time |
+| `refund_eligible_at` | a parked run | the time after which the retry worker may refund the call if no receipt has arrived |
 
 ## What is never in an error
 
-A failure reason names the class of failure only. It never carries an upstream URL,
-a response body, a query, or any internal detail. A reason a peer sent is never
-adopted as your kernel's own. Between kernels only the code and a short message
-cross.
+A transaction's stored failure reason identifies the failure class. It excludes
+upstream URLs, response bodies, database queries, and other internal details.
+Remote error information is likewise limited, and a peer's reason is not adopted
+as the local transaction's reason.
 
-A refused or re-quoted call never discloses the terms of an action you may not see.
-The access check runs before the contract check, so a wrong guess about a private
-action returns `not_found`, not its price.
+Access checks precede quote checks. A caller without access to a private action
+therefore cannot use a mismatched quote to discover that action's terms.
 
 ## Rate limiting
 
-Authentication and account creation are rate limited per client and answer `429`
-when exceeded. Genuine loopback traffic is exempt. Traffic between kernels is
-limited at its own transport.
+Authentication and account creation may return HTTP `429` when the client's
+rate limit is exceeded. Direct loopback requests are exempt; forwarded
+requests arriving through a loopback proxy are still subject to the limit.
+Federation applies its own transport limits.

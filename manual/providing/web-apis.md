@@ -6,12 +6,14 @@ nav_order: 5
 
 # Wrapping a web API
 
-An OpenAPI document can be installed as a set of actions in one command: one action
-per operation, under one name you choose.
+An OpenAPI document describes the operations exposed by a web API. Juice can
+use that description to register each supported operation as an action under
+a common application name, preserving the API's existing HTTP implementation.
 
-You need the document at a URL the kernel can fetch. The example below uses a
-document served at `https://greeter.example.com/openapi.json`, describing two
-operations, which is the smallest document the import accepts:
+The document must be available at a URL the kernel can fetch. The following
+example describes a small application with an `index` operation that explains
+the service and a `greet` operation that returns a greeting. Assume it is hosted
+at `https://greeter.example.com/openapi.json`:
 
 ```json
 {
@@ -39,7 +41,8 @@ operations, which is the smallest document the import accepts:
 }
 ```
 
-`x-juice-price` is in base units. Install it:
+The optional `x-juice-price` extension gives an operation's price in base units.
+Import the document under the application name `greeter`:
 
 ```
 $ juice action import greeter https://greeter.example.com/openapi.json
@@ -48,11 +51,12 @@ imported greeter/index
 greeter: 2 imported.
 ```
 
-The name is the application's identity. One name holds one document. Installing a
-second document under a name already in use is refused; installing the same
-document under two names gives two independent applications.
+The chosen name identifies this installation of the document. It cannot be
+reused for another document, but you can install the same document under a
+different name to create an independent application.
 
-As with any action, the imported rows start inactive and private:
+Imported actions begin inactive and private. Enable them using their shared
+path, then set the visibility required for their intended audience:
 
 ```
 $ juice action enable bob/greeter
@@ -62,7 +66,7 @@ enabled bob/greeter/index
 
 ## What the document must declare
 
-An operation is imported only if it gives all of these:
+To produce a usable action, an operation must provide:
 
 - an `operationId`, or an `x-juice-name`;
 - a description or a summary;
@@ -70,22 +74,23 @@ An operation is imported only if it gives all of these:
 - exactly one unambiguous 2xx JSON response schema;
 - an `x-juice-price` that is a non-negative integer, if it declares a price at all.
 
-Methods `GET`, `POST`, `PUT`, `PATCH` and `DELETE` are supported. Operations that
-are not JSON, that stream, that use multipart, that have an ambiguous success
-schema, or that use an unsupported authentication scheme are installed but cannot
-be activated.
+Supported HTTP methods are `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
+Non-JSON responses, streaming, multipart data, ambiguous success schemas, and
+unsupported authentication cannot produce an activatable action.
 
-The path and query parameters and the body schema are compiled into one input
-schema. The chosen 2xx response becomes the output schema.
+The importer combines path parameters, query parameters, and the request body
+into the action's input schema. It preserves the bindings needed to reconstruct
+the HTTP request, and uses the selected success response as the output schema.
 
 ## The root of an application
 
-An operation keyed `index` becomes `NAME/index`, which is what the bare name
-`bob/greeter` resolves to. A document with no such operation installs fine, but the
-group has no front door: callers must name an operation.
+An operation named `index` becomes the application's default entry point through
+Juice's reference convention. For example, `bob/greeter` resolves to
+`bob/greeter/index` when no action occupies the shorter name.
 
-To give an application a root, name one operation `index`, either with
-`operationId: index` or with `x-juice-name: index`.
+Set `operationId: index` or `x-juice-name: index` on an operation that describes
+the application. This is optional; without it, callers name individual
+operations directly.
 
 ```
 $ juice action show bob/greeter
@@ -98,8 +103,9 @@ $ juice action show bob/greeter
 
 ## Re-importing
 
-Re-run the import to take up a changed document. The name alone is enough; the URL
-is remembered.
+Re-importing reads the document again and reconciles its operations with the
+installed actions. The kernel remembers the document URL, so the application
+name is sufficient:
 
 ```
 $ juice action import greeter
@@ -108,7 +114,7 @@ unchanged greeter/index
 greeter: 2 unchanged.
 ```
 
-Reconciliation compares the document against what each row currently holds:
+The importer compares the document with each action's current definition:
 
 | Outcome | Effect |
 |---|---|
@@ -116,71 +122,76 @@ Reconciliation compares the document against what each row currently holds:
 | changed | updated in place, deactivated, statistics reset, identity kept |
 | gone from the document | deactivated, statistics reset |
 
-Nothing is deleted, and no transaction, receipt or rating is ever touched.
-Reconciliation is confined to that application's own rows; it never affects an
-action you created by hand or one belonging to another application.
+Reconciliation preserves historical transactions, receipts, and ratings, and
+affects only actions belonging to this import. Manually registered actions and
+other applications are outside its scope.
 
-The document owns the description, both schemas, the base URL, method, path and
-bindings, and the price only where it declares `x-juice-price`. You own the
-visibility, the credentials, and the price where the document does not declare one.
-Those survive every re-import. A document-owned field you edit by hand is restored
-on the next import.
+The document controls descriptions, schemas, HTTP routing, and any price
+explicitly declared by `x-juice-price`. Re-importing restores these fields if
+you edited them manually. Visibility and credentials remain under your control,
+as does the price of an operation whose document declares none.
 
 ## Switching off and removing
 
-The ordinary verbs act on the whole application:
+Because an application shares a path, the ordinary action commands can disable
+or retire all of its operations together:
 
 ```
 $ juice action disable bob/greeter
 $ juice action delete bob/greeter
 ```
 
-Deletion is soft, as it is for any action.
+Retirement preserves the application's historical records, as it does for an
+individual action.
 
 ## Credentials you hold
 
-One credential can cover the whole application:
+If all operations use your account at the upstream provider, supply its
+credential when importing the application:
 
 ```
 $ juice action import weather https://api.example.com/openapi.json \
     --auth '{"scheme":"bearer","secrets":{"token":"…"}}'
 ```
 
-It is validated, encrypted, and applied when any of the application's actions is
-dispatched. Replacing it revokes the consents callers have given.
+The ordinary action credential checks validate and encrypt it, and the kernel
+applies it when dispatching the imported actions. Replacing the credential
+revokes any associated caller grants.
 
 ## Credentials each caller holds
 
-For an API where every caller uses their own account, configure a delegated scheme
-instead. The kernel then holds one credential per caller, not one per action.
+An API such as a personal mailbox may need each caller's own account. Configure
+a delegated authentication scheme for these actions. Each caller then creates
+a connection that can serve several explicitly authorized actions.
 
-`oauth_delegated` performs the authorisation-code exchange with the provider:
+The `oauth_delegated` scheme lets the kernel exchange an authorization code
+with the upstream provider:
 
 ```
 --auth '{"scheme":"oauth_delegated","config":{"auth_url":"…","token_url":"…","client_id":"…","scopes":"…"}}'
 ```
 
-`delegated_bearer` accepts a token the caller pastes:
+The `delegated_bearer` scheme uses a personal token supplied by the caller:
 
 ```
 --auth '{"scheme":"delegated_bearer"}'
 ```
 
-A call by someone who has not consented is refused before any money moves, naming
-what to connect. What the caller then does is described in
+A caller without the required grant is refused before charging and told which
+action to connect. The consent procedure is described in
 [Connecting an upstream account](../calling/consent-and-steps.html#connecting-an-upstream-account).
 
-Two things follow from choosing this scheme. A delegated action
-is never offered to other kernels, because a kernel has one account on yours and
-cannot consent on behalf of its users. And the credential is bound to the exact
-action consented for and to the caller who is paying: it is not inherited by
-anything your action calls.
+Delegated actions are excluded from federation: the peer's kernel account
+cannot stand in for each remote user's upstream consent. Locally, each
+credential applies only to the action granted access and when its grantor is
+the payer. A child action must have its own grant.
 
 For the OAuth details, see
 [`docs/oauth.md`](https://github.com/daios-ai/juice/blob/master/docs/oauth.md).
 
 ## Webhooks
 
-An import installs the API you call. It does nothing about the API calling you.
-Incoming events come in as an ordinary account running an action or completing a
-step; see [External systems](steps.html#external-systems).
+OpenAPI import describes outbound calls to a service. To receive an event from
+that service, give the external system a Juice account through which it can
+run an action or complete a prepared step. See
+[External systems](steps.html#external-systems).

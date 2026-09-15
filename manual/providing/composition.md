@@ -6,32 +6,36 @@ nav_order: 3
 
 # Composition
 
-An action can call other actions. The buyer sees one price, one result and one
-party to rate; you pay the sub-providers out of the price you charged.
+Composition allows an action to use other services as part of its
+implementation. The caller purchases the resulting service at your advertised
+price, while your action allocates parts of that budget to the providers it
+uses. You remain responsible for the combined result and receive the rating
+for the call the buyer made.
 
 ## The budget rule
 
-A sub-call spends from the budget of the call that made it. A sub-call costing
-more than the budget has left is refused:
+A child call receives its allocation from the remaining budget of its parent.
+If the requested action costs more than the parent has available, the kernel
+rejects the child call before it executes:
 
 ```
 error: wasm execution failed: run failed: parent trace has 100000 credits, action costs 750000
 ```
 
-In a WebAssembly action the refusal stops the module, so the whole call fails and
-the buyer is refunded what was not consumed. Check the price of what you intend to
-call against the budget you have, rather than relying on handling the failure. An
-HTTP action receives the refusal as an ordinary error from `POST /v1/call` and can
-carry on.
+The current WebAssembly host stops the module on this refusal, causing the
+parent call to fail and refund its unused budget. Check expected child prices
+when designing the action. An HTTP implementation receives an error from
+`POST /v1/call` and can decide how to handle it.
 
-This is what makes the advertised price a bound. There is no path by which work
-beneath a call can exceed the money set aside for it.
+Applying the same budget rule at each level bounds execution spending throughout
+the call tree. Separate value transfers and remote ticket stakes use the
+immediate caller's balance, as described in [Earnings](earnings.html).
 
 ## Composing from WebAssembly
 
-A `wasm` action is compiled code the kernel runs in a sandbox. It has no
-filesystem, no network, no environment variables and no access to any credential.
-It can do four things through the host:
+A `wasm` action runs a compiled WebAssembly module inside the kernel's sandbox.
+The module has no direct access to the filesystem, network, environment, or
+credentials. It interacts with Juice through four host functions:
 
 | Host function | Effect |
 |---|---|
@@ -40,12 +44,15 @@ It can do four things through the host:
 | `JuiceStepComplete(stepID, input)` | complete a step this call created |
 | `JuiceLog(level, msg)` | write a log record against this call |
 
-To reach the web, call `sys/web` or an `http` action of your own. Both go through
-the ordinary call machinery, so they are priced and confined like anything else.
+A module can reach a web service by calling `sys/web` or a registered HTTP
+action. These requests use the ordinary action budget and the kernel's outbound
+network policy.
 
 ### Writing and compiling a handler
 
-You write one function, `Handle`. The kernel supplies everything around it.
+The supplied compilation interface expects a `Handle` function. It supplies
+the surrounding module code, including the entry point and host bindings.
+This example calls `sys/time` and combines its result with a note from the input:
 
 ```go
 func Handle(in map[string]any) (map[string]any, error) {
@@ -63,18 +70,18 @@ func Handle(in map[string]any) (map[string]any, error) {
 }
 ```
 
-`encoding/json`, `strings`, `strconv`, `math`, `sort` and `errors` are available.
-`fmt` is not, because it pulls reflection into the binary.
-
-Compile it on the kernel with `sys/tinygo/compile`, which returns the module as
-base64:
+The supplied imports include `encoding/json`, `strings`, `strconv`, `math`,
+`sort`, and `errors`; they do not include `fmt`. Save the function in
+`handler.go`, then call `sys/tinygo/compile`. Its result contains a base64
+module, which the following pipeline decodes into a file:
 
 ```
 $ juice run sys/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
     | jq -r .result.artifact | base64 -d > stamp.wasm
 ```
 
-Registration takes the decoded file:
+Register the decoded module as a WebAssembly action, then enable it and choose
+its audience:
 
 ```
 $ juice action create stamp --kind wasm --artifact stamp.wasm --price 1 \
@@ -84,7 +91,8 @@ $ juice action enable bob/stamp
 $ juice action update bob/stamp --visibility local
 ```
 
-Running it shows the sub-call's result folded into your own:
+The action returns the input note together with the timestamp obtained by its
+child call:
 
 ```
 $ juice run bob/stamp '{"note":"invoice 42"}'
@@ -95,8 +103,9 @@ $ juice run bob/stamp '{"note":"invoice 42"}'
   …
 ```
 
-A compile failure is reported in the result rather than as an error, and is
-charged as a failed output:
+A source compilation failure is reported in the compiler action's result.
+The compilation service is still charged, since it performed the requested
+compilation attempt:
 
 ```
   result: {
@@ -105,23 +114,24 @@ charged as a failed output:
   }
 ```
 
-If the toolchain is not installed on the kernel, `sys/tinygo/compile` reports an
-invalid state and charges nothing. You can also compile elsewhere and register the
-`.wasm` file directly.
+If the kernel lacks the toolchain, the compilation action is unavailable and
+reports an invalid state without charging. A module compiled elsewhere can also
+be registered from its `.wasm` file.
 
 ## Composing from an HTTP endpoint
 
-An `http` action can compose too, without holding any Juice credential.
-
-Each dispatch to your endpoint carries two headers:
+An HTTP implementation can request child calls through a callback to the kernel.
+The dispatched request supplies a callback address and a capability authorizing
+work within that call, so the endpoint does not need a saved Juice login.
+When a callback address is available, the request includes:
 
 ```
 X-Juice-Callback: http://127.0.0.1:4040
 X-Juice-Capability: <trace-id>.<signature>
 ```
 
-Send the capability back in that same header, to the callback address, to make
-sub-calls under the same budget:
+To make a child call, send the capability in the same header to the callback
+address. The kernel allocates the child's price from the current call's budget:
 
 ```
 POST http://127.0.0.1:4040/v1/call
@@ -135,32 +145,30 @@ Content-Type: application/json
 {"result": {"…"}, "tx_id": "…", "trace_id": "…"}
 ```
 
-It is not an `Authorization: Bearer` credential, and presenting it as one is
-refused:
+The current HTTP interface expects the `X-Juice-Capability` header. Supplying
+the capability as an `Authorization: Bearer` token is rejected:
 
 ```
 {"code":"unauthenticated","error":"capability required"}
 ```
 
-The same header authorises `POST /v1/steps` and
-`POST /v1/steps/{id}/complete`.
+The header also authorizes step creation and completion through
+`POST /v1/steps` and `POST /v1/steps/{id}/complete`, subject to the step rules.
+Completion is restricted to steps created by this trace and addressed to the
+executing action's owner.
 
-The capability acts as your action's owner, inside this one call, for as long as
-the call is open. It is not a login: it carries no wallet, reaches no other call,
-and cannot rate anything. It stops working the moment the call settles.
+The capability acts with the action owner's authority inside the current call.
+It cannot spend another call's budget, access account management, or submit
+ratings, and it expires when the call settles. An endpoint can therefore serve
+several kernels by using the callback information in each request.
 
-A service written this way holds nothing kernel-specific. It can serve several
-kernels at once, because every request tells it where to call back and with what.
-
-The capability never crosses to another kernel. An action of yours that composes
-this way is served abroad as an ordinary endpoint, bounded by its advertised
-price.
+This capability remains local to the executing kernel. Remote buyers invoke
+your action through ordinary federation; the endpoint's child calls still use
+the budget and callback supplied by your own kernel.
 
 ## Reaching your own private actions
 
-Your public action may call your own private actions, in anyone's process. This is
-how you build on helpers you do not want to sell.
-
-The reverse does not hold. An action somebody else owns, running inside a process
-your buyer funded, cannot reach that buyer's private actions. Funding code does not
-lend it your authority.
+Child calls are authorized as the composing action's owner. Your public action
+can therefore use your private helpers even when another user funds the process.
+It does not gain access to that user's private actions: paying for a service
+does not grant its implementation the payer's permissions.

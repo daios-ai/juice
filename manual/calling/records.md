@@ -6,10 +6,15 @@ nav_order: 4
 
 # Records, receipts and ratings
 
-Every attempted call writes one transaction and one signed receipt. Neither
-changes afterwards.
+When a call settles, the kernel records its outcome and payment in a transaction
+and issues a signed receipt. These records are permanent. They let the parties
+inspect what happened, verify the charge, and relate a rating to the call that
+produced it.
 
 ## Transactions
+
+Use `tx list` to find calls you are entitled to read and `tx show` to inspect one
+in detail:
 
 ```
 $ juice tx list
@@ -36,25 +41,29 @@ $ juice tx show 116fd3a6-…
   target_handle: bob
 ```
 
-The three handles are the three roles a call records. `owner_handle` is the payer,
-who owns the process the call ran in. `caller_handle` is whoever asked for this
-particular call, which is the payer for a call you ran yourself and the composing
-action's owner for a call made inside another action. `target_handle` is the
-action's owner, who is paid.
+The three handle fields distinguish the participants. `owner_handle` names the
+owner of the process that funded the work; `caller_handle` names the immediate
+requester; and `target_handle` names the action's owner. For a call you start
+with `run`, you are both process owner and requester. If that action calls
+another, the original process owner stays the same, while the requester of the
+child call is the composing action's owner.
 
-The amounts: `gross` is what was set aside for the call, `net` what the provider
-received, `fee` what the kernel took, and `refund` what came back to the caller.
-On a failure `reason` names the class of failure. It never contains an upstream
-URL, response body, or internal detail.
+For a local call, `gross` is the allocation, `net` is the provider's payment,
+`fee` is the kernel's fee, and `refund` is the amount returned to the funding
+budget. On failure, `reason` identifies the failure class without exposing an
+upstream URL, response body, or internal error detail. Remote settlement uses
+the additional amounts explained below.
 
-A transaction is readable by its payer, its caller and its payee, and by the
-operator. It keeps the action's name even if the action is later deleted, so
-history stays readable.
+The process owner, requester, action owner, and operator may read the
+transaction. Its captured action name remains available even after the action
+is retired, so the history can still be interpreted.
 
 ## Receipts
 
-A receipt is the signed form of the transaction, issued by the kernel that
-executed the call.
+A receipt records the call's outcome and charge under the kernel's signature.
+It contains hashes of the arguments and result, allowing those values to be
+checked without including their full contents in the receipt. Use `tx verify`
+to inspect the verification result:
 
 ```
 $ juice tx verify 116fd3a6-…
@@ -85,16 +94,14 @@ $ juice tx verify 116fd3a6-…
   }
 ```
 
-Amounts in the receipt are base units, because the receipt is the signed artifact
-rather than a rendering of it.
+Receipt amounts are integer base units. Verification uses the stored record
+and the issuing kernel's public key; it does not require contact with the
+issuer. The command still uses your local kernel's API to retrieve and check
+those records, and reports only the checks relevant to the call.
 
-You can verify a receipt offline. It needs the stored receipt and the signing key
-of the kernel that issued it, not a connection to anybody. Only the checks that apply are
-reported.
-
-For a call to another kernel, the receipt was signed by that kernel and is stored
-with your transaction, so it stays verifiable even if the other kernel later
-deletes its own copy:
+For a remote call, your kernel retains the remote receipt and its signing key
+with the transaction. It can therefore verify the charge after losing contact
+with the peer or removing that peer from its local roster:
 
 ```
 $ juice tx verify 6cd9f6b6-…
@@ -118,17 +125,16 @@ $ juice tx verify 6cd9f6b6-…
   }
 ```
 
-The extra checks confirm what a cross-kernel call adds: that the charge did not
-exceed the quoted ceiling, that the markup and import fee follow the rates the
-call was dispatched under, that the refund adds up, and that the settlement draw
-matches the commitment both sides recorded.
-
-A signature your kernel's network does not accept is reported invalid. It is never
-re-signed.
+Remote verification checks the receipt against the dispatched terms, including
+the charge ceiling, markup, import fee, and refund. It also checks that the
+ticket's payment agrees with the recorded draw. A signature that is invalid
+under your kernel's network remains invalid; verification does not replace it
+with a new signature.
 
 ## Rating
 
-Only the account that paid for a call can rate it, once.
+The payer may submit one assessment of a completed call. Use its transaction
+identifier to associate the rating with the work you purchased:
 
 ```
 $ juice tx rate 116fd3a6-… 1 --note "did what it said"
@@ -140,26 +146,24 @@ $ juice tx rate 116fd3a6-… 1 --note "did what it said"
   signature: rx8TNj531MkA…
 ```
 
-The value is `1` or `0`. The note is optional and at most 1024 bytes. A rating is
-permanent: it cannot be changed or withdrawn, and it never alters what was paid.
-
-Ratings are public wherever the action is visible, shown without the rater's
-identity:
+The rating is `1` for a positive assessment or `0` for a negative one. A note
+may add context, up to 1024 bytes. Once submitted, the rating cannot be changed
+or withdrawn and has no effect on the payment. Readers who can see the action
+can also see its ratings, without the payer's identity:
 
 ```
 $ juice action ratings bob/echo
 1  2026-09-14T12:05:17Z  did what it said
 ```
 
-The code that executes an action can never rate anything, and rating never runs
-through the call machinery. Reputation cannot be manufactured by the thing it
-judges.
+Rating belongs to the account's supervisory interface. Code executing inside
+an action has no authority to submit ratings through its execution capability.
 
 ## Processes
 
-A process is the wallet of one `run`. It closes by itself once the call has
-returned, no step is waiting, and no call is awaiting a receipt from another
-kernel.
+A process groups the work and reserved funds of one `run`. It closes
+automatically after all calls have settled and no steps remain outstanding.
+Use the process commands to follow work that has not yet finished:
 
 ```
 $ juice process list
@@ -168,18 +172,21 @@ e3539f75-…  open    available:0.00 credits  locked:0.00 credits
 $ juice process show e3539f75-…
 ```
 
-A process that stays open is holding money. The two reasons are a step waiting on
-somebody and a call parked awaiting a receipt; a listed process says which by
-carrying `awaiting_receipt` and, when set, `awaiting_receipt_since`. A process held
-open only by a step can be ended by its owner, which cancels the waiting steps and
-returns their money. One awaiting a receipt is better left to settle on its own.
-See [Ending a process](../providing/steps.html#ending-a-process).
+A process may remain open while a step waits for input or a remote call awaits
+a receipt. The fields `awaiting_receipt` and `awaiting_receipt_since` identify
+the latter condition and its age. An open process can have a zero balance when
+its outstanding work is free.
+
+The owner can end abandoned work to cancel waiting steps and recover their
+reserved funds. A process awaiting a remote receipt should normally be allowed
+to settle through the retry mechanism. See
+[Ending a process](../providing/steps.html#ending-a-process) for the consequences
+of forced closure.
 
 ## What you can reconstruct
 
-As a buyer, `tx list` and `user ledger` together account for every credit that
-left your balance: transactions for work you bought, the ledger for deposits,
-withdrawals, transfers and value delivered to you or by you.
-
-As a provider, every credit that reached you is reconstructible from the
-transactions you are party to, which you may read because you are the payee.
+Use call transactions together with the account ledger to follow your balance.
+Transactions explain execution charges, while the ledger records deposits,
+withdrawals, transfers, and delivered value. For a provider, readable call
+records identify the work behind its earnings; deposits and other account
+movements remain visible in the ledger.

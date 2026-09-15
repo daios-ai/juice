@@ -6,10 +6,17 @@ nav_order: 1
 
 # Accounts, logins and identity
 
+Your account belongs to a kernel, while your client keeps the information needed
+to reach that kernel and authenticate to the account. Understanding this
+distinction makes it easier to work with several accounts or kernels from the
+same machine.
+
 ## Accounts
 
-An account is created on one kernel and exists only there. An account on
-`acme` is unrelated to an account with the same handle on another kernel.
+Each account has its own balance and history on the kernel where it was created.
+Its handle is unique there, but another kernel may have an unrelated account
+with the same handle. The following command creates `alice` on the kernel that
+your client knows as `acme`:
 
 ```
 $ juice user create alice@acme
@@ -23,19 +30,18 @@ Press Enter once you have written it down:
   …
 ```
 
-The handle must be bare: letters, digits and the separators the kernel accepts,
-with no `@` and no `/`. A leading `@` is rejected rather than removed. Handles are
-unique on their kernel.
+The handle itself contains neither `@` nor `/`; the `@` in this command
+separates the handle from the kernel name. A leading `@` in a handle is invalid.
 
-The twelve-word recovery phrase is shown once and is the only way to reset the
-password. Write it down before pressing Enter.
-
-Creating an account does not log you in.
+Account creation prints a twelve-word recovery phrase. Save it before pressing
+Enter, since it is shown only once and is required to recover a lost password.
+After creating the account, log in to establish a session.
 
 ## Logins
 
-A **login** is one account at one kernel, written `handle@kernel`. It says who a
-command acts as and which kernel it acts on.
+A **login** is the client's saved session for an account, identified by
+`handle@kernel`. Logging in authenticates you to that account and selects it
+for subsequent commands:
 
 ```
 $ juice auth login alice@acme
@@ -43,10 +49,9 @@ Password:
 alice@acme
 ```
 
-Logging in stores that login's tokens in their own file and selects it. The
-selected login applies to every later command.
-
-You may hold several logins at once, including several accounts on one kernel:
+The client stores each login's session tokens separately. It can hold several
+logins at once, including logins for different accounts on the same kernel.
+Use `auth list` to see them and `auth use` to change the selected one:
 
 ```
 $ juice auth list
@@ -56,40 +61,39 @@ $ juice auth use alice@acme
 alice@acme
 ```
 
-`auth logout` ends a session. If the login was the selected one, nothing is
-selected afterwards. Two programs logged in as the same account on the same
-kernel share one session, so logging out ends it for both.
+`auth logout` ends a saved session and leaves no login selected. Programs using
+that same saved login share its session, so logging it out also affects them.
 
 ## Naming one login for one command
 
-`--as` runs a single command as a login you already hold, without changing the
-selection:
+When you want to use a different account for one command, `--as` names an
+existing login without changing the client's selection:
 
 ```
 $ juice --as bob@acme user me
 ```
 
-The environment variable `JUICE_AS` does the same. A name that is not a login on
-this machine is refused; it never falls back to whoever is selected.
-
-Programs that run unattended must name their login this way and never rely on the
-selection, which a person at the same machine can change at any time.
+The environment variable `JUICE_AS` provides the same choice. An unknown login
+causes an error, so a misspelling cannot cause the command to use the selected
+account instead. Unattended programs should always specify a login: the client
+selection may change as a person uses other accounts on the same machine.
 
 ## The three names a kernel has
 
-Three different names can refer to a kernel, and they are not interchangeable.
+Kernel names have three roles. A nickname labels a kernel, a client name selects
+it from your machine, and a petname identifies a remote kernel in references
+resolved by your own kernel:
 
 | Name | Chosen by | Where it resolves |
 |---|---|---|
 | Nickname | the kernel's operator | nowhere; it is a label the kernel reports about itself |
-| Client name | you, in `kernel add` | on this machine, in `handle@kernel` and `--server` |
+| Client name | you, in `kernel add` | on this machine, in logins such as `handle@kernel` |
 | Petname | one kernel's operator, for another kernel | on that kernel only, in `owner@kernel/name` |
 
-They often use the same word. `juice kernel add http://localhost:4040` with no
-name registers the kernel under the nickname it reports, which is why the kernel
-called `acme` is usually reached as `acme`. Nothing enforces that: a kernel's
-nickname is not unique and not verified. What identifies a kernel is its public
-key.
+These names may happen to be the same. For example, `kernel add` uses the
+reported nickname when you supply no client name. Their meanings still depend
+on where they are used, and the public key remains the kernel's identity even
+when its names change.
 
 ## Registering and trusting a kernel
 
@@ -103,16 +107,15 @@ $ juice kernel health work
 ok  acme  network play  fdlMi64P…
 ```
 
-Registering dials the address and records the public key and network the kernel
-reports. `auth login` and `auth use` refuse a server that no longer reports the
-recorded key or network, so a stored credential is never sent to a different
-kernel. The same key on the same network at a new address is taken as that kernel
-having moved: the address is updated and the logins are kept.
+Registration records the public key and network returned by the address you
+provide. Later login and selection operations check those values before trusting
+the server. If you register a new address under an existing client name, the
+client accepts it only when it identifies the same kernel on the same network;
+the saved logins are then retained.
 
-`kernel forget` removes the record and the credentials of its logins.
-
-`--server URL` sends one command to an address directly. It carries no login, so
-it is only useful for unauthenticated routes.
+Use `kernel forget` to remove a registration and its saved credentials.
+For an unauthenticated request, `--server URL` can address a server directly;
+it does not carry a saved login to that address.
 
 ## Password and profile
 
@@ -136,20 +139,21 @@ Confirm password:
   status: ok
 ```
 
-The command takes the phrase printed when the account was created, proves to the
-kernel that you hold it, and sets the new password. There is no email
-anywhere in Juice, so the phrase is the only recovery route. An account whose
-phrase is lost cannot be recovered.
+The client uses the recovery phrase to prove that you hold the account's
+recovery key, allowing the kernel to set a new password. Juice provides no
+email recovery. If both the password and the phrase are lost, this recovery
+procedure is unavailable.
 
 ## Suspension
 
-An operator can suspend any account, reversibly. A suspended account is refused
-at every authenticated request:
+An operator may suspend an account to prevent it from making authenticated
+requests. A command using a suspended account therefore fails even if its
+session credentials are otherwise valid:
 
 ```
 $ juice user me
 error: account suspended
 ```
 
-Nothing is deleted. Unsuspending restores the account with its balance and
-history intact.
+Suspension preserves the account's balance and history. The operator can restore
+access by unsuspending it.

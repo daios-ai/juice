@@ -6,8 +6,12 @@ has_children: true
 
 # Operating a kernel
 
-This part is for whoever runs a kernel: starting one, keeping it, crediting
-accounts, moderating them, and understanding the money that moves between kernels.
+Operating a kernel involves maintaining its persistent state, managing accounts
+and access, and overseeing the funds it holds. These chapters cover setup and
+maintenance, routine administrative duties, and the economics of serving other
+kernels.
 
-An operator is also an ordinary user, so the rest of the manual is their reference
-too. The `admin` commands described here add only what a superuser alone may do.
+The operator uses the `sys` account. It has access to administrative commands
+and a wider view of ordinary records, while using the same client and HTTP API
+as other users. The earlier chapters therefore remain relevant to the
+operator's own calls, deposits, and withdrawals.

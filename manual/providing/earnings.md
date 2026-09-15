@@ -6,22 +6,27 @@ nav_order: 2
 
 # Earnings
 
+An action's price funds its execution and determines the provider's margin.
+This chapter follows that allocation through successful and failed calls, then
+explains when a provider also needs funds in its own account.
+
 ## Price is a bound and a margin
 
-The price you set is two things at once. To the buyer it is the most the call can
-cost. To you it is the budget the call runs on: every paid action your action calls
-is paid out of it, and whatever is left over at the end is yours.
+The price you set provides a budget for the action and any work it buys from
+other actions. For a successful local purchase, the buyer pays that price and
+you earn what remains after downstream costs and the kernel's fee. Remote
+purchases add serving and import charges and use the settlement procedure
+described in [The ticket](../calling/running.html#the-ticket).
 
-There is no metering. A successful call is paid its full price whether it consumed
-the budget or not, so the less of the budget the call spends, the more of the price
-you keep.
+Since a successful call is paid at a fixed price, reducing its downstream costs
+increases your margin. The buyer receives the agreed service at the agreed
+price regardless of how much of the execution budget it consumed.
 
 ## The kernel's fee
 
-The kernel charges a fee on your margin, not on the money passing through you. The
-rate is the kernel's `fee_bps`, 20% by default.
-
-For a call that succeeds:
+The kernel applies its fee to the margin remaining after downstream work has
+been paid. The rate is configured as `fee_bps`, in hundredths of a percent;
+the default value of 2000 is 20%. For a successful call:
 
 ```
 margin = price − what this call spent on other actions
@@ -37,12 +42,13 @@ A call to `bob/echo` at `0.50` that calls nothing:
   fee: 0.10 credits
 ```
 
-The whole price is margin, so the fee is `0.10` and bob receives `0.40`.
+Because this action buys no downstream work, its whole price is margin.
+The 20% fee is therefore `0.10`, leaving Bob `0.40`.
 
 ## Worked example with composition
 
-You sell `bob/pipeline` at `1.00`. It calls `carol/extract`, priced at `0.30`.
-Both kernels charge 20%.
+Suppose you sell `bob/pipeline` at `1.00` and it calls `carol/extract` on the
+same kernel for `0.30`. With a 20% fee, your layer settles as follows:
 
 | | |
 |---|---|
@@ -52,32 +58,32 @@ Both kernels charge 20%.
 | Fee on your margin | 0.14 |
 | **You receive** | **0.56** |
 
-Carol's layer settles separately and on the same rule: her margin is `0.30`, her
-fee `0.06`, and she receives `0.24`. Each layer is taxed once, on the value it
-added. The buyer's total cost is `1.00` regardless of how many layers there are.
+Carol's call settles under the same rule. Assuming it buys no further work,
+its margin is `0.30`, its fee `0.06`, and Carol receives `0.24`. Each provider
+is charged on its own margin, so adding a layer does not tax the same gross
+payment again. The buyer's total remains `1.00`.
 
 ## When a call fails
 
-A failed call earns you nothing. The buyer is refunded the part of the price that
-had not already been spent.
+If your call fails, your layer receives no execution payment and incurs no
+margin fee. The unused budget is refunded, while downstream work already
+delivered remains paid. This explains why the refund can be smaller than the
+original price even though your own action earned nothing.
 
-Sub-calls that succeeded before the failure stay paid. Their providers keep that
-money and it does not come out of your pocket; it comes out of the budget, which
-is why the buyer's refund is smaller than the full price. Your own layer earns
-zero.
-
-Output that does not match your output schema is a failure. It is not paid for.
+The same rule applies when the action returns a result that violates its output
+schema: the result is treated as a failure, with completed downstream work
+preserved.
 
 ## When you need a balance of your own
 
-Executing an action for a caller on your own kernel costs you nothing. The work is
-funded by the buyer's price.
+For a local buyer, the execution budget comes from the buyer's allocation.
+This covers payments through Juice; any cost of operating your own HTTP service
+remains yours. Three additional circumstances require an available account
+balance.
 
-Your own balance is drawn in three cases.
-
-**Serving a caller on another kernel.** Your kernel funds the execution from your
-account and is repaid when the buyer's kernel settles. If you have not got the
-price, the call is refused before it runs, and the buyer sees this:
+**Serving a remote buyer.** Your account advances the execution budget while
+waiting for the remote payment. If it cannot fund the advertised price, the
+call is rejected before execution. The buyer receives a message such as:
 
 ```
 $ juice run 'dave@k-hqDr8oMX/summarize' '{"text":"…"}'
@@ -88,21 +94,25 @@ own provider for the work.
 error: this kernel's credit with peer k-hqDr8oMX is exhausted; the operator must top up
 ```
 
-Keep a working balance if you sell across the network.
+Maintain a working balance when selling to remote buyers, allowing for the
+delay and variation in settlement.
 
-**Calling another kernel from inside your action.** Your action is the immediate
-caller of that cross-kernel call, so the stake it requires is taken from your
-balance, not the buyer's. See [The ticket](../calling/running.html#the-ticket).
+**Buying remote work within your action.** You are the immediate caller of
+that remote action, so your account supplies its ticket stake in addition to
+the budget allocated by the parent call. See
+[The ticket](../calling/running.html#the-ticket).
 
-**Delivering value.** If your action moves money to a named recipient, that money
-comes from your balance. See
+**Delivering value through a child action.** If your action calls a
+value-bearing action such as `sys/transfer`, the amount delivered comes from
+your balance. See
 [Moving money through an action](../money/funds.html#moving-money-through-an-action).
 
 ## Zero-price actions
 
-An action priced at zero runs with no funds on either side. It can still call
-other zero-price actions. It cannot call anything that costs money, because there
-is no budget to spend.
+A zero-price action needs no execution funds and can call other free actions.
+It has no budget for paid downstream work. Separate value delivery still
+requires the immediate caller's funds, even if the transfer action's execution
+price is zero.
 
 ## Your track record
 
@@ -117,17 +127,13 @@ $ juice action stats bob/echo
   last_used_at: 2026-09-14T12:05:24Z
 ```
 
-`latency_estimate` is the mean time your action itself took, in seconds.
-`rating_estimate` is the mean of its ratings.
+The `latency_estimate` is the mean duration recorded for the action's own calls,
+in seconds, and `rating_estimate` is the mean of its ratings. Current statistics
+reset when the description, price, schemas, or source changes. Historical
+transactions and ratings remain available.
 
-Statistics are reset when you change the price, a schema, the source, or the
-description, because they describe behaviour under terms that no longer apply.
-Ratings themselves are never deleted.
-
-Ratings are written only by accounts that paid for a call, and only once each.
-Code that executes an action can never rate anything, so an action cannot generate
-its own reputation as it runs. Buying your own action and rating it is possible, as
-it is for anyone willing to pay; each such call costs you the kernel's fee, and
-across the network a rating counts as evidence only when it is backed by a trade
-the other kernel also recorded. See
+Only a call's payer may rate it, once, and executing action code has no rating
+authority. This does not make ratings proof of quality: an account holder can
+buy and rate its own action, subject to the usual fees. Remote evidence adds a
+check that the reported trade is linked to the other kernel's record. See
 [Reputation across kernels](../operating/network-economy.html#reputation-across-kernels).

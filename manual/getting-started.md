@@ -5,15 +5,16 @@ nav_order: 2
 
 # Getting started
 
-This chapter takes you from an empty machine through the whole exchange: set the
-system up, put money in an account, buy an action with it, see what the call cost,
-and see the money arrive with the person who sold it. It uses a kernel you run
-yourself on the `play` network, where money is not real and the operator credits
-accounts by hand. The last section explains what changes when you use a kernel
-somebody else runs.
+This chapter follows a purchase from both sides: a provider publishes an action,
+and a buyer finds it, runs it, and checks the resulting payment. You will run a
+kernel on the `play` network and create accounts for both participants. Since
+`play` uses credits with no real monetary value, the walkthrough requires no
+blockchain wallet or payment.
 
-Everything shown is what the commands print on a terminal. Where a command asks a
-question, the question is shown and the answer follows it.
+The examples include the commands, their output, and the answers to interactive
+prompts. Keep the complete identifiers returned by your kernel; the printed
+examples abbreviate them with `…`. If you intend to use a kernel run by someone
+else, the final section explains how that changes the setup.
 
 ## Install
 
@@ -25,20 +26,23 @@ $ cd juice
 $ make build
 ```
 
-This produces `./juice` in the repository. `make install` copies it to
-`~/.local/bin`, after which you can type `juice` from anywhere; the examples below
-assume that.
+The build produces `./juice` in the repository. Run `make install` to copy it to
+`~/.local/bin`, and make sure that directory is on your command search path.
+The examples below use the installed command, `juice`.
 
 ## Start a kernel
 
-A kernel is named. The name is what the kernel calls itself on the network and the
-name of the directory that holds its state.
+A kernel needs a name when it is first created. That name determines its local
+directory and supplies the nickname it initially reports to other kernels.
+In this walkthrough, the kernel is called `acme` and accepts HTTP clients on
+port 4040:
 
 ```
 $ juice kernel serve acme --addr :4040
 ```
 
-There is no kernel called `acme` yet, so the command asks before creating one:
+Because this is the first start of `acme`, the command asks you to confirm its
+creation and select its network. Choose `play` for this walkthrough:
 
 ```
 There is no kernel named acme. No kernels here yet.
@@ -63,31 +67,35 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 > only way to reset the superuser password.
 
 {: .warning }
-> The choice of money cannot be changed later. Everything else about the kernel
-> can.
+> The network is fixed when the kernel is created. To use another network later,
+> create a separate kernel.
 
-The kernel now runs in the foreground of this terminal. Leave it running and open
-a second terminal for everything below.
+The kernel remains running in this terminal. Open a second terminal for the
+client commands that follow, leaving the first available for server output.
 
-The superuser account is called `sys`. It credits accounts and can see every
-account on the kernel.
+First boot also creates the superuser account, `sys`. You will use it to fund
+the buyer's account on `play`; it also gives the operator access to account
+records and administrative commands.
 
 ## Tell the client about the kernel
 
-`juice` is one program, but the kernel and the commands you type are separate
-things. The commands are a client, and a client keeps a list of the kernels it can
-reach.
+The `juice` executable provides both the server and its command-line client.
+Starting the server does not register it with the client. Add its HTTP address
+so that subsequent commands can refer to it by name:
 
 ```
 $ juice kernel add http://localhost:4040
 acme  network play  http://localhost:4040  L3ciw7zj…  (added)
 ```
 
-The client dials the address, records the public key and network the kernel
-reports, and registers the kernel under the name it reports about itself, here
-`acme`.
+The client contacts the address and records the kernel's public key and network.
+Since this command supplies no local name, it uses the nickname reported by the
+kernel, `acme`.
 
 ## Create an account and log in
+
+Create the buyer's account, `alice`, on the registered kernel. The combined name
+`alice@acme` tells the client where to create the account:
 
 ```
 $ juice user create alice@acme
@@ -103,9 +111,9 @@ Press Enter once you have written it down:
   locked: 0.00 credits
 ```
 
-The phrase is this account's only recovery route; there is no email in Juice.
-
-Creating an account does not log you in:
+Save Alice's recovery phrase as you did the superuser's. Juice has no email
+recovery, so this phrase is needed if the password is lost. Account creation
+and login are separate operations; authenticate as Alice next:
 
 ```
 $ juice auth login alice@acme
@@ -113,8 +121,9 @@ Password:
 alice@acme
 ```
 
-`alice@acme` is now the login in use. Every command from here on acts as alice on
-acme until you switch.
+The client now selects `alice@acme` as the current login. Subsequent commands
+act as Alice on `acme` until you switch to another login. Inspect the account to
+confirm its identity and initial balance:
 
 ```
 $ juice user me
@@ -127,8 +136,9 @@ $ juice user me
   locked: 0.00 credits
 ```
 
-Before going further, check that the install, the login and the kernel all work,
-by calling one of the free built-in actions every kernel ships under `sys`:
+You can check execution before adding funds by calling `sys/time`, one of the
+built-in actions. It is free under the default configuration and returns the
+kernel's current time:
 
 ```
 $ juice run sys/time
@@ -144,14 +154,15 @@ $ juice run sys/time
 
 ## Put money in the account
 
-Some actions are free, but most are not, so money is the next thing to get.
-Alice's balance pays for every action she calls through this kernel, including
-actions on other kernels; she does not open an account with each provider.
+Alice will need funds for the paid action later in the walkthrough. Her balance
+can pay for services on `acme` and for public services on other kernels in the
+same network.
 
-On the `play` network nothing is sent from anywhere: the operator credits accounts
-against payments received outside the system and keeps the records. On `test` and
-`real` you would send USDC from your own wallet, which
-[Deposits and withdrawals](money/deposits-and-withdrawals.html) covers.
+On `play`, the operator records deposits directly, using a reference from their
+own records. Here, `demo-payment-1` identifies the demonstration deposit. Log
+in as `sys` to credit Alice with ten credits. On a chain network, funding
+instead requires a token payment, as described in
+[Deposits and withdrawals](money/deposits-and-withdrawals.html).
 
 ```
 $ juice auth login sys@acme
@@ -167,10 +178,9 @@ Credit 10.00 credits to alice, acting as sys@acme? This cannot be undone. [y/N] 
   to_handle: alice
 ```
 
-`--ref` names the payment in the operator's own books. The same reference never
-credits an account twice.
-
-You now hold two logins. Switch back to alice:
+The reference prevents the same deposit from being credited twice if the command
+is repeated. Both logins are now saved in the client, so you can return to Alice
+without entering her password again:
 
 ```
 $ juice auth use alice@acme
@@ -179,12 +189,11 @@ alice@acme
 
 ## Buy something
 
-Alice has money; now there must be something to buy. This section creates a second
-account, bob, who publishes an action, and then has alice find it, buy it, see what
-it cost and rate it.
-
-Bob's action wraps `https://httpbin.org/post`, a public endpoint that echoes back
-what it receives. It needs an internet connection.
+The purchase uses a second account, `bob`, as the provider. Bob will publish an
+action that wraps `https://httpbin.org/post`, a public endpoint that echoes the
+data it receives. This gives Alice a service to find and buy, and lets you inspect
+both the charge and the provider's earnings. The endpoint requires an internet
+connection.
 
 ### Bob publishes
 
@@ -201,7 +210,8 @@ Password:
 bob@acme
 ```
 
-Now acting as bob:
+As Bob, register the endpoint with a description, a price of half a credit, and
+an input schema requiring a text field named `msg`:
 
 ```
 $ juice action create echo --kind http --source https://httpbin.org/post \
@@ -219,8 +229,9 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
   quote_hash: 1f8ec43b…
 ```
 
-A new action is inactive and private, so nothing is callable by accident. Bob
-switches it on and lets other users of this kernel see it:
+Registration creates an inactive, private action. Enable it to allow execution,
+then choose `local` visibility so that Alice and other users of `acme` can call
+it:
 
 ```
 $ juice action enable bob/echo
@@ -256,9 +267,10 @@ $ juice run sys/lookup '{"query":"echo a message"}'
   …
 ```
 
-The `price` in a search result is in base units: `500000` is `0.50 credits`.
-Amounts inside an action's JSON are always base units; amounts the command line
-takes and prints are in credits.
+The search result contains the reference to call, its description and schemas,
+and its price. Because this is an action's JSON result, `price` uses integer
+base units: `500000` represents `0.50 credits`. Use the returned reference to
+send Bob's action a message:
 
 ```
 $ juice run bob/echo '{"msg":"hello"}'
@@ -274,7 +286,8 @@ $ juice run bob/echo '{"msg":"hello"}'
   process_id: 5027b6df-…
 ```
 
-Alice's balance has gone down by exactly the price:
+After the successful call, Alice's available balance has decreased by the
+advertised half credit:
 
 ```
 $ juice user me
@@ -303,10 +316,13 @@ $ juice tx show e989c5e1-…
   target_handle: bob
 ```
 
-Alice paid `0.50`. Bob received `0.40`. The kernel took `0.10`, which is its fee of
-20% on bob's margin. [Earnings](providing/earnings.html) explains the arithmetic.
+The transaction accounts for the half credit Alice paid: Bob receives `0.40`,
+and the kernel receives `0.10`. Since the action bought no further work, its
+whole price is margin, on which the default fee is 20%.
+[Earnings](providing/earnings.html) extends this calculation to composed actions.
 
-Only the account that paid can rate a call, and only once:
+Alice can now rate the call because she paid for it. A rating can be submitted
+only once and may include a note:
 
 ```
 $ juice tx rate e989c5e1-… 1 --note "did what it said"
@@ -320,12 +336,13 @@ $ juice action ratings bob/echo
 1  2026-09-14T15:06:11Z  did what it said
 ```
 
-The rating is now part of the action's public record.
+The rating is available to readers who can see the action. It remains attached
+to this call and does not alter the payment.
 
 ## Using somebody else's kernel
 
-If you are not running a kernel, someone else runs one for you. Register it, then
-create an account and log in as above:
+To use an existing kernel, begin by registering the address its operator gives
+you. You can then create an account and log in without running a server:
 
 ```
 $ juice kernel add https://kernel.example.org work
@@ -336,11 +353,11 @@ $ juice auth login alice@work
 The name after the URL is this client's own name for the kernel. Without it, the
 kernel's own name is used.
 
-Two things differ from the walkthrough above. You cannot run `admin` commands;
-those belong to the kernel's operator. And credits reach your account by the route
-that kernel's network uses: on `play` the operator credits you against a payment
-they received; on `test` or `real` you send USDC from your own wallet, as
-[Deposits and withdrawals](money/deposits-and-withdrawals.html) describes.
+The operator handles the administrative work performed by `sys` in the
+walkthrough. Your funding method depends on that kernel's network: the operator
+records deposits on `play`, while chain networks accept payments from your
+wallet. See [Deposits and withdrawals](money/deposits-and-withdrawals.html)
+before sending funds.
 
 ## Next
 

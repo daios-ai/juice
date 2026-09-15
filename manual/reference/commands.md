@@ -6,11 +6,14 @@ nav_order: 1
 
 # Commands
 
-Every command is `juice [admin] <noun> <verb>`, except `run`.
+Commands generally follow `juice [admin] <noun> <verb>`. The exception is
+`run`, which executes an action directly. This reference summarizes the
+commands and common options; the linked chapters provide worked examples.
 
-`admin` marks the verbs only a superuser may use, and its noun says which kind of
-target they take. Other supervision is scope on the ordinary commands: a superuser
-sees every row and may disable any action.
+The `admin` prefix requires superuser authority. Its noun distinguishes user
+accounts from peers, so a target is interpreted in the intended namespace.
+The superuser can also use ordinary commands with wider access to records and
+can disable any action.
 
 ## Global flags
 
@@ -28,8 +31,8 @@ sees every row and may disable any action.
 |---|---|
 | `juice run ACTION [JSON]` | run an action ([Running an action](../calling/running.html)) |
 
-`--quote-hash H` refuses the run if the terms have changed. `JSON` may be
-`@file.json`.
+Use `--quote-hash H` to bind the request to previously inspected terms.
+The JSON input can be supplied inline or read from a file with `@file.json`.
 
 ## kernel
 
@@ -41,7 +44,7 @@ sees every row and may disable any action.
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |
 | `juice kernel forget NAME` | drop the record and its logins' credentials |
 
-`kernel serve` takes `--addr` for the HTTP listen address.
+For `kernel serve`, `--addr` selects the HTTP listening address used by clients.
 
 ## auth
 
@@ -53,7 +56,8 @@ sees every row and may disable any action.
 | `juice auth logout [USER@KERNEL]` | end a session |
 | `juice auth recover USER@KERNEL` | reset a password using the recovery phrase |
 
-`--password` and `--phrase` supply non-interactively.
+Authentication commands that accept `--password` or `--phrase` can receive
+those values without an interactive prompt.
 
 ## user
 
@@ -71,8 +75,9 @@ sees every row and may disable any action.
 | `juice user withdraw AMOUNT` | take money out ([Taking money out](../money/deposits-and-withdrawals.html#taking-money-out)) |
 | `juice user withdrawals` | withdrawals made, and where each stands |
 
-`transfer` takes `--external-key`, `withdraw` takes `--id`; both make a retry safe.
-Both take `--yes`.
+For retryable requests, give `transfer` an `--external-key` and `withdraw` an
+`--id`, then reuse that key with the same terms. Both accept `--yes` for
+non-interactive confirmation.
 
 ## action
 
@@ -84,7 +89,7 @@ Both take `--yes`.
 | `juice action enable ACTION\|PATH` | make callable |
 | `juice action disable ACTION\|PATH` | make uncallable, reversibly |
 | `juice action delete ACTION\|PATH` | retire; history survives |
-| `juice action list` | actions you can call; `--all` widens to your inactive and private rows |
+| `juice action list` | active actions within your access; `--all` includes inactive actions in your scope |
 | `juice action import NAME [SPEC_URL]` | install an OpenAPI document ([Wrapping a web API](../providing/web-apis.html)) |
 | `juice action stats ACTION` | uses, successes, failures, latency, rating |
 | `juice action ratings ACTION` | the public ratings |
@@ -100,7 +105,7 @@ Both take `--yes`.
 | `juice tx list` | transactions you are party to |
 | `juice tx show ID` | one transaction in full ([Records](../calling/records.html)) |
 | `juice tx rate ID 0\|1` | rate a call you paid for, once; `--note` |
-| `juice tx verify ID` | verify the signed receipt offline |
+| `juice tx verify ID` | verify stored receipt evidence without contacting its issuer |
 
 ## process
 
@@ -126,7 +131,7 @@ Both take `--yes`.
 
 | Command | |
 |---|---|
-| `juice admin user list` | every account on this kernel |
+| `juice admin user list` | local user accounts on this kernel |
 | `juice admin user show USER` | one account |
 | `juice admin user suspend USER` | suspend, reversibly ([Operator duties](../operating/duties.html)) |
 | `juice admin user unsuspend USER` | restore |
@@ -141,4 +146,6 @@ Both take `--yes`.
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
 
-A peer is named by public key or petname; a user by handle or id.
+Peer targets use a public key or petname. User targets use a handle or account
+ID. Keeping these namespaces separate avoids ambiguity when a handle and a
+petname happen to be the same.

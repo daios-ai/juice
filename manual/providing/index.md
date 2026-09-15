@@ -6,10 +6,12 @@ has_children: true
 
 # Providing actions
 
-This part covers publishing an action, what you earn from it, and the three ways
-to implement something more than a single call to one endpoint: composing other
-actions, waiting for a party to supply something, and installing a whole web API
-at once.
+As a provider, you describe a service, set its price, and choose who may call it.
+The following chapters explain how to publish an action and calculate its
+earnings, then develop services that call other actions or wait for input.
+The final chapter covers importing an existing web API as a collection of
+actions.
 
-It assumes [Calling actions](../calling/), because a provider is also a buyer of
-whatever their own action calls.
+The examples build on [Calling actions](../calling/). This is particularly
+useful for composition: when your action calls another service, you are also
+buying work from that service's provider.

@@ -5,34 +5,40 @@ nav_order: 7
 
 # Using Juice from a program
 
-A program uses the same commands and the same API as a person. This chapter covers
-what it must do differently.
+A program can use Juice through the command-line client or directly through
+the HTTP API. Both use the same account permissions and payment rules as an
+interactive user. Automation requires particular care with login selection,
+units, errors, and retries, because the program must make decisions that a
+person would otherwise make at the terminal.
 
-An agent is an ordinary account. It holds its own login, its own balance and its
-own history, and it is not privileged in any way. Give it its own account rather
-than sharing a person's.
+Give an agent its own account so that its balance and history can be managed
+independently. The account grants no special privileges; it authorizes the
+agent's calls in the same way as any other user's.
 
 ## Name the login on every command
+
+Specify the saved login for each invocation with `--as`:
 
 ```
 $ juice --as bot@acme run sys/lookup '{"query":"translate to german"}' --json
 ```
 
-or set `JUICE_AS=bot@acme` in the environment.
+Alternatively, set `JUICE_AS=bot@acme` in the environment.
 
-Never rely on the selected login. A person at the same machine can change it with
-`juice auth use` at any moment, which would move your program's spending to another
-account or another kernel. A `--as` that names no login on this machine is an
-error; it never falls back.
+Explicit selection keeps later invocations tied to the intended account even
+when a person changes the client's current login. If the named login does not
+exist, the command fails instead of selecting another account.
 
-Anything a program remembers about a kernel should be keyed by the kernel's public
-key and network digest and the account's principal id, all of which `kernel list`
-and `user me` report. Handles and kernel names can be renamed and reused.
+For persistent records, identify the kernel by public key and network digest
+and the account by its ID. You can obtain these from `kernel list` and
+`user me`. Handles and local kernel names are useful for interaction but may
+be renamed or reused.
 
 ## Output
 
-`--json` prints the server's reply as it was sent. `--quiet` prints ids only, one
-per line.
+Use `--json` when the program needs to parse a successful response. It preserves
+the server's reply structure. Use `--quiet` when only the returned identifiers
+are needed, one per line:
 
 ```
 $ juice --as bot@acme run sys/time --json
@@ -47,10 +53,11 @@ $ juice --as bot@acme run sys/time --quiet
 821a9f33-…
 ```
 
-## Errors are two different contracts
+## Handling errors
 
-**From the command line**, an error is a line of prose on stderr and an exit code.
-`--json` does not change this: it governs successful replies only.
+The command line reports an error on stderr and sets an exit status. The
+`--json` option applies to successful replies, so it does not make command-line
+errors machine-readable JSON. Branch on the exit status using these meanings:
 
 | Code | Meaning |
 |---|---|
@@ -67,25 +74,25 @@ $ juice --as bot@acme run sys/time --quiet
 | 10 | peer will not serve on credit |
 | 11 | terms changed |
 
-Branch on the exit code, never on the message text.
-
-**Over HTTP**, an error is a JSON body with a stable `code`, a message, and
-sometimes `meta`:
+Message text is intended for people and should not be used as a program's error
+classifier. Over HTTP, the response instead contains a stable `code`, a message,
+and, where applicable, `meta`:
 
 ```
 {"code":"schema_violation","error":"field #.msg: required field missing"}
 {"code":"grant_required","error":"grant required for bob/mail","meta":{"action":"bob/mail"}}
 ```
 
-`meta` carries what the program needs to act: the action to connect for
-`grant_required`, the peer for `peer_unreachable` and `peer_unfunded`, and
-`process_id`, `pending_since` and `refund_eligible_at` for a call that parked.
+The metadata supplies context for recovery. For example, `grant_required`
+identifies the action requiring consent, while peer errors identify the remote
+kernel. A pending call includes `process_id`, `pending_since`, and
+`refund_eligible_at`, allowing the program to follow its existing execution.
 
 ## Units
 
-The command line takes and prints display units. The HTTP API and the JSON
-arguments and results of actions use base units. On the shipped networks one
-credit is 1,000,000 base units.
+Convert amounts at the interface boundary. The command line accepts display
+units, while the HTTP API and action arguments and results use integer base
+units. On the shipped networks, one display unit contains 1,000,000 base units:
 
 ```
 $ juice user transfer bob 1.5           # display units
@@ -94,14 +101,16 @@ $ juice user transfer bob 1.5           # display units
 POST /v1/run {"action":"sys/transfer","args":{"target":"bob","amount":1500000}}
 ```
 
-Both move the same amount. `GET /v1/me` returns `"available": 4795000` where the
-command line prints `4.795 credits`. Read `decimals` from `GET /health` rather
-than assuming six.
+Both examples deliver the same amount, although `sys/transfer` may also have
+an execution price. Similarly, `GET /v1/me` returns `"available": 4795000`
+where the command line displays `4.795 credits`. Read `decimals` from
+`GET /health` when calculating conversions instead of hard-coding six.
 
 ## Separate planning from spending
 
-`sys/llm/decide` chooses an action and proposes arguments. It never executes
-anything:
+The built-in `sys/llm/decide` action can choose among candidate actions and
+propose their arguments. Calling it purchases the selection service, but does
+not execute the action it selects:
 
 ```
 $ juice --as bot@acme run sys/llm/decide '{
@@ -110,32 +119,34 @@ $ juice --as bot@acme run sys/llm/decide '{
   }' --json
 ```
 
-It returns `{"action": …, "args": …}`. The contracts it reasons over are fetched
-from the kernel by reference, not taken from the request, so a caller cannot feed
-it a false description of an action. Proposed arguments are validated against the
-real schema. A candidate on an unreachable kernel is dropped rather than blocking
-the choice; if no model is configured the action reports an invalid state rather
-than guessing.
+The result contains `{"action": …, "args": …}`. The kernel resolves each
+candidate's actual contract and validates proposed arguments against its schema.
+An unreachable remote candidate can be discarded so that selection continues
+among available choices; an unavailable model produces an invalid-state error.
 
-Running what it proposes is a separate decision, and a separate command.
+Your program can inspect the proposal before issuing a separate `run`. This
+keeps the decision to spend on the selected service under the program's control.
 
 ## Pin the terms between reading and running
 
-Terms can change between the moment you read an action and the moment you call it.
-Carry the `quote_hash` from the search result or the action read into the run:
+An action's terms can change while a program prepares work. Carry the
+`quote_hash` from the selected search result or action read into the execution
+request:
 
 ```
 $ juice --as bot@acme run bob/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
-A changed contract then fails with exit code 11 and charges nothing, instead of
-buying something you did not plan.
+A mismatch on an otherwise callable action produces exit code 11 before any
+charge. The program can then obtain the new terms and decide whether to proceed.
+If the action is inactive, that earlier precondition fails instead.
 
 ## Retries
 
-**`run` is not idempotent.** There is no idempotency key on a call. Running the
-same command again buys the work a second time. If a run does not return, do not
-re-run it: find out what happened first.
+Repeating `run` starts another purchase. The public run request has no
+idempotency key, so a program must establish the outcome of an earlier request
+before deciding whether to submit it again. Remote transport retries within
+the kernel are different: they retain the original call's identity.
 
 - A cross-kernel call that parked returns `process_id`, `pending_since` and
   `refund_eligible_at`. Poll `juice process show <id>` until it closes. A running
@@ -145,33 +156,34 @@ re-run it: find out what happened first.
 - A call that failed with exit code 9 provably never left your kernel and was
   fully refunded. It is safe to retry.
 
-**Money commands do carry keys.** A transfer takes `--external-key` and a
-withdrawal takes `--id`, both minted by you. Replaying with the same key returns
-the original record rather than moving money again. Use them whenever a retry is
-possible.
+Transfers and withdrawals provide explicit retry keys: `--external-key` for a
+transfer and `--id` for a withdrawal. Generate and save the key before issuing
+the request, then reuse it with the same terms if a retry is needed. The kernel
+returns the existing movement rather than creating a second one.
 
 ```
 $ juice --as bot@acme user transfer bob 1 --external-key payout-2026-09-14-001 --yes
 $ juice --as bot@acme user withdraw 5 --id wd-2026-09-14-001 --yes
 ```
 
-**Completing a step cannot run it twice.** A repeat on your own kernel is
-refused, because the step is no longer waiting; read the step to find the
-transaction it produced. A repeat of a completion sent to another kernel returns
-the original outcome, because its key is derived from the step and the input.
+Step completion also prevents duplicate execution. A repeated local completion
+is refused after the step has been claimed or completed; read its record to
+find the resulting transaction. A remote completion derives its retry key from
+the step and input, allowing the same request to recover its stored outcome.
 
 ## Confirmation
 
-Commands that move money ask before acting and refuse outright when there is no
-terminal:
+Transfers and withdrawals require confirmation. Without a terminal or explicit
+confirmation, the client refuses to act:
 
 ```
 $ juice user transfer bob 1
 error: re-run with --yes to confirm (no terminal to ask on)
 ```
 
-Pass `--yes`. A `run` is not confirmed: issuing it is the consent, to its
-advertised or pinned price and to any value its arguments name.
+Supply `--yes` when the program has authorized that movement. An action run
+does not prompt: issuing the request authorizes the selected price and any
+value named in its arguments.
 
 ## Non-interactive equivalents
 
@@ -182,13 +194,17 @@ advertised or pinned price and to any value its arguments name.
 | confirmation on a money command | `--yes` |
 | the selected login | `--as` or `JUICE_AS` |
 
-A password on a command line is visible to other processes. Prefer the environment
-or a prompt where you can.
+A password supplied as a command-line argument may be visible to other
+processes. For long-running programs, establish a saved login during setup
+and use its managed session for subsequent commands.
 
 ## Speaking HTTP directly
 
-The command line is a client of the HTTP API and has no private access to it. Log
-in with the authorisation-code flow and PKCE:
+A direct HTTP client uses the same API as the command line. Before sending
+credentials, check `GET /health` against the expected kernel key and network,
+as shown below. Authentication uses an authorization code with PKCE: the
+client generates a verifier, sends its derived challenge when authenticating,
+and presents the verifier when exchanging the code for tokens.
 
 ```
 $ VERIFIER=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
@@ -209,9 +225,9 @@ $ curl -s localhost:4040/v1/run -H "Authorization: Bearer $TOKEN" \
 {"result":{"iso":"2026-09-14T12:07:31Z","unix":1789387651},"tx_id":"800c8279-…", …}
 ```
 
-Access tokens are short-lived. On a 401, exchange the refresh token at
-`POST /v1/auth/refresh`, which returns a new pair; the old refresh token stops
-working.
+Access tokens expire. On a 401, the client can exchange its refresh token at
+`POST /v1/auth/refresh` for a new pair. Persist the replacement refresh token
+before the next refresh, since the old one is no longer valid.
 
 Check `GET /health` before trusting a server, and compare what it reports against
 the key and network you expect:
@@ -222,19 +238,21 @@ $ curl -s localhost:4040/health
  "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"credits"}
 ```
 
-A port number is not an identity. A client that dials a port without checking will
-talk to whichever kernel happens to hold it.
+This check distinguishes the expected kernel from any other server occupying
+the same address. Save the expected identity when establishing trust and compare
+subsequent responses against it.
 
-The full route table is in
-[`API.md`](https://github.com/daios-ai/juice/blob/master/API.md). Federation has no
-HTTP surface; kernels speak to each other over their own transport only.
+The full HTTP interface is documented in
+[`API.md`](https://github.com/daios-ai/juice/blob/master/API.md).
+Kernel-to-kernel federation uses a separate transport managed by the kernel.
 
-## Services are not agents
+## Implementing a service
 
-A program that *implements* an action — the endpoint behind an `http` action — holds
-no Juice login at all. It receives a capability on each dispatch and uses it to
-compose within that one call. See
+A program implementing an HTTP action has a different role from an agent that
+buys services. The endpoint receives an execution capability with each
+dispatched call and can use it to request work within that call's budget.
+It therefore needs no saved Juice login for composition. See
 [Composing from an HTTP endpoint](providing/composition.html#composing-from-an-http-endpoint).
 
-An agent spends money and therefore has an account. A service earns money and
-therefore does not need one; its owner's account is where the earnings go.
+The action's owner holds the account that receives its earnings. An agent
+making independent purchases needs its own account and login to authorize them.

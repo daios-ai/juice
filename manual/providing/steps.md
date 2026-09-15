@@ -6,17 +6,25 @@ nav_order: 4
 
 # Steps and processes
 
-A **step** is a call your action sets aside, pays for in advance, and addresses to
-one named party. The call suspends; when that party supplies what is missing, it
-resumes and settles. This is how an action waits for a person, for an approval, or
-for an external system, without holding anything open in your own code.
+A **step** represents a future action call waiting for input from a named party.
+Your action supplies the arguments already known and reserves the execution
+price. Later, the named party completes the input and the target action runs.
+This supports approvals, messages, and external events without requiring your
+endpoint or module to remain running during the wait.
+
+Creating a step does not suspend execution at the next line of your code.
+The creating action may return and settle while its process remains open for
+the step. Put the work that should follow the response in the step's target
+action.
 
 For what it looks like to the party being asked, see
 [Consent and assigned work](../calling/consent-and-steps.html#completing-work-addressed-to-you).
 
 ## The simplest case
 
-`sys/message` creates a step addressed to a user, carrying a message:
+The built-in `sys/message` action creates a step carrying a message to a named
+recipient. Its target is `sys/sink`, so completion acknowledges the work without
+performing a further service:
 
 ```
 $ juice run sys/message '{"to":"bob","message":"approve the order?"}'
@@ -26,12 +34,14 @@ $ juice run sys/message '{"to":"bob","message":"approve the order?"}'
   …
 ```
 
-Bob now has work waiting. The process that ran `sys/message` stays open until he
-answers it.
+Bob can now see the waiting step. Although `sys/message` has returned, its
+process remains open until the step completes or the owner cancels the work.
 
 ## Creating a step yourself
 
-From WebAssembly:
+In your own workflow, choose a target action that performs the continuation.
+The following WebAssembly call supplies an order identifier in advance and
+addresses the remaining input to Bob:
 
 ```go
 id := JuiceStepCreate(
@@ -41,7 +51,7 @@ id := JuiceStepCreate(
 )
 ```
 
-From an HTTP endpoint, using the capability it was dispatched with:
+An HTTP endpoint creates the same kind of step using its execution capability:
 
 ```
 POST /v1/steps
@@ -50,55 +60,60 @@ X-Juice-Capability: <the capability it was dispatched with>
 {"action": "bob/approve", "required_caller": "bob", "partial_args": {"order": "42"}}
 ```
 
-From the command line, naming the call whose budget pays for it:
+The command-line form identifies the trace whose budget funds the step:
 
 ```
 $ juice step create bob/approve --trace <trace-id> --required-caller bob \
     --partial-args '{"order":"42"}'
 ```
 
-`--trace` must name a call that is still running, so this form is for adding a
-step to a call already suspended on one. A call that has returned is settled and
-cannot fund anything:
+The trace must still be unsettled, and the authenticated caller must have
+authority to use it. An open process with a waiting step does not, by itself,
+make a settled trace spendable again. Attempting to fund a step from a settled
+trace gives:
 
 ```
 error: create step: the call has already settled
 ```
 
-Steps created as part of doing the work come from the first two forms.
+For steps created as part of normal execution, use the WebAssembly host or HTTP
+callback. Both already identify the executing trace and its budget.
 
-Three things are fixed when the step is created.
+At creation, the kernel reserves the target action's current execution price.
+Completion uses that reservation even if the price later changes. Separate
+value or remote-ticket requirements still belong to the immediate caller.
 
-**The price is taken then.** The target action's price is deducted from the
-current call's budget and parked. Completion needs no further funds, and the price
-cannot move underneath it afterwards.
+The required party must be named and resolvable. Only that party can complete
+the step; the operator has no override. Visibility is checked against the
+creator when the target is bound, allowing you to reserve a private helper for
+completion by someone else.
 
-**The party is mandatory.** There is no open step that anyone may complete and no
-superuser override. The named account must exist.
-
-**What is missing is derived.** `partial_args` is what you already know;
-completion supplies the rest of the target action's input, and the two are merged
-with the completer's values winning. The completer never needs to read the target
-action, which may be private to you.
+The `partial_args` contain known input. The kernel derives an `allowed_input`
+schema for what remains and checks the completer's submission against it before
+merging and validating the complete arguments. The completer can therefore
+supply the missing information without needing access to the private target's
+full definition.
 
 ## What happens to a step
 
-A step is `waiting` until someone completes it, `running` while it executes, and
-then `done` with a transaction, or `cancelled`.
+A step begins as `waiting`. An authorized completion claims it as `running`,
+and settlement records its transaction and marks it `done`. If a precondition
+fails before execution, the step returns to `waiting` with its reservation
+intact. The target must still be active and its owner unsuspended, although
+narrowing visibility after creation does not prevent completion.
 
-Waiting steps survive a restart of the kernel. A step that was executing when the
-kernel stopped returns to `waiting` with its money re-parked, so it can be
-completed again.
-
-A step is cancelled, and its money returned, when the process is ended or when the
-call that created it fails.
+Waiting steps survive restarts. Interrupted local completions with no committed
+transaction are re-parked for another attempt; work awaiting a remote receipt
+continues through the remote retry mechanism. Ending the process or failing the
+creating call cancels waiting steps and returns their funds. Running work must
+settle before its parent can close.
 
 ## Processes
 
-A process holds the money for one `run` and everything beneath it. It closes by
-itself when the root call has returned, no step is waiting, and no call is
-awaiting a receipt from another kernel. Closing returns whatever is left to the
-owner.
+A process groups the calls and steps started by one `run`, together with their
+funds. It closes automatically once the root call and its descendants have
+settled and no steps remain outstanding. Any funds left at closure return to
+the process owner.
 
 ```
 $ juice process list
@@ -107,34 +122,36 @@ e3539f75-…  open    available:0.00 credits  locked:0.00 credits
 
 ### Ending a process
 
-The owner of a process can end it:
+The process owner can end work that is no longer wanted:
 
 ```
 $ juice process end e3539f75-…
 Process e3539f75-… ended.
 ```
 
-Ending cancels the waiting steps and returns their parked money. Use it for work
-that was abandoned: an approval nobody will give, a message nobody will answer.
+Ending cancels waiting steps and returns their reserved funds. It is useful for
+abandoned approvals or messages whose recipients will not respond.
 
-Ending a process that still has a call in flight to another kernel fails that
-call locally and refunds it. If the other kernel did execute it, the two operators
-reconcile the difference between them afterwards. Prefer to wait: a parked call
-settles on its own within 24 hours.
+Forced closure also settles pending remote calls locally as refunded failures.
+It cannot undo execution already performed on the other kernel. Prefer to let
+the retry mechanism obtain the signed outcome or apply its 24-hour limit.
+Closure is refused while other execution remains in flight; the owner can try
+again after that work settles.
 
 ## External systems
 
-There is no webhook machinery. An external system participates as an ordinary
-account: it authenticates, and either runs an action or completes a step created
-for it in advance.
+An external system can deliver events using an ordinary Juice account. It can
+either run an action when the event occurs or complete a step you created for
+it in advance.
 
-To have a system deliver an event, create a step addressed to its account and give
-it the step id. When the event happens, it completes the step, and your suspended
-computation resumes with the event's data as input. The money was reserved when the
-step was created, so nothing depends on that system holding a balance.
+For the second arrangement, address the step to the system's account and give
+it the step ID. When the event occurs, the system authenticates and completes
+the step with the event data. The target action then performs the next part of
+the workflow using the reserved execution budget.
 
 ## What the kernel does not provide
 
-There are no coordination primitives: no waiting for the first of several steps, no
-quorum, no deadline that fires by itself. A step is one call, addressed to one
-party. Anything more is built out of steps in your own action.
+A step represents one future call assigned to one party. More elaborate
+coordination, such as accepting the first of several replies, collecting a
+quorum, or enforcing a deadline, belongs in the application that creates and
+manages those steps.

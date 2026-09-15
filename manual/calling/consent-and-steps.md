@@ -6,18 +6,20 @@ nav_order: 5
 
 # Consent and assigned work
 
-Two things a buyer is sometimes asked to do: connect an account of their own so an
-action can act on their behalf elsewhere, and complete a piece of work addressed
-to them.
+Some services require your participation beyond the initial call. An action
+that uses your mailbox or repository needs permission to access that account;
+a workflow awaiting your input creates a step addressed to you. This chapter
+explains how to give and revoke consent, and how to complete assigned work.
 
 ## Connecting an upstream account
 
-Some actions work against a service where you, not the provider, hold the account:
-your mailbox, your calendar, your repository. Such an action cannot run for you
-until you have connected that account.
+An upstream service is the external system an action accesses while doing its
+work. For a personal mailbox, calendar, or repository, the action needs a
+credential for your account on that service. Connecting the account grants
+specified actions permission to use it when you pay for their execution.
 
-A call that needs a consent you have not given is refused before any money moves,
-and names what to connect:
+If a required consent is absent, the call is rejected before charging and
+identifies what you need to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
@@ -27,29 +29,31 @@ Authorize with:
 error: grant required for bob/mail
 ```
 
-Connect in one of two ways, depending on what the upstream service supports.
-
-**By browser consent**, for services that use OAuth:
+The connection procedure depends on the authentication scheme configured for
+the action. With OAuth, start the consent flow using:
 
 ```
 $ juice user connect bob/mail
 ```
 
-The command prints a URL to open. You authorise at the provider's own site and
-return. `--device` uses the device-code flow instead, for a machine with no
-browser.
+The command prints a URL where you can authorize access at the upstream
+provider's site. Follow the prompts to complete the connection. If supported
+by the provider, `--device` uses a device-code flow suitable for a machine
+without a browser.
 
-**By pasting a token**, for services that issue personal keys:
+For an action configured to use a personal token, supply the token directly:
 
 ```
 $ juice user connect bob/mail --token ghp_…
 Connected bob/mail.
 ```
 
-One consent covers a group of related actions. The selector is an owner
-(`bob`), a directory (`bob/mail`), or a single action (`bob/mail/send`); the
-consent applies to every action beneath the path you name that uses the same
-upstream account.
+The reference you connect is a selector: it can name an owner (`bob`), a
+directory (`bob/mail`), or a particular action (`bob/mail/send`). The kernel
+groups accessible delegated actions under that path by upstream provider,
+allowing one consent to cover related operations. The grant applies to the
+actions included in that consent; adding another action later requires
+connecting it as well.
 
 ## Seeing and revoking consents
 
@@ -75,9 +79,11 @@ $ juice user me
   ]
 ```
 
-`connections` is your inventory of upstream accounts. `connectors` groups the
-actions each one has been granted to. The credential itself never appears here or
-anywhere else: not in inputs, outputs, logs, receipts, or any other read path.
+The `connections` list shows the upstream accounts stored for you, including
+accounts no longer used by any action. The `connectors` view groups the actions
+you have authorized by directory. These views contain no credentials; the
+kernel also excludes credentials from call inputs, outputs, logs, and receipts.
+To revoke access for a selection of actions, use:
 
 ```
 $ juice user disconnect bob/mail
@@ -86,22 +92,25 @@ $ juice user disconnect bob/mail
   ]
 ```
 
-`user disconnect --account <provider_key>` removes an upstream account entirely
-and every consent that points at it.
+To remove the saved upstream account and all grants using it, use
+`user disconnect --account <provider_key>`.
 
-A credential is applied only when three things hold at once: you granted it, the
-action being executed is the one you granted it for, and you are the one paying.
-It is never inherited by an action that this action calls, never sent to another
-kernel, and never visible to code running inside the kernel.
+A grant authorizes a particular action when you are the payer. If that action
+calls another, the second action needs its own grant. Delegated credentials
+are not sent across federation or exposed to sandboxed code.
 
-A consent is revoked automatically if the action's contract changes, so it can
-never come back attached to terms you did not agree to.
+Changes to the action's source, schemas, or price revoke its grants, as do
+credential replacement and deletion. Disabling the action or changing its
+description alone does not revoke them. After revocation, reconnect before
+using the action with your upstream account again.
 
 ## Completing work addressed to you
 
-An action can set work aside and address it to a named party. This is called a
-**step**. The money for it is reserved when the step is created, so completing it
-costs you nothing.
+A **step** is a future action call awaiting input from a named party. Its
+creator reserves the execution price when setting it up, so you do not pay
+that price when completing it. An action that delivers value or calls a remote
+kernel can still require the immediate caller's separate value or stake funds.
+Use `step list` and `step show` to inspect the work addressed to you:
 
 ```
 $ juice step list
@@ -123,10 +132,11 @@ $ juice step show b75366d1-…
   }
 ```
 
-`created_by` is the action that set the work aside, which is what the step means.
-`action` is what will run when you complete it. `owner_handle` is who is paying.
-`allowed_input` is the schema of what you must supply: the target action's input
-minus what has already been filled in.
+The `created_by` field identifies the action that created the step, while
+`action` identifies the service that will execute when you complete it.
+`owner_handle` names the process owner funding the work. Read `partial_args`
+for the information already supplied and `allowed_input` for the schema of
+the remaining input:
 
 ```
 $ juice step complete b75366d1-… '{}'
@@ -137,19 +147,22 @@ $ juice step complete b75366d1-… '{}'
   step_id: b75366d1-…
 ```
 
-Completion runs the action and settles it. Only the named party can complete a
-step, and a step completes once. Waiting steps survive restarts of the kernel.
+Completion claims the step for execution, preventing a second caller from
+executing it concurrently. Only the named party may do this. The result and
+transaction then record the completed work; a waiting step remains available
+across kernel restarts.
 
 ## Work held for you on another kernel
 
-If a step is addressed to you but was created on another kernel, list and complete
-it there by naming that kernel:
+Work addressed to you may be held by another kernel. Specify that peer to list
+or complete its steps through your own login:
 
 ```
 $ juice step list --peer beta-kernel
 $ juice step complete <id> '{}' --peer beta-kernel
 ```
 
-Your kernel proves to the other one that you are who the step names. The other
-kernel is told only which step is being answered; it learns nothing else about
-you.
+Your home kernel signs an attestation naming your stable account ID as the
+party addressed by the step. The peer checks it before allowing completion. The
+listing returns the step's input requirements without disclosing the remote
+process owner's identity or other local execution details.

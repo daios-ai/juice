@@ -6,14 +6,14 @@ nav_order: 4
 
 # Configuration
 
-`config.json` lives in the kernel's own directory, `$JUICE_HOME/kernels/<name>/`,
-and is written once by first boot. Nothing rewrites it afterwards; edit it and
-restart.
+Each kernel reads `config.json` from `$JUICE_HOME/kernels/<name>/`. First boot
+creates this file; later starts read it without rewriting it. Apply a
+configuration change by editing the file and restarting the kernel.
 
-An absent key takes its default. A key that is not a key is a startup error rather
-than a silent default, because a misspelled key reads exactly like an absent one.
-
-The file holds `credentials_key` and is mode 0600.
+Known settings take their documented defaults when absent. An unrecognized key
+causes startup to fail, helping catch misspellings that would otherwise appear
+to configure a value. The file contains the credential-encryption key and is
+stored with mode 0600.
 
 ## Identity and network
 
@@ -27,7 +27,9 @@ The file holds `credentials_key` and is mode 0600.
 
 ## Money
 
-All three amounts are base units.
+The fee rates below use basis points, or hundredths of a percent. The three
+monetary settings—`lottery`, `lottery_max`, and `credit_limit`—use integer base
+units.
 
 | Key | Default | |
 |---|---|---|
@@ -48,8 +50,9 @@ See [The network economy](../operating/network-economy.html).
 | `discovery_interval_seconds` | `300` | how often peers are enumerated and catalogues exchanged |
 | `peer_retention_days` | `90` | how long an idle peer's cached data is kept. Non-positive disables purging |
 
-The 24-hour limit on a parked call is not configurable. It is a property of the
-protocol's record lifetime.
+The retry interval controls how often pending calls are revisited. Their
+24-hour maximum age is fixed by the protocol's idempotency-record lifetime
+and cannot be configured separately.
 
 ## Execution
 
@@ -60,14 +63,17 @@ protocol's record lifetime.
 | `credentials_key` | generated at first boot | the key sealing upstream credentials. A value that is not a 32-byte key refuses the boot |
 | `native.<name>` | see below | per-action price and settings for the standard library |
 
-`native.llm` holds the language model's URL and model names; the defaults are
-Ollama at `http://localhost:11434`. `native.lookup.default_limit` is `10`.
-`native.tinygo.price` is `5`. Other natives are priced `0`.
+The `native.llm` settings select the language-model endpoint and model names;
+the default endpoint is Ollama at `http://localhost:11434`.
+`native.lookup.default_limit` defaults to `10`. The compilation action defaults
+to a price of `5` base units through `native.tinygo.price`; other built-in
+actions default to zero.
 
 ### Fuel, on a chain network
 
-These belong to the network and live in its world file, not in `config.json`. They
-govern when and how the kernel buys the ETH it pays transaction fees with.
+The world file supplies the rail's fuel policy. These settings determine when
+the rail buys ETH, the balance it targets, and the limits applied to that
+purchase. They are not keys in the kernel's `config.json`.
 
 | Key | Arbitrum One | Arbitrum Sepolia | |
 |---|---|---|---|
@@ -90,8 +96,9 @@ See
 
 ## Environment variables
 
-These are bootstrap and runtime overrides only. Nothing else is read from the
-environment.
+The following environment variables provide bootstrap values, runtime
+overrides, and client login selection. Other environment variables do not
+configure Juice.
 
 | Variable | |
 |---|---|
@@ -105,17 +112,18 @@ environment.
 
 ## Client files
 
-The command line keeps its own state under `$JUICE_HOME/client/`, separately from
-any kernel:
+The command-line client keeps kernel registrations and saved sessions under
+`$JUICE_HOME/client/`:
 
 ```
 client/config.json        the kernels known, and which login is selected
 client/credentials/       one file per login, named handle@kernel, mode 0600
 ```
 
-Each login holds its own tokens, so an agent and a person working on one kernel
-never share a session. A credential is sent only to the address recorded for its
-kernel.
+Each saved login has its own token file, with access serialized by a session
+lock during refresh. Programs using the same saved login share that session;
+separate logins allow an agent and a person to authenticate independently.
+Credentials are sent only to the recorded address for their kernel.
 
 The rest of the installation's layout — where agents, services and interfaces keep
 their state — is described in

@@ -5,108 +5,128 @@ nav_order: 3
 
 # Concepts
 
-This chapter defines the terms the rest of the manual uses. It describes what
-each thing is, not how to use it.
+Juice connects accounts, services, and payments through a small set of concepts.
+This chapter introduces their meanings and relationships. The task chapters
+show how to work with them at the command line.
 
 ## Accounts and identity
 
-**Kernel.** One server, together with the accounts it holds, the actions
-published on it, its ledger, its signing key, and the network it belongs to. A kernel's identity is
-its public key. Its **nickname** is the name it calls itself on the network; that
-name is not unique and proves nothing.
+A **kernel** is a server that manages accounts, hosts actions, and records their
+execution and payment. Its public key identifies it to other kernels. It also
+has a **nickname**, chosen by its operator, which provides a readable label but
+need not be unique.
 
-**Account.** A principal on one kernel, with a balance and a history. Accounts
-are either user accounts, which have a handle and a password, or kernel accounts,
-which stand for another kernel and exist only so that trade with it can be
-recorded.
+An **account** holds a balance and a history on one kernel. A user account has a
+**handle**, such as `alice`, that is unique on that kernel. The same handle on
+another kernel refers to a different account. Kernels also keep accounts that
+represent their peers for recording and authorizing trade; these accounts have
+no user login and hold no money.
 
-**Handle.** An account's name on its kernel, unique there. A handle is bare:
-`alice`, not `@alice`.
+A **login** is the client's saved session for a user account. It is written as
+`handle@kernel` and determines both the account a command acts as and the kernel
+it contacts. The kernel name in a login is the name registered by that client,
+which may differ from the kernel's nickname.
 
-**Login.** One account at one kernel, written `handle@kernel`, holding that
-session's tokens. A login says both who a command acts as and which kernel it
-acts on. The `kernel` half is this client's own name for that kernel and is not
-necessarily its nickname.
+Each kernel has a **superuser** account named `sys`. The operator uses this
+account to administer money and access, and can inspect records across the
+kernel. Ordinary users see the records their own roles permit them to read.
 
-**Superuser.** The account `sys`, of which each kernel has one. It performs the
-operator's money and moderation commands and can read every account.
+A **petname** is a name one kernel assigns to another for use in remote
+references. It is meaningful only on the assigning kernel. Since the remote
+kernel cannot choose this name, it cannot claim an existing local name merely
+by announcing a matching nickname.
 
-**Petname.** A name one kernel gives another kernel locally. It resolves only on
-the kernel that assigned it, and is never transmitted. A remote kernel cannot
-claim a petname on yours.
-
-**World, or network.** The money a kernel deals in, fixed when the kernel is
-created. `play` has no money: the operator creates credits and they mean nothing
-elsewhere. `test` is Arbitrum Sepolia, carrying a worthless copy of USDC for
-rehearsal. `real` is Arbitrum One, where the money is USDC and balances are
-dollars. Kernels on different networks never meet.
+A **world**, also called a **network**, defines the money and external payment
+system a kernel uses. The shipped worlds are `play`, which uses credits with no
+real monetary value; `test`, which uses a test token on Arbitrum Sepolia; and
+`real`, which uses USDC on Arbitrum One. The choice is fixed when the kernel is
+created, and kernels federate only within the same network.
 
 ## Actions
 
-**Action.** A callable unit of service with an owner, a name, a description,
-typed input and output, and a price. Its **kind** says how it executes: `http` (a
-web endpoint), `wasm` (a WebAssembly module the kernel runs), `native` (one of
-the kernel's built-in `sys` actions), or `remote_proxy` (the kernel's cached
-handle on another kernel's action).
+An **action** is a service that can be called through Juice. Its description
+states what it does, its input and output schemas describe the data it accepts
+and returns, and its price states the execution budget. Together with its owner
+and name, these form the interface a caller uses to find and select the service.
 
-**Reference.** How an action is named: `owner/name` on your own kernel,
-`owner@kernel/name` on another, where `kernel` is a petname or a public key. A
-reference that names no action resolves to that path's `index` child instead, at
-any depth: `bob` reaches `bob/index`, `bob/mail` reaches `bob/mail/index`.
+An action's **kind** specifies how it runs. An `http` action calls a web endpoint;
+a `wasm` action runs a WebAssembly module in the kernel's sandbox; and a `native`
+action uses a built-in handler. A `remote_proxy` is the local cache of an action
+hosted on another kernel. These kinds share the same calling interface.
 
-**Visibility.** Who may call an action: `private` (its owner), `local` (accounts
-on the same kernel), `public` (anyone, including other kernels). An action is also
-either active or inactive; an inactive action cannot be called by anyone.
+A **reference** names an action as `owner/name` locally or
+`owner@kernel/name` remotely. The remote kernel can be named by petname or public
+key. If the reference names no action directly, Juice tries its `index` child:
+`bob` can resolve to `bob/index`, and `bob/mail` to `bob/mail/index`. This
+convention gives a group of related actions an entry point.
 
-**Application.** A set of actions installed together from one OpenAPI document
-under one name. It is a naming convention, not an object: the actions are
-ordinary actions and the document's `index` operation is the root.
+**Visibility** determines an action's audience. A `private` action is available
+to its owner, a `local` action to users of its kernel, and a `public` action to
+callers across the network. Activity is a separate setting: an inactive action
+cannot be called, regardless of its visibility.
+
+An **application** is a collection of actions imported from one OpenAPI document
+under a common name. Each operation becomes an ordinary action. An operation
+named `index` can provide the application's entry point through the reference
+convention above.
 
 ## Calls and their records
 
-**Call.** One execution of one action. A call by a user is started with `run`.
+A **call** is an execution of one action. A user starts a call with `run`;
+the action may then call further actions to perform parts of its work.
 
-**Process.** The wallet of one `run`. It is created when the run starts, holds
-the money set aside for it, and closes by itself when the work is finished and
-nothing is outstanding. Closing returns what was not spent.
+A **process** groups the computation initiated by one `run` and holds the funds
+reserved for it. It includes the initial call, calls made within it, and any
+work awaiting input. The process closes when all its work has finished, returning
+any remaining funds to its owner.
 
-**Trace.** One call inside a process, with its own share of the process's money.
-The root trace is the call you asked for; a call it makes in turn gets a child
-trace. Traces are how the kernel keeps the price a bound on everything beneath.
+A **trace** represents an individual call within that process and holds its
+share of the budget. The initial call has a root trace. Each further call has a
+child trace linked to the call that requested it. These links let you follow
+the execution and let the kernel account for spending within each budget.
 
-**Step.** A call that has been set aside, paid for in advance, and addressed to
-one named party. It waits until that party supplies the missing input, then runs
-and settles. Nobody else can complete it and it cannot complete twice.
+A **step** reserves a future action call for completion by a named party. Its
+creator supplies the arguments already known and reserves the execution price;
+the named party later supplies the missing input. The creating action can return
+while the step waits, but its process remains open. Completion executes the
+step's target action using the reserved funds.
 
-**Transaction.** The immutable record of one attempted call: who paid, who asked,
-who was paid, the arguments, the result, the amounts, and whether it succeeded.
+A **transaction** records a settled call: its payer, requester, and payee, its
+arguments and result, its outcome, and the amounts charged or refunded. Once
+committed, this record cannot be changed. A request rejected before execution,
+such as one with invalid input, does not produce a call transaction.
 
-**Receipt.** The signed form of that record, issued by the kernel that executed
-the call. A receipt can be checked against the signing key of the kernel that
-issued it, without contacting it.
+A **receipt** is the kernel's signed record of a call's outcome and charge. It
+contains hashes of the input and output and can be verified against the issuing
+kernel's key without contacting that kernel. For a remote call, the local
+transaction also retains the remote receipt used to settle it.
 
-**Rating.** A `0` or `1` with an optional note, written once by the account that
-paid for a call. Ratings are permanent and public wherever the action is visible.
+A **rating** records the payer's assessment of a completed call as `0` or `1`,
+with an optional note. A call may be rated once. Ratings are permanent and can
+be read wherever the action is visible, without disclosing the rater's identity.
 
 ## Money
 
-**Available and locked.** Available money can be spent. Locked money is committed
-to work in progress: the price of a call that is running, the price parked for a
-waiting step, or a stake held against a call to another kernel. When the work
-settles, what it consumed is paid out and the rest returns to available.
+An account's **available** balance is money it can spend. Its **locked** balance
+is reserved for commitments, including running calls, waiting steps, and stakes
+for remote calls. Settlement pays for the completed work and releases unused
+reservations. The operator's account also holds funds committed to external
+payments and fuel purchases.
 
-**Ledger.** The record of money entering, leaving, or moving between accounts:
-deposits, withdrawals, transfers, and value delivered by an action. Payments for
-executing an action are not ledger entries; they are transactions.
+The **ledger** records deposits, withdrawals, transfers, and value delivered by
+actions. Transactions separately record the cost of executing actions. Both
+are needed to follow the full movement of money through an account.
 
-**Base units and display units.** Internally every amount is a whole number of
-base units. The `play`, `test` and `real` networks all have six decimal places,
-so one credit is 1,000,000 base units. The command line takes and prints display
-units (`0.50 credits`); the HTTP API and the JSON arguments of an action use base
-units (`500000`).
+**Base units** are the integer amounts used by the HTTP API and action JSON.
+**Display units** are the amounts accepted and shown by the command line.
+The shipped networks use six decimal places, so `500000` base units correspond
+to `0.50` credits on `play`, or `0.50` tokens on a chain network.
 
-**Peer and counterparty.** A peer is any kernel yours knows about. A counterparty
-is a peer yours has traded with, which therefore has an account on your kernel.
+A **peer** is another kernel known to yours. A **counterparty** is a peer for
+which your kernel holds an account, allowing it to authorize requests and record
+trade. Discovering a peer does not by itself create such an account.
 
-**Exposure.** The total work a kernel has performed for other kernels and not yet
-been paid for. It is capped by one credit limit for all peers together.
+**Exposure** measures the value of work delivered to foreign buyers less the
+cash received for that work. One credit limit bounds admission across all peers.
+Because small obligations settle by a draw, exposure can remain after a losing
+draw or become negative after a payment larger than the obligation it settles.

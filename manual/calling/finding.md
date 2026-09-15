@@ -6,9 +6,14 @@ nav_order: 2
 
 # Finding an action
 
+You can find a service by searching for what it does or by reading a known
+action reference. In either case, inspect its description, input requirements,
+and price before running it.
+
 ## Search
 
-`sys/lookup` searches in natural language and returns ranked candidates.
+`sys/lookup` accepts a description of the service you need and returns ranked
+action candidates. For example, a search for an echo service might return:
 
 ```
 $ juice run sys/lookup '{"query":"echo a message"}'
@@ -35,7 +40,8 @@ $ juice run sys/lookup '{"query":"echo a message"}'
   }
 ```
 
-Each result carries everything needed to decide and to call:
+The result contains the interface needed to assess the action and prepare a
+call. The main fields are:
 
 | Field | Meaning |
 |---|---|
@@ -48,17 +54,16 @@ Each result carries everything needed to decide and to call:
 
 `limit` controls how many results are returned; the default is ten.
 
-Ranking combines keyword matching with semantic similarity. A kernel with no
-embedding model configured falls back to keyword matching alone, so search
-degrades but keeps working.
-
-Search never returns an action you could not call. Results are filtered by what
-is visible to you before they are ranked and truncated.
+When an embedding model is available, ranking combines keyword matching with
+similarity in meaning. Without that model, the kernel uses keyword matching.
+In either case, access filtering takes place before the result limit is
+applied, so inaccessible local actions cannot displace accessible results.
 
 ## Results from other kernels
 
-A kernel learns about actions on other kernels in the background and includes them
-in search. Such a result names the kernel it lives on:
+The kernel periodically learns about public actions hosted by its peers and
+includes them in search. Their references identify both the provider and the
+hosting kernel:
 
 ```
 "action": "dave@beta-kernel/summarize",
@@ -67,21 +72,22 @@ in search. Such a result names the kernel it lives on:
 "last_seen": "2026-09-14T12:06:20Z"
 ```
 
-Three extra fields appear on these results. `observed_at` is when your kernel last
-verified this entry against the kernel that owns it. `last_seen` and
-`last_contact_failed_at` are when the hosting kernel was last reached and last
-provably unreachable. They say how current the entry is; they are not a promise
-that the kernel is up now.
+Remote results may carry three dates. `observed_at` records when the entry was
+last verified against its home kernel. `last_seen` and
+`last_contact_failed_at` record successful contact and a failed attempt known
+not to have reached that kernel. These observations help you judge freshness,
+but cannot guarantee that the service is reachable now.
 
-The price shown for a remote action is indicative. Nothing is committed until the
-call is made, at which point your kernel fetches the action's signed terms from
-its home kernel and quotes you the real price. A stale directory therefore affects
-only what you find, never what you pay. See
+A discovered action's price is indicative until its signed terms are resolved
+from the home kernel. Your kernel caches verified terms for subsequent calls;
+the serving kernel checks them again when admitting a call. Use the
+`quote_hash` to pin the terms you selected, as explained in
 [Running an action](running.html#calling-an-action-on-another-kernel).
 
 ## Reading an action directly
 
-If you already know the reference:
+If you already know an action's reference, `action show` reads its interface
+directly:
 
 ```
 $ juice action show bob/echo
@@ -99,12 +105,13 @@ $ juice action show bob/echo
   requires_grant: false
 ```
 
-`requires_grant` says whether the action needs you to connect an account of your
-own before it will run. See [Consent and steps](consent-and-steps.html).
+The `requires_grant` field indicates that the action uses an upstream account
+belonging to its caller. You must connect that account before the action can
+run; see [Consent and assigned work](consent-and-steps.html).
 
-A reference that names no action resolves to that path's `index` child instead.
-`juice action show bob/greeter` returns `bob/greeter/index`, which is how a group
-of related actions describes itself.
+A provider can give a group of actions a common entry point by publishing an
+`index` action. If `bob/greeter` names no action directly, for example,
+`action show` tries `bob/greeter/index`.
 
 ## Listing
 
@@ -117,10 +124,10 @@ $ juice action list
   …
 ```
 
-This lists the actions you can call on this kernel: your own, this kernel's
-`local` actions, its `public` actions, and any remote actions your kernel has
-cached. `[grant]` marks an action that needs you to connect an account of your own
-first. `--all` adds inactive and private rows within your own scope.
+The default list shows active actions within your access: your own actions,
+local and public actions hosted here, and cached remote actions. The `[grant]`
+marker identifies actions requiring an upstream connection. Use `--all` to
+include inactive actions within your permitted scope.
 
 ## What other buyers thought
 
@@ -138,10 +145,10 @@ $ juice action stats bob/echo
   last_used_at: 2026-09-14T12:05:24Z
 ```
 
-Ratings show the value, the note and the date, without the rater's identity.
-Every rating was written by an account that paid for a call to that action; there
-is no way to rate an action you did not buy. `latency_estimate` is in seconds.
+Ratings present the payer's assessment of a completed call, including an optional
+note and the date, without naming the payer. Statistics summarize the action's
+recorded use; `latency_estimate` is its mean execution time in seconds.
 
-For actions on other kernels, the evidence that crosses the network is narrower
-and is described in
+Evidence shared between kernels contains less information than the private call
+record. Its interpretation is explained in
 [The network economy](../operating/network-economy.html#reputation-across-kernels).

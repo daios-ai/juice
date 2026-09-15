@@ -6,13 +6,17 @@ nav_order: 3
 
 # The network economy
 
-How money moves between kernels. A buyer needs only
-[Calling an action on another kernel](../calling/running.html#calling-an-action-on-another-kernel);
-this chapter is for whoever sets the rates and answers for the balance.
+Federation lets a buyer use a local balance to purchase a service hosted
+elsewhere. The serving provider advances the work, the kernels record the
+result, and an external payment settles the obligation. This chapter explains
+the prices, funding, and evidence involved from the operator's perspective.
+The buyer's procedure is covered in
+[Calling an action on another kernel](../calling/running.html#calling-an-action-on-another-kernel).
 
 ## What a cross-kernel call costs and who gets it
 
-Three numbers make the price.
+The advertised price combines the provider's local price with a serving markup
+and the originating kernel's import fee:
 
 ```
 provider's price                  mp
@@ -20,32 +24,35 @@ serving kernel's markup           sr = mp + ceil(mp × remote_bps / 10000)
 buyer's kernel's import fee        q = sr + ceil(sr × import_bps / 10000)
 ```
 
-The buyer pays `q`. The provider's own kernel takes its ordinary fee on the
-provider's margin out of `mp`. The markup goes to the provider, who funded the
-work on credit and is paid by a draw whose expected value, not whose outcome, is
-the debt. The buyer's kernel keeps the import fee. No kernel keeps any part of a
-draw: a kernel that took the difference would be paying its providers less than
-they are owed on average.
+The buyer reserves `q` as the execution budget. The serving kernel applies its
+ordinary fee to the provider's local execution margin. The serving markup
+compensates the provider for advancing the work and accepting variation in
+ticket settlement, while the origin retains the import fee. A paying ticket
+is credited whole to the serving provider.
 
-Both rates default to 500, that is 5%. Every component is fixed before the call
-runs and is carried in the signed record, so neither side can move the price
-afterwards.
+Both markup rates default to 500 basis points, or 5%. The serving rate is
+bound to the call's terms, and the origin records its own import rate at
+dispatch. Later configuration changes therefore do not reprice an existing
+call. The import rate is local accounting information and is not part of the
+remote receipt.
 
-With `mp = 2.00` and both rates at 5%: `sr = 2.10`, `q = 2.205`. The seller's
-receipt shows `charge 2000000` and `premium 100000`; the buyer's transaction shows
-`gross 2.205`, of which `0.105` is the import fee.
+With `mp = 2.00` and both rates at 5%, `sr = 2.10` and `q = 2.205`. On
+success, the seller's receipt contains `charge 2000000` and `premium 100000`
+in base units. The buyer's allocation is `2.205`, including an import fee of
+`0.105`. The final account charge also depends on the ticket mechanism below.
 
 ## The seller advances the work
 
-A call from another kernel runs on the seller's money. The provider's account funds
-the execution and is repaid when the buyer's kernel settles.
+The serving provider supplies the execution budget from its own account.
+Payment from the remote buyer arrives through settlement, rather than being
+available before execution. A provider therefore needs a working balance to
+serve paid remote calls.
 
-The kernel tracks one number, its **exposure**: everything it has delivered to
-other kernels and not yet been paid for, less the cash received for it. When a
-call is admitted, exposure rises by the most that call could owe. When the call
-finishes, the figure is corrected to what was actually charged. A call that would
-take exposure past the limit is refused with a signed rejection, and so is a call
-whose provider cannot fund the work.
+The kernel tracks **exposure** as delivered value less cash received for that
+work. Admission temporarily adds the maximum obligation, including markup;
+settlement of execution corrects that reservation to the actual charge.
+The kernel returns a signed rejection if admitting the call would exceed its
+limit or if the provider cannot fund the execution.
 
 ```
 Credit:     owed-to-us=4.20 credits limit=500.00 credits
@@ -53,61 +60,66 @@ Credit:     owed-to-us=4.20 credits limit=500.00 credits
 
 ### Bounding what strangers can cost you
 
-`credit_limit` is one number covering every peer at once, not a limit per peer.
-Creating new identities therefore buys an attacker nothing: a thousand new kernels
-share the same ceiling as one. The limit defaults to 500 units.
+The `credit_limit` applies across all peers together. Its default is 500
+display units. Because admission uses a shared limit, an attacker cannot obtain
+another allowance simply by creating a new kernel identity.
 
-It is independent of settlement: refusing every ticket would not stop this kernel
-serving, and setting the limit to zero does not stop it either — only current
-exposure is bounded.
-
-Free calls add nothing to exposure.
+Exposure is reduced by actual receipts of money. A losing ticket closes its
+obligation without reducing exposure, while a paying ticket can reduce exposure
+below zero. The limit therefore bounds current exposure rather than requiring
+each ticket to pay. With a zero limit, free work still proceeds and paid work
+can be admitted when negative exposure leaves enough room.
 
 ## Settling one call
 
-Every cross-kernel debt settles on its own, identified by a ticket both kernels
-know the call by.
+Each obligation has a ticket identified by the call's original retry key.
+It settles independently, without accumulating a bilateral balance that must
+later be netted against other calls.
 
-Paying every small debt individually would cost more in payment fees than the debts
-are worth. So a debt is settled by a draw, as follows.
+For a small obligation, a draw avoids making a blockchain payment whose fee
+would exceed the service's value. The buyer commits to a secret at dispatch.
+After execution, the seller generates a nonce and signs it into the receipt.
+These two contributions determine the draw, preventing either side from
+choosing the result alone.
 
-The buyer commits to a secret when it makes the call. The seller mints a nonce
-after executing and signs it into the receipt. Neither number alone decides
-anything, and neither side can choose the outcome.
-
-Let `D` be the debt and `L` the buyer's kernel's `lottery` setting.
+Let `D` be the obligation and `L` the face value configured as `lottery` on the
+buyer's kernel:
 
 - If `D ≥ L`, or `L` is zero, the debt is paid exactly.
 - Otherwise `L` is paid with probability `D / L`, and nothing is paid otherwise.
 
-The expected payment is `D` either way. Over many calls the two kernels exchange
-the right amount of money in a fraction of the payments.
+Both cases have expected payment `D`. Small obligations therefore produce fewer
+external payments, with individual payments larger than the services they
+settle. Actual totals over a finite set of calls can differ from their expected
+value.
 
-The buyer stakes the whole of `L` from the immediate caller's balance when the call
-is dispatched, releases it at settlement, and reserves the payment from it if the
-draw pays. The seller refuses a call whose `L` is above its own `lottery_max`,
-since no retry would change that.
+When a paid call is dispatched with a nonzero `L`, the origin reserves the full
+stake from the immediate caller's account. On receipt settlement it returns
+the obligation amount from the execution budget to that account, releases the
+stake, and reserves any payment due from the draw in the same operation. The
+serving kernel refuses a face value above its own `lottery_max` before execution.
 
-Then the buyer reveals the secret: at once on a loss, and once the payment is final
-on a win. The seller recomputes the draw against the commitment it stored. A loss
-is accepted however late it arrives, because a deadline that turned a loss into a
-win would make every outage cost the buyer money.
+The buyer reveals its secret immediately for a loss, or after the payment is
+final for a win. The seller checks the reveal against the recorded commitment
+and recomputes the outcome. A late losing reveal remains valid; a delay does
+not change the draw into a payment.
 
 ### What counts as payment
 
-On a network with a chain, an obligation closes only against a finalised payment
-from the address the buyer proved at admission, for the amount drawn.
+On a chain network, a paying obligation closes against the finalized transaction
+named in the reveal. Its sender must match the buyer's address proved at
+admission, and its amount must match the draw. One payment can close only one
+obligation. A losing draw closes after its reveal is verified, with no payment.
 
-Such a payment arrives at the same address a user's deposit does, and the kernel
-tells them apart by what each one settles: every incoming payment is matched
-against outstanding obligations first, and only what matches none of them is
-considered as a deposit — attributed to the account that registered the sending
-address, or held for the operator if nobody has. One payment closes at most one
-obligation.
+Settlement payments and user deposits arrive at the same rail address.
+Reconciliation matches obligations first, then attributes remaining deposits
+by registered sender. A payment from the payer of an unresolved obligation can
+remain held until the reveal establishes its purpose; this prevents premature
+crediting as a user deposit.
 
-On `play` there is no chain, so the buyer's signed reveal *is* the payment. Debts
-close by themselves and no operator settles anything by hand. `play` credits are
-backed by nothing, and this is the sense in which that is true.
+On `play`, the buyer's signed paying reveal supplies the manual rail's payment
+fact. The same reconciliation can then close the obligation automatically.
+No operator payment is needed, consistent with `play` having no cash backing.
 
 ### The settings
 
@@ -115,60 +127,60 @@ backed by nothing, and this is the sense in which that is true.
 Rates:      … lottery=1.00 credits lottery_max=5.00 credits
 ```
 
-`lottery` is the face value your kernel's buyers stake. Setting it to zero pays
-every debt exactly, at the cost of a payment per call. `lottery_max` is the largest
-face value you will accept from somebody else's buyer.
+The `lottery` setting determines the face value your local callers stake.
+Setting it to zero pays each obligation exactly, requiring an external payment
+for every nonzero obligation. The `lottery_max` setting limits the face value
+your kernel accepts when serving a buyer from elsewhere.
 
-Both are your kernel's own settings. They are not network-wide, and a buyer whose
-kernel sets a large `lottery` needs that much available on top of each cross-kernel
-price.
+These are operator settings rather than network-wide constants. A larger
+ticket can reduce payment frequency for small calls, but also requires a larger
+available balance and produces greater variation in individual charges.
 
 ## Federation does not chain
 
-A kernel never re-serves an action it imported from a third kernel. To reach a
-provider you resolve from the kernel that owns it. There is no chain of
-intermediaries between a buyer and a provider, and therefore nothing to audit
-through.
+A kernel's remote-action cache is available to its local users and cannot be
+exported to a third kernel. Resolution therefore reaches the provider's home
+kernel directly, and its signed receipt supplies the evidence for that remote
+call. Providers can still compose other services within their own actions,
+subject to ordinary budgets and attribution.
 
 ## Reputation across kernels
 
-Kernels exchange evidence about trade, not scores.
+Kernels share signed projections of trade records so that another participant
+can examine the evidence behind a rating. Each projection names the subject
+kernel and action, the outcome and times, and optionally the counterparty
+kernel. It excludes user identities, transaction and execution IDs, payload
+hashes, amounts, and value recipients.
 
-An evidence record names the kernel and the action it is about, at most the
-counterparty **kernel**, the outcome, and the times. It never carries the rater's
-identity, any payer or caller, any transaction, trace or process id, any argument
-or result hash, any amount, or any recipient of value. The evidence is public
-about actions and silent about people.
+A kernel publishes evidence from its own records. It does not relay evidence
+learned from other kernels, so consumers obtain each statement from its issuer.
 
-A kernel gossips only its own receipts, never anything it learned from another
-kernel. Because no kernel relays what it heard, every piece of evidence is
-first-hand.
-
-A rating is **trade-backed** when it points at a receipt the subject kernel also
-issued for that action, naming the rater's kernel as counterparty. Only those are
-evidence of a real trade; other ratings are counted separately as unverified. A
-kernel that issues two different valid ratings under one key has equivocated, and
-both are dropped from every derived figure.
+A rating is **trade-backed** when its linked receipt matches an execution
+receipt issued by the subject kernel for that action, with the rating issuer
+named as counterparty. Unlinked claims remain separately counted as unverified.
+Two conflicting valid ratings for the same evidence record constitute
+equivocation and are excluded from derived figures. Inspect these views with:
 
 ```
 $ juice admin peer inspect beta-kernel
 ```
 
-shows this in two parts. The execution summary counts the kernel's own receipts.
-Counterparty experience groups what other kernels report, by issuer, never folded
-into the first.
+The execution summary counts the subject kernel's own evidence. Counterparty
+experience separately groups the reports of other issuers, avoiding a combined
+score that would obscure their sources.
 
-What this proves is attribution and immutability: that a record was issued by the
-key it claims and has not been altered. It does not prove honesty. The only
-signals resistant to manufactured identities are your own settled experience and
-the number of distinct kernels that report trade.
+Signature and receipt checks establish who issued a record, whether it has
+changed, and whether a claimed trade links to the counterparty's evidence.
+They do not prove that an assessment is honest. Interpret ratings alongside
+your own experience and the independently recorded history of trade.
 
 ## Retention
 
-A peer is kept while it has acted recently, is suspended, or has anything
-unresolved in either direction. Once idle past `peer_retention_days`, its cached
-actions, statistics, directory entries and evidence are purged and the kernel row
-goes.
+The kernel retains peers with recent activity, suspended status, or unresolved
+work in either direction. After an eligible peer has been idle beyond
+`peer_retention_days`, its cached actions, statistics, discovery entries, and
+evidence can be removed with its peer record.
 
-The account row stays, because it anchors the ledger. Every credit involving that
-peer stays reconstructible; the immutable history is never purged.
+The associated account remains as a reference for historical transactions and
+ledger entries. Removing cached peer information therefore does not remove
+the immutable financial history.

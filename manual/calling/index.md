@@ -6,9 +6,12 @@ has_children: true
 
 # Calling actions
 
-This part covers what a buyer does with an account that already has money in it:
-finding an action, running it, reading what it cost, and the two things a buyer is
-sometimes asked to do in return.
+Calling an action involves choosing a service, supplying its input, and paying
+for the work it performs. These chapters follow that sequence, beginning with
+the account and login used to make the call. They then explain discovery,
+execution, records, and ratings, followed by services that require consent or
+later input from you.
 
-Holding money is the [Money](../money/) part, before this one. Nothing here
-requires you to publish anything or to run a kernel.
+The examples assume an existing account and, for paid calls, an available
+balance. [Money](../money/) explains how to fund it. You can follow these
+chapters using someone else's kernel without publishing any actions yourself.

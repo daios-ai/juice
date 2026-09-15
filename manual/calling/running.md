@@ -6,6 +6,9 @@ nav_order: 3
 
 # Running an action
 
+Once you have selected an action and prepared its input, use `run` to execute
+it under the current login:
+
 ```
 $ juice run ACTION [JSON]
 ```
@@ -26,39 +29,43 @@ $ juice run bob/echo '{"msg":"hello"}'
   process_id: a394b5c5-…
 ```
 
-`tx_id` identifies the transaction, and is what you pass to `tx show`,
-`tx verify` and `tx rate`.
+The response includes the action's result and identifiers for its records.
+Use `tx_id` with `tx show` to inspect the charge, `tx verify` to check the
+receipt, or `tx rate` to record your assessment.
 
 ## What a call costs
 
-The price you were quoted is the whole cost. Whatever the action does internally —
-calling other paid actions, waiting for a person, calling an action on another
-kernel — comes out of that price. You are charged the price and nothing more.
+For a local action, the advertised price covers the call and the work it
+performs through other actions. The provider must fit that work within its
+budget. A direct call to another kernel also involves a settlement stake,
+described under [The ticket](#the-ticket), so its final charge can vary around
+the advertised price.
 
-Running the call takes the price from your available balance and locks it for the
-duration. On success the whole price is paid: the provider keeps what the work did
-not consume. There is no metering and no discount for an action that finished
-cheaply.
-
-Actions priced at zero run without any funds.
+Starting a paid call reserves its price from your available balance. On success,
+the full price is paid: the provider earns the unused margin after the kernel's
+fee. The price therefore represents the service purchased, rather than a meter
+of the resources consumed. A failed call returns the unspent part of the budget.
+Zero-price actions require no execution funds.
 
 ## When something goes wrong
 
-**Invalid arguments cost nothing.** Input is checked against the action's schema
-before any money moves.
+The kernel checks input against the action's schema before reserving funds.
+If a required argument is absent or has the wrong type, the request is rejected
+without charge:
 
 ```
 $ juice run bob/echo '{}'
 error: field #.msg: required field missing
 ```
 
-**A failed call refunds what was not consumed.** If the action ran and failed, you
-are refunded the part of the price that had not already been spent. Work that
-sub-providers completed successfully before the failure stays paid; that money is
-gone and the refund does not cover it. Invalid output is never paid for.
+Failure after execution has begun is different. The kernel refunds the budget
+that remains, but preserves payment for work already completed by other actions.
+An output that fails schema validation also causes the action to fail; the
+provider receives no payment for that failed output.
 
-**A missing consent costs nothing.** An action that needs you to connect an
-upstream account of your own is refused before any charge, naming what to connect:
+Some actions require permission to use an upstream account belonging to you.
+If that consent is missing, the kernel rejects the call before charging and
+identifies the action to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
@@ -70,15 +77,16 @@ error: grant required for bob/mail
 
 ## Pinning the terms you saw
 
-A provider may change an action's price or contract at any time. To be sure you
-are buying what you read, pass the `quote_hash` you saw:
+A provider may revise an action between the time you inspect it and the time you
+run it. To bind your purchase to the terms you read, pass the `quote_hash`
+returned by search or `action show`:
 
 ```
 $ juice run bob/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
-If the terms have moved, the call is refused before any charge and the new terms
-are named:
+If an otherwise callable action has different terms, the kernel rejects the
+request before charging and reports the current quote:
 
 ```
 Nothing was charged. The action's terms changed since you quoted them; its price is now 500000.
@@ -86,30 +94,33 @@ Re-read the action and pass --quote-hash 4965342976414282… to accept the new t
 error: the action's terms changed; it now costs 0.50 credits
 ```
 
-Without a pin, a call is made at whatever the current terms are. Pin whenever
-time passes between reading an action and calling it.
+Without a pin, `run` uses the terms current when the call is admitted. Pinning
+is therefore useful whenever selection and execution happen at different times,
+particularly in programs that prepare work in advance.
 
 ## Calling an action on another kernel
 
-Name the kernel in the reference. The kernel part is a petname your operator
-assigned, or the kernel's public key.
+To reach a remote provider, include its kernel in the action reference. This
+can be a petname known to your kernel or the remote kernel's public key:
 
 ```
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
 ```
 
-You pay from your balance on your own kernel. You need no account on the other
-kernel, no prefunding and no approval from its operator.
+Your local balance funds the purchase. The two kernels handle the exchange,
+without requiring you to open or fund an account at the destination.
 
-The first such call fetches the action's signed terms from its home kernel,
-verifies them, and caches them. Later calls use the cache. If the remote contract
-has changed, the call is refused and the terms are fetched again rather than
-being repriced silently.
+On first use, your kernel fetches and verifies the action's signed terms, then
+caches them. Later calls can use the cache. The serving kernel refuses a call
+whose cached terms no longer match; the local cache can then be refreshed for
+a subsequent attempt.
 
-The price is all-in and is fixed before the call runs. It has three parts: the
-provider's price, a markup that compensates the provider for doing the work on
-credit and being paid by a draw, and your own kernel's import fee. With a provider
-price of `2.00`, a markup of 5% and an import fee of 5%, you pay `2.205`:
+The advertised remote price includes the provider's price, the serving markup,
+and your kernel's import fee. The markup compensates the provider for advancing
+the work and accepting the settlement draw described below. With a provider
+price of `2.00` and both rates at 5%, the advertised total is `2.205`. When the
+obligation is at least the ticket's face value, it is paid exactly, as in this
+example with the default `1.00` ticket:
 
 ```
 $ juice user me
@@ -122,23 +133,24 @@ $ juice user me
 
 ### The ticket
 
-A call to another kernel also **stakes** a fixed amount from your balance while
-it runs. The stake exists because paying every small cross-kernel debt
-individually would cost more in payment fees than the debts are worth. Instead,
-debts smaller than the stake are settled by a draw: the debt is paid at the
-stake's full face value with a probability that makes the average payment equal
-the debt. Neither kernel can influence the outcome. A debt at least as large as
-the stake is paid in full.
+A paid remote call may also reserve a **stake** from your balance. Your kernel's
+`lottery` setting determines its size. This stake supports settlement of small
+obligations, for which making an individual blockchain payment could cost more
+than the service itself.
 
-Two consequences follow for you as a buyer.
+When the obligation is smaller than the ticket's face value, a draw determines
+whether the full face value is paid or no payment is made. The probability is
+chosen so that the expected payment equals the obligation, and the two kernels
+contribute to the draw without either choosing its outcome. An obligation at
+least as large as the face value is paid exactly.
 
 {: .warning }
-> One call to another kernel can cost more than the price you were shown. See the
-> two consequences below.
+> A remote call can cost more than its advertised price when the draw pays.
+> Allow for both the required stake and the possible final charge.
 
-**You need the stake as well as the price.** Both must be available when the call
-is dispatched. With a price of `2.205` and a stake of `1.00`, a balance of `2.50`
-is not enough:
+The first consequence is a funding requirement: both the price and the stake
+must be available at dispatch. For a price of `2.205` and a stake of `1.00`, a
+balance of `2.50` is insufficient:
 
 ```
 $ juice user me
@@ -147,33 +159,32 @@ $ juice run 'dave@beta-kernel/summarize' '{"text":"x"}'
 error: insufficient user balance
 ```
 
-**What one call finally costs depends on the draw.** When the call settles, the
-whole price comes back to you except your kernel's import fee, and the stake is
-released. If the draw pays, the stake's full face value is then taken. So a call
-whose debt was below the stake costs you either the import fee alone, or the
-import fee plus the face value. Across many calls the average is the price you
-saw, which is the sense in which the advertised price bounds a cross-kernel call.
-A debt at least as large as the stake is paid exactly, and the call costs the
-price. Calls within your own kernel have no stake and no such variation.
+The second consequence is variation in the final charge. For a successful call
+whose obligation is below the face value, settlement returns the execution
+budget except for the import fee and releases the stake. A paying draw then
+reserves the face value as payment. The call therefore costs either the import
+fee alone or the import fee plus the face value. Its expected cost is the
+advertised price; a finite series of calls need not average to that exact amount.
 
-The stake is your kernel's setting, not the provider's. An operator who sets it
-to zero pays every debt exactly, and calls from that kernel have no stake and no
-draw. Ask your operator, or read `juice admin kernel show` if you run the kernel
-yourself.
+If the obligation is at least the face value, the payment equals the obligation
+and the successful call costs its advertised price. Setting `lottery` to zero
+also pays every obligation exactly, with no stake or draw. Ask your operator
+which setting applies, or inspect `juice admin kernel show` if you operate the
+kernel yourself.
 
 ### When the other kernel cannot be reached
 
-A cross-kernel call ends in exactly one of two ways.
-
-It **fails fast**, with a full refund, when the call provably never left your
-kernel:
+When contact fails during a remote call, the kernel distinguishes a request
+known not to have reached the peer from one that may already be executing there.
+The first case can fail immediately with a full refund:
 
 ```
 error: peer unreachable
 ```
 
-Or it **parks**, when the call may have been received and its outcome is not yet
-known. The money stays locked and the run reports where to follow it:
+In the second case, the call remains pending because its outcome is unknown.
+Its funds stay locked, and the response identifies the process and the time at
+which a refund becomes eligible:
 
 ```
 process_id: 01d1da53-…
@@ -181,9 +192,11 @@ pending_since: 2026-09-14T12:06:27Z
 refund_eligible_at: 2026-09-15T12:06:27Z
 ```
 
-A parked call is retried until a signed receipt arrives, surviving restarts of
-either kernel. If none arrives within 24 hours it settles as a failure with a full
-refund. You are never charged twice and the call is never silently dropped.
+A pending call is retried under its original identity, including after a
+restart, so a retry can recover the outcome without buying the work again.
+A signed receipt settles the call. If none arrives within 24 hours, the running
+kernel's retry worker settles it as a failure with a full refund; a stopped
+kernel must restart before it can do so.
 
 {: .warning }
 > Do not re-run a parked call. `run` has no idempotency key, so running it again
@@ -197,6 +210,6 @@ $ juice process show 01d1da53-…
 
 ### Actions are not re-sold
 
-A kernel never serves another kernel's imported action onward. To call an action
-you must resolve it from the kernel that owns it, so there is never a chain of
-intermediaries between you and the provider.
+A cached remote action is available to local callers but cannot be exported
+again to a third kernel. Each remote call therefore resolves directly from the
+action's home kernel, keeping its terms and signed outcome tied to the provider.

@@ -6,32 +6,33 @@ nav_order: 2
 
 # The sys standard library
 
-Every kernel ships these actions under the handle `sys`. They are ordinary actions:
-called with `run`, priced, recorded, and rated like any other. They hold no special
-privilege, and an equivalent could be published by anyone as an `http` or `wasm`
-action.
+The built-in actions are published under `sys` and use the ordinary calling,
+payment, and recording interfaces. Most provide common services such as search,
+time, and web access; the transfer action additionally has the kernel-declared
+authority to deliver value.
 
-They are `local` to their kernel, so they are not served to other kernels. A kernel
-with capacity to sell wraps its own public action around one.
-
-The operator sets each one's price in `native.<name>`. The defaults are zero for
-all but `sys/tinygo/compile`. Amounts in these schemas are base units.
+Built-ins have local visibility. A provider wishing to offer one of these
+capabilities remotely can compose it into a public action with its own price
+and contract. The operator configures built-in prices under `native.<name>`;
+all default to zero except `sys/tinygo/compile`. Amounts in action JSON use
+base units.
 
 ## Search
 
 **`sys/lookup`** — `{query, limit=10}` → `{results: [...]}`
 
-Ranked candidates, each with `action`, `action_id`, `description`, `input_schema`,
-`output_schema`, `price`, `quote_hash` and `score`. Results from other kernels also
-carry `observed_at`, `last_seen` and `last_contact_failed_at`. Ranking combines
-keyword and semantic matching; with no embedding model configured it falls back to
-keyword matching. Results are filtered to what the caller may call before they are
-ranked. See [Finding an action](../calling/finding.html).
+Returns ranked candidates with `action`, `action_id`, `description`,
+`input_schema`, `output_schema`, `price`, `quote_hash`, and `score`. Remote
+results may include observation and contact timestamps. Ranking combines
+keywords with semantic matching when an embedding model is available, and
+uses keywords alone otherwise. Access filtering precedes the result limit.
+See [Finding an action](../calling/finding.html).
 
 ## Language model
 
-These need a model configured in `native.llm`. Without one they report
-`ErrInvalidState` and charge nothing.
+These actions require the corresponding model capability configured through
+`native.llm`. An unavailable capability is reported as `ErrInvalidState`
+without charging for the request.
 
 **`sys/llm/chat`** — `{messages, system?}` → `{message}`
 
@@ -42,35 +43,35 @@ locally against the schema.
 
 **`sys/llm/decide`** — `{messages, actions}` → `{action, args, message?}`
 
-Selects one action from the candidates and proposes arguments. It never executes
-anything. Contracts are read from the kernel by reference, never taken from the
-request; proposed arguments are validated against the real schema. A candidate on
-an unreachable kernel is discarded, and `ErrNotFound` is reported only if none
-resolves. See
+Selects a candidate and proposes schema-valid arguments without executing the
+selected action. The kernel resolves candidate contracts by reference.
+Unavailable remote candidates can be discarded; an unknown local reference
+is an error, and a set with no resolvable candidate returns `ErrNotFound`. See
 [Separate planning from spending](../programs.html#separate-planning-from-spending).
 
 ## Basics
 
 **`sys/time`** — `{}` → `{unix, iso}`. Seconds since the epoch, and RFC 3339.
 
-**`sys/random`** — `{}` → `{value}`. A cryptographically secure float in `[0,1)`.
-It exists because sandboxed code has no source of entropy of its own.
+**`sys/random`** — `{}` → `{value}`. Returns a random value in `[0,1)` for
+sandboxed code, which has no direct access to operating-system entropy.
 
-**`sys/sink`** — anything → `{}`. Accepts and discards. Used as the target of a
-step whose point is the waiting, not the work.
+**`sys/sink`** — anything → `{}`. Accepts input and returns an empty object.
+It can complete a step that needs acknowledgment without further processing.
 
 ## Messaging and money
 
 **`sys/message`** — `{to, message}` → `{step_id}`
 
-Creates a waiting step for the named recipient, carrying the message. The
-recipient sees it with `step list` and answers it with `step complete`. See
+Creates a step carrying the message for the named recipient. The recipient can
+inspect it with `step list` and acknowledge it with `step complete`. See
 [Consent and assigned work](../calling/consent-and-steps.html#completing-work-addressed-to-you).
 
 **`sys/transfer`** — `{target, amount}` → `{amount}`
 
-Delivers `amount` base units from the immediate caller to a local recipient,
-untaxed and all-or-nothing. The recipient must be an ordinary active account on
+Reserves `amount` base units from the immediate caller and delivers them whole
+on success. The execution price is charged separately, and failure returns the
+value reservation. The recipient must be an ordinary, unsuspended account on
 the same kernel. See
 [Moving money through an action](../money/funds.html#moving-money-through-an-action).
 
@@ -78,24 +79,25 @@ the same kernel. See
 
 **`sys/web`** — `{url}` → `{status, body, content_type, final_url}`
 
-A read-only `GET`. It takes no headers and carries no credentials, so nothing
-sensitive can enter arguments, receipts or logs. A URL with no scheme defaults to
-`https`, and an explicit scheme is never downgraded. Private, link-local and
-reserved addresses are refused unless the operator allowed them. A non-2xx status
-is returned rather than raised. Responses are capped at 10 MiB.
+Fetches a URL with `GET`, without accepting custom headers or credentials.
+A URL without a scheme defaults to `https`; an explicit scheme is preserved.
+The kernel's outbound policy excludes private, link-local, and reserved
+addresses unless enabled by the operator, while allowing loopback by default.
+Non-2xx HTTP responses are returned as results, and bodies are capped at 10 MiB.
 
-This is the only way code running inside the kernel reaches the network.
+Sandboxed code can use this action or another registered HTTP action to reach
+the network through the ordinary call interface.
 
 ## Building actions
 
 **`sys/tinygo/compile`** — `{source}` → `{status, artifact, artifact_hash, diagnostics}`
 
-Compiles a `Handle` function into a WebAssembly module, returned base64-encoded.
-The surrounding code — package, imports, allocator, entry point — is supplied for
-you. A compile error is reported as `status: "failure"` with diagnostics, and is
-charged as a failed output. If the toolchain is not installed, the action reports
-`ErrInvalidState` and charges nothing.
+Compiles a `Handle` function and returns a base64-encoded WebAssembly module.
+The compiler supplies the surrounding package, imports, allocator, and entry
+point. Source errors return `status: "failure"` with diagnostics as the paid
+compilation result. An unavailable toolchain produces `ErrInvalidState`
+without charging.
 
-Registering the result is a separate step:
-`action create --kind wasm --artifact <file>`. See
+Register the decoded module using `action create --kind wasm --artifact <file>`.
+See
 [Composition](../providing/composition.html#composing-from-webassembly).
