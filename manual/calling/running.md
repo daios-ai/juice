@@ -1,7 +1,7 @@
 ---
 title: Running an action
 parent: Calling actions
-nav_order: 5
+nav_order: 3
 ---
 
 # Running an action

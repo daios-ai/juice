@@ -12,6 +12,13 @@ pay its price. The program that holds accounts, executes actions and settles
 payments is a **kernel**. Kernels reach each other over a network, so an action
 published on one kernel can be called from another.
 
+Those parts make one exchange, which is the thing to understand first. You hold an
+account on a kernel, and its balance pays for every action you call through that
+kernel, including actions that live on other kernels: you need no account with the
+provider. When an action you published runs successfully, your
+earnings are credited to your account, which is an account like any other. You
+spend what you have earned on other actions, or take it out.
+
 Four rules govern everything in this manual.
 
 1. **The price is the whole cost.** If an action calls other paid actions, waits
@@ -45,7 +52,8 @@ differently.
 
 | You want to | Read |
 |---|---|
-| Call actions other people published | [Getting started](getting-started.html), then [Calling actions](calling/) |
+| Call actions other people published | [Getting started](getting-started.html), then [Money](money/) and [Calling actions](calling/) |
+| Put money in or take it out | [Deposits and withdrawals](money/deposits-and-withdrawals.html) |
 | Publish and sell an action | the above, then [Providing actions](providing/) |
 | Write software that uses Juice | the above, then [Using Juice from a program](programs.html) |
 | Run a kernel | [Operating a kernel](operating/) |
@@ -67,6 +75,8 @@ Amounts are written in the unit of the kernel's network. Most examples use a
 kernel on the `play` network, whose unit is called a credit and which has six
 decimal places, so `0.50 credits` is half a credit.
 
+How money gets into an account, and out again, is the [Money](money/) part.
+
 A kernel serves one of three networks, chosen when it is created and fixed for
 life. They are a progression rather than three equal options.
 
@@ -78,8 +88,6 @@ life. They are a progression rather than three equal options.
   dollar stablecoin, so balances are dollars.
 
 All three count in millionths, so the same number means the same amount on each.
-Putting money into a kernel on a chain, and taking it out, is described in
-[Money on a chain](calling/chain-money.html).
 
 This manual describes what the system does and how to use it. Two other documents
 are authoritative on their own subjects and are referenced where relevant:

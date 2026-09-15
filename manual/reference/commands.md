@@ -64,11 +64,11 @@ sees every row and may disable any action.
 | `juice user update` | `--description`, `--password` |
 | `juice user connect SELECTOR` | consent for an action to use your upstream account ([Consent](../calling/consent-and-steps.html)) |
 | `juice user disconnect [SELECTOR]` | revoke it; `--account KEY` removes the whole upstream account |
-| `juice user transfer RECIPIENT AMOUNT` | send money to another user of this kernel ([Funds](../calling/funds.html)) |
+| `juice user transfer RECIPIENT AMOUNT` | send money to another user of this kernel ([Funds](../money/funds.html)) |
 | `juice user ledger` | deposits, withdrawals, transfers, delivered value |
-| `juice user address [ADDRESS]` | register the address you are paid at |
-| `juice user deposit` | where to send money, and whether you are registered |
-| `juice user withdraw AMOUNT` | withdraw credits |
+| `juice user address [ADDRESS]` | register the address you pay from and are paid at ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
+| `juice user deposit` | where to send money, and whether you are registered ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
+| `juice user withdraw AMOUNT` | take money out ([Taking money out](../money/deposits-and-withdrawals.html#taking-money-out)) |
 | `juice user withdrawals` | withdrawals made, and where each stands |
 
 `transfer` takes `--external-key`, `withdraw` takes `--id`; both make a retry safe.
@@ -131,7 +131,7 @@ Both take `--yes`.
 | `juice admin user suspend USER` | suspend, reversibly ([Operator duties](../operating/duties.html)) |
 | `juice admin user unsuspend USER` | restore |
 | `juice admin user rename USER NEW_NAME` | the only way a handle changes |
-| `juice admin user deposit USER [AMOUNT]` | credit against a payment received; `--ref` names it |
+| `juice admin user deposit USER [AMOUNT]` | credit against a payment received; `--ref` names it ([Crediting accounts](../operating/duties.html#crediting-accounts)) |
 | `juice admin peer list` | known kernels, traded and discovered |
 | `juice admin peer show PEER` | one peer's account here |
 | `juice admin peer suspend PEER` | refuse its requests, reversibly |

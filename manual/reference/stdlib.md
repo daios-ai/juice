@@ -72,7 +72,7 @@ recipient sees it with `step list` and answers it with `step complete`. See
 Delivers `amount` base units from the immediate caller to a local recipient,
 untaxed and all-or-nothing. The recipient must be an ordinary active account on
 the same kernel. See
-[Moving money through an action](../calling/funds.html#moving-money-through-an-action).
+[Moving money through an action](../money/funds.html#moving-money-through-an-action).
 
 ## The web
 

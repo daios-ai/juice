@@ -1,13 +1,14 @@
 ---
 title: Calling actions
-nav_order: 4
+nav_order: 5
 has_children: true
 ---
 
 # Calling actions
 
-This part covers everything a buyer does: holding an account, holding money,
-finding an action, running it, reading what it cost, and the two things a buyer
-is sometimes asked to do in return.
+This part covers what a buyer does with an account that already has money in it:
+finding an action, running it, reading what it cost, and the two things a buyer is
+sometimes asked to do in return.
 
-Nothing here requires you to publish anything or to run a kernel.
+Holding money is the [Money](../money/) part, before this one. Nothing here
+requires you to publish anything or to run a kernel.

@@ -1,7 +1,7 @@
 ---
 title: Finding an action
 parent: Calling actions
-nav_order: 4
+nav_order: 2
 ---
 
 # Finding an action

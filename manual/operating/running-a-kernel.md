@@ -104,9 +104,11 @@ On Arbitrum One the kernel treats 0.001 ETH as its floor and tops itself up to
 Arbitrum Sepolia the figures are ten times smaller and the ETH is free from a
 faucet.
 
-You do this once. Afterwards the kernel keeps itself supplied by selling a little
-of its own USDC for ETH, on the exchange the network names, spending its earnings
-and never a user's balance. See
+This is initial funding rather than a one-off. Once the kernel has ETH it keeps
+itself supplied by selling a little of its own USDC for more, on the exchange the
+network names, spending its earnings and never a user's balance. It can still fall
+back to you: a kernel whose ETH drops below what that purchase itself costs can no
+longer make it, and needs sending more. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 {: .warning }
@@ -115,30 +117,16 @@ and never a user's balance. See
 > `admin kernel show` reports a halt. The kernel cannot fix this itself, because
 > buying ETH is also a payment and needs ETH to send.
 
-### One address, two different things
-
-The address you send that ETH to is the same one your users send their USDC to.
-What arrives is treated by which asset it is, not by who sent it.
-
-| Sent there | What happens to it |
-|---|---|
-| ETH | becomes the kernel's fuel. It is credited to no account and belongs to no user |
-| USDC, from a registered address | credited to the balance of the account that registered that address |
-| USDC, from an address nobody registered | held, and listed by `admin kernel deposits`, until somebody registers it |
-
-The kernel only ever looks for USDC transfers when it decides who has deposited
-what. ETH arriving is not a deposit and never appears in anyone's balance.
-
-{: .warning }
-> Tell your users to send USDC, never ETH. ETH sent to the kernel's address
-> becomes the kernel's fuel, is credited to nobody, and cannot be returned through
-> Juice.
+This ETH is the kernel's own and is credited to no account. It arrives at the same
+address your users send their USDC to, which is why they must be told to send USDC
+and not ETH:
+[Step 3](../money/deposits-and-withdrawals.html#step-3-send-the-usdc) warns them.
 
 The kernel needs no USDC of its own to operate: its own USDC accumulates as the
 fees it earns, held in the `sys` account. If you want to put more of your own USDC
-into `sys` — to cover the credit you extend to other kernels, say — deposit it the
-way any user would, by registering an address for `sys` and paying from it. That
-is an ordinary deposit and has nothing to do with the ETH above.
+into `sys`, deposit it the way any account holder would, by registering an address
+for `sys` and paying from it. That is an ordinary deposit and has nothing to do
+with the ETH above.
 
 ## Starting without a terminal
 

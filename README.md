@@ -131,8 +131,10 @@ amounts are written the way that token is written — `1.50`, not `1500000`:
 ./juice user withdrawals          # the ones you have made, and where each stands
 ```
 
-Every command that moves money asks before it does, since none of them can be undone.
-`--yes` answers in advance, which is how a script says it meant it.
+`user transfer` and `user withdraw` ask before they act, since neither can be undone.
+`--yes` answers in advance, which is how a script says it meant it. Running a
+value-bearing action does not ask: the run is itself the authorisation for the value
+its arguments name.
 
 If you lose your password, `juice auth recover <user>` restores the account from the
 recovery phrase. There is no email anywhere in the system.
@@ -340,6 +342,16 @@ llm/         Language/embedding adapter (Ollama)
 native/      The sys stdlib actions
 log/         Structured logging
 ```
+
+## Known bugs
+
+- `juice user deposit` does not report the token contract selected by the kernel's
+  world. On `test` and `real`, obtain the exact contract from the operator before
+  sending money; the token symbol alone is not sufficient.
+- The human output of `juice user deposit` says that a payment sent directly from
+  an exchange would credit the exchange. Unless that sending address is registered,
+  the payment is actually held for the operator to attribute. In either case it is
+  not credited automatically to the intended user.
 
 ## Further reading
 

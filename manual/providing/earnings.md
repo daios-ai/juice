@@ -96,7 +96,7 @@ balance, not the buyer's. See [The ticket](../calling/running.html#the-ticket).
 
 **Delivering value.** If your action moves money to a named recipient, that money
 comes from your balance. See
-[Moving money through an action](../calling/funds.html#moving-money-through-an-action).
+[Moving money through an action](../money/funds.html#moving-money-through-an-action).
 
 ## Zero-price actions
 

@@ -1,10 +1,15 @@
 ---
 title: Funds
-parent: Calling actions
-nav_order: 2
+parent: Money
+nav_order: 1
 ---
 
 # Funds
+
+Money already inside a kernel: what your balance consists of, how amounts are
+written, sending money to somebody else on the same kernel, and the record of it
+all. Getting money in and taking it out are the next chapter,
+[Deposits and withdrawals](deposits-and-withdrawals.html).
 
 ## Available and locked
 
@@ -37,33 +42,6 @@ number means the same amount everywhere. The command line takes and shows displa
 units: `0.50 credits`. The HTTP API and the JSON arguments of an action use base
 units: `500000`.
 
-## Getting money in
-
-How credits enter depends on the kernel's network.
-
-### On `play`
-
-There is nothing to send. The operator credits accounts against payments received
-outside the system and keeps the records.
-
-```
-$ juice user deposit
-Money on the play network has no addresses to send to.
-The operator of this kernel records payments here; there is nothing to send from your side.
-```
-
-`play` money is backed by nothing. It exists so the system can be used and tested
-without real money.
-
-### On `test` and `real`
-
-Money arrives and leaves as a payment on a blockchain: USDC on Arbitrum Sepolia
-for `test`, USDC on Arbitrum One for `real`. You register the address you will pay
-from, send USDC to the kernel's address, and the kernel credits you once the
-payment is final.
-
-That procedure has its own chapter: [Money on a chain](chain-money.html).
-
 ## Sending money to another user
 
 A transfer moves money between two accounts on the same kernel. It is direct, has
@@ -84,33 +62,14 @@ Send 1.00 credits to bob, acting as alice@acme? This cannot be undone. [y/N] y
 > A transfer is final. There is no reversal and no dispute: check the handle before
 > you confirm.
 
+`transfer` and `withdraw` ask for confirmation before they act, because neither
+can be undone; `--yes` answers in advance and belongs in scripts. Running a
+value-bearing action does not ask, because issuing the run is the authorisation —
+see [Moving money through an action](#moving-money-through-an-action).
+
 Transfers are local to one kernel. There is no transfer to an account on another
 kernel; money crosses a kernel boundary only as payment for work. See
 [The network economy](../operating/network-economy.html).
-
-## Taking money out
-
-Here bob, who has earned credits, withdraws some. He is acting as `bob@acme`,
-either because that is the login in use or by passing `--as bob@acme`:
-
-```
-$ juice user withdraw 0.5
-Withdraw 0.50 credits on play, acting as bob@acme? This cannot be undone. [y/N] y
-  id: a4ff7443-…
-  kind: payout
-  amount: 0.50 credits
-  status: confirmed
-  tx_hash: manual:a4ff7443-…
-$ juice user withdrawals
-```
-
-On a chain network the money is paid to the address you registered. Changing that
-address never redirects a withdrawal already in flight: each one carries the
-destination it was created with. See
-[Withdrawing](chain-money.html#withdrawing-taking-money-out).
-
-Every command that moves money asks for confirmation first, because none of them
-can be undone. `--yes` answers in advance; use it only in scripts.
 
 ## The ledger
 

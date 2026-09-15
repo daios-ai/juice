@@ -5,10 +5,12 @@ nav_order: 2
 
 # Getting started
 
-This chapter takes you from an empty machine to your first call, and then through
-one paid call between two accounts. It uses a kernel you run yourself on the
-`play` network, where money is not real and the operator credits accounts by hand.
-The last section explains what changes when you use a kernel somebody else runs.
+This chapter takes you from an empty machine through the whole exchange: set the
+system up, put money in an account, buy an action with it, see what the call cost,
+and see the money arrive with the person who sold it. It uses a kernel you run
+yourself on the `play` network, where money is not real and the operator credits
+accounts by hand. The last section explains what changes when you use a kernel
+somebody else runs.
 
 Everything shown is what the commands print on a terminal. Where a command asks a
 question, the question is shown and the answer follows it.
@@ -125,10 +127,8 @@ $ juice user me
   locked: 0.00 credits
 ```
 
-## Run a free action
-
-Every kernel ships a small standard library of actions under the handle `sys`. The
-operator sets their prices; on a fresh kernel all but the code compiler are free.
+Before going further, check that the install, the login and the kernel all work,
+by calling one of the free built-in actions every kernel ships under `sys`:
 
 ```
 $ juice run sys/time
@@ -142,14 +142,16 @@ $ juice run sys/time
   process_id: 8816e98e-…
 ```
 
-That is a complete call: an action ran, returned a result, and left a transaction
-(`tx_id`) and a receipt. Everything else in Juice is a variation on this.
-
 ## Put money in the account
 
-To buy anything, alice needs credits. On the `play` network nothing is sent from
-anywhere: the operator credits accounts against payments received outside the
-system and keeps the records.
+Some actions are free, but most are not, so money is the next thing to get.
+Alice's balance pays for every action she calls through this kernel, including
+actions on other kernels; she does not open an account with each provider.
+
+On the `play` network nothing is sent from anywhere: the operator credits accounts
+against payments received outside the system and keeps the records. On `test` and
+`real` you would send USDC from your own wallet, which
+[Deposits and withdrawals](money/deposits-and-withdrawals.html) covers.
 
 ```
 $ juice auth login sys@acme
@@ -175,11 +177,11 @@ $ juice auth use alice@acme
 alice@acme
 ```
 
-## A paid call between two accounts
+## Buy something
 
-For a paid call there must be something to buy. This section creates a second
-account, bob, who publishes an action, and then has alice find it, buy it and rate
-it.
+Alice has money; now there must be something to buy. This section creates a second
+account, bob, who publishes an action, and then has alice find it, buy it, see what
+it cost and rate it.
 
 Bob's action wraps `https://httpbin.org/post`, a public endpoint that echoes back
 what it receives. It needs an internet connection.
@@ -338,11 +340,13 @@ Two things differ from the walkthrough above. You cannot run `admin` commands;
 those belong to the kernel's operator. And credits reach your account by the route
 that kernel's network uses: on `play` the operator credits you against a payment
 they received; on `test` or `real` you send USDC from your own wallet, as
-[Money on a chain](calling/chain-money.html) describes.
+[Deposits and withdrawals](money/deposits-and-withdrawals.html) describes.
 
 ## Next
 
 - [Concepts](concepts.html) defines the terms used from here on.
-- [Calling actions](calling/) covers finding, running, paying and rating in full.
+- [Money](money/) covers balances, deposits and withdrawals in full, including
+  putting real money into an account on `test` or `real`.
+- [Calling actions](calling/) covers finding, running, paying and rating.
 - [Providing actions](providing/) covers publishing, pricing and composition.
 - [Operating a kernel](operating/) covers running the kernel you started above.

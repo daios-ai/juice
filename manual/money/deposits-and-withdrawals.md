@@ -1,28 +1,50 @@
 ---
-title: Money on a chain
-parent: Calling actions
-nav_order: 3
+title: Deposits and withdrawals
+parent: Money
+nav_order: 2
 ---
 
-# Money on a chain
+# Deposits and withdrawals
 
-On a kernel whose network is `test` or `real`, money reaches your account as a
-payment on a blockchain, and leaves the same way. This chapter is the whole
-procedure for depositing and withdrawing, in the order you do it.
+A deposit brings money into your account from outside the system. A withdrawal
+takes it back out. They are the two acts you perform yourself to move money across
+that edge; transfers, charges for the calls you make, and what you earn all move
+money that is already inside.
 
-If you operate the kernel rather than hold an account on it, the ETH it needs to
-make payments at all is a separate matter:
-[Funding the kernel](../operating/running-a-kernel.html#funding-the-kernel).
+How you do either depends on the kernel's network, so this chapter covers `play`
+first and then the two chain networks.
+[What differs between the three networks](index.html#what-differs-between-the-three-networks)
+compares them at a glance.
 
-On `play` there is nothing to send and none of this applies. See
-[Funds](funds.html#on-play).
+## On `play`
+
+There is nothing to send and nothing to install. The operator credits accounts
+against payments they received outside the system and recorded themselves.
+
+```
+$ juice user deposit
+Money on the play network has no addresses to send to.
+The operator of this kernel records payments here; there is nothing to send from your side.
+```
+
+Ask them, and they credit you with `admin user deposit`, naming the payment it
+stands for. Withdrawing works, and is an entry in the kernel's books rather than a
+payment anywhere.
+
+`play` credits are backed by nothing and mean nothing outside that kernel. They
+exist so the system can be used and learned without real money.
+
+## On `test` and `real`
+
+Money arrives as a payment on a blockchain and leaves the same way: USDC on
+Arbitrum Sepolia for `test`, USDC on Arbitrum One for `real`.
 
 The examples below were run against a local chain standing in for Arbitrum. The
 commands, the questions they ask and the messages they print are what you will
 see. The addresses are not, and neither are the waiting times, which are given
 here from each network's own settings.
 
-## The two assets
+### The two assets
 
 You need two things in your wallet, and they do different jobs.
 
@@ -31,12 +53,12 @@ in, and what you withdraw. On `real` it is a dollar stablecoin, so a balance of
 `250.00 USDC` is two hundred and fifty dollars. On `test` it is a worthless copy
 of one, used for rehearsal.
 
-**ETH pays transaction fees.** You need a small amount of it to pay for your own
-transfer into the kernel. It is not money you are depositing, and the kernel never
-sees it. This is how every transaction on an Ethereum network works, and is not
+**ETH pays transaction fees.** You need a small amount to pay for your own
+transfer into the kernel. It is not money you are depositing, and it never reaches
+your balance. Every transaction on an Ethereum network works this way; it is not
 something Juice arranges.
 
-## What you need before you start
+### What you need before you start
 
 A wallet on the right chain. Arbitrum One and Arbitrum Sepolia are Ethereum
 networks, so any ordinary Ethereum wallet works once you point it at the right
@@ -49,10 +71,18 @@ token.
 | The money | a test token, worth nothing | USDC, real dollars |
 | Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDC |
 
-If you cannot get test funds, ask the kernel's operator, who can credit you
-directly.
+If you cannot get test funds yourself, ask the operator to send you some. On a
+chain nobody can add to your balance without a payment the chain has witnessed,
+so there is no way for them to credit you directly; what they can do is pay you,
+or pay in on your behalf and attribute it.
 
-## Step 1: register the address you will pay from
+{: .warning }
+> A symbol is not an identity. Several tokens on a chain call themselves USDC, and
+> money sent in the wrong one cannot be recovered. Before your first deposit, get
+> the exact token contract address from the kernel's operator and check that your
+> wallet is sending that token. The kernel does not yet print it.
+
+### Step 1: register the address you will pay from
 
 The kernel credits whoever the chain says sent the money, so it has to know which
 sending address is yours. You establish that by signing a message with the wallet
@@ -86,7 +116,7 @@ same thing.
 One address serves one account. To change it, register a new one; a withdrawal
 already on its way keeps the destination it was created with.
 
-## Step 2: find out where to send
+### Step 2: find out where to send
 
 ```
 $ juice user deposit
@@ -104,31 +134,31 @@ withdraw to your own wallet first, then pay from there.
 Before you have registered an address the same command says so, and nothing else
 is needed from you first.
 
-## Step 3: send the USDC
+### Step 3: send the USDC
 
 From your own wallet, on that chain, send USDC to the kernel's address. You pay
 the transaction fee in ETH, as you would for any transfer.
 
 {: .warning }
-> Send from the address you registered, and only from it. Money that arrives from
-> any other sender is held, not credited, until somebody registers that address.
-> An exchange withdrawal does not work: the exchange is the sender, so the
-> exchange would be the one credited. Move the money to your own wallet first and
-> send it from there.
+> Send USDC, not ETH. The kernel's address takes both, and they are not the same
+> thing: USDC is credited to your balance, while ETH pays the kernel's own
+> transaction fees and reaches no account at all. Your wallet spends a little ETH
+> as the fee for the transfer, which is normal; the amount you *send* must be
+> USDC.
 
 {: .warning }
-> Send USDC, not ETH. The kernel's address takes both, and they are not the same
-> thing: USDC is credited to your balance, while ETH becomes the kernel's own fuel
-> for paying transaction fees and is credited to nobody. Your wallet spends a
-> little ETH as the fee for the transfer, which is normal; the amount you *send*
-> must be USDC.
+> Send from the address you registered, and only from it. Money that arrives from
+> any other sender is held, not credited, until somebody registers that address.
+> Withdrawing straight from an exchange does not work, because the exchange is the
+> sender and its address is not yours: the payment sits held until the operator
+> sorts it out. Move the money to your own wallet first and send it from there.
 
 {: .warning }
 > Send it on the chain the kernel named. The right token on a different chain, or
 > a different token altogether, does not reach the kernel and cannot be recovered
 > through it.
 
-## Step 4: wait
+### Step 4: wait
 
 Nothing further is required of you. The kernel watches the chain and credits the
 account that registered the sending address, once the payment is final.
@@ -147,7 +177,7 @@ The credit appears with no further command. If it has not appeared after the
 waiting time, the usual reason is that the sender was not the registered address;
 the money is held and the operator can see it.
 
-## Withdrawing: taking money out
+## Taking money out
 
 ```
 $ juice user withdraw 50
@@ -162,8 +192,9 @@ Withdraw 50.00 USDC on real to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, actin
   party_handle: alice
 ```
 
-The money goes to the address you registered. The kernel drives the payment to
-completion by itself; you do not confirm it again or push it along.
+On a chain the money goes to the address you registered, and the kernel drives the
+payment to completion by itself: you do not confirm it again or push it along. On
+`play` the same command moves an entry in the kernel's books and completes at once.
 
 ```
 $ juice user withdrawals
@@ -183,9 +214,14 @@ see below.
 > Withdrawals cannot be undone or recalled. Check the destination in the
 > confirmation line before answering it.
 
+`transfer` and `withdraw` ask before acting, because neither can be undone;
+`--yes` answers in advance and belongs in scripts rather than at a terminal.
+Running a value-bearing action does not ask, because issuing the run is the
+authorisation.
+
 ## When a payment does not go out
 
-A kernel that cannot pay reports it plainly, on the withdrawal itself:
+A kernel that cannot pay reports it on the withdrawal itself:
 
 ```
   status: blocked
@@ -193,10 +229,11 @@ A kernel that cannot pay reports it plainly, on the withdrawal itself:
           — send native currency to 0xcAf2a882aF8730C6ad92D76361b1952C71C0453F
 ```
 
-This is the kernel's own problem, not yours: it has run out of the ETH it needs to
-pay transaction fees. Your money is not lost and your withdrawal is not cancelled.
-It is re-presented as it is, and goes out as soon as the operator tops the kernel
-up. See [Operator duties](../operating/duties.html#money-on-a-chain).
+This is the kernel's own problem, not yours. It has run out of the ETH it needs to
+pay transaction fees, which its operator supplies. Your money is not lost and your
+withdrawal is not cancelled: it is re-presented unchanged and goes out as soon as
+the kernel is topped up. See
+[Money on a chain](../operating/duties.html#money-on-a-chain).
 
 Deposits, calls and every read carry on normally while payments are blocked. Only
 outgoing money waits.

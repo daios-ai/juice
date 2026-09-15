@@ -1,7 +1,7 @@
 ---
 title: Consent and assigned work
 parent: Calling actions
-nav_order: 7
+nav_order: 5
 ---
 
 # Consent and assigned work

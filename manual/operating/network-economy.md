@@ -98,6 +98,13 @@ win would make every outage cost the buyer money.
 On a network with a chain, an obligation closes only against a finalised payment
 from the address the buyer proved at admission, for the amount drawn.
 
+Such a payment arrives at the same address a user's deposit does, and the kernel
+tells them apart by what each one settles: every incoming payment is matched
+against outstanding obligations first, and only what matches none of them is
+considered as a deposit — attributed to the account that registered the sending
+address, or held for the operator if nobody has. One payment closes at most one
+obligation.
+
 On `play` there is no chain, so the buyer's signed reveal *is* the payment. Debts
 close by themselves and no operator settles anything by hand. `play` credits are
 backed by nothing, and this is the sense in which that is true.
