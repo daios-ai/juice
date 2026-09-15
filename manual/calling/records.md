@@ -1,7 +1,7 @@
 ---
 title: Records, receipts and ratings
 parent: Calling actions
-nav_order: 5
+nav_order: 6
 ---
 
 # Records, receipts and ratings
@@ -88,8 +88,8 @@ $ juice tx verify 116fd3a6-…
 Amounts in the receipt are base units, because the receipt is the signed artifact
 rather than a rendering of it.
 
-Verification is offline. It needs the stored receipt and the signing key of the
-kernel that issued it, not a connection to anybody. Only the checks that apply are
+You can verify a receipt offline. It needs the stored receipt and the signing key
+of the kernel that issued it, not a connection to anybody. Only the checks that apply are
 reported.
 
 For a call to another kernel, the receipt was signed by that kernel and is stored

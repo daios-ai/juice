@@ -38,20 +38,74 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
 On a network with a chain there is one further question, for the endpoint that
-reaches it.
+reaches it. See [Setting up on a chain](#setting-up-on-a-chain).
 
 Declining, or stopping before the network is chosen, leaves nothing on disk.
 
-The network is the one permanent choice. It is recorded in the database once the
-kernel has verified it, and from then on the database is what says which network
-this kernel serves. Everything else — the address, the fees, the peers, the chain
-endpoint — is configuration you can change.
+{: .warning }
+> The network cannot be changed afterwards. A kernel serves the one it was created
+> with for its whole life; using another means creating another kernel.
 
-Save the recovery phrase. It is the only way to reset the `sys` password, with
-`juice auth recover sys@acme`.
+It is recorded in the database once the kernel has verified it, and from then on
+the database is what says which network this kernel serves. Everything else — the
+address, the fees, the peers, the chain endpoint — is configuration you can
+change.
+
+{: .warning }
+> Save the recovery phrase before pressing Enter. It is shown once, it is the only
+> way to reset the `sys` password (`juice auth recover sys@acme`), and nobody can
+> recover it for you.
 
 Later boots ask nothing and print the ready line, which names the nickname, the
 network and the public key that answered.
+
+## Setting up on a chain
+
+A kernel on `test` or `real` needs three things the operator provides: a way to
+reach the chain, its own key, and enough ETH to pay a transaction fee. Do them in
+this order.
+
+**1. Get an endpoint for the chain.** This is a URL the kernel uses to read the
+chain and send payments. Hosted node providers give them out, free tiers
+included, and you can run your own node instead. First boot asks for it, and it
+is kept in `rail_rpc`, which you can change later.
+
+**2. Boot the kernel.** It creates its own key for the chain, in its home, as
+`rail.key`.
+
+{: .warning }
+> `rail.key` controls the kernel's money on the chain. It is created once and
+> never regenerated. Back it up with the rest of the home, and lose it and you
+> lose what the kernel holds.
+
+**3. Read the kernel's address.** It exists only after that first boot, because
+the key is made then.
+
+```
+$ juice admin kernel show
+Handle:     bank
+Network:    real
+Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
+Holdings:   0.00 USDC (gas 0.00) as of block 13
+…
+```
+
+**4. Send it ETH.** The kernel pays a fee on every payment it makes, in ETH, and
+it cannot make its first one without some. On Arbitrum One it treats 0.001 ETH as
+its floor and tops itself up to 0.003, so send a few thousandths — a few dollars'
+worth at ordinary prices. On Arbitrum Sepolia the figures are ten times smaller
+and the ETH is free from a faucet.
+
+After that the kernel looks after its own fuel: when the ETH runs low it sells
+some of its own USDC for more, on the exchange the network names. It spends its
+earnings and never a user's balance. See
+[How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
+
+{: .warning }
+> Until it has that ETH the kernel can take deposits and run paid calls, but
+> cannot pay anything out: withdrawals and payments to other kernels wait, and
+> `admin kernel show` reports a halt. The kernel cannot fix this itself, because
+> buying ETH is also a payment.
 
 ## Starting without a terminal
 

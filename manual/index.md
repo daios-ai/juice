@@ -63,9 +63,23 @@ differ. Long results are abbreviated, marked `…`.
 An account is written `handle@kernel`, for example `alice@acme`. An action is
 written `owner/name` on your own kernel, and `owner@kernel/name` on another.
 
-Amounts are written in the unit of the kernel's network. The examples use a
+Amounts are written in the unit of the kernel's network. Most examples use a
 kernel on the `play` network, whose unit is called a credit and which has six
 decimal places, so `0.50 credits` is half a credit.
+
+A kernel serves one of three networks, chosen when it is created and fixed for
+life. They are a progression rather than three equal options.
+
+- **`play`** has no money in it. The operator creates credits, and they mean
+  nothing outside that kernel. Use it to learn the system and to develop against.
+- **`test`** is Arbitrum Sepolia, a test network. The machinery is the real one
+  and the token is a worthless copy of USDC. Use it to rehearse.
+- **`real`** is Arbitrum One, and is what the system is for. The money is USDC, a
+  dollar stablecoin, so balances are dollars.
+
+All three count in millionths, so the same number means the same amount on each.
+Putting money into a kernel on a chain, and taking it out, is described in
+[Money on a chain](calling/chain-money.html).
 
 This manual describes what the system does and how to use it. Two other documents
 are authoritative on their own subjects and are referenced where relevant:

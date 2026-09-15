@@ -56,9 +56,13 @@ Superuser "sys" created.
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
-Write the recovery phrase down before pressing Enter. It is the only way to reset
-the superuser password, and it is not shown again. The choice of money cannot be
-changed later; everything else can.
+{: .warning }
+> Write the recovery phrase down before pressing Enter. It is shown once and is the
+> only way to reset the superuser password.
+
+{: .warning }
+> The choice of money cannot be changed later. Everything else about the kernel
+> can.
 
 The kernel now runs in the foreground of this terminal. Leave it running and open
 a second terminal for everything below.
@@ -333,8 +337,8 @@ kernel's own name is used.
 Two things differ from the walkthrough above. You cannot run `admin` commands;
 those belong to the kernel's operator. And credits reach your account by the route
 that kernel's network uses: on `play` the operator credits you against a payment
-they received, and on `test` or `real` you send tokens to the kernel's address from
-a wallet you have registered. [Funds](calling/funds.html) covers both.
+they received; on `test` or `real` you send USDC from your own wallet, as
+[Money on a chain](calling/chain-money.html) describes.
 
 ## Next
 

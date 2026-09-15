@@ -1,7 +1,7 @@
 ---
 title: Running an action
 parent: Calling actions
-nav_order: 4
+nav_order: 5
 ---
 
 # Running an action
@@ -132,6 +132,10 @@ the stake is paid in full.
 
 Two consequences follow for you as a buyer.
 
+{: .warning }
+> One call to another kernel can cost more than the price you were shown. See the
+> two consequences below.
+
 **You need the stake as well as the price.** Both must be available when the call
 is dispatched. With a price of `2.205` and a stake of `1.00`, a balance of `2.50`
 is not enough:
@@ -181,8 +185,11 @@ A parked call is retried until a signed receipt arrives, surviving restarts of
 either kernel. If none arrives within 24 hours it settles as a failure with a full
 refund. You are never charged twice and the call is never silently dropped.
 
-Do not re-run a parked call. `run` has no idempotency key, so running it again
-buys the work a second time. Follow the process instead:
+{: .warning }
+> Do not re-run a parked call. `run` has no idempotency key, so running it again
+> buys the work a second time and you pay twice.
+
+Follow the process instead:
 
 ```
 $ juice process show 01d1da53-…

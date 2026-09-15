@@ -20,6 +20,11 @@ nav_sort: case_insensitive
 
 color_scheme: light
 
+callouts:
+  warning:
+    title: Warning
+    color: red
+
 exclude:
   - Gemfile
   - Gemfile.lock

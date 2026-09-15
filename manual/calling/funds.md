@@ -57,35 +57,12 @@ without real money.
 
 ### On `test` and `real`
 
-Money arrives as a token transfer on a chain. `user deposit` shows where to send
-it and whether you are registered to be credited:
+Money arrives and leaves as a payment on a blockchain: USDC on Arbitrum Sepolia
+for `test`, USDC on Arbitrum One for `real`. You register the address you will pay
+from, send USDC to the kernel's address, and the kernel credits you once the
+payment is final.
 
-```
-$ juice user deposit
-```
-
-Credit is given to the account that registered the **sending** address, not to
-whoever reports the payment. To register an address you prove you control it, by
-signing a message with the wallet that holds it:
-
-```
-$ juice user address 0xAbC…
-Sign this message with the wallet holding 0xAbC…:
-
-juice address registration
-kernel: L3ciw7zj…
-user: 5b984930-…
-address: 0xAbC…
-
-Signature:
-```
-
-Sign that text with your wallet — most wallets have a "sign message" function —
-and paste the signature at the prompt. A program passes it with `--signature`.
-Registering also claims any payments already received from that address and held.
-
-Because credit follows the sender, money sent directly from an exchange cannot be
-attributed to you. Move it to your own wallet first, then send it from there.
+That procedure has its own chapter: [Money on a chain](chain-money.html).
 
 ## Sending money to another user
 
@@ -102,6 +79,10 @@ Send 1.00 credits to bob, acting as alice@acme? This cannot be undone. [y/N] y
   from_handle: alice
   to_handle: bob
 ```
+
+{: .warning }
+> A transfer is final. There is no reversal and no dispute: check the handle before
+> you confirm.
 
 Transfers are local to one kernel. There is no transfer to an account on another
 kernel; money crosses a kernel boundary only as payment for work. See
@@ -123,10 +104,10 @@ Withdraw 0.50 credits on play, acting as bob@acme? This cannot be undone. [y/N] 
 $ juice user withdrawals
 ```
 
-On a chain network the money is paid to the address you registered, and the
-withdrawal proceeds through `pending`, `submitted` and `confirmed`. Changing your
-registered address never redirects a withdrawal already in flight: each one
-carries the destination it was created with.
+On a chain network the money is paid to the address you registered. Changing that
+address never redirects a withdrawal already in flight: each one carries the
+destination it was created with. See
+[Taking money out](chain-money.html#taking-money-out).
 
 Every command that moves money asks for confirmation first, because none of them
 can be undone. `--yes` answers in advance; use it only in scripts.
@@ -161,6 +142,11 @@ Two things move separately in such a call. The execution price is charged the
 usual way. The value is taken from the account of whoever called the action
 directly, delivered whole to the named recipient, and not taxed. The transfer is
 all-or-nothing: if the call fails, nothing is delivered.
+
+{: .warning }
+> Running a value-bearing action authorises the payment its arguments name. The
+> confirmation you get for `user transfer` does not apply here: the run itself is
+> the consent.
 
 An action can only deliver value if its contract declares it, which only the
 kernel can do when it registers the action. No action you create can move a

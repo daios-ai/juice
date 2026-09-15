@@ -19,8 +19,8 @@ The file holds `credentials_key` and is mode 0600.
 
 | Key | Default | |
 |---|---|---|
-| `world` | none | the network this kernel serves for life: `play`, `test`, `real`, or the path to a world file. First boot asks; the answer is then recorded in the database, which is what later boots read |
-| `rail_rpc` | empty | the endpoint reaching the chain. Required where the world has one. Ordinary configuration: change it and restart |
+| `world` | none | the network this kernel serves for life: `play` (no money), `test` (Arbitrum Sepolia), `real` (Arbitrum One), or the path to a world file. First boot asks; the answer is then recorded in the database, which is what later boots read |
+| `rail_rpc` | empty | the URL the kernel uses to reach the chain, from a node provider or a node you run. Required on `test` and `real`. Ordinary configuration: change it and restart |
 | `kernel_handle` | the directory name | the nickname this kernel reports |
 | `bootstrap_peers` | the project's public node | peers dialled to join the network. An empty list disables discovery |
 | `fed_listen_addrs` | OS-assigned | where this kernel answers peers. Give each kernel its own when running more than one. A public node pins port 31313 |
@@ -63,6 +63,22 @@ protocol's record lifetime.
 `native.llm` holds the language model's URL and model names; the defaults are
 Ollama at `http://localhost:11434`. `native.lookup.default_limit` is `10`.
 `native.tinygo.price` is `5`. Other natives are priced `0`.
+
+### Fuel, on a chain network
+
+These belong to the network and live in its world file, not in `config.json`. They
+govern when and how the kernel buys the ETH it pays transaction fees with.
+
+| Key | Arbitrum One | Arbitrum Sepolia | |
+|---|---|---|---|
+| `gas.min` | 0.001 ETH | 0.0002 ETH | buy more below this |
+| `gas.max` | 0.003 ETH | 0.0004 ETH | buy up to this |
+| `gas.feeBound` | 0.0003 ETH | 0.0001 ETH | most it will pay for one purchase |
+| `gas.slippageBps` | 100 | 500 | tolerance above the quoted price |
+| `venue` | — | — | the exchange it buys at: a Uniswap V3 router, quoter, wrapped-ETH address and fee tier |
+
+See
+[How the kernel keeps itself in fuel](../operating/duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 ## Logging, sessions, scripts
 

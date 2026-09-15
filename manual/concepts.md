@@ -36,8 +36,10 @@ the kernel that assigned it, and is never transmitted. A remote kernel cannot
 claim a petname on yours.
 
 **World, or network.** The money a kernel deals in, fixed when the kernel is
-created: `play` (no real money), `test` (a test token on a test chain), or `real`
-(USDC on Arbitrum One). Kernels on different networks never meet.
+created. `play` has no money: the operator creates credits and they mean nothing
+elsewhere. `test` is Arbitrum Sepolia, carrying a worthless copy of USDC for
+rehearsal. `real` is Arbitrum One, where the money is USDC and balances are
+dollars. Kernels on different networks never meet.
 
 ## Actions
 
