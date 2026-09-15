@@ -61,9 +61,9 @@ network and the public key that answered.
 
 ## Setting up on a chain
 
-A kernel on `test` or `real` needs three things the operator provides: a way to
-reach the chain, its own key, and enough ETH to pay a transaction fee. Do them in
-this order.
+A kernel on `test` or `real` needs three things from you: a way to reach the
+chain, its own key, and enough ETH to pay a transaction fee. Do them in this
+order.
 
 **1. Get an endpoint for the chain.** This is a URL the kernel uses to read the
 chain and send payments. Hosted node providers give them out, free tiers
@@ -90,22 +90,33 @@ Holdings:   0.00 USDC (gas 0.00) as of block 13
 …
 ```
 
-**4. Send it ETH.** The kernel pays a fee on every payment it makes, in ETH, and
-it cannot make its first one without some. On Arbitrum One it treats 0.001 ETH as
-its floor and tops itself up to 0.003, so send a few thousandths — a few dollars'
-worth at ordinary prices. On Arbitrum Sepolia the figures are ten times smaller
-and the ETH is free from a faucet.
+**4. Send it ETH**, as described next.
 
-After that the kernel looks after its own fuel: when the ETH runs low it sells
-some of its own USDC for more, on the exchange the network names. It spends its
-earnings and never a user's balance. See
+## Funding the kernel
+
+The kernel pays a transaction fee, in ETH, on every payment it makes: a user's
+withdrawal, and a payment owed to another kernel. It cannot make its first one
+without some ETH of its own, and it starts with none.
+
+Send ETH to the address `admin kernel show` prints as `Paid at:`, from any wallet.
+On Arbitrum One the kernel treats 0.001 ETH as its floor and tops itself up to
+0.003, so send a few thousandths — a few dollars' worth at ordinary prices. On
+Arbitrum Sepolia the figures are ten times smaller and the ETH is free from a
+faucet.
+
+You do this once. Afterwards the kernel keeps itself supplied by selling a little
+of its own USDC for ETH, on the exchange the network names, spending its earnings
+and never a user's balance. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 {: .warning }
 > Until it has that ETH the kernel can take deposits and run paid calls, but
 > cannot pay anything out: withdrawals and payments to other kernels wait, and
 > `admin kernel show` reports a halt. The kernel cannot fix this itself, because
-> buying ETH is also a payment.
+> buying ETH is also a payment and needs ETH to send.
+
+The kernel needs no USDC of its own. Users' deposits arrive at the same address,
+and the kernel's own USDC accumulates as the fees it earns.
 
 ## Starting without a terminal
 

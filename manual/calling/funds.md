@@ -107,7 +107,7 @@ $ juice user withdrawals
 On a chain network the money is paid to the address you registered. Changing that
 address never redirects a withdrawal already in flight: each one carries the
 destination it was created with. See
-[Taking money out](chain-money.html#taking-money-out).
+[Withdrawing](chain-money.html#withdrawing-taking-money-out).
 
 Every command that moves money asks for confirmation first, because none of them
 can be undone. `--yes` answers in advance; use it only in scripts.

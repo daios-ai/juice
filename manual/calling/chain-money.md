@@ -8,7 +8,11 @@ nav_order: 3
 
 On a kernel whose network is `test` or `real`, money reaches your account as a
 payment on a blockchain, and leaves the same way. This chapter is the whole
-procedure, in the order you do it.
+procedure for depositing and withdrawing, in the order you do it.
+
+If you operate the kernel rather than hold an account on it, the ETH it needs to
+make payments at all is a separate matter:
+[Funding the kernel](../operating/running-a-kernel.html#funding-the-kernel).
 
 On `play` there is nothing to send and none of this applies. See
 [Funds](funds.html#on-play).
@@ -136,7 +140,7 @@ The credit appears with no further command. If it has not appeared after the
 waiting time, the usual reason is that the sender was not the registered address;
 the money is held and the operator can see it.
 
-## Taking money out
+## Withdrawing: taking money out
 
 ```
 $ juice user withdraw 50
