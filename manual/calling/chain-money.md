@@ -117,9 +117,16 @@ the transaction fee in ETH, as you would for any transfer.
 > send it from there.
 
 {: .warning }
-> Send USDC on the chain the kernel named, and nothing else. A different token, or
-> the right token on a different chain, does not reach the kernel and cannot be
-> recovered through it.
+> Send USDC, not ETH. The kernel's address takes both, and they are not the same
+> thing: USDC is credited to your balance, while ETH becomes the kernel's own fuel
+> for paying transaction fees and is credited to nobody. Your wallet spends a
+> little ETH as the fee for the transfer, which is normal; the amount you *send*
+> must be USDC.
+
+{: .warning }
+> Send it on the chain the kernel named. The right token on a different chain, or
+> a different token altogether, does not reach the kernel and cannot be recovered
+> through it.
 
 ## Step 4: wait
 

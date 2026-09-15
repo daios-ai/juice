@@ -254,6 +254,10 @@ your users, the money reaches them as soon as they register that address with
 `juice user address`; nothing needs undoing. The commonest cause is a user paying
 from an exchange rather than from their own wallet.
 
+Only USDC is listed here. ETH sent to the same address is the kernel's fuel, not a
+deposit, and belongs to no account. See
+[One address, two different things](running-a-kernel.html#one-address-two-different-things).
+
 ### Holdings and custody
 
 ```
