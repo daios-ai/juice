@@ -3,8 +3,8 @@
 #
 # install.sh — install the juice binary.
 #
-#   curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- v0.14.15
+#   curl -fsSL https://juiceos.org/install.sh | sh
+#   curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
 #
 # Keep this script simple and easily auditable.
 #
@@ -32,7 +32,7 @@ Usage:
   install.sh [VERSION] [--no-modify-path]
   curl -fsSL <url>/install.sh | sh -s -- [VERSION] [--no-modify-path]
 
-  VERSION            a release tag such as v0.14.15; the latest release by default
+  VERSION            a release tag from the releases page; the latest release by default
   --no-modify-path   do not touch any shell profile; print what to add instead
   -h, --help         print this help
 

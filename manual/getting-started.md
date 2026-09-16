@@ -18,19 +18,18 @@ else, the final section explains how that changes the setup.
 
 ## Install
 
-One command installs the released binary:
+Use this command to install:
 
 ```
-$ curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh
+$ curl -fsSL https://juiceos.org/install.sh | sh
 ```
 
-It puts `juice` in `~/.juice/bin`, beside the kernels and logins that directory
-already holds, and adds that directory to your command search path.
+This puts everything under the `~/.juice` directory and adds `~/.juice/bin` containing the  `juice` command to your search path.
 
-A piped script receives no arguments of its own, so options go after `sh -s --`:
+You can put options go after `sh -s --`:
 
 ```
-$ curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- v0.14.15
+$ curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
 ```
 
 A release tag pins a version, `--no-modify-path` leaves your shell profile alone,
@@ -38,16 +37,6 @@ and `JUICE_HOME` moves the installation somewhere else entirely, in which case t
 installer records that choice in your profile too, since every `juice` command reads
 it afresh.
 
-To build it yourself instead, you need Go 1.25 or later:
-
-```
-$ git clone https://github.com/daios-ai/juice.git
-$ cd juice
-$ make build
-```
-
-The build produces `./juice` in the repository. Run `make install` to copy it to
-the same `~/.juice/bin`. The examples below use the installed command, `juice`.
 
 ## Start a kernel
 

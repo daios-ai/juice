@@ -7,6 +7,7 @@
 - Native actions should be encapsulated, never hardwired into the kernel.
 - If you ever touch requirements.md, you MUST FOLLOW THE INSTRUCTIONS FOR CHANGING IT.
 - The network simulation (netsim/, make netsim) tests and measures the behaviour of a whole Juice economy on play, anvil and Sepolia. It does not gate a commit. Any change to federation, pricing, settlement, the rail, or recovery must update the simulation to match and be followed by a run on play and anvil before the change is considered done.
+- Never add a Claude-Session trailer or any session identifier to commit messages.
 
 Answering questions
 ===================

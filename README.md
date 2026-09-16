@@ -17,16 +17,18 @@ network — you are never charged more than the price you saw.
 
 ## Install and boot
 
+The ordinary way in is [juiceos.org](https://juiceos.org/download/), which is one command:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh
+curl -fsSL https://juiceos.org/install.sh | sh
 ```
 
 That puts `juice` in `~/.juice/bin` and adds it to your PATH. Options go after `sh -s --`,
 since a piped script gets no arguments of its own:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- v0.14.15
-curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- --no-modify-path
+curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
+curl -fsSL https://juiceos.org/install.sh | sh -s -- --no-modify-path
 ```
 
 A release tag pins a version, and `--no-modify-path` leaves your shell profile alone.
