@@ -25,6 +25,7 @@ keeps clusters apart from users. Only the terms are ours.
 
 ```
 $JUICE_HOME/
+  bin/                   the family's executables, where the installer puts them
   kernels/<name>/        one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected
@@ -39,7 +40,9 @@ signing key its receipts are signed with, the rail key that settles them, and th
 are valid on. It backs up, moves and locks as a unit. `cache/` is regenerable and safe to delete.
 
 Everything else belongs to the component that owns it and outlives any kernel. Removing a kernel
-never removes an agent's memory, a service's state, or the interface's history.
+never removes an agent's memory, a service's state, or the interface's history. `bin/` is the one
+directory holding no state at all: the programs are replaceable, so an installer overwrites them
+and a person deletes them without losing anything.
 
 ## 3. Kernels
 
@@ -123,8 +126,8 @@ error rather than a fallback: a misspelled `--as` must not act as somebody else.
 A component finds its kernel in `client/config.json` by the kernel half of its login, and its
 tokens in `client/credentials/<login>.json`. A refresh is read, exchange, write under an exclusive
 lock on that file. `config.json` is written by temp file and rename. A session is obtained with the
-`juice` command line or by writing those two files. Executables go to `$PREFIX/bin`, default
-`~/.local`.
+`juice` command line or by writing those two files. Executables go to `$JUICE_HOME/bin`, which is
+where the installer puts them and where a component looks for a sibling program.
 
 ## 5. Releasing a credential
 

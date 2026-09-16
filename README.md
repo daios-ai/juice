@@ -18,13 +18,37 @@ network — you are never charged more than the price you saw.
 ## Install and boot
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh
+```
+
+That puts `juice` in `~/.juice/bin` and adds it to your PATH. Options go after `sh -s --`,
+since a piped script gets no arguments of its own:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- v0.14.15
+curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- --no-modify-path
+```
+
+A release tag pins a version, and `--no-modify-path` leaves your shell profile alone.
+`JUICE_HOME` moves the whole installation, binary included. To remove it, delete the binary;
+the kernels beside it are untouched.
+
+Or build it yourself, which needs Go 1.25 or later:
+
+```bash
 git clone https://github.com/daios-ai/juice.git
 cd juice
 make build          # or: go build -o juice ./cmd/juice/
-./juice kernel serve acme --addr :4040
+make install        # copies it to ~/.juice/bin, where install.sh puts it
 ```
 
-Requires Go 1.25+. `acme` is the kernel's nickname: what it calls itself on the network,
+Either way, the first kernel is one command:
+
+```bash
+juice kernel serve acme --addr :4040
+```
+
+`acme` is the kernel's nickname: what it calls itself on the network,
 and the name of its directory. There is no kernel of that name yet, so `serve` says what
 is here, asks whether to create one, and asks the two things it can never revise:
 
@@ -40,7 +64,7 @@ Choice [play/test/real]: play
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
-  bomb buffalo march shock slim obvious stairs time usage grace habit wear
+  bomb buffalo march shock slim obvious stairs time usage grace habit window
 Press Enter once you have written it down:
 Superuser "sys" created.
 INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…

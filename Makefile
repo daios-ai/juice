@@ -1,6 +1,9 @@
 BINARY  := juice
 PKG     := github.com/daios-ai/juice/cmd/juice
-PREFIX  ?= $(HOME)/.local
+# The installation root, as install.sh and the kernel use it: everything juice owns
+# lives under one directory, the binary included.
+JUICE_HOME ?= $(HOME)/.juice
+PREFIX  ?= $(JUICE_HOME)
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)"
@@ -20,7 +23,8 @@ install: build
 	mkdir -p $(PREFIX)/bin
 	install -m 755 $(BINARY) $(PREFIX)/bin/$(BINARY)
 
-# Removes the installed binary only; $JUICE_HOME/kernels/ data (signing keys, configs) is left intact.
+# Removes the installed binary only; the kernels beside it (signing keys, ledgers, configs)
+# are left intact.
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)
 

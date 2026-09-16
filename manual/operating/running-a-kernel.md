@@ -34,7 +34,7 @@ Choice [play/test/real]: play
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
-  depart motion moon climb useless hole learn usage delay fish brand lab
+  depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…

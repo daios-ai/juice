@@ -18,7 +18,27 @@ else, the final section explains how that changes the setup.
 
 ## Install
 
-Juice needs Go 1.25 or later.
+One command installs the released binary:
+
+```
+$ curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh
+```
+
+It puts `juice` in `~/.juice/bin`, beside the kernels and logins that directory
+already holds, and adds that directory to your command search path.
+
+A piped script receives no arguments of its own, so options go after `sh -s --`:
+
+```
+$ curl -fsSL https://raw.githubusercontent.com/daios-ai/juice/master/install.sh | sh -s -- v0.14.15
+```
+
+A release tag pins a version, `--no-modify-path` leaves your shell profile alone,
+and `JUICE_HOME` moves the installation somewhere else entirely, in which case the
+installer records that choice in your profile too, since every `juice` command reads
+it afresh.
+
+To build it yourself instead, you need Go 1.25 or later:
 
 ```
 $ git clone https://github.com/daios-ai/juice.git
@@ -27,8 +47,7 @@ $ make build
 ```
 
 The build produces `./juice` in the repository. Run `make install` to copy it to
-`~/.local/bin`, and make sure that directory is on your command search path.
-The examples below use the installed command, `juice`.
+the same `~/.juice/bin`. The examples below use the installed command, `juice`.
 
 ## Start a kernel
 
@@ -56,7 +75,7 @@ Choice [play/test/real]: play
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
-  depart motion moon climb useless hole learn usage delay fish brand lab
+  depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
@@ -102,7 +121,7 @@ $ juice user create alice@acme
 Password:
 Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
-  prepare divorce absurd cabin series excite lunar vicious approve brown fossil hard
+  prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
   available: 0.00 credits
   description:
@@ -202,7 +221,7 @@ $ juice user create bob@acme
 Password:
 Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
-  slim appear diamond peanut unit funny net right circle raven blind youth
+  slim appear diamond peanut unit funny net right circle raven blind window
 Press Enter once you have written it down:
   …
 $ juice auth login bob@acme
