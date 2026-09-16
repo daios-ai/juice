@@ -108,8 +108,8 @@ different stages of use:
   Juice and developing services.
 - **`test`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
   withdrawals, and settlement on a blockchain without using real money.
-- **`real`** uses USDC on Arbitrum One. Accounts and prices are denominated in
-  USDC, and external payments settle on that chain.
+- **`real`** uses USDT on Arbitrum One. Accounts and prices are denominated in
+  USDT, and external payments settle on that chain.
 
 Kernels federate within their own network. All three shipped networks use six
 decimal places, but their balances remain separate and have different monetary

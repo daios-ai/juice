@@ -34,8 +34,8 @@ Create acme as a new kernel? [y/N] y
 
 Which money will acme use? This cannot be changed later.
   play  no real money: you credit accounts yourself and keep the records
-  test  fake USDC on the Arbitrum Sepolia test chain
-  real  USDC on Arbitrum One
+  test  fake USDT on the Arbitrum Sepolia test chain
+  real  USDT on Arbitrum One
 Choice [play/test/real]: play
 Superuser password:
 Confirm password:
@@ -342,16 +342,6 @@ llm/         Language/embedding adapter (Ollama)
 native/      The sys stdlib actions
 log/         Structured logging
 ```
-
-## Known bugs
-
-- `juice user deposit` does not report the token contract selected by the kernel's
-  world. On `test` and `real`, obtain the exact contract from the operator before
-  sending money; the token symbol alone is not sufficient.
-- The human output of `juice user deposit` says that a payment sent directly from
-  an exchange would credit the exchange. Unless that sending address is registered,
-  the payment is actually held for the operator to attribute. In either case it is
-  not credited automatically to the intended user.
 
 ## Further reading
 

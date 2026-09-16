@@ -39,7 +39,7 @@ by announcing a matching nickname.
 A **world**, also called a **network**, defines the money and external payment
 system a kernel uses. The shipped worlds are `play`, which uses credits with no
 real monetary value; `test`, which uses a test token on Arbitrum Sepolia; and
-`real`, which uses USDC on Arbitrum One. The choice is fixed when the kernel is
+`real`, which uses USDT on Arbitrum One. The choice is fixed when the kernel is
 created, and kernels federate only within the same network.
 
 ## Actions

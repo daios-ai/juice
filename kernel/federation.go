@@ -375,6 +375,10 @@ type Network struct {
 	Digest   string `json:"digest"`
 	Decimals uint8  `json:"decimals"`
 	Symbol   string `json:"symbol"`
+	// Token is the contract money is paid in, empty where the world has no chain. A symbol names
+	// no token — a chain carries several with one name and one decimals — so the address is what a
+	// depositor must be told, and it travels beside the symbol rather than being fetched separately.
+	Token string `json:"token"`
 }
 
 // Amount renders base units the way a person reads them, and is the only place that decides how:

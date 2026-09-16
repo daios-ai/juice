@@ -27,6 +27,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/rail"
 	"github.com/daios-ai/juice/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -273,6 +274,53 @@ func TestServeHealth(t *testing.T) {
 	}
 	if body["public_key"] == "" {
 		t.Error("public_key should be present in the health banner")
+	}
+	// The banner is an enumerated contract (D20): a client pins what it finds here, and everything
+	// it needs to render or pay money must be in it. A missing key is indistinguishable from a
+	// kernel that has nothing to say, so every one is required, whatever its value.
+	for _, key := range []string{"status", "handle", "public_key", "network", "network_digest",
+		"decimals", "symbol", "token", "rail_address"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("the health banner omits %q; a client cannot tell that from an empty value", key)
+		}
+	}
+	// This kernel serves play, where money has no contract and nothing is sent anywhere.
+	if body["token"] != "" || body["rail_address"] != "" {
+		t.Errorf("play names a token or an address: %v / %v", body["token"], body["rail_address"])
+	}
+}
+
+// The token travels from the world file to the banner unchanged: it is the one fact that says which
+// money this kernel takes, and a depositor acts on it.
+func TestServeHealthCarriesTheWorldsToken(t *testing.T) {
+	world, err := rail.Load("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	net := world.Network()
+	if net.Token == "" {
+		t.Fatal("the test world names no token")
+	}
+
+	db := newTestStore(t)
+	cfg := testConfig("health-token-secret")
+	cfg.Network = net
+	k := newKernel(cfg, kernel.Dependencies{Store: db})
+	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapSigning(t, k)
+	srv := httptest.NewServer(mountFullRouter(&server{kernel: k, log: log.Discard()}))
+	defer srv.Close()
+
+	resp := httpDo(t, srv, "GET", "/health", nil, "")
+	var body map[string]any
+	decodeResponse(t, resp, &body)
+	if body["token"] != net.Token {
+		t.Errorf("token = %v, want %s", body["token"], net.Token)
+	}
+	if body["symbol"] != net.Symbol {
+		t.Errorf("symbol = %v, want %s", body["symbol"], net.Symbol)
 	}
 }
 

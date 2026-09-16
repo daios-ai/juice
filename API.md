@@ -87,7 +87,7 @@ Money is one unit throughout the CLI, the world's: `--price`, `admin user deposi
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Health check | `GET /health` (open) → `{status, handle, public_key, network, network_digest, decimals, symbol, rail_address}`; identity banner — what a client pins before it trusts a server (C13) | `juice kernel health [<name>]` |
+| Health check | `GET /health` (open) → `{status, handle, public_key, network, network_digest, decimals, symbol, token, rail_address}`; identity banner — what a client pins before it trusts a server (C13); `token` is the contract money is paid in, empty where the world has no chain | `juice kernel health [<name>]` |
 
 Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (D12), not over this API. Kernels discover each other in the background through libp2p routing discovery over their own network's namespace (D12), so kernels of different networks never meet; discovered actions surface through `sys/lookup`, and every known kernel — counterparties and discovery-only alike — appears in the merged `admin peer list` roster and is inspected with `admin peer inspect <key>`.
 
@@ -116,7 +116,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, and inbound ca
 | Register payout address | `PUT /v1/me/address` `{address, signature}` → `{address, attributed}` | `juice user address <address> [--signature <sig>]`; `juice user me` shows the registered one |
 | Withdraw credits | `POST /v1/withdrawals` `{id, amount, [reason]}` → withdrawal row `{id, kind, amount, destination, status, tx_hash, reason, created_at, finalized_at}` | `juice user withdraw <amount> [--id <id>] [--reason]` |
 | List withdrawals | `GET /v1/withdrawals[?limit=&offset=]` → own withdrawal rows | `juice user withdrawals [--limit --offset]` |
-| Where to pay in | client-composed from `GET /health` + `GET /v1/me` | `juice user deposit` — prints where to send money and whether the caller has registered an address; `--json` prints what it composed, `{network, kernel_address, your_address}` |
+| Where to pay in | client-composed from `GET /health` + `GET /v1/me` | `juice user deposit` — prints where to send money and whether the caller has registered an address; `--json` prints what it composed, `{network, kernel_address, your_address, token}` |
 
 `handle` is immutable. `description` and `password` are updatable by the authenticated user; `password` change requires `current_password` to verify the existing credential. At least one of `description` or `password` must be provided (`description` may be `""` to clear). There is no email; account recovery is by seed phrase (D9): `user create` generates a 12-word BIP-39 mnemonic client-side, sends only the derived `recovery_public_key`, and prints the phrase once; `juice auth recover <user>@<kernel>` resets a lost password by signing a server nonce with the phrase-derived key. Kernel accounts (federation peers) cannot be created here, cannot log in, and hold no tokens — the schema forbids them a handle, password, or recovery key; they exist only through a peer's first call, authenticate per request by federation signature, and cannot use `PUT /v1/me`. They are named by their kernel's petname, in a namespace separate from user handles: a user and a kernel may both be `minibox` locally, and the five commands that accept either (`show`, `rename`, `suspend`/`unsuspend`, `deposit`) refuse an ambiguous bare name rather than guess.
 

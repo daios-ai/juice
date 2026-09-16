@@ -2525,3 +2525,115 @@ func TestOnlyTheClientResolvesTheIdentity(t *testing.T) {
 		}
 	}
 }
+
+// depositKernel serves the two facts `user deposit` composes its answer from: the identity banner
+// and the caller's own account. A chain world is the interesting case, so the banner carries an
+// address, and the token is a parameter because an older kernel does not publish one.
+func depositKernel(t *testing.T, network, kernelAddr, token, mine string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "handle": "bank", "public_key": "bank-key",
+				"network": network, "decimals": 6, "symbol": "USDT",
+				"token": token, "rail_address": kernelAddr,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "u-1", "handle": "alice", "available": 0, "locked": 0, "rail_address": mine})
+	}))
+	t.Cleanup(srv.Close)
+	old := flagServer
+	flagServer = srv.URL
+	t.Cleanup(func() { flagServer = old })
+	t.Setenv("JUICE_HOME", t.TempDir())
+	selectTestLogin(t, "alice@bank", srv.URL)
+	resetClient() // one client per invocation, as rootCmd's PersistentPreRun gives a real command
+}
+
+// A symbol names no token: one chain carries several stablecoins with one name and six decimals,
+// and a payment in the wrong one is never credited. The contract is therefore what the command
+// must print, and where the kernel does not publish one it must say so rather than leave a blank
+// line under an instruction to send money.
+func TestDepositNamesTheTokenItTakes(t *testing.T) {
+	const (
+		vault = "0x1111111111111111111111111111111111111111"
+		token = "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9"
+		mine  = "0x2222222222222222222222222222222222222222"
+	)
+	run := func(t *testing.T) string {
+		t.Helper()
+		return captureStdout(t, func() error {
+			cmd := userDepositCmd()
+			cmd.SetArgs(nil)
+			return cmd.RunE(cmd, nil)
+		})
+	}
+
+	t.Run("the contract is printed with the symbol beside it", func(t *testing.T) {
+		depositKernel(t, "real", vault, token, mine)
+		got := run(t)
+		if !strings.Contains(got, token) {
+			t.Errorf("the token contract is not named, so the depositor cannot tell which money to send:\n%s", got)
+		}
+		if !strings.Contains(got, "USDT") {
+			t.Errorf("the symbol is not shown beside the contract:\n%s", got)
+		}
+		if !strings.Contains(got, vault) {
+			t.Errorf("the kernel's address is missing:\n%s", got)
+		}
+	})
+
+	t.Run("an unregistered sender is held, not credited to whoever sent it", func(t *testing.T) {
+		depositKernel(t, "real", vault, token, mine)
+		got := run(t)
+		if !strings.Contains(got, "held") {
+			t.Errorf("the command does not say an unattributed payment is held for the operator:\n%s", got)
+		}
+		if strings.Contains(got, "crediting itself") {
+			t.Errorf("the command still claims an exchange would be credited:\n%s", got)
+		}
+	})
+
+	t.Run("a kernel that publishes no token says so", func(t *testing.T) {
+		depositKernel(t, "real", vault, "", mine)
+		got := run(t)
+		if !strings.Contains(got, "Ask the operator") {
+			t.Errorf("an absent contract must be named, not left blank:\n%s", got)
+		}
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, "  ") && strings.TrimSpace(line) == "" {
+				t.Errorf("an empty indented line reads as a contract that is not there:\n%q", got)
+			}
+		}
+	})
+
+	t.Run("play has nothing to send", func(t *testing.T) {
+		depositKernel(t, "play", "", "", "")
+		got := run(t)
+		if !strings.Contains(got, "no addresses to send to") {
+			t.Errorf("play must still explain that the operator records payments:\n%s", got)
+		}
+		if strings.Contains(got, "token") {
+			t.Errorf("play names no token:\n%s", got)
+		}
+	})
+}
+
+// The token has to survive the trip: the kernel puts it in its banner, and the client's own view of
+// the network is what every command reads. A field that decodes but is dropped here is invisible.
+func TestClientNetworkCarriesTheToken(t *testing.T) {
+	const token = "0x8e87deee3bf1efe27e8e96abf205bedf802ed568"
+	depositKernel(t, "test", "0x3333333333333333333333333333333333333333", token, "")
+	net, err := freshClient().network(context.Background())
+	if err != nil {
+		t.Fatalf("read network: %v", err)
+	}
+	if net.Token != token {
+		t.Errorf("the token did not reach the client: %+v", net)
+	}
+	if net.Symbol != "USDT" || net.Decimals != 6 {
+		t.Errorf("the money's shape did not survive with it: %+v", net)
+	}
+}

@@ -612,7 +612,8 @@ func userDepositCmd() *cobra.Command {
 				return err
 			}
 			facts, err := json.Marshal(map[string]string{
-				"network": h.Network, "kernel_address": h.RailAddress, "your_address": me.RailAddress})
+				"network": h.Network, "kernel_address": h.RailAddress, "your_address": me.RailAddress,
+				"token": h.Token})
 			if err != nil {
 				return err
 			}
@@ -623,6 +624,21 @@ func userDepositCmd() *cobra.Command {
 					return nil
 				}
 				fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.RailAddress)
+				// The contract, not the symbol, is what says which money this is: one chain carries
+				// several tokens called the same thing, and a payment in the wrong one is never
+				// credited. An older kernel does not publish it, and a blank line under an
+				// instruction to send money would be worse than none.
+				if h.Token != "" {
+					fmt.Printf("Send only this token, and nothing else:\n  %s", h.Token)
+					if h.Symbol != "" {
+						fmt.Printf("  (%s)", h.Symbol)
+					}
+					fmt.Print("\n\n")
+				} else {
+					fmt.Println("This kernel does not say which token it takes; its symbol alone does not name one.")
+					fmt.Println("Ask the operator for the exact contract address before sending anything.")
+					fmt.Println()
+				}
 				if me.RailAddress == "" {
 					fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
 					fmt.Println("Register the address you will pay from first:  juice user address ADDRESS")
@@ -630,8 +646,8 @@ func userDepositCmd() *cobra.Command {
 				}
 				fmt.Printf("Pay from your registered address:\n  %s\n\n", me.RailAddress)
 				fmt.Println("Money is credited to whoever finally sent it, so it must arrive from that address.")
-				fmt.Println("An exchange paying this kernel on your behalf would be crediting itself, not you:")
-				fmt.Println("withdraw to your own wallet first, then pay from there.")
+				fmt.Println("A payment from any other address, an exchange paying on your behalf included, is held")
+				fmt.Println("for the operator to assign by hand: withdraw to your own wallet first, then pay from there.")
 				return nil
 			}})
 		},

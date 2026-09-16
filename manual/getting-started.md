@@ -50,8 +50,8 @@ Create acme as a new kernel? [y/N] y
 
 Which money will acme use? This cannot be changed later.
   play  no real money: you credit accounts yourself and keep the records
-  test  fake USDC on the Arbitrum Sepolia test chain
-  real  USDC on Arbitrum One
+  test  fake USDT on the Arbitrum Sepolia test chain
+  real  USDT on Arbitrum One
 Choice [play/test/real]: play
 Superuser password:
 Confirm password:

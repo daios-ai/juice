@@ -370,6 +370,7 @@ type serverHealth struct {
 	Digest      string `json:"network_digest"`
 	Decimals    uint8  `json:"decimals"`
 	Symbol      string `json:"symbol"`
+	Token       string `json:"token"`
 	RailAddress string `json:"rail_address"`
 	base        string // the address it was read from: a banner is a claim about one place
 }
@@ -445,7 +446,8 @@ func (c *client) network(ctx context.Context) (kernel.Network, error) {
 		return kernel.Network{}, kernel.ErrInvalidState.Wrapf(
 			"cannot read this kernel's money units right now; nothing was sent — retry").Because(err)
 	}
-	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals, Symbol: h.Symbol}, nil
+	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals,
+		Symbol: h.Symbol, Token: h.Token}, nil
 }
 
 // A client knows kernels and holds logins on them. A login is one account at one kernel, written

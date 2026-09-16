@@ -173,7 +173,7 @@ between custody and the account books.
 ### How the kernel keeps itself in fuel
 
 The operator supplies initial ETH for transaction fees. The kernel can then
-replenish it by swapping its own USDC earnings for ETH through the venue
+replenish it by swapping its own USDT earnings for ETH through the venue
 configured in the world file. The shipped chain worlds use Uniswap V3.
 
 The refill policy has a lower threshold, `gas.min`, and a target, `gas.max`.
@@ -181,7 +181,7 @@ When the balance is below the threshold, the rail attempts to buy enough ETH
 to reach the target. On Arbitrum One the shipped values are 0.001 and 0.003 ETH.
 Buying above the threshold reduces the need to refill on every payment.
 
-Fuel is an operator expense. The reservation excludes USDC backing other
+Fuel is an operator expense. The reservation excludes USDT backing other
 accounts, so a shortage of operator earnings can block a refill without using
 those balances. The `gas.feeBound` setting limits the purchase's transaction
 fee, while `slippageBps` limits the swap's deviation from its quote.
@@ -234,7 +234,7 @@ $ juice admin kernel deposits
 Payments received whose sender nobody has registered:
   id: rail:0xccb0975d…:0
   kind: deposit
-  amount: 40.00 USDC
+  amount: 40.00 USDT
   status: held
   tx_hash: 0xccb0975d…
   party_handle: 0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc
@@ -255,9 +255,9 @@ at the address supplies fuel and does not appear as a user deposit.
 ### Holdings and custody
 
 ```
-Holdings:   240.00 USDC (gas 0.04994…) as of block 28
-Operator:   earned=0.00 USDC paying-out=0.00 USDC unclaimed=40.00 USDC held-for-gas=0.00 USDC
-Solvency:   user-balances=240.00 USDC money-in=240.00 USDC difference=0.00 USDC
+Holdings:   240.00 USDT (gas 0.04994…) as of block 28
+Operator:   earned=0.00 USDT paying-out=0.00 USDT unclaimed=40.00 USDT held-for-gas=0.00 USDT
+Solvency:   user-balances=240.00 USDT money-in=240.00 USDT difference=0.00 USDT
 Custody:    the money the rail holds matches the books
 ```
 

@@ -28,8 +28,8 @@ Create acme as a new kernel? [y/N] y
 
 Which money will acme use? This cannot be changed later.
   play  no real money: you credit accounts yourself and keep the records
-  test  fake USDC on the Arbitrum Sepolia test chain
-  real  USDC on Arbitrum One
+  test  fake USDT on the Arbitrum Sepolia test chain
+  real  USDT on Arbitrum One
 Choice [play/test/real]: play
 Superuser password:
 Confirm password:
@@ -87,7 +87,7 @@ $ juice admin kernel show
 Handle:     bank
 Network:    real
 Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
-Holdings:   0.00 USDC (gas 0.00) as of block 13
+Holdings:   0.00 USDT (gas 0.00) as of block 13
 …
 ```
 
@@ -105,7 +105,7 @@ The shipped Arbitrum One settings trigger a refill below 0.001 ETH and target
 thresholds describe the configured refill policy, rather than a guarantee of
 how much a particular transaction will cost.
 
-Once funded, the kernel can buy more ETH using its own USDC earnings. User
+Once funded, the kernel can buy more ETH using its own USDT earnings. User
 backing is excluded from that spending. A refill itself needs ETH, however,
 so a kernel that falls below the cost of submitting one may need another
 operator top-up. See
@@ -117,11 +117,11 @@ operator top-up. See
 > shortage to be resolved. Buying ETH also requires a transaction fee.
 
 ETH sent to the rail address supplies the kernel's transaction fees and is not
-credited to a user's balance. Users deposit USDC at the same address, so explain
+credited to a user's balance. Users deposit USDT at the same address, so explain
 the distinction when giving funding instructions; the deposit chapter covers it
-in [Step 3](../money/deposits-and-withdrawals.html#step-3-send-the-usdc).
+in [Step 3](../money/deposits-and-withdrawals.html#step-3-send-the-usdt).
 
-The kernel's own USDC ordinarily accumulates as fees in the `sys` account.
+The kernel's own USDT ordinarily accumulates as fees in the `sys` account.
 You may add to that balance through an ordinary deposit: register a sender
 address for `sys` and send the token from it. These account funds are separate
 from the ETH supplied for blockchain fees.

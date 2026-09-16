@@ -37,7 +37,7 @@ blockchain.
 ## On `test` and `real`
 
 On `test` and `real`, deposits and withdrawals use the token specified by the
-network: a test token on Arbitrum Sepolia, or USDC on Arbitrum One.
+network: a test token on Arbitrum Sepolia, or USDT on Arbitrum One.
 
 The following examples use a local chain to demonstrate the commands and their
 output. Substitute the addresses returned by your kernel and wallet. The
@@ -49,8 +49,8 @@ than the local demonstration chain.
 Your wallet needs the network's token for the deposit and ETH for the
 transaction fee. They serve different purposes.
 
-**USDC** is the unit used for account balances on `real`. A deposit of
-`250.00 USDC` credits that amount to the account, and a withdrawal pays USDC
+**USDT** is the unit used for account balances on `real`. A deposit of
+`250.00 USDT` credits that amount to the account, and a withdrawal pays USDT
 back to the registered address. The `test` network uses a test token with no
 real monetary value.
 
@@ -67,8 +67,8 @@ the token transfer supplies the deposit.
 | | `test` | `real` |
 |---|---|---|
 | Chain | Arbitrum Sepolia | Arbitrum One |
-| The money | a test token, worth nothing | USDC, real dollars |
-| Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDC |
+| The money | a test token, worth nothing | USDT, real dollars |
+| Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDT |
 
 If you need test funds, the operator may be able to supply them. Even on `test`,
 an account credit must be supported by a witnessed payment. The operator can
@@ -76,9 +76,9 @@ send you tokens or arrange and attribute a payment on your behalf.
 
 {: .warning }
 > Check the token's contract address before sending a deposit. A token symbol
-> such as USDC does not uniquely identify it. Obtain the exact address from the
-> operator, since the kernel's deposit instructions do not yet print it.
-> Payments in another token are not credited through this deposit procedure.
+> such as USDT does not uniquely identify it: one chain carries several tokens of
+> that name. `juice user deposit` prints the contract this kernel takes; send that
+> one. Payments in another token are not credited through this deposit procedure.
 
 ### Step 1: register the address you will pay from
 
@@ -122,26 +122,29 @@ $ juice user deposit
 Send real to this kernel at:
   0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 
+Send only this token, and nothing else:
+  0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9  (USDT)
+
 Pay from your registered address:
   0x70997970c51812dc3a010c7d01b50e0d17dc79c8
 
 Money is credited to whoever finally sent it, so it must arrive from that address.
-An exchange paying this kernel on your behalf would be crediting itself, not you:
-withdraw to your own wallet first, then pay from there.
+A payment from any other address, an exchange paying on your behalf included, is held
+for the operator to assign by hand: withdraw to your own wallet first, then pay from there.
 ```
 
 You can also run this command before registration. It will report that a sender
 address still needs to be registered.
 
-### Step 3: send the USDC
+### Step 3: send the USDT
 
-From your own wallet, on that chain, send USDC to the kernel's address. You pay
+From your own wallet, on that chain, send USDT to the kernel's address. You pay
 the transaction fee in ETH, as you would for any transfer.
 
 {: .warning }
-> Select the network's USDC token as the asset to send. Your wallet will also
-> spend ETH on the transaction fee, but ETH sent directly to the kernel supplies
-> its fuel and does not credit your account.
+> Select the token by the contract address `juice user deposit` printed, not by
+> its symbol. Your wallet will also spend ETH on the transaction fee, but ETH sent
+> directly to the kernel supplies its fuel and does not credit your account.
 
 {: .warning }
 > Send from your registered address. A direct withdrawal from an exchange names
@@ -164,7 +167,7 @@ waiting times depend on the chain and the kernel's progress reading it.
 
 ```
 $ juice user me
-  available: 250.00 USDC
+  available: 250.00 USDT
   …
 ```
 
@@ -176,11 +179,11 @@ payments and the kernel's view of chain progress.
 
 ```
 $ juice user withdraw 50
-Withdraw 50.00 USDC on real to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
+Withdraw 50.00 USDT on real to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
   id: 58e1e97f-…
   kind: payout
-  amount: 50.00 USDC
-  credit: 50.00 USDC
+  amount: 50.00 USDT
+  credit: 50.00 USDT
   destination: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
   status: submitted
   created_at: 2026-09-15T00:12:42Z
@@ -196,8 +199,8 @@ manual payment records. Use `user withdrawals` to follow the outcome:
 $ juice user withdrawals
   id: 58e1e97f-…
   kind: payout
-  amount: 50.00 USDC
-  credit: 50.00 USDC
+  amount: 50.00 USDT
+  credit: 50.00 USDT
   …
 ```
 

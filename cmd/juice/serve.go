@@ -581,6 +581,7 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 		"network_digest": net.Digest,
 		"decimals":       net.Decimals,
 		"symbol":         net.Symbol,
+		"token":          net.Token,
 		"rail_address":   s.railAddress(r.Context()),
 	})
 }

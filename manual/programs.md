@@ -235,7 +235,7 @@ the key and network you expect:
 ```
 $ curl -s localhost:4040/health
 {"decimals":6,"handle":"acme","network":"play","network_digest":"ef1fac03…",
- "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"credits"}
+ "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"credits","token":""}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

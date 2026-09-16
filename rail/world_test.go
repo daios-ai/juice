@@ -18,12 +18,31 @@ import (
 // change here must be a deliberate protocol break rather than an accident of refactoring.
 const playDigest = "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"
 
+// The chain networks are pinned for the same reason, and for one more: they are what says where
+// real money is paid. A label may be corrected, a description reworded; the moment either of these
+// moves, the file names a different network and nothing on the old one verifies here.
+const (
+	testDigest = "8e0041de41ec5e9ee0ebb2eed05d51f93e704b5e8c86975f6a30f72237b45a77"
+	realDigest = "c86252cb887f73499149126ad3918f379592d59f2c2e1573c13dc681c2858e7a"
+)
+
+// The shipped worlds are pinned whole: name, digest, decimals, token and symbol together. The
+// symbol is what a depositor is shown and the token is what they must send; a file that names one
+// while holding the other tells them to send the wrong money, which is how these two worlds came to
+// say USDC while holding Tether. Changing either alone fails here.
 func TestShippedWorldsLoad(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		chained  bool
 		decimals uint8
-	}{{"play", false, 6}, {"test", true, 6}, {"real", true, 6}} {
+		digest   string
+		token    string
+		symbol   string
+	}{
+		{"play", false, 6, playDigest, "", "credits"},
+		{"test", true, 6, testDigest, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT"},
+		{"real", true, 6, realDigest, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT"},
+	} {
 		w, err := rail.Load(tc.name)
 		if err != nil {
 			t.Fatalf("load %s: %v", tc.name, err)
@@ -32,14 +51,38 @@ func TestShippedWorldsLoad(t *testing.T) {
 			t.Fatalf("%s: name=%q chained=%v", tc.name, w.Name, w.Chained())
 		}
 		n := w.Network()
-		if n.Decimals != tc.decimals || len(n.Digest) != 64 {
-			t.Fatalf("%s: network %+v", tc.name, n)
+		if n.Decimals != tc.decimals || n.Digest != tc.digest {
+			t.Fatalf("%s: network %+v, want decimals %d digest %s", tc.name, n, tc.decimals, tc.digest)
+		}
+		if n.Token != tc.token || n.Symbol != tc.symbol {
+			t.Fatalf("%s: token %q symbol %q, want %q %q", tc.name, n.Token, n.Symbol, tc.token, tc.symbol)
+		}
+		if w.Description == "" {
+			t.Fatalf("%s: no description; it is the line an operator chooses a network by", tc.name)
 		}
 		if tc.chained {
 			if _, err := w.Domain(); err != nil {
 				t.Fatalf("%s: domain: %v", tc.name, err)
 			}
 		}
+	}
+}
+
+// Relabelling is not a new network: the symbol and description are what a person reads, and the
+// digest is what signatures carry. This is the guard that correcting a label never strands a kernel.
+func TestLabelsDoNotMoveTheDigest(t *testing.T) {
+	raw, err := os.ReadFile("worlds/real.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["symbol"] = "SOMETHING-ELSE"
+	doc["description"] = "reworded entirely"
+	if got := writeWorld(t, doc); got != realDigest {
+		t.Fatalf("a label moved the digest: %s (was %s)", got, realDigest)
 	}
 }
 

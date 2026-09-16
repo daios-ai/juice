@@ -160,7 +160,8 @@ type definingPart struct {
 }
 
 // Network is what the kernel needs: the name for people, the digest for signatures and discovery,
-// and the decimals a client renders amounts with.
+// the decimals a client renders amounts with, and the token those amounts are paid in — empty
+// where the world has no chain, and the only thing that says which money this is.
 func (w World) Network() kernel.Network {
 	token := ""
 	if w.Token != "" {
@@ -172,7 +173,8 @@ func (w World) Network() kernel.Network {
 		panic("rail: canonicalize world: " + err.Error())
 	}
 	sum := sha256.Sum256(canon)
-	return kernel.Network{Name: w.Name, Digest: hex.EncodeToString(sum[:]), Decimals: w.Decimals, Symbol: w.Symbol}
+	return kernel.Network{Name: w.Name, Digest: hex.EncodeToString(sum[:]), Decimals: w.Decimals,
+		Symbol: w.Symbol, Token: token}
 }
 
 // Domain converts the world into the rail library's domain. Only a chain world has one.
