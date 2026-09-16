@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package fed is the federation transport: the sole carrier for cross-kernel calls,
 // single-action resolution, gossip, and steps (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.

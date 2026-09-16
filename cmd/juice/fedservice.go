@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Inbound federation (§13): everything a peer's signed request touches on this kernel — the

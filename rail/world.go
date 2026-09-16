@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package rail is the boundary between the kernel's ledger and real money (D23). It owns the world
 // files that define a network, and the adaptors that witness external payments: the manual one,
 // whose finalized facts are the operator's own records, and the chain one over juice-rail. It is the

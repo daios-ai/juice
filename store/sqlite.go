@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package store provides the SQLite implementation of kernel.Store.
 package store
 

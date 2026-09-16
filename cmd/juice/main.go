@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package main is the CLI entrypoint for the Juice kernel.
 package main
 

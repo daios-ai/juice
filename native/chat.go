@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package native contains the built-in native action plugins for the Juice kernel.
 // Each plugin is registered via its Register* function; the kernel never imports this package.
 package native

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //go:build integration
 
 // The local-chain release gate (§8): the chain adaptor driven against a real chain, with

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Outbound federation (§13). One adapter owns everything this kernel needs to reach a peer —

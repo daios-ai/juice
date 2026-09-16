@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // In-process federation simulator: several real kernels in one test binary, wired to each other

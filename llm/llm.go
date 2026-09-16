@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package llm provides language model and embedding adapters.
 package llm
 

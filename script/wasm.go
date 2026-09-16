@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package script provides WebAssembly script execution via wazero.
 package script
 

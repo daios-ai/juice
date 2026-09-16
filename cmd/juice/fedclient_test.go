@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 package main
 
 // Tests for the outbound federation adapter (§13): envelope parsing, never-dispatched

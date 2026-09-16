@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Package main is the network simulation suite: a five-kernel economy driven end to end over a
 // real network, recording what it did and judging it.
 //

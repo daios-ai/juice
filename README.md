@@ -399,3 +399,18 @@ if you need to share something, and delete the directory when you are done with 
 Two release gates are opt-in and need more than a laptop: `JUICE_RAIL_FLOWS=1` for the local-chain
 rail gate, and `JUICE_NETWORK_FLOWS=1` for the real-NAT federation gate, which needs a second host
 behind a different NAT.
+
+## License
+
+Copyright (C) 2026 Pedro A. Ortega <pedro.ortega@gmail.com>
+
+Juice is free software: you can redistribute it and/or modify it under the terms of the GNU
+Affero General Public License as published by the Free Software Foundation, version 3 of the
+License only (`AGPL-3.0-only`). It is distributed WITHOUT ANY WARRANTY; see `LICENSE` for the
+full text. Every Go file carries the matching `SPDX-License-Identifier` line.
+
+The one exception is `script/sdk.tmpl`, the source prepended to every action compiled by
+`sys/tinygo/compile`: it is licensed under the Apache License, Version 2.0 (`Apache-2.0`, text in
+`script/LICENSE-APACHE`), so that the compiled actions it becomes part of remain their authors'
+own work. Programs that talk to a kernel over HTTP or the federation transport are separate
+works and are not affected by the kernel's license.
