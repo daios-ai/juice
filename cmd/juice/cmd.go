@@ -14,7 +14,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
@@ -109,9 +108,13 @@ var interactiveTTY = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 }
 
+// errCancelled is a user who said no. It is not a failure of the command and is not rendered as
+// one — the exit code is non-zero so a script does not read silence as success, and the word is
+// printed once, plainly (§14).
+var errCancelled = errors.New("cancelled")
+
 // confirm gates an act that cannot be undone. The default is no: a bare Enter on a prompt about
-// money should not move it, and the one way to say yes is to say it. Declining is an error, so the
-// exit code says so too and a script does not read silence as success. Off a terminal there is
+// money should not move it, and the one way to say yes is to say it. Off a terminal there is
 // nobody to ask, so --yes is required rather than assumed.
 func confirm(msg string, yes bool) error {
 	if yes {
@@ -132,8 +135,7 @@ func askYesNo(msg string) error {
 	if l := strings.ToLower(strings.TrimSpace(line)); l == "y" || l == "yes" {
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "cancelled")
-	return kernel.ErrInvalidInput.Wrap("cancelled")
+	return errCancelled
 }
 
 // ---- output helpers ----
@@ -232,6 +234,102 @@ func (o output) resources(body []byte) []byte {
 	return fields[o.rows]
 }
 
+// ---- the list view ----
+//
+// Every list a person reads is one shape: a header naming the columns, one row per item, aligned,
+// and the same empty state — the header alone — whether the list is empty because nothing exists
+// or because nothing matched. A command declares its columns; nothing else about a list is a
+// command's to decide (§14).
+
+// column is one column of a list: its heading, and what it reads from a row.
+type column struct {
+	head string
+	cell func(row json.RawMessage) string
+}
+
+// text reads one field of a row as it stands.
+func text(field string) func(json.RawMessage) string {
+	return func(row json.RawMessage) string { return strField(row, field) }
+}
+
+// money reads one field of a row as an amount, in the unit a person reads.
+func money(field string, net kernel.Network) func(json.RawMessage) string {
+	return func(row json.RawMessage) string {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(row, &fields) != nil {
+			return ""
+		}
+		var amount int64
+		if json.Unmarshal(fields[field], &amount) != nil {
+			return ""
+		}
+		return net.Amount(amount)
+	}
+}
+
+// strField reads one string field of a row, rendering a non-string as it stands.
+func strField(row json.RawMessage, field string) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(row, &fields) != nil {
+		return ""
+	}
+	raw, ok := fields[field]
+	if !ok {
+		return ""
+	}
+	return renderValue(raw)
+}
+
+// list renders a reply of rows as the list view: the columns as declared, widths from the content,
+// header always. rows() names the rows inside a reply that wraps them; nil means the reply is them.
+func list(cols ...column) func(b []byte) error {
+	return func(b []byte) error {
+		var rows []json.RawMessage
+		if len(bytes.TrimSpace(b)) > 0 && json.Unmarshal(b, &rows) != nil {
+			var one json.RawMessage = b
+			rows = []json.RawMessage{one}
+		}
+		cells := make([][]string, 0, len(rows))
+		widths := make([]int, len(cols))
+		for i, c := range cols {
+			widths[i] = len(c.head)
+		}
+		for _, row := range rows {
+			line := make([]string, len(cols))
+			for i, c := range cols {
+				line[i] = c.cell(row)
+				if len(line[i]) > widths[i] {
+					widths[i] = len(line[i])
+				}
+			}
+			cells = append(cells, line)
+		}
+		print := func(vals []string) {
+			var sb strings.Builder
+			for i, v := range vals {
+				if i > 0 {
+					sb.WriteString("  ")
+				}
+				if i == len(vals)-1 {
+					sb.WriteString(v)
+					continue
+				}
+				sb.WriteString(v + strings.Repeat(" ", widths[i]-len(v)))
+			}
+			fmt.Println(strings.TrimRight(sb.String(), " "))
+		}
+		heads := make([]string, len(cols))
+		for i, c := range cols {
+			heads[i] = c.head
+		}
+		print(heads)
+		for _, line := range cells {
+			print(line)
+		}
+		return nil
+	}
+}
+
 // printIDs prints the identifier of every resource a response names, one per line, so output
 // pipes into the next command: a list yields one line per row, a single resource one line, and a
 // response naming no resource nothing at all (§14 C8).
@@ -302,12 +400,19 @@ func printFields(body []byte, money []string, net kernel.Network) error {
 	return nil
 }
 
-// renderField formats one field: money in the world's unit, everything else as renderValue does.
+// renderField formats one field: money in the world's unit, a duration with the unit it is in, and
+// everything else as renderValue does. A bare number a person cannot interpret is not an answer.
 func renderField(key string, raw json.RawMessage, money []string, net kernel.Network) string {
 	for _, m := range money {
 		var amount int64
 		if m == key && json.Unmarshal(raw, &amount) == nil {
 			return net.Amount(amount)
+		}
+	}
+	if strings.HasSuffix(key, "latency_estimate") {
+		var seconds float64
+		if json.Unmarshal(raw, &seconds) == nil {
+			return fmt.Sprintf("%.3f seconds", seconds)
 		}
 	}
 	return renderValue(raw)
@@ -322,6 +427,7 @@ var (
 	moneyRail    = []string{"amount", "credit"}
 	moneyLedger  = []string{"amount"}
 	moneyStep    = []string{"price"}
+	moneyCall    = []string{"charge"}
 	moneyOwed    = []string{"obligation", "amount"}
 )
 
@@ -507,25 +613,13 @@ func userLedgerCmd() *cobra.Command {
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return cli.emitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: func(b []byte) error {
-				var entries []*ledgerView
-				if err := json.Unmarshal(b, &entries); err != nil {
-					return err
-				}
-				for _, e := range entries {
-					from, to := e.FromHandle, e.ToHandle
-					if from == "" {
-						from = "—"
-					}
-					if to == "" {
-						to = "—"
-					}
-					fmt.Printf("[%s] amount:%-10s  from:%-12s  to:%-12s  %s\n",
-						e.CreatedAt.Format(time.RFC3339),
-						net.Amount(e.Amount), from, to, e.Reason)
-				}
-				return nil
-			}})
+			return cli.emitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: list(
+				column{"WHEN", text("created_at")},
+				column{"AMOUNT", money("amount", net)},
+				column{"FROM", party("from_handle")},
+				column{"TO", party("to_handle")},
+				column{"WHY", text("reason")},
+			)})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -537,6 +631,7 @@ type meView struct {
 	ID          string `json:"id"`
 	Handle      string `json:"handle"`
 	RailAddress string `json:"rail_address"`
+	Available   int64  `json:"available"`
 }
 
 func readMe(ctx context.Context) (*meView, error) {
@@ -889,7 +984,7 @@ func actionUpdateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --auth: %v", err)
 				}
 			}
-			return cli.emit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, output{money: moneyAction})
+			return cli.emit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, reportActions("updated"))
 		},
 	}
 	cmd.Flags().StringVar(&description, "description", "", "New description")
@@ -921,18 +1016,66 @@ type targetRequest struct {
 	kernel.UpdateActionRequest
 }
 
-// reportActions names the rows a mutation touched rather than counting them.
+// reportActions names the rows a mutation wrote rather than counting them, in the list view every
+// other set of rows is read in — the terms included, since a change to an action is most often a
+// change to what it costs (§14).
 func reportActions(verb string) output {
 	return output{human: func(b []byte) error {
 		var as []actionResp
 		if err := json.Unmarshal(b, &as); err != nil {
 			return err
 		}
-		for _, a := range as {
-			fmt.Printf("%s %s\n", verb, a.ActionRef)
+		net, err := humanUnits(context.Background())
+		if err != nil {
+			return err
 		}
+		if err := list(
+			column{"CHANGE", func(json.RawMessage) string { return verb }},
+			column{"ACTION", text("action")},
+			column{"PRICE", money("price", net)},
+			column{"ACTIVE", func(row json.RawMessage) string {
+				if strField(row, "active") == "true" {
+					return "yes"
+				}
+				return "no"
+			}},
+			column{"AUDIENCE", text("visibility")},
+		)(b); err != nil {
+			return err
+		}
+		warnUnfundedPublic(as)
 		return nil
 	}}
+}
+
+// warnUnfundedPublic tells a provider what only their own kernel can know: a public action is
+// served abroad on the provider's own money (D14), so one priced above their balance is refused
+// for every foreign buyer — who is told nothing except that this kernel declined. Said once, when
+// the action becomes sellable, and never as an error: the action is published either way.
+func warnUnfundedPublic(rows []actionResp) {
+	var dearest int64
+	for _, a := range rows {
+		if a.Action != nil && a.Active && a.Visibility == kernel.VisibilityPublic && a.Price > dearest {
+			dearest = a.Price
+		}
+	}
+	if dearest == 0 {
+		return
+	}
+	ctx := context.Background()
+	me, err := readMe(ctx)
+	if err != nil || me.Available >= dearest {
+		return
+	}
+	net, nerr := humanUnits(ctx)
+	if nerr != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Note: your balance is %s and this action costs %s. Your kernel pays for the work a buyer on\n"+
+			"another kernel asks for, and is repaid when they settle, so it will decline their calls\n"+
+			"until you hold at least the price. Calls from this kernel are unaffected.\n",
+		net.Amount(me.Available), net.Amount(dearest))
 }
 
 // actionRunE adapts a command body that needs the resolved action id: every action subcommand
@@ -1000,29 +1143,24 @@ func actionListCmd() *cobra.Command {
 			if name != "" {
 				q.Set("name", name)
 			}
-			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: func(b []byte) error {
-				var actions []actionResp
-				if err := json.Unmarshal(b, &actions); err != nil {
-					return err
-				}
-				for _, a := range actions {
-					grant := ""
-					if a.RequiresGrant {
-						grant = " [grant]" // caller must connect their own credential first (§8)
+			// Whether a row is live and whether it needs the caller's own credential are columns
+			// like any other, rather than marks the reader has to have been told about.
+			cols := []column{{"ACTION", text("action")}, {"PRICE", money("price", net)}}
+			if all {
+				cols = append(cols, column{"ACTIVE", func(row json.RawMessage) string {
+					if strField(row, "active") == "true" {
+						return "yes"
 					}
-					// The ref already contains the name; one padded reference column in both branches.
-					if all {
-						active := " "
-						if a.Active {
-							active = "*"
-						}
-						fmt.Printf("[%s] %-30s  %s%s\n", active, a.ActionRef, net.Amount(a.Price), grant)
-					} else {
-						fmt.Printf("  %-30s  %s%s\n", a.ActionRef, net.Amount(a.Price), grant)
-					}
+					return "no"
+				}})
+			}
+			cols = append(cols, column{"AUTHORIZE", func(row json.RawMessage) string {
+				if strField(row, "requires_grant") == "true" {
+					return "your own login"
 				}
-				return nil
+				return ""
 			}})
+			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: list(cols...)})
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include inactive and private actions (a superuser sees every owner's)")
@@ -1152,25 +1290,17 @@ func actionRatingsCmd() *cobra.Command {
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			return cli.emitCtx(ctx, "GET", path, nil, output{human: func(b []byte) error {
-				var ratings []struct {
-					Value   int     `json:"value"`
-					Note    *string `json:"note"`
-					Created string  `json:"created_at"`
-					Source  string  `json:"source"`
-				}
-				if err := json.Unmarshal(b, &ratings); err != nil {
-					return err
-				}
-				for _, rt := range ratings {
-					note := ""
-					if rt.Note != nil {
-						note = "  " + *rt.Note
+			return cli.emitCtx(ctx, "GET", path, nil, output{human: list(
+				column{"RATING", func(row json.RawMessage) string {
+					if strField(row, "value") == "1" {
+						return "good"
 					}
-					fmt.Printf("%d  %s%s\n", rt.Value, rt.Created, note)
-				}
-				return nil
-			}})
+					return "bad"
+				}},
+				column{"WHEN", text("created_at")},
+				column{"FROM", text("source")},
+				column{"NOTE", text("note")},
+			)})
 		}),
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -1199,21 +1329,15 @@ func processListCmd() *cobra.Command {
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return cli.emitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: func(b []byte) error {
-				var processes []*processView
-				if err := json.Unmarshal(b, &processes); err != nil {
-					return err
-				}
-				for _, p := range processes {
-					awaiting := ""
-					if p.AwaitingReceipt && p.AwaitingReceiptSince != nil {
-						awaiting = fmt.Sprintf("  awaiting-receipt since %s", p.AwaitingReceiptSince.Format(time.RFC3339))
-					}
-					fmt.Printf("%s  %-6s  available:%-12s  locked:%-12s%s\n",
-						p.ID, p.Status, net.Amount(p.Available), net.Amount(p.Locked), awaiting)
-				}
-				return nil
-			}})
+			return cli.emitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: list(
+				column{"PROCESS", text("id")},
+				column{"STATUS", text("status")},
+				column{"AVAILABLE", money("available", net)},
+				column{"LOCKED", money("locked", net)},
+				// Not a liveness claim: the age of the oldest call this process is still waiting
+				// on a receipt for (§14).
+				column{"AWAITING SINCE", text("awaiting_receipt_since")},
+			)})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -1313,11 +1437,14 @@ func stepListCmd() *cobra.Command {
 					if err := json.Unmarshal(b, &held); err != nil {
 						return err
 					}
-					for _, h := range held.Steps {
-						fmt.Printf("%s  price=%s  %s\n", h.ID, net.Amount(h.Price), h.CreatedAt.Format(time.RFC3339))
-						if len(h.PartialArgs) > 0 && string(h.PartialArgs) != "{}" {
-							fmt.Printf("      %s\n", h.PartialArgs)
-						}
+					rows, _ := json.Marshal(held.Steps)
+					if err := list(
+						column{"STEP", text("id")},
+						column{"PRICE", money("price", net)},
+						column{"CREATED", text("created_at")},
+						column{"SUPPLIED", text("partial_args")},
+					)(rows); err != nil {
+						return err
 					}
 					if held.Truncated {
 						fmt.Println("more steps are waiting than one page carries; complete some and ask again")
@@ -1332,24 +1459,18 @@ func stepListCmd() *cobra.Command {
 				q.Set("status", status)
 			}
 			setLimitOffset(q, limit, offset)
-			return cli.emit("GET", "/v1/steps?"+q.Encode(), nil, output{human: func(b []byte) error {
-				var steps []stepWithAction
-				if err := json.Unmarshal(b, &steps); err != nil {
-					return err
-				}
-				for _, s := range steps {
-					marker := ""
-					if s.WaitingOnPeer {
-						marker = "  waiting-on-peer"
+			return cli.emit("GET", "/v1/steps?"+q.Encode(), nil, output{human: list(
+				column{"STEP", text("id")},
+				column{"STATUS", text("status")},
+				column{"CREATED BY", text("created_by")},
+				column{"COMPLETES", text("action")},
+				column{"CALLER", func(row json.RawMessage) string {
+					if strField(row, "waiting_on_peer") == "true" {
+						return strField(row, "required_caller_handle") + " (on a peer)"
 					}
-					label := s.Action
-					if s.CreatedBy != "" {
-						label = s.CreatedBy + " → " + s.Action
-					}
-					fmt.Printf("%s  %-7s  %s%s\n", s.ID, s.Status, label, marker)
-				}
-				return nil
-			}})
+					return strField(row, "required_caller_handle")
+				}},
+			)})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -1423,18 +1544,17 @@ func txListCmd() *cobra.Command {
 				q.Set("process_id", processID)
 			}
 			setLimitOffset(q, limit, offset)
-			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: func(b []byte) error {
-				var txs []*txSummary
-				if err := json.Unmarshal(b, &txs); err != nil {
-					return err
-				}
-				for _, tx := range txs {
-					fmt.Printf("[%s] %s  status:%s  gross:%s\n",
-						tx.StartedAt.Format(time.RFC3339),
-						tx.ID, tx.Status, net.Amount(tx.Gross))
-				}
-				return nil
-			}})
+			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: list(
+				column{"TRANSACTION", text("id")},
+				column{"STARTED", text("started_at")},
+				column{"ACTION", text("action_name")},
+				column{"STATUS", text("status")},
+				// What the call drew, which is what it locked less what came back: a failed call
+				// refunds all of it unless work beneath it was already delivered (P5, U13).
+				column{"CHARGED", func(row json.RawMessage) string {
+					return net.Amount(numberField(row, "gross") - numberField(row, "refund"))
+				}},
+			)})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
@@ -1487,48 +1607,6 @@ func txRateCmd() *cobra.Command {
 	return cmd
 }
 
-// runHint is everything a failed run tells the operator beyond the error itself: what was charged,
-// where the money stands, and which command answers the question next. It is one function rather
-// than a paragraph at each branch so the advice can be read — and tested — as a whole, which is
-// what keeps it from outliving the commands it names.
-func runHint(err error, ref, quoteHash string) string {
-	ke := (*kernel.KernelError)(nil)
-	errors.As(err, &ke)
-	switch {
-	case errors.Is(err, kernel.ErrGrantRequired):
-		return fmt.Sprintf("\nAuthorize with:\n  juice user connect %s\n", directorySelector(grantActionRef(err, ref)))
-	// Federation-relationship failures (§13): the caller's own balance is fine — say so, and point
-	// at the operator remedy instead of a caller one.
-	case errors.Is(err, kernel.ErrPeerUnreachable):
-		return "\nThe peer is offline; your funds were not charged. Try again when it is online.\n"
-	case errors.Is(err, kernel.ErrPeerUnfunded):
-		peer := peerMetaHandle(err)
-		return fmt.Sprintf("\nYour balance is fine. The kernel %q refused this call because it will not serve this\n"+
-			"kernel on credit right now: either it has lent us as much as it allows, or it cannot pay its\n"+
-			"own provider for the work.\n"+
-			"This is for the operator of your kernel to look into:\n"+
-			"  juice admin kernel show  — how much this kernel owes and is owed\n"+
-			"  juice admin peer inspect %s — this kernel's standing with %q\n", peer, peer, peer)
-	// A pinned run refused for changed terms: nothing was charged, and the current number is what
-	// the caller must re-consent to (§4 precondition 7).
-	case quoteHash != "" && ke != nil && ke.Meta["quote_hash"] != "":
-		return fmt.Sprintf("\nNothing was charged. The action's terms changed since you quoted them; its price is now %s.\n"+
-			"Re-read the action and pass --quote-hash %s to accept the new terms.\n", ke.Meta["price"], ke.Meta["quote_hash"])
-	// A parked remote call: the money is reserved, not spent, and the process is the handle to
-	// follow it by (§13). Say so — a bare "pending" reads as a lost charge.
-	case ke != nil && ke.Meta["process_id"] != "":
-		id := ke.Meta["process_id"]
-		hint := fmt.Sprintf("\nYour funds are reserved, not spent, on process %s.\nFollow it with:\n  juice process show %s\n", id, id)
-		if at := ke.Meta["refund_eligible_at"]; at != "" {
-			return hint + fmt.Sprintf("It retries automatically. From %s it becomes eligible for an automatic refund, "+
-				"which a later retry pass applies; `juice process end` refunds it sooner.\n", at)
-		}
-		return hint + "Work is still running beneath the call; the receipt follows when it settles. " +
-			"`juice process end` settles it now.\n"
-	}
-	return ""
-}
-
 // ---- run ----
 
 func init() {
@@ -1551,6 +1629,12 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return kernel.ErrInvalidInput.Wrapf("invalid args: %v", err)
 			}
+			// The unit is read before the call, never after: a /health that fails once the charge is
+			// committed must not turn a run that happened into an error (the rule units() states).
+			net, err := humanUnits(context.Background())
+			if err != nil {
+				return err
+			}
 			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
 			err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
@@ -1569,12 +1653,36 @@ func runCmd() *cobra.Command {
 				}
 			}
 			if err != nil {
-				fmt.Fprint(os.Stderr, runHint(err, cmdArgs[0], quoteHash))
 				return err
 			}
-			return emit(raw, output{id: "tx_id"})
+			return emit(raw, output{id: "tx_id", money: moneyCall, net: net})
 		},
 	}
 	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Fingerprint of the terms you saw (quote_hash on the action); the run is refused before any charge if the terms have changed since")
 	return cmd
+}
+
+// numberField reads one whole-number field of a row; a field that is absent or is not a number
+// reads as zero, since every number these views show is an amount and an absent amount is none.
+func numberField(row json.RawMessage, field string) int64 {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(row, &fields) != nil {
+		return 0
+	}
+	var n int64
+	if json.Unmarshal(fields[field], &n) != nil {
+		return 0
+	}
+	return n
+}
+
+// party names one side of a ledger entry, where an absent side is the world outside this kernel:
+// money that came from nowhere it knows, or left for somewhere it does not follow.
+func party(field string) func(json.RawMessage) string {
+	return func(row json.RawMessage) string {
+		if v := strField(row, field); v != "" {
+			return v
+		}
+		return "outside"
+	}
 }

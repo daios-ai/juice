@@ -1381,6 +1381,36 @@ func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error
 	return releaseTransferValue(ctx, tx, callerC, value, callerC)
 }
 
+// postSettlement records what a settlement moved between accounts. The balance updates are the
+// caller's; these are the journal rows that make the ledger the complete account of an account's
+// money — every credit a provider received and every fee the operator took, each naming the
+// transaction that caused it, so a balance equals the sum of its postings (D4, G1). Ids derive
+// from the transaction, like the transfer effect's above, so one settlement can write one of each.
+// Only movements between two accounts are postings: a refund returns to the payer's own wallet
+// and moves nobody's money.
+func postSettlement(ctx context.Context, tx *sql.Tx, payerID string, at time.Time, txID string, rows ...ledgerPosting) error {
+	for _, p := range rows {
+		if p.amount <= 0 || p.to == "" || p.to == payerID {
+			continue
+		}
+		if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
+			ID: p.prefix + txID, OperatorUserID: payerID, FromUserID: payerID, ToUserID: p.to,
+			Amount: p.amount, Reason: txID, CreatedAt: at,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ledgerPosting is one movement postSettlement may write: who receives it, how much, and the id
+// prefix that names its kind.
+type ledgerPosting struct {
+	prefix string
+	to     string
+	amount int64
+}
+
 func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
@@ -1444,6 +1474,10 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 			if n, _ := res.RowsAffected(); n != 1 {
 				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
 			}
+		}
+		if err := postSettlement(ctx, tx, ktx.OwnerUserID, receipt.CreatedAt, ktx.ID,
+			ledgerPosting{"net_", targetUserID, net}, ledgerPosting{"fee_", feeRecipientID, fee}); err != nil {
+			return err
 		}
 		// The lottery stake goes back to whoever locked it: the draw's own outcome is settled by
 		// CommitRemoteSettlement, which is the only path that wins one. No-op for a local call.
@@ -1593,6 +1627,13 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 				`UPDATE accounts SET available=available+? WHERE id=?`, importFee, feeRecipientID); err != nil {
 				return dbErr(err, "commit remote settlement: credit fee recipient")
 			}
+		}
+		// The postings for the two movements above. The obligation is one only when C is not the
+		// payer: in a composed call it leaves the process owner's budget for another owner's
+		// account, and in an ordinary root call it returns to the same person who paid it.
+		if err := postSettlement(ctx, tx, ktx.OwnerUserID, receipt.CreatedAt, ktx.ID,
+			ledgerPosting{"obl_", ktx.CallerUserID, obligation}, ledgerPosting{"imp_", feeRecipientID, importFee}); err != nil {
+			return err
 		}
 		// A won draw is money leaving: reserved from C into the operator's hold now, so the amount is
 		// committed before the rail is ever asked, and journalled where every crossing is.

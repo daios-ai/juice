@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/daios-ai/juice/kernel"
@@ -31,8 +32,16 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "juice",
-	Short:   "Juice kernel — callable action platform",
+	Use:   "juice",
+	Short: "Juice kernel — callable action platform",
+	// Two examples, because the first screen of a program nobody has used before should say where
+	// to start: run a kernel of your own, or use somebody else's (§14).
+	Example: "  # run a kernel of your own, and use it\n" +
+		"  juice kernel serve acme\n" +
+		"  juice auth login sys@acme\n\n" +
+		"  # use a kernel somebody else runs\n" +
+		"  juice kernel add https://their.example acme\n" +
+		"  juice user create me@acme",
 	Version: version + " (" + commit + ")",
 	// main() is the single place errors and usage are printed. Cobra prints neither itself,
 	// so every command is handled identically: main renders the error, and shows usage only
@@ -44,7 +53,10 @@ var rootCmd = &cobra.Command{
 	// worth showing) from a runtime error (usage would be noise). It is also where this
 	// invocation's client is made, so every command body has exactly one — and the same one.
 	// No subcommand overrides this, so the behavior is uniform across every command.
-	PersistentPreRun: func(_ *cobra.Command, _ []string) { enteredCommand, cli = true, &client{} },
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		enteredCommand, cli = true, &client{}
+		return checkGlobalFlags(cmd)
+	},
 	// Hide cobra's stock `completion` command from the help listing (it still works if invoked).
 	CompletionOptions: cobra.CompletionOptions{HiddenDefaultCmd: true},
 }
@@ -129,6 +141,9 @@ func main() {
 	// command's, not the root's.
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
+		if !enteredCommand {
+			err = inputError(cmd, err)
+		}
 		renderError(err)
 		if !enteredCommand {
 			// The error came from flag parsing or argument validation, before the command
@@ -171,7 +186,16 @@ func errorLine(msg string, color bool) string {
 // it also prints the underlying cause chain, so the friendly message stays clean by default
 // while raw detail (e.g. a dial error) remains available for troubleshooting.
 func renderError(err error) {
+	// A declined confirmation is the answer the prompt asked for, not a failure: one word, no
+	// colour, no "error:" — and the non-zero exit above still tells a script what happened.
+	if errors.Is(err, errCancelled) {
+		fmt.Fprintln(os.Stderr, "cancelled")
+		return
+	}
 	fmt.Fprintln(os.Stderr, errorLine(err.Error(), useColor()))
+	if r := remedy(err); r != "" {
+		fmt.Fprintln(os.Stderr, "       "+r)
+	}
 	if flagVerbose {
 		for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
 			fmt.Fprintln(os.Stderr, "  caused by:", cause.Error())
@@ -416,4 +440,127 @@ func readJSONArg(s string) (map[string]any, error) {
 		return nil, fmt.Errorf("parse JSON: %w", err)
 	}
 	return m, nil
+}
+
+// remedy is the second half of every error a person reads: what to do about it. It is written here
+// and nowhere else, from the error's own code and the structured fields the kernel attached to it,
+// so one failure reads the same whichever command met it — and a command never prints a paragraph
+// of its own beside the error line (§14). An error with nothing useful to add says nothing.
+func remedy(err error) string {
+	ke := (*kernel.KernelError)(nil)
+	if !errors.As(err, &ke) {
+		return ""
+	}
+	peer := ke.Meta["peer"]
+	switch {
+	// Not allowed as you are: name the one command that changes that.
+	case errors.Is(err, kernel.ErrGrantRequired):
+		if ref := ke.Meta["action"]; ref != "" {
+			return "Authorize it with: juice user connect " + directorySelector(ref)
+		}
+	// Cannot be done now, and nothing moved. The condition is the peer's, and only its operator
+	// can change it, so the buyer is told what happened and not sent to inspect their own books.
+	case errors.Is(err, kernel.ErrPeerUnreachable):
+		switch {
+		case ke.Meta["kernel_is_local"] == "yes":
+			return "Start it with: juice kernel serve " + ke.Meta["kernel"]
+		case peer != "":
+			return "Nothing was charged. Try again when " + peer + " is back."
+		case ke.Meta["kernel"] != "":
+			return "Try again when " + ke.Meta["kernel"] + " is answering."
+		}
+	case errors.Is(err, kernel.ErrPeerUnfunded):
+		if peer != "" {
+			return peer + " declined to serve this call; nothing was charged. Only that kernel's operator can change it."
+		}
+		return "The peer declined to serve this call; nothing was charged."
+	case errors.Is(err, kernel.ErrTermsChanged):
+		if h := ke.Meta["quote_hash"]; h != "" {
+			return fmt.Sprintf("Nothing was charged. The price is now %s; pass --quote-hash %s to accept it.", ke.Meta["price"], h)
+		}
+	// A parked call: the money is reserved, not spent, and the process is the handle to follow it by.
+	case ke.Meta["process_id"] != "":
+		id := ke.Meta["process_id"]
+		if at := ke.Meta["refund_eligible_at"]; at != "" {
+			return fmt.Sprintf("Your funds are reserved, not spent, on process %s. It retries by itself, is refundable from %s, and `juice process end %s` refunds it sooner.", id, at, id)
+		}
+		return fmt.Sprintf("Your funds are reserved, not spent, on process %s. Follow it with: juice process show %s", id, id)
+	// It ran and failed: what it drew, and where the record of it is.
+	case ke.Meta["tx_id"] != "":
+		return fmt.Sprintf("Charged %s. The record is: juice tx show %s", renderCharge(ke.Meta["charge"]), ke.Meta["tx_id"])
+	case errors.Is(err, kernel.ErrInternal):
+		return "This is a fault in juice. Re-run with --verbose for the detail behind it."
+	}
+	return ""
+}
+
+// renderCharge writes what a failed call drew the way every other amount is written. The unit is
+// this client's already-read record of the kernel it spoke to, so reporting a charge never costs a
+// request — and an unreadable one says the base-unit number rather than nothing.
+func renderCharge(raw string) string {
+	amount, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return raw
+	}
+	net, nerr := humanUnits(context.Background())
+	if nerr != nil {
+		return raw
+	}
+	return net.Amount(amount)
+}
+
+// inputError is what a mistake in the command line says. Only the wrong number of arguments is
+// reworded — cobra counts them and says so in its own words ("accepts between 1 and 2 arg(s),
+// received 0"), where this program can name what the command takes. Everything else it reports —
+// an unknown command, an unknown flag, a flag given no value — is already about the words the
+// person typed, so it is carried through as written and only given a code (§14).
+func inputError(cmd *cobra.Command, err error) error {
+	if strings.HasPrefix(err.Error(), "accepts ") || strings.HasPrefix(err.Error(), "requires ") ||
+		strings.Contains(err.Error(), "arg(s)") {
+		return kernel.ErrInvalidInput.Wrapf("%s takes %s", cmd.CommandPath(), argumentsOf(cmd))
+	}
+	return kernel.ErrInvalidInput.Wrap(err.Error())
+}
+
+// argumentsOf is what a command's own Use line says it takes, which is the part after its name:
+// `run ACTION [JSON]` takes `ACTION [JSON]`. A command that takes nothing says so.
+func argumentsOf(cmd *cobra.Command) string {
+	_, args, _ := strings.Cut(cmd.Use, " ")
+	if strings.TrimSpace(args) == "" {
+		return "no arguments"
+	}
+	return strings.TrimSpace(args)
+}
+
+// checkGlobalFlags refuses the two ways of asking for something no command can answer: two output
+// formats at once, and acting as a login on a command that acts as nobody. A flag that is accepted
+// and ignored teaches that it works (§14).
+func checkGlobalFlags(cmd *cobra.Command) error {
+	if flagJSON && flagQuiet {
+		return kernel.ErrInvalidInput.Wrap("--json and --quiet are two answers to one question; pass one")
+	}
+	if flagAs != "" && !actsAsALogin(cmd) {
+		return kernel.ErrInvalidInput.Wrapf("%s acts on this client's own records, not as a login, so --as means nothing here", cmd.CommandPath())
+	}
+	return nil
+}
+
+// actsAsALogin reports whether a command acts as somebody on a kernel. Two whole nouns do not:
+// `kernel`, which is this client's address book and the server itself, and `auth`, which is the
+// logins themselves rather than anything done as one. `user create` is the third, since the login
+// it makes is the one it names. Taken from the command's place in the tree rather than from a list
+// of names, so a command added under either noun is covered the day it is added.
+func actsAsALogin(cmd *cobra.Command) bool {
+	if cmd.CommandPath() == "juice user create" {
+		return false
+	}
+	for c := cmd; c != nil && c.Parent() != nil; c = c.Parent() {
+		if c.Name() != "kernel" && c.Name() != "auth" {
+			continue
+		}
+		// `kernel` and `auth` at the top are this client's own; under `admin` they are the
+		// operator's commands about a kernel, which do act as a login.
+		return c.Parent().Name() == "admin"
+	}
+	return true
 }

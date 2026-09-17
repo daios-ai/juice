@@ -114,13 +114,14 @@ Use `step list` and `step show` to inspect the work addressed to you:
 
 ```
 $ juice step list
-b75366d1-…  waiting  sys/message → sys/sink
+STEP        STATUS   CREATED BY   COMPLETES  CALLER
+b75366d1-…  waiting  sys/message  sys/sink   bob
 $ juice step show b75366d1-…
   id: b75366d1-…
   partial_args: {
     "message": "approve the order?"
   }
-  price: 0.00 credits
+  price: 0.00 fUSDT
   status: waiting
   created_at: 2026-09-14T12:05:35Z
   action: sys/sink

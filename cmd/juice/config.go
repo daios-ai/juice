@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/rail"
 )
 
 // NativeLLMConfig holds configuration for the @sys/llm/* native actions.
@@ -105,8 +106,8 @@ type ServerConfig struct {
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
 	World                      string       `json:"world"`                         // the network this kernel serves: play, test, real, or a world file's path (D23)
 	RailRPC                    string       `json:"rail_rpc"`                      // endpoint the chain adaptor dials; required where the world has a chain
-	BootstrapPeers             []string     `json:"bootstrap_peers"`               // seed multiaddrs; sole seed source; empty = no announce/discovery (§13)
-	FedListenAddrs             []string     `json:"fed_listen_addrs"`              // multiaddrs the peer transport binds; empty = OS-assigned ports; a public node pins one so peers find it at the same address after a restart (§13)
+	BootstrapPeers             *[]string    `json:"bootstrap_peers,omitempty"`     // seed multiaddrs; absent = the world's own seeds, [] = no announce/discovery, set = these instead (§13, D23)
+	FedListenAddrs             []string     `json:"fed_listen_addrs"`              // multiaddrs the peer transport binds; empty = OS-assigned ports; a world's seed pins one so members find it at the same address after a restart (§13)
 	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
 	PeerRetentionDays          int64        `json:"peer_retention_days"`           // days a peer may stay idle at zero balance before purge (§13); <=0 → disabled
@@ -169,10 +170,8 @@ func DefaultServerConfig() ServerConfig {
 		LogFile:           "",
 		LogFormat:         "text",
 		AllowLocalSources: false,
-		// The public daios.ai node is the default meeting point, so a fresh `juice kernel serve` joins
-		// the network out of the box (it listens on the standard port 31313, §13). Override or
-		// extend for a private network; clear it to run standalone.
-		BootstrapPeers:             []string{"/dns4/daios.ai/tcp/31313/p2p/12D3KooWE2MELSd8JvKxdNDwqGczfJ4ki3VKfNeWFiYJKjwqCuVx"},
+		// No default meeting point here: it belongs to the world (D23), which is what decides
+		// whose network a kernel is joining. An absent key takes the world's seeds.
 		RemoteRetryIntervalSeconds: 60,
 		PeerRetentionDays:          90,
 		DiscoveryIntervalSeconds:   300,
@@ -408,4 +407,16 @@ func migrateLegacyHome() error {
 	}
 	fmt.Fprintf(os.Stderr, "moved kernel home %s to %s\n", legacy, dest)
 	return nil
+}
+
+// bootstrapPeers is where this kernel looks for the network before it knows anyone. The world
+// names its own seeds (D23), because a seed serving another network can only ever answer that it
+// serves another network. The config key overrides them in three states an operator can tell
+// apart: absent takes the world's, an empty list means no meeting point at all (announce and
+// discover nothing), and a list of addresses replaces them.
+func (c ServerConfig) bootstrapPeers(w rail.World) []string {
+	if c.BootstrapPeers != nil {
+		return *c.BootstrapPeers
+	}
+	return w.Seeds
 }

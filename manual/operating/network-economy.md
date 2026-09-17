@@ -55,7 +55,7 @@ The kernel returns a signed rejection if admitting the call would exceed its
 limit or if the provider cannot fund the execution.
 
 ```
-Credit:     owed-to-us=4.20 credits limit=500.00 credits
+Credit:     owed-to-us=4.20 fUSDT limit=500.00 fUSDT
 ```
 
 ### Bounding what strangers can cost you
@@ -124,7 +124,7 @@ No operator payment is needed, consistent with `play` having no cash backing.
 ### The settings
 
 ```
-Rates:      … lottery=1.00 credits lottery_max=5.00 credits
+Tickets:    this kernel draws for 1.00 fUSDT, and accepts tickets up to 5.00 fUSDT
 ```
 
 The `lottery` setting determines the face value your local callers stake.

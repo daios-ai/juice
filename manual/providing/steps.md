@@ -117,7 +117,8 @@ the process owner.
 
 ```
 $ juice process list
-e3539f75-…  open    available:0.00 credits  locked:0.00 credits
+PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
+e3539f75-…  open    0.00 fUSDT  0.00 fUSDT
 ```
 
 ### Ending a process

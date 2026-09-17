@@ -6,6 +6,7 @@
   "decimals": 6,
   "symbol": "USDT",
   "description": "fake USDT on the Arbitrum Sepolia test chain",
+  "seeds": [],
   "finality": "latest",
   "venue": {
     "router": "0x101F443B4d1b059569D643917553c771E1b9663E",

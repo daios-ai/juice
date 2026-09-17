@@ -2036,35 +2036,37 @@ func TestTheUnitIsReadBeforeTheRequest(t *testing.T) {
 	}
 }
 
-// TestARunsAdviceNamesCommandsThatExist: when a run fails, what the operator is told to do next is
-// the whole value of the message. A hint naming a command that has since been deleted — or renamed
-// — is worse than none, so every command any hint names is resolved against the command tree.
-func TestARunsAdviceNamesCommandsThatExist(t *testing.T) {
+// TestTheAdviceOnAnErrorNamesCommandsThatExist: what a failure tells someone to do next is the
+// whole value of the message, and it is written in one place (§14). Advice naming a command that
+// has since been deleted — or renamed — is worse than none, so every command any of it names is
+// resolved against the command tree.
+func TestTheAdviceOnAnErrorNamesCommandsThatExist(t *testing.T) {
 	parked := &kernel.KernelError{Code: "timeout", Meta: map[string]string{"process_id": "p-1"}}
 	for _, c := range []struct {
-		name  string
-		err   error
-		quote string
-		want  string
+		name string
+		err  error
+		want string
 	}{
-		{"a call needing consent", kernel.ErrGrantRequired.Wrap("x"), "", "user connect"},
-		{"a peer that is offline", kernel.ErrPeerUnreachable.Wrap("x"), "", ""},
-		{"a peer that will not serve on credit", kernel.ErrPeerUnfunded.Wrap("x").WithMeta("peer", "other"), "", "admin peer inspect"},
-		{"terms that changed under a pin", (&kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2"}}), "h", ""},
-		{"money parked on a peer", parked, "", "process show"},
-		{"money parked with a refund date", parked.WithMeta("refund_eligible_at", "2026-01-01T00:00:00Z"), "", "process end"},
+		{"a call needing consent", kernel.ErrGrantRequired.Wrap("x").WithMeta("action", "bob/echo"), "user connect"},
+		{"a peer that is offline", kernel.ErrPeerUnreachable.Wrap("x").WithMeta("peer", "other"), "nothing was charged"},
+		{"a peer that will not serve on credit", kernel.ErrPeerUnfunded.Wrap("x").WithMeta("peer", "other"), "other declined"},
+		{"terms that changed under a pin", &kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2"}}, "--quote-hash h"},
+		{"money parked on a peer", parked, "process show"},
+		{"money parked with a refund date", parked.WithMeta("refund_eligible_at", "2026-01-01T00:00:00Z"), "process end"},
+		{"a call that ran and failed", (&kernel.KernelError{Code: "execution_failed", Meta: map[string]string{"tx_id": "t-1", "charge": "0"}}), "tx show t-1"},
+		{"a fault in juice", kernel.ErrInternal.Wrap("x"), "--verbose"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			hint := runHint(c.err, "bob/echo", c.quote)
+			hint := remedy(c.err)
 			if hint == "" {
 				t.Fatal("a failure an operator must act on said nothing")
 			}
-			if c.want != "" && !strings.Contains(hint, c.want) {
-				t.Errorf("hint does not mention %q:\n%s", c.want, hint)
+			if !strings.Contains(strings.ToLower(hint), strings.ToLower(c.want)) {
+				t.Errorf("the advice does not mention %q:\n%s", c.want, hint)
 			}
 			for _, named := range namedCommands(hint) {
 				if !resolves(named) {
-					t.Errorf("the hint names `juice %s`, which is not a command:\n%s", strings.Join(named, " "), hint)
+					t.Errorf("the advice names `juice %s`, which is not a command:\n%s", strings.Join(named, " "), hint)
 				}
 			}
 		})
@@ -2636,4 +2638,41 @@ func TestClientNetworkCarriesTheToken(t *testing.T) {
 	if net.Symbol != "USDT" || net.Decimals != 6 {
 		t.Errorf("the money's shape did not survive with it: %+v", net)
 	}
+}
+
+// TestAsIsRefusedWhereItMeansNothing: `--as` names who a command acts as, so the commands that act
+// as nobody — this client's own address book and its logins — refuse it rather than accept it and
+// ignore it. Every command in the tree is asked, so a command added later is covered by the rule
+// rather than by a list somebody has to remember to extend (§14).
+func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
+	clientSide := map[string]bool{
+		"juice kernel": true, "juice kernel add": true, "juice kernel list": true,
+		"juice kernel health": true, "juice kernel forget": true, "juice kernel serve": true,
+		"juice auth": true, "juice auth login": true, "juice auth use": true,
+		"juice auth list": true, "juice auth logout": true, "juice auth recover": true,
+		"juice user create": true,
+	}
+	old := flagAs
+	flagAs = "someone@somewhere"
+	t.Cleanup(func() { flagAs = old })
+
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+		if c.Name() == "help" || c.Name() == "completion" {
+			return
+		}
+		err := checkGlobalFlags(c)
+		refused := err != nil
+		if refused != clientSide[c.CommandPath()] {
+			if refused {
+				t.Errorf("%s refuses --as, but it acts as a login", c.CommandPath())
+			} else {
+				t.Errorf("%s accepts --as, but it acts on this client's own records", c.CommandPath())
+			}
+		}
+	}
+	walk(rootCmd)
 }

@@ -30,7 +30,7 @@ external payment system that supports deposits, withdrawals, and settlement:
 
 | | `play` | `test` | `real` |
 |---|---|---|---|
-| What a balance is | credits the operator creates | a test token on Arbitrum Sepolia | USDT on Arbitrum One |
+| What a balance is | fUSDT (fake USDT) recorded by the operator | a test token on Arbitrum Sepolia | USDT on Arbitrum One |
 | What it is worth | nothing | nothing | dollars |
 | Register a paying address | refused: this network has no addresses | required, by signing a message | required, by signing a message |
 | How you deposit | ask the operator; there is nothing to send | send the token to the kernel's address | send USDT to the kernel's address |

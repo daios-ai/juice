@@ -37,8 +37,8 @@ kernel cannot choose this name, it cannot claim an existing local name merely
 by announcing a matching nickname.
 
 A **world**, also called a **network**, defines the money and external payment
-system a kernel uses. The shipped worlds are `play`, which uses credits with no
-real monetary value; `test`, which uses a test token on Arbitrum Sepolia; and
+system a kernel uses. The shipped worlds are `play`, which counts in fUSDT
+(fake USDT), with six decimal places and no real monetary value; `test`, which uses a test token on Arbitrum Sepolia; and
 `real`, which uses USDT on Arbitrum One. The choice is fixed when the kernel is
 created, and kernels federate only within the same network.
 
@@ -113,14 +113,14 @@ for remote calls. Settlement pays for the completed work and releases unused
 reservations. The operator's account also holds funds committed to external
 payments and fuel purchases.
 
-The **ledger** records deposits, withdrawals, transfers, and value delivered by
-actions. Transactions separately record the cost of executing actions. Both
-are needed to follow the full movement of money through an account.
+The **ledger** records deposits, withdrawals, transfers, value delivered by
+actions, and settlement postings such as provider payouts and fees. Each
+settlement posting names its transaction, which records the work and its cost.
 
 **Base units** are the integer amounts used by the HTTP API and action JSON.
 **Display units** are the amounts accepted and shown by the command line.
 The shipped networks use six decimal places, so `500000` base units correspond
-to `0.50` credits on `play`, or `0.50` tokens on a chain network.
+to `0.50` fUSDT on `play`, or `0.50` tokens on a chain network.
 
 A **peer** is another kernel known to yours. A **counterparty** is a peer for
 which your kernel holds an account, allowing it to authorize requests and record

@@ -164,12 +164,11 @@ func (c *client) token() (string, error) {
 	return c.creds.Token, nil
 }
 
-// errUnreachable reports that the juice server/peer at url couldn't be reached, retaining
-// the raw transport error as the cause (surfaced only with --verbose).
+// errUnreachable reports that the juice server at url could not be reached. One condition, one
+// message, one place: `unreachable` writes it for every command, and the raw transport error
+// stays as the cause, surfaced only with --verbose (§14).
 func errUnreachable(url string, cause error) error {
-	return kernel.ErrInvalidState.
-		Wrapf("cannot reach juice server at %s (is `juice kernel serve` running?)", url).
-		Because(cause)
+	return unreachable(url).Because(cause)
 }
 
 // apiCall sends an authenticated JSON request to the server and decodes a 2xx body into
@@ -378,11 +377,54 @@ type serverHealth struct {
 // health reads a server's identity banner, at most once per address per command: deciding what a
 // client may do must not multiply the requests a command makes. It reuses the one HTTP path every
 // other request takes, so a proxy or timeout behaves identically here.
+// unreachable is the one answer to a kernel that does not answer, whichever command asked it for
+// whatever. It names the kernel by the name this client knows it under, so the reader recognises
+// it, and carries that name for the remedy to use (§14).
+func unreachable(base string) *kernel.KernelError {
+	name, local := kernelNameOfAddress(base)
+	if name == "" {
+		return kernel.ErrPeerUnreachable.Wrapf("cannot reach a kernel at %s", base)
+	}
+	err := kernel.ErrPeerUnreachable.Wrapf("cannot reach kernel %s at %s", name, base).WithMeta("kernel", name)
+	if local {
+		err = err.WithMeta("kernel_is_local", "yes")
+	}
+	return err
+}
+
+// kernelNameOfAddress is what this client calls the kernel at an address, and whether that address
+// is on this machine — which is what decides whether starting it is something the reader can do.
+func kernelNameOfAddress(base string) (string, bool) {
+	for name, k := range loadClientConfig().Kernels {
+		if k == nil || !sameAddress(k.Endpoint, base) {
+			continue
+		}
+		host := base
+		if u, err := url.Parse(base); err == nil {
+			host = u.Hostname()
+		}
+		ip := net.ParseIP(host)
+		return name, host == "localhost" || (ip != nil && ip.IsLoopback())
+	}
+	return "", false
+}
+
+// checkAddress refuses an address that is not one before anything is sent. A kernel is named by a
+// URL, and the commonest mistake is leaving off the scheme — which the URL parser reports as a
+// colon in a path segment, a sentence about a string the person never typed.
+func checkAddress(base string) error {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return kernel.ErrInvalidInput.Wrapf("%s is not a server address; write it with http:// or https://", base)
+	}
+	return nil
+}
+
 func (c *client) health(ctx context.Context, base string) (*serverHealth, error) {
 	c.resolve()
 	if h, ok := c.banners[base]; ok {
 		if h == nil {
-			return nil, kernel.ErrPeerUnreachable.Wrapf("cannot reach %s", base)
+			return nil, unreachable(base)
 		}
 		return h, nil
 	}
@@ -396,9 +438,14 @@ func (c *client) health(ctx context.Context, base string) (*serverHealth, error)
 }
 
 func (c *client) dialHealth(ctx context.Context, base string) (*serverHealth, error) {
+	// An address is checked before it is dialed, so what comes back is this program's sentence
+	// about the address rather than the HTTP library's about a URL the caller never wrote (§14).
+	if err := checkAddress(base); err != nil {
+		return nil, err
+	}
 	body, status, err := doHTTP(ctx, "GET", base+"/health", nil, nil, 0, true)
 	if err != nil {
-		return nil, kernel.ErrPeerUnreachable.Wrapf("cannot reach %s: %v", base, err)
+		return nil, unreachable(base).Because(err)
 	}
 	if status != 200 {
 		return nil, errorFromResponse(status, body)
@@ -443,8 +490,10 @@ func (c *client) network(ctx context.Context) (kernel.Network, error) {
 	}
 	h, err := c.health(ctx, c.base)
 	if err != nil {
-		return kernel.Network{}, kernel.ErrInvalidState.Wrapf(
-			"cannot read this kernel's money units right now; nothing was sent — retry").Because(err)
+		// A kernel that does not answer is one condition with one message, whichever command met
+		// it and whatever that command wanted from it (§14). Reading the money unit is where most
+		// commands meet it first, so it must not report a unit problem.
+		return kernel.Network{}, err
 	}
 	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals,
 		Symbol: h.Symbol, Token: h.Token}, nil
@@ -543,6 +592,33 @@ func loadClientConfig() *clientConfig {
 	return cfg
 }
 
+// withClientConfig opens the client's records under an exclusive lock and hands them to fn, which
+// answers whether to write them back. Reading, changing and writing the records is one operation:
+// `kernel add`, a server registering itself at boot and a login being recorded are three writers of
+// one file, and two of them interleaved would drop whichever wrote first. The lock is the same one
+// the credential files use, on a file of its own so an empty record set still has something to hold.
+func withClientConfig(fn func(*clientConfig) (bool, error)) error {
+	if err := os.MkdirAll(clientHome(), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(clientConfigPath()+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	cfg := loadClientConfig()
+	write, err := fn(cfg)
+	if err != nil || !write {
+		return err
+	}
+	return saveClientConfig(cfg)
+}
+
 // saveClientConfig writes the records atomically — temp file in the same directory, then rename —
 // so an interrupted write never leaves a client without its bearings. The file holds no secret;
 // credentials are their own files.
@@ -618,9 +694,10 @@ func (c *client) selectLogin(ctx context.Context) error {
 	if err := c.verify(ctx); err != nil {
 		return err
 	}
-	cfg := loadClientConfig()
-	cfg.Current = c.login.String()
-	return saveClientConfig(cfg)
+	return withClientConfig(func(cfg *clientConfig) (bool, error) {
+		cfg.Current = c.login.String()
+		return true, nil
+	})
 }
 
 // logins are the logins this client holds, read from the credential directory itself: a login is

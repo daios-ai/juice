@@ -23,10 +23,11 @@ $ juice admin kernel show
 Handle:     acme
 Public key: fdlMi64P…
 Network:    play
-Operator:   earned=0.710005 credits paying-out=4.20 credits unclaimed=0.00 credits held-for-gas=0.00 credits
-Solvency:   user-balances=10.00 credits money-in=10.00 credits difference=0.00 credits
-Credit:     owed-to-us=0.00 credits limit=500.00 credits
-Rates:      fee_bps=2000 remote_bps=500 import_bps=500 lottery=1.00 credits lottery_max=5.00 credits
+Operator:   earned=0.710005 fUSDT paying-out=4.20 fUSDT unclaimed=0.00 fUSDT held-for-gas=0.00 fUSDT
+Solvency:   user-balances=10.00 fUSDT money-in=10.00 fUSDT difference=0.00 fUSDT
+Credit:     owed-to-us=0.00 fUSDT limit=500.00 fUSDT
+Fees:       20% of each layer's margin here, 5% on work served to another kernel, 5% on work imported from one
+Tickets:    this kernel draws for 1.00 fUSDT, and accepts tickets up to 5.00 fUSDT
 Listen addresses:
   /ip4/127.0.0.1/tcp/31401/p2p/12D3KooWJHdK…
 ```
@@ -45,7 +46,7 @@ count as backing, because the payment has not yet been received.
 The **Credit** line reports exposure against the configured admission limit.
 Its meaning is developed in
 [Bounding what strangers can cost you](network-economy.html#bounding-what-strangers-can-cost-you).
-The **Rates** line reports the fees and ticket settings used by the kernel.
+The **Fees** and **Tickets** lines report the rates and ticket settings used by the kernel.
 
 ## Crediting accounts
 
@@ -54,8 +55,8 @@ external reference:
 
 ```
 $ juice admin user deposit alice 10 --ref demo-payment-1
-Credit 10.00 credits to alice, acting as sys@acme? This cannot be undone. [y/N] y
-  amount: 10.00 credits
+Credit 10.00 fUSDT to alice, acting as sys@acme? This cannot be undone. [y/N] y
+  amount: 10.00 fUSDT
   operator_handle: sys
   from_handle: sys
   to_handle: alice
@@ -119,14 +120,15 @@ for reuse. Programs keeping durable references should therefore store the ID.
 
 ```
 $ juice admin peer list
-PETNAME       NICKNAME   TRADED  LAST SEEN  LAST FAILED  ACTIONS  PUBLIC KEY
-k-hqDr8oMX               yes     just now   never        0        hqDr8oMX…
+PETNAME     NICKNAME  TRADED  LAST SEEN  LAST FAILED  ACTIONS  STATUS  PUBLIC KEY
+k-hqDr8oMX  —         yes     just now   never        0                hqDr8oMX…
 ```
 
 The roster combines known counterparties with kernels learned through discovery.
 `PETNAME` is the local name usable in references, while `NICKNAME` is the label
 reported by the peer. A dash in the petname column means the peer must be
-addressed by key.
+addressed by key. With `--all`, suspended peers are included and marked in
+the `STATUS` column.
 
 A successful outbound action resolution can assign a petname automatically.
 An incoming call may provision an account but does not assign a local name,
@@ -155,7 +157,7 @@ Reachability: direct (0ms)
 Traded here:  yes
 
 Public actions (1):
-  summarize                       2.205 credits
+  summarize                       2.205 fUSDT
       Summarize a piece of text
 ```
 

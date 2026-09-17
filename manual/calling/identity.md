@@ -25,7 +25,7 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
-  available: 0.00 credits
+  available: 0.00 fUSDT
   handle: alice
   …
 ```
@@ -55,8 +55,9 @@ Use `auth list` to see them and `auth use` to change the selected one:
 
 ```
 $ juice auth list
-  alice@acme
-* sys@acme
+LOGIN       IN USE
+alice@acme
+sys@acme    yes
 $ juice auth use alice@acme
 alice@acme
 ```
@@ -87,22 +88,24 @@ resolved by your own kernel:
 | Name | Chosen by | Where it resolves |
 |---|---|---|
 | Nickname | the kernel's operator | nowhere; it is a label the kernel reports about itself |
-| Client name | you, in `kernel add` | on this machine, in logins such as `handle@kernel` |
+| Client name | `serve` uses the nickname; you can choose another with `kernel add` | on this machine, in logins such as `handle@kernel` |
 | Petname | one kernel's operator, for another kernel | on that kernel only, in `owner@kernel/name` |
 
 These names may happen to be the same. For example, `kernel add` uses the
 reported nickname when you supply no client name. Their meanings still depend
 on where they are used, and the public key remains the kernel's identity even
-when its names change.
+when its names change. A kernel you serve is registered on every boot. Each
+key has one client record: registering a known kernel under a new name renames
+that record and keeps its logins. A name held by a different kernel is refused.
 
 ## Registering and trusting a kernel
 
 ```
-$ juice kernel add http://localhost:4040 work
-work  network play  http://localhost:4040  fdlMi64P…  (added)
+$ juice kernel add https://kernel.example.org work
+work  network play  https://kernel.example.org  fdlMi64P…  (added)
 $ juice kernel list
-  KERNEL    NETWORK   ADDRESS                  KEY
-  work      play      http://localhost:4040    fdlMi64P…
+KERNEL  NETWORK  ADDRESS                     IN USE  KEY
+work    play     https://kernel.example.org          fdlMi64P…
 $ juice kernel health work
 ok  acme  network play  fdlMi64P…
 ```

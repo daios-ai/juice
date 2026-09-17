@@ -69,7 +69,8 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   bomb buffalo march shock slim obvious stairs time usage grace habit window
 Press Enter once you have written it down:
 Superuser "sys" created.
-INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…
+INF client.self_registered kernel=acme outcome=added
+INF server.ready handle=acme network=play addr=[::]:4040 public_key=Kl8eObRJ…
 ```
 
 Declining, or interrupting before the money is chosen, leaves nothing behind.
@@ -100,16 +101,22 @@ CLI is a pure client of the server: under `$JUICE_HOME/client/` it keeps the ker
 knows — each one's address, public key and network — and one file per *login*, written
 `handle@kernel`, which says both who a command acts as and which kernel it acts through.
 
+A kernel you serve yourself is registered by `serve` as it starts, under the name it
+serves as, so nothing has to be copied from its log. A kernel somebody else runs is
+registered once, by address:
+
 ```bash
-./juice kernel add http://localhost:4040 work   # register it under the name "work"
+./juice kernel add https://their.example work   # register somebody else's under "work"
 ./juice user create alice@work                  # create an account on it
 ./juice auth login alice@work                   # log in, and act as alice@work
-./juice kernel list                             # the kernels known, current one marked
-./juice auth list                               # the logins held, current one marked
+./juice kernel list                             # the kernels known, and which is in use
+./juice auth list                               # the logins held, and which is in use
 ./juice auth use bot@work                       # switch to another login already held
 ```
 
-Registering dials the server and records the key and network it presents; logging in and
+Registering dials the server and records the key and network it presents; a key is one
+record, so registering a kernel already known under a new name renames it and keeps its
+logins, and a name another kernel holds is refused; logging in and
 switching refuse a server that no longer presents them, so a command never reaches a
 kernel you did not mean, and a login travels only to the address recorded for its kernel.
 `--server` sets the endpoint for one invocation and carries no login. `--as alice@work`
@@ -136,15 +143,18 @@ by the fact that witnesses it, and then move freely between local users:
 ./juice admin user deposit alice 1000 --ref wire-8823   # operator only
 ./juice auth use alice@work
 ./juice user transfer bob 250      # alice pays bob directly, no fee
-./juice user ledger                # every deposit, withdrawal, and transfer
+./juice user ledger                # deposits, withdrawals, transfers, and settlement postings
 ```
 
-On `play` no crypto is involved at all. The operator records the payments they receive from
-people, `--ref` is whatever names one in their own books, and amounts have six decimal places like
-the other worlds, so the same number means the same amount everywhere. What
-another kernel owes needs no such record: its own signed message saying it paid is the payment
-here, so those debts close by themselves. `play` money is play money — it is backed by nothing,
-and is meant for trying the system out.
+The ledger also shows provider payouts, operator fees, and import fees, each linked
+to the transaction that settled it.
+
+On `play` amounts are shown in fUSDT (fake USDT), with six decimal places like
+the other worlds. No crypto is involved. The operator records the payments they
+receive from people; `--ref` is whatever names one in their own books. What
+another kernel owes needs no such record: its own signed message saying it paid
+is the payment here, so those debts close by themselves. `play` money is backed
+by nothing and is meant for trying the system out.
 
 On a world with a chain (`test`, `real`), money arrives and leaves over that chain, and
 amounts are written the way that token is written — `1.50`, not `1500000`:
@@ -284,9 +294,12 @@ sys/time`.
 ## Federation
 
 Kernels reach each other by public key over libp2p — no URLs, no port forwarding; a
-kernel behind home NAT federates like any other. Joining is just booting with the
-default `bootstrap_peers`. Serving is just marking an action `public`. Calling is just
-naming it:
+kernel behind home NAT federates like any other. By default, it joins through the
+seeds in its world file. `bootstrap_peers` overrides those seeds: leave it absent
+to use the world's list, set `[]` to disable discovery, or supply a list to use
+those peers instead. `play` and `test` currently ship without seeds, so their
+operators must configure a meeting point. Serving is just marking an action
+`public`. Calling is just naming it:
 
 ```bash
 ./juice run 'bob@<kernel-key-or-petname>/summarize' '{"text":"..."}'
@@ -333,8 +346,9 @@ The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
-| `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
-| `fed_listen_addrs` | Where this kernel answers peers; give each kernel its own when running more than one (as `--addr` does for clients) |
+| `kernel_handle` | The nickname this kernel reports |
+| `bootstrap_peers` | Absent: use the world's seeds; `[]`: disable discovery; a list: use those peers instead. `play` and `test` currently have no seeds |
+| `fed_listen_addrs` | Where this kernel answers peers; empty uses OS-assigned ports. A public seed pins its listening address |
 | `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
 | `rail_rpc` | The node this kernel reaches its chain through, over the one its world names; needed only for a world naming none |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |

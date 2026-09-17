@@ -130,7 +130,9 @@ flow_rail_isolation() {
     printf '{"name":"otherworld","decimals":6}\n' > "$other"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 || { fail "rail_isolation.boot_r" "no start"; return; }
-    local boot; boot=$(kernel_fed_addr "$dbr")
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     start_server "$dbl" "$hl" kernel_handle=kernel-l world="$other" bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "rail_isolation.boot_l" "no start"; return; }
     know "$dbr" "$hr"
@@ -281,7 +283,7 @@ flow_rail_economic_loop() {
     # B was the node the others dialed, and it comes back on a new port, so C is pointed at where B
     # is now — the ordinary consequence of restarting a node others reach through.
     stop_server "$dbc"
-    start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$(kernel_fed_addr "$FED_DBR")" \
+    start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$(kernel_fed_addr "$FED_DBR" "$FED_HR")" \
         discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.restart_c" "did not restart"; return; }
     await_login "$dbc" "$hc" || { fail "rail_economic_loop.c_answers" "not serving after restart"; return; }
@@ -437,9 +439,9 @@ flow_money_reads_as_money() {
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 500
 
-    # play counts in whole credits and says so, rather than printing a bare number.
-    assert_contains "money.ledger_names_the_unit" "credits" "$(j "$db" "$ha" user ledger)"
-    assert_contains "money.identity_names_the_unit" "credits" "$(j "$db" "$hs" admin kernel show)"
+    # play counts in its own unit and says so, rather than printing a bare number.
+    assert_contains "money.ledger_names_the_unit" "$SYMBOL" "$(j "$db" "$ha" user ledger)"
+    assert_contains "money.identity_names_the_unit" "$SYMBOL" "$(j "$db" "$hs" admin kernel show)"
 
     # An irreversible movement is confirmed, and a script that has not said --yes moves nothing.
     assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys "$(units 10)"
@@ -460,9 +462,9 @@ flow_one_output_policy() {
 
     # A price given the way this kernel writes money reads back that way wherever a person sees it,
     # while a program still reads the base units it counts in.
-    assert_contains "output.detail_shows_the_unit" "credits" "$(j "$db" "$ha" action show "$aid")"
-    assert_contains "output.list_shows_the_unit" "credits" "$(j "$db" "$ha" action list --all)"
-    assert_contains "output.profile_shows_the_unit" "credits" "$(j "$db" "$ha" user me)"
+    assert_contains "output.detail_shows_the_unit" "$SYMBOL" "$(j "$db" "$ha" action show "$aid")"
+    assert_contains "output.list_shows_the_unit" "$SYMBOL" "$(j "$db" "$ha" action list --all)"
+    assert_contains "output.profile_shows_the_unit" "$SYMBOL" "$(j "$db" "$ha" user me)"
     assert_jnum "output.json_stays_in_base_units" "$(jj "$db" "$ha" action show "$aid")" price 5
 
     # --quiet: ids alone, one per line, on a read as on a write — and nothing at all from a command
@@ -484,7 +486,7 @@ flow_one_output_policy() {
 
     # A reply of several rows is several resources: `action update` on a path answers with each
     # one, and its price reads the way it was given.
-    assert_contains "output.list_reply_shows_the_unit" "credits" "$(j "$db" "$ha" action update "$aid" --price "$(units 7)")"
+    assert_contains "output.list_reply_shows_the_unit" "$SYMBOL" "$(j "$db" "$ha" action update "$aid" --price "$(units 7)")"
     assert_contains "output.operator_waiting_list_shows_the_unit" "Work delivered" "$(j "$db" "$hs" admin kernel deposits)"
 
     # The commands that write this client's own records answer the same way as the rest.

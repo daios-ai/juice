@@ -135,14 +135,46 @@ json.dump(d, open(path, "w"), indent=2)
 # root rather than the kernel's home, so a home that moves does not take its own log with it.
 server_log() { echo "$(khome "$1")/$(basename "$(dirname "$1")")-server.log"; }
 
-# kernel_fed_addr db  — print a running kernel's loopback libp2p multiaddr, scraped from the
-# fed_addrs on its `server.ready` log line. Every kernel now serves as a DHT+relay node, so one
-# kernel can be the bootstrap for the others — there is no separate seed process.
+# kernel_fed_addr db home — print a running kernel's loopback libp2p multiaddr, read from
+# `admin kernel show`, which is where a kernel reports where it listens (the ready line names the
+# kernel, not its addresses). Every kernel serves as a DHT+relay node, so one kernel can be the
+# bootstrap for the others — there is no separate seed process.
 kernel_fed_addr() {
-    local db="$1"
-    local log; log=$(server_log "$db")
-    sed 's/\x1b\[[0-9;]*m//g' "$log" 2>/dev/null \
+    jj "$1" "$2" admin kernel show \
         | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
+}
+
+# SYMBOL is what this world calls its money when a person reads it — the one place the flows name
+# it, so renaming a world's symbol is one line here and not a hunt through assertions.
+SYMBOL=fUSDT
+
+# awaiting db home — how many of this login's processes are waiting on a remote receipt. Read from
+# the reply's own field rather than from a rendering, so a change of wording never silently turns a
+# parked call into a settled one.
+awaiting() {
+    python3 -c "
+import sys, json
+rows = json.loads(sys.argv[1] or '[]')
+print(sum(1 for p in rows if p.get('awaiting_receipt')))" "$(jj "$1" "$2" process list --limit 50)"
+}
+
+# ledger_in db home tx — what this login's account received, by the postings naming that
+# transaction. The ledger is where money between accounts is recorded, so this is what a party
+# reads rather than a balance difference (D4).
+ledger_in() {
+    python3 -c "
+import sys, json
+me, tx = sys.argv[2], sys.argv[3]
+rows = json.loads(sys.argv[1] or '[]')
+print(sum(e['amount'] for e in rows if e.get('reason') == tx and e.get('to_handle') == me))" \
+        "$(jj "$1" "$2" user ledger --limit 100)" "$(strfield "$(jj "$1" "$2" user me)" handle)" "$3"
+}
+
+# inner_tx db home trace — the transaction of the call made beneath a trace.
+inner_tx() {
+    jj "$1" "$2" tx list --limit 20 | python3 -c "
+import sys, json
+print(next((t['id'] for t in json.load(sys.stdin) if t.get('parent_trace_id') == sys.argv[1]), ''))" "$3"
 }
 
 # kernel_key db home  — print a kernel's own federation public key (via admin kernel show).

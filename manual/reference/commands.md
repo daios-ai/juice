@@ -25,6 +25,10 @@ can disable any action.
 | `--quiet` | print ids only, one per line |
 | `--verbose` | show the underlying cause of an error |
 
+`--as` is refused on `kernel` and `auth` commands and on `user create`, which
+manage kernels or logins rather than act through a selected login. `--json`
+and `--quiet` cannot be used together.
+
 ## Running
 
 | Command | |
@@ -45,6 +49,9 @@ The JSON input can be supplied inline or read from a file with `@file.json`.
 | `juice kernel forget NAME` | drop the record and its logins' credentials |
 
 For `kernel serve`, `--addr` selects the HTTP listening address used by clients.
+
+`kernel serve` registers its kernel before reporting ready, so `kernel health NAME`
+works on the serving machine without a separate `kernel add`.
 
 ## auth
 
@@ -69,7 +76,7 @@ those values without an interactive prompt.
 | `juice user connect SELECTOR` | consent for an action to use your upstream account ([Consent](../calling/consent-and-steps.html)) |
 | `juice user disconnect [SELECTOR]` | revoke it; `--account KEY` removes the whole upstream account |
 | `juice user transfer RECIPIENT AMOUNT` | send money to another user of this kernel ([Funds](../money/funds.html)) |
-| `juice user ledger` | deposits, withdrawals, transfers, delivered value |
+| `juice user ledger` | deposits, withdrawals, transfers, delivered value, and settlement postings |
 | `juice user address [ADDRESS]` | register the address you pay from and are paid at ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
 | `juice user deposit` | where to send money, and whether you are registered ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
 | `juice user withdraw AMOUNT` | take money out ([Taking money out](../money/deposits-and-withdrawals.html#taking-money-out)) |

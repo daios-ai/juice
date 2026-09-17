@@ -8,7 +8,7 @@ nav_order: 2
 
 A deposit credits your account against an external payment; a withdrawal sends
 funds out of that account. Their external form depends on the kernel's network.
-On `play`, they are records of play credits. On a chain network, they correspond
+On `play`, they are records of fUSDT (fake USDT). On a chain network, they correspond
 to token payments confirmed by the blockchain.
 
 This chapter first covers `play`, then follows a chain deposit from address
@@ -30,7 +30,7 @@ The operator of this kernel records payments here; there is nothing to send from
 
 Ask the operator to credit your account. They use `admin user deposit` with a
 reference identifying the deposit. A withdrawal likewise updates the kernel's
-records without making an external payment. These credits have no real monetary
+records without making an external payment. These funds have no real monetary
 value, allowing you to learn and test the system without handling funds on a
 blockchain.
 

@@ -2427,3 +2427,106 @@ func TestReadCallableActionIndexFallback(t *testing.T) {
 		t.Errorf("want ErrUnauthorized for the exact private action, got %v", err)
 	}
 }
+
+// TestSettlementPostsToLedger follows the money of a paid call that crosses accounts: the buyer's
+// budget pays the provider its net and the operator its fee, and the ledger says so, so an
+// account's balance is the sum of its own postings and nothing else (D4). The failed call that
+// follows charges nothing and must post nothing — a refund returns to the payer's own wallet, and
+// a row there would claim money moved between accounts that never did.
+func TestSettlementPostsToLedger(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	buyer := setupUser(t, st, "buyer", 0)
+	seller := setupUser(t, st, "seller", 0)
+	// The money arrives the way money arrives: a deposit, which posts. Every movement after it
+	// posts too, so these three accounts hold exactly what their postings say from here on.
+	sys := setupSys(t, k, st)
+	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 1000, "test", "seed-"+buyer.ID); err != nil {
+		t.Fatal(err)
+	}
+	beforeBuyer, _ := st.ReadUser(ctx, buyer.ID)
+	beforeSeller, _ := st.ReadUser(ctx, seller.ID)
+	beforeSys, _ := st.ReadUser(ctx, testIssuerUserID)
+
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: seller.ID, Name: "paid",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	_, tr := beginTestRun(t, st, buyer.ID, a)
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: buyer.ID, ExistingTraceID: tr.ID,
+		TargetUserID: seller.ID, ActionName: "paid", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	afterBuyer, _ := st.ReadUser(ctx, buyer.ID)
+	afterSeller, _ := st.ReadUser(ctx, seller.ID)
+	afterSys, _ := st.ReadUser(ctx, testIssuerUserID)
+	for _, c := range []struct {
+		who         string
+		before, now *kernel.Account
+		want        int64
+	}{
+		{"buyer", beforeBuyer, afterBuyer, -tx.Gross},
+		{"seller", beforeSeller, afterSeller, tx.Net},
+		{"operator", beforeSys, afterSys, tx.Fee},
+	} {
+		if got := (c.now.Available + c.now.Locked) - (c.before.Available + c.before.Locked); got != c.want {
+			t.Errorf("%s balance moved %d, want %d", c.who, got, c.want)
+		}
+	}
+
+	// Each movement between accounts is one posting naming the transaction that caused it.
+	posted := map[string]int64{}
+	for _, id := range []string{seller.ID, testIssuerUserID} {
+		entries, err := st.ListLedgerByUser(ctx, id, 100, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Reason != tx.ID {
+				continue
+			}
+			if e.FromUserID != buyer.ID {
+				t.Errorf("posting %s came from %q, want the payer", e.ID, e.FromUserID)
+			}
+			posted[e.ToUserID] += e.Amount
+		}
+	}
+	if posted[seller.ID] != tx.Net {
+		t.Errorf("seller posted %d, want net %d", posted[seller.ID], tx.Net)
+	}
+	if posted[testIssuerUserID] != tx.Fee {
+		t.Errorf("operator posted %d, want fee %d", posted[testIssuerUserID], tx.Fee)
+	}
+
+	// A failure charges nothing and posts nothing.
+	kf := newTestKernelWithScripts(st, &fakeScriptExec{err: errors.New("boom")})
+	before, _ := st.ListLedgerByUser(ctx, seller.ID, 100, 0)
+	_, tr2 := beginTestRun(t, st, buyer.ID, a)
+	if _, err := kf.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: buyer.ID, ExistingTraceID: tr2.ID,
+		TargetUserID: seller.ID, ActionName: "paid", Args: map[string]any{},
+	}); err == nil {
+		t.Fatal("expected the call to fail")
+	}
+	after, _ := st.ListLedgerByUser(ctx, seller.ID, 100, 0)
+	if len(after) != len(before) {
+		t.Errorf("a failed call wrote %d postings, want none", len(after)-len(before))
+	}
+
+	// The whole point of posting every movement: each account holds what its own postings say.
+	assertLedgerExplainsBalances(t, st, buyer.ID, seller.ID, testIssuerUserID)
+}

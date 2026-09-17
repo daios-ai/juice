@@ -37,9 +37,9 @@ you receive = margin − fee
 A call to `bob/echo` at `0.50` that calls nothing:
 
 ```
-  gross: 0.50 credits
-  net: 0.40 credits
-  fee: 0.10 credits
+  gross: 0.50 fUSDT
+  net: 0.40 fUSDT
+  fee: 0.10 fUSDT
 ```
 
 Because this action buys no downstream work, its whole price is margin.
@@ -83,19 +83,14 @@ balance.
 
 **Serving a remote buyer.** Your account advances the execution budget while
 waiting for the remote payment. If it cannot fund the advertised price, the
-call is rejected before execution. The buyer receives a message such as:
-
-```
-$ juice run 'dave@k-hqDr8oMX/summarize' '{"text":"…"}'
-
-Your balance is fine. The kernel "k-hqDr8oMX" refused this call because it will not serve this
-kernel on credit right now: either it has lent us as much as it allows, or it cannot pay its
-own provider for the work.
-error: this kernel's credit with peer k-hqDr8oMX is exhausted; the operator must top up
-```
+call is rejected before execution. The buyer's client explains that the peer
+declined the call, nothing was charged, and only that kernel's operator can
+change the condition.
 
 Maintain a working balance when selling to remote buyers, allowing for the
-delay and variation in settlement.
+delay and variation in settlement. The client warns at publication or activation
+if your balance is too low. When the kernel refuses a call for that reason,
+it logs `call.provider_unfunded` with the action, balance, and price.
 
 **Buying remote work within your action.** You are the immediate caller of
 that remote action, so your account supplies its ticket stake in addition to
@@ -114,6 +109,13 @@ It has no budget for paid downstream work. Separate value delivery still
 requires the immediate caller's funds, even if the transfer action's execution
 price is zero.
 
+## Reading your earnings
+
+`juice user ledger` shows provider payouts as settlement entries, each naming
+the transaction that produced it. Use `juice tx show <id>` for the full call
+record. Calls made before settlement postings were introduced remain in the
+transaction history.
+
 ## Your track record
 
 ```
@@ -122,7 +124,7 @@ $ juice action stats bob/echo
   successes: 3
   failures: 0
   rating_count: 1
-  latency_estimate: 0.399
+  latency_estimate: 0.399 seconds
   rating_estimate: 1
   last_used_at: 2026-09-14T12:05:24Z
 ```

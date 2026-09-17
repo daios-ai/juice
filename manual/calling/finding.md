@@ -97,7 +97,7 @@ $ juice action show bob/echo
   kind: http
   active: true
   visibility: local
-  price: 0.50 credits
+  price: 0.50 fUSDT
   description: Echo a message back to the caller
   input_schema: { … }
   output_schema: {}
@@ -117,30 +117,33 @@ A provider can give a group of actions a common entry point by publishing an
 
 ```
 $ juice action list
-  bob/mail                        0.00 credits [grant]
-  dave@beta-kernel/summarize      2.205 credits
-  bob/stamp                       1.00 credits
-  bob/echo                        0.50 credits
+ACTION                      PRICE        AUTHORIZE
+bob/mail                    0.00 fUSDT   your own login
+dave@beta-kernel/summarize   2.205 fUSDT
+bob/stamp                   1.00 fUSDT
+bob/echo                    0.50 fUSDT
   …
 ```
 
 The default list shows active actions within your access: your own actions,
-local and public actions hosted here, and cached remote actions. The `[grant]`
-marker identifies actions requiring an upstream connection. Use `--all` to
-include inactive actions within your permitted scope.
+local and public actions hosted here, and cached remote actions. `your own login`
+in the `AUTHORIZE` column means an upstream connection is required. Use `--all`
+to include inactive actions within your permitted scope; it also adds an
+`ACTIVE` column between `PRICE` and `AUTHORIZE`.
 
 ## What other buyers thought
 
 ```
 $ juice action ratings bob/echo
-1  2026-09-14T12:05:17Z  did what it said
+RATING  WHEN                  FROM   NOTE
+good    2026-09-14T12:05:17Z  local  did what it said
 $ juice action stats bob/echo
   action_id: bb7fe1a8-…
   uses: 3
   successes: 3
   failures: 0
   rating_count: 1
-  latency_estimate: 0.399
+  latency_estimate: 0.399 seconds
   rating_estimate: 1
   last_used_at: 2026-09-14T12:05:24Z
 ```

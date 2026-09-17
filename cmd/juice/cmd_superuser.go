@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -227,8 +228,12 @@ func identityCmd() *cobra.Command {
 				// The money rules this kernel serves under, named by their configuration keys so an
 				// operator can find them. A lottery of 0 pays every obligation exactly, and lottery_max
 				// is the largest ticket this kernel accepts from a buyer.
-				fmt.Printf("Rates:      fee_bps=%d remote_bps=%d import_bps=%d lottery=%s lottery_max=%s\n",
-					out.FeeBPS, out.RemoteBPS, out.ImportBPS, net.Amount(out.Lottery), net.Amount(out.LotteryMax))
+				// In words, and in this world's own money: an operator reading what their kernel
+				// charges should not have to convert basis points in their head (§14).
+				fmt.Printf("Fees:       %s of each layer's margin here, %s on work served to another kernel, %s on work imported from one\n",
+					percent(out.FeeBPS), percent(out.RemoteBPS), percent(out.ImportBPS))
+				fmt.Printf("Tickets:    this kernel draws for %s, and accepts tickets up to %s\n",
+					net.Amount(out.Lottery), net.Amount(out.LotteryMax))
 				if len(out.Addrs) > 0 {
 					fmt.Println("Listen addresses:")
 					for _, a := range out.Addrs {
@@ -250,20 +255,16 @@ func adminUserListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "handle", human: func(b []byte) error {
-				var users []*kernel.Account
-				if err := json.Unmarshal(b, &users); err != nil {
-					return err
-				}
-				for _, u := range users {
-					suspended := ""
-					if u.SuspendedAt != nil {
-						suspended = " [suspended]"
+			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "handle", human: list(
+				column{"ACCOUNT", text("handle")},
+				column{"STATUS", func(row json.RawMessage) string {
+					if strField(row, "suspended_at") != "" {
+						return "suspended"
 					}
-					fmt.Printf("%-20s  %s%s\n", u.Handle, u.Description, suspended)
-				}
-				return nil
-			}})
+					return "active"
+				}},
+				column{"ABOUT", text("description")},
+			)})
 		},
 	}
 	addPagingFlags(cmd, &limit, &offset)
@@ -546,37 +547,29 @@ func peerListCmd() *cobra.Command {
 			if e := q.Encode(); e != "" {
 				path += "?" + e
 			}
-			return cli.emit("GET", path, nil, output{id: "public_key", human: func(b []byte) error {
-				var peers []*kernel.RemoteKernelView
-				if err := json.Unmarshal(b, &peers); err != nil {
-					return err
-				}
-				if len(peers) == 0 {
-					return nil
-				}
-				// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
-				// calls itself and never resolves (§13). The public key always resolves, so an
-				// unbound kernel is still callable — bind a petname with `admin rename <key> <name>`.
-				fmt.Printf("%-16s %-16s %8s %10s %12s %10s  %s\n",
-					"PETNAME", "NICKNAME", "TRADED", "LAST SEEN", "LAST FAILED", "ACTIONS", "PUBLIC KEY")
-				for _, p := range peers {
-					flags := ""
-					if p.SuspendedAt != nil {
-						flags += " [suspended]"
+			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
+			// calls itself and never resolves (§13). The public key always resolves, so an unbound
+			// kernel is still callable — bind a petname with `admin peer rename <key> <name>`.
+			return cli.emit("GET", path, nil, output{id: "public_key", human: list(
+				column{"PETNAME", dash("petname")},
+				column{"NICKNAME", dash("nickname")},
+				column{"TRADED", func(row json.RawMessage) string {
+					if strField(row, "has_account") == "true" {
+						return "yes"
 					}
-					petname, traded := "—", "—"
-					if p.Petname != "" {
-						petname = p.Petname
+					return "—"
+				}},
+				column{"LAST SEEN", when("last_seen")},
+				column{"LAST FAILED", when("last_contact_failed_at")},
+				column{"ACTIONS", text("actions")},
+				column{"STATUS", func(row json.RawMessage) string {
+					if strField(row, "suspended_at") != "" {
+						return "suspended"
 					}
-					if p.HasAccount {
-						traded = "yes"
-					}
-					fmt.Printf("%-16s %-16s %8s %10s %12s %10d  %s%s\n",
-						petname, p.Nickname, traded, lastSeenStr(p.LastSeen),
-						lastSeenStr(p.LastContactFailedAt), p.Actions, p.PublicKey, flags)
-				}
-				return nil
-			}})
+					return ""
+				}},
+				column{"PUBLIC KEY", text("public_key")},
+			)})
 		},
 	}
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include suspended counterparties")
@@ -590,4 +583,37 @@ func shortKey(k string) string {
 		return k[:12] + "…"
 	}
 	return k
+}
+
+// dash is a name that may not be bound yet: an unbound one is shown as a dash rather than as a gap
+// the reader has to interpret.
+func dash(field string) func(json.RawMessage) string {
+	return func(row json.RawMessage) string {
+		if v := strField(row, field); v != "" {
+			return v
+		}
+		return "—"
+	}
+}
+
+// when is a timestamp a person reads as an age, and never as a claim about now: it is when this
+// kernel last proved something about that peer, not whether the peer is up (§13).
+func when(field string) func(json.RawMessage) string {
+	return func(row json.RawMessage) string {
+		v := strField(row, field)
+		if v == "" {
+			return "never"
+		}
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return v
+		}
+		return lastSeenStr(&t)
+	}
+}
+
+// percent writes a rate the way it is read rather than the way it is stored: basis points are the
+// integer the config holds, and nobody says "two thousand basis points" out loud.
+func percent(bps int64) string {
+	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", float64(bps)/100), "0"), ".") + "%"
 }

@@ -199,7 +199,7 @@ func runServer(name, addr string) error {
 	}
 	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
-	fedTransport, ferr := startFedTransport(context.Background(), k, logger)
+	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world)
 	// Every outbound contact records whether the peer answered (§13). Two integration points reach
 	// all of it: the adapter below (calls, resolves, steps, settlement) and the discovery pass
 	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
@@ -262,13 +262,6 @@ func runServer(name, addr string) error {
 		go startPeerRetentionSweep(sweepCtx, k.PurgeIdlePeers, peerRetentionSweepInterval)
 	}
 
-	// server.ready is emitted only after a successful bind — the harness waits on this line.
-	// It carries the kernel's public key and libp2p listen addrs, because federation no longer
-	// exposes them over HTTP (there is no .well-known).
-	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
-		"addr", ln.Addr().String(), "public_key", pubKey, "fed_addrs", srv.fed.ListenAddrs())
-
 	httpSrv := &http.Server{Handler: r}
 
 	serveErr := make(chan error, 1)
@@ -278,6 +271,22 @@ func runServer(name, addr string) error {
 		}
 		close(serveErr)
 	}()
+
+	// This machine's client now knows the kernel this machine runs: `kernel list` names it and
+	// `auth login sys@<name>` reaches it, with nothing for the operator to copy out of a log line.
+	// It runs on every boot, so a kernel that comes back on another port is followed rather than
+	// left stale — the record is keyed by the kernel's key, and moving an address keeps its logins.
+	// After the server is answering, since registering reads /health like any other client would.
+	registerSelf(context.Background(), globalCfg.KernelHandle, ln.Addr().String(), logger)
+
+	// server.ready is emitted only after a successful bind — the harness waits on this line, and
+	// it is the last thing an operator sees at first boot, so it says what answered and nothing
+	// else: the kernel, its network, where clients reach it, and the key that is its identity.
+	// The federation addresses are `admin kernel show`'s to report; only a world's seed publishes
+	// one, and the peer id inside it is this same key in libp2p's spelling (D15, §14).
+	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
+		"addr", ln.Addr().String(), "public_key", pubKey)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1617,7 +1626,7 @@ func writeErr(w http.ResponseWriter, err error) {
 // platform signing key from config (the same key bootstrap loaded) so the libp2p identity is the
 // kernel's Ed25519 identity (§12). AllowPrivateAddrs mirrors allow_local_sources so the flow
 // harness can run a whole network on loopback.
-func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger) (*fed.Transport, error) {
+func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World) (*fed.Transport, error) {
 	privB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
 	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
 	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
@@ -1626,7 +1635,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(50, 100)}
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
-		BootstrapPeers:    globalCfg.BootstrapPeers,
+		BootstrapPeers:    globalCfg.bootstrapPeers(world),
 		ListenAddrs:       globalCfg.FedListenAddrs,
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,
@@ -1636,4 +1645,25 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		return nil, err
 	}
 	return tr, nil
+}
+
+// registerSelf records the kernel this process serves in this installation's client records, under
+// the nickname it serves as. The address is derived from the socket actually bound, so an
+// OS-assigned port is the one a client will dial, and a wildcard host becomes loopback: the record
+// is this machine's own way in, not an announcement of where others reach it. A name already held
+// by a different kernel is left alone and said so — the operator chose that name for that kernel
+// (D15, D20). Nothing here can stop a kernel from serving, so every failure is a line, not an error.
+func registerSelf(ctx context.Context, name, bound string, logger *log.Logger) {
+	host, port, err := net.SplitHostPort(bound)
+	if err != nil {
+		return
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	if _, _, outcome, err := registerKernel(ctx, name, "http://"+net.JoinHostPort(host, port)); err != nil {
+		logger.With(ctx).Info("client.self_register_skipped", "kernel", name, "error", err.Error())
+	} else if outcome != "already known" {
+		logger.With(ctx).Info("client.self_registered", "kernel", name, "outcome", outcome)
+	}
 }

@@ -16,9 +16,9 @@ between your account and the outside world.
 
 ```
 $ juice user me
-  available: 9.50 credits
+  available: 9.50 fUSDT
   …
-  locked: 0.00 credits
+  locked: 0.00 fUSDT
 ```
 
 The **available** balance is the amount you can spend. The **locked** balance
@@ -38,10 +38,10 @@ See [Steps and processes](../providing/steps.html) before forcing closure.
 ## Amounts
 
 The command line accepts amounts in the network's display unit, such as
-`0.50 credits` on `play`. The HTTP API and action JSON use integer base units.
+`0.50 fUSDT` on `play`. The HTTP API and action JSON use integer base units.
 All three shipped networks use six decimal places, so `500000` base units
-represent half a credit or token. Equal numeric amounts on different networks
-do not imply equal monetary value.
+represent 0.50 fUSDT on `play`. Equal numeric amounts on different networks do
+not imply equal monetary value.
 
 ## Sending money to another user
 
@@ -51,8 +51,8 @@ transaction:
 
 ```
 $ juice user transfer bob 1 --reason "thanks"
-Send 1.00 credits to bob, acting as alice@acme? This cannot be undone. [y/N] y
-  amount: 1.00 credits
+Send 1.00 fUSDT to bob, acting as alice@acme? This cannot be undone. [y/N] y
+  amount: 1.00 fUSDT
   reason: thanks
   created_at: 2026-09-14T12:05:34Z
   operator_handle: alice
@@ -80,14 +80,22 @@ Use `user ledger` to read entries involving your account:
 
 ```
 $ juice user ledger
-[2026-09-14T12:05:34Z] amount:1.00 credits  from:alice  to:bob    thanks
-[2026-09-14T12:04:54Z] amount:10.00 credits from:sys    to:alice
+WHEN                  AMOUNT       FROM   TO     WHY
+2026-09-14T12:05:54Z  0.40 fUSDT   alice  bob    e989c5e1-…
+2026-09-14T12:05:54Z  0.10 fUSDT   alice  sys    e989c5e1-…
+2026-09-14T12:05:34Z  1.00 fUSDT   alice  bob    thanks
+2026-09-14T12:04:54Z  10.00 fUSDT  sys    alice
 ```
 
 Deposits, withdrawals, transfers, and value delivered by an action appear in
-this list. Execution charges are recorded separately as call transactions,
-available through `juice tx list`. Reading both gives you the account movements
-and the work for which it paid or earned money.
+this list, along with settlement postings: provider payouts, operator fees,
+import fees, and obligations returned to another account during a composed
+remote call. Each settlement entry names its transaction in `WHY`. A missing
+source or destination is shown as `outside`.
+
+Use `juice tx show` with that transaction ID to read the work behind a posting.
+Older calls made before settlement postings were introduced remain in the
+transaction history; they are not backfilled into the ledger.
 
 ## Moving money through an action
 

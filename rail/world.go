@@ -59,6 +59,13 @@ type World struct {
 	Symbol      string `json:"symbol"`
 	Description string `json:"description"`
 
+	// Seeds are the bootstrap addresses of this network's own kernels — the meeting point a new
+	// member dials before it knows anyone. Each world has its own, since a kernel that dialled
+	// another world's seed would be told, every pass, that it serves a network this one is not.
+	// A kernel's own `bootstrap_peers` overrides them; an empty list is a world with no meeting
+	// point, where members introduce each other by configuration.
+	Seeds []string `json:"seeds"`
+
 	// RPC is the network's default endpoint, which a kernel's own `rail_rpc` overrides. A world
 	// that names none asks its operator at first boot. There is no field for where the payment scan
 	// starts: that is not the network's to say and not the operator's either — it is the block the

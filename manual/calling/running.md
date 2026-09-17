@@ -27,11 +27,13 @@ $ juice run bob/echo '{"msg":"hello"}'
   trace_id: 009b8dc1-…
   receipt_id: b69abbd8-…
   process_id: a394b5c5-…
+  charge: 0.50 fUSDT
 ```
 
-The response includes the action's result and identifiers for its records.
-Use `tx_id` with `tx show` to inspect the charge, `tx verify` to check the
-receipt, or `tx rate` to record your assessment.
+The response includes the action's result, its settled charge, and identifiers
+for its records. Use `tx_id` with `tx show` to read the full record, `tx verify`
+to check the receipt, or `tx rate` to record your assessment. `charge` is absent
+while settlement is deferred.
 
 ## What a call costs
 
@@ -55,7 +57,7 @@ without charge:
 
 ```
 $ juice run bob/echo '{}'
-error: field #.msg: required field missing
+error: field msg: required field missing
 ```
 
 Failure after execution has begun is different. The kernel refunds the budget
@@ -69,10 +71,8 @@ identifies the action to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
-
-Authorize with:
-  juice user connect bob/mail
 error: grant required for bob/mail
+       Authorize it with: juice user connect bob/mail
 ```
 
 ## Pinning the terms you saw
@@ -89,9 +89,8 @@ If an otherwise callable action has different terms, the kernel rejects the
 request before charging and reports the current quote:
 
 ```
-Nothing was charged. The action's terms changed since you quoted them; its price is now 500000.
-Re-read the action and pass --quote-hash 4965342976414282… to accept the new terms.
-error: the action's terms changed; it now costs 0.50 credits
+error: the action's terms changed; it now costs 0.50 fUSDT
+       Nothing was charged. The price is now 500000; pass --quote-hash 4965342976414282… to accept it.
 ```
 
 Without a pin, `run` uses the terms current when the call is admitted. Pinning
@@ -124,11 +123,11 @@ example with the default `1.00` ticket:
 
 ```
 $ juice user me
-  available: 7.00 credits
+  available: 7.00 fUSDT
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
   …
 $ juice user me
-  available: 4.795 credits
+  available: 4.795 fUSDT
 ```
 
 ### The ticket
@@ -154,7 +153,7 @@ balance of `2.50` is insufficient:
 
 ```
 $ juice user me
-  available: 2.50 credits
+  available: 2.50 fUSDT
 $ juice run 'dave@beta-kernel/summarize' '{"text":"x"}'
 error: insufficient user balance
 ```
@@ -172,6 +171,13 @@ also pays every obligation exactly, with no stake or draw. Ask your operator
 which setting applies, or inspect `juice admin kernel show` if you operate the
 kernel yourself.
 
+If the client cannot reach your local kernel, it reports the name and address:
+
+```
+error: cannot reach kernel acme at http://127.0.0.1:4040
+       Start it with: juice kernel serve acme
+```
+
 ### When the other kernel cannot be reached
 
 When contact fails during a remote call, the kernel distinguishes a request
@@ -179,7 +185,8 @@ known not to have reached the peer from one that may already be executing there.
 The first case can fail immediately with a full refund:
 
 ```
-error: peer unreachable
+error: peer beta-kernel is unreachable; the call was not sent and has been refunded
+       Nothing was charged. Try again when beta-kernel is back.
 ```
 
 In the second case, the call remains pending because its outcome is unknown.
@@ -187,9 +194,7 @@ Its funds stay locked, and the response identifies the process and the time at
 which a refund becomes eligible:
 
 ```
-process_id: 01d1da53-…
-pending_since: 2026-09-14T12:06:27Z
-refund_eligible_at: 2026-09-15T12:06:27Z
+Your funds are reserved, not spent, on process 01d1da53-…. It retries by itself, is refundable from 2026-09-15T12:06:27Z, and `juice process end 01d1da53-…` refunds it sooner.
 ```
 
 A pending call is retried under its original identity, including after a

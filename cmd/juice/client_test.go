@@ -149,14 +149,30 @@ func TestUnauthenticatedWithNoTokenSuggestsLogin(t *testing.T) {
 	}
 }
 
+// TestAPICallUnreachable: a kernel that does not answer is one condition with one code, whichever
+// command met it and whatever it wanted — the CLI used to report a money-unit problem here and an
+// unreachable peer there, for the same dead server (§14).
 func TestAPICallUnreachable(t *testing.T) {
 	old := flagServer
 	t.Cleanup(func() { flagServer = old })
 	flagServer = "http://127.0.0.1:1" // nothing listening
 	t.Setenv("HOME", t.TempDir())
-	err := freshClient().call(context.Background(), "GET", "/v1/x", nil, nil)
-	if err == nil || kernel.KernelErrorCode(err) != "invalid_state" {
-		t.Fatalf("expected invalid_state, got %v", err)
+	for _, c := range []struct {
+		name string
+		call func(*client) error
+	}{
+		{"a request", func(c *client) error { return c.call(context.Background(), "GET", "/v1/x", nil, nil) }},
+		{"reading the money unit", func(c *client) error { _, err := c.network(context.Background()); return err }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call(freshClient())
+			if err == nil || kernel.KernelErrorCode(err) != "peer_unreachable" {
+				t.Fatalf("expected peer_unreachable, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "cannot reach") {
+				t.Errorf("the message does not say what happened: %q", err)
+			}
+		})
 	}
 }
 
@@ -1406,6 +1422,9 @@ func TestALoginRefusalSaysWhichRefusalItIs(t *testing.T) {
 func TestTheClientsOwnRecordsAnswerUnderBothFlags(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "D-A", "play")
+	// A second kernel, because one key is one record: registering the first server again under
+	// another name renames it rather than adding a second (D15).
+	other := healthServer(t, "KEY-B", "D-B", "play")
 	old := flagServer
 	flagServer = ""
 	t.Cleanup(func() { flagServer = old })
@@ -1420,7 +1439,7 @@ func TestTheClientsOwnRecordsAnswerUnderBothFlags(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("JUICE_AS", "")
-		if _, _, _, err := registerKernel(context.Background(), "k2", srv.URL); err != nil {
+		if _, _, _, err := registerKernel(context.Background(), "k2", other.URL); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1430,7 +1449,7 @@ func TestTheClientsOwnRecordsAnswerUnderBothFlags(t *testing.T) {
 		args []string
 		id   string // an id --quiet must print, one per line
 	}{
-		{"registering a kernel", kernelAddCmd, []string{srv.URL, "k2"}, "k2"},
+		{"registering a kernel", kernelAddCmd, []string{other.URL, "k2"}, "k2"},
 		{"listing the kernels known", kernelListCmd, nil, "k2"},
 		{"switching to a login held", authUseCmd, []string{"alice@work"}, "alice@work"},
 		{"listing the logins held", authListCmd, nil, "alice@work"},
@@ -1845,4 +1864,77 @@ func TestAnExpiredSessionIsRenewedBeforeTheRequest(t *testing.T) {
 	if tok, _ := loadToken(); tok != "FRESH" {
 		t.Errorf("the renewed session was not stored: %q", tok)
 	}
+}
+
+// TestOneRecordPerKey: a kernel is its key, and this client holds one record for it. Registering a
+// known kernel under another name renames what is there — logins included, since a session belongs
+// to the kernel that issued it — rather than leaving two records for one kernel with its logins
+// split between them (D15).
+func TestOneRecordPerKey(t *testing.T) {
+	clientHomeFor(t)
+	srv := healthServer(t, "KEY-A", "D-A", "play")
+	old := flagServer
+	flagServer = ""
+	t.Cleanup(func() { flagServer = old })
+
+	if _, _, _, err := registerKernel(context.Background(), "work", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	recordLogin(t, "alice@work", srv.URL, "KEY-A")
+	t.Setenv("JUICE_AS", "alice@work")
+	if err := saveRefreshToken("R"); err != nil { // the session file is what makes the login exist
+		t.Fatal(err)
+	}
+	t.Setenv("JUICE_AS", "")
+
+	name, _, outcome, err := registerKernel(context.Background(), "home", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "home" || !strings.Contains(outcome, "renamed") {
+		t.Fatalf("registering a known key under a new name: name=%q outcome=%q", name, outcome)
+	}
+	cfg := loadClientConfig()
+	if cfg.Kernels["work"] != nil {
+		t.Error("the old name still holds a record; one key is one record")
+	}
+	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].PublicKey != "KEY-A" {
+		t.Fatalf("the new name holds %+v", cfg.Kernels["home"])
+	}
+	if got := loginNames(t); !slices.Contains(got, "alice@home") {
+		t.Errorf("logins after the rename = %v, want alice@home among them", got)
+	}
+	if cfg.Current != "alice@home" {
+		t.Errorf("selected login = %q, want alice@home", cfg.Current)
+	}
+
+	// A name another kernel already holds is not taken, and nothing is moved on the way to finding
+	// that out: the record and the logins of both kernels survive the refusal.
+	other := healthServer(t, "KEY-B", "D-B", "play")
+	if _, _, _, err := registerKernel(context.Background(), "spare", other.URL); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := registerKernel(context.Background(), "spare", srv.URL); err == nil {
+		t.Fatal("a name held by another kernel was taken")
+	}
+	cfg = loadClientConfig()
+	if cfg.Kernels["spare"] == nil || cfg.Kernels["spare"].PublicKey != "KEY-B" {
+		t.Errorf("the refused name no longer holds its own kernel: %+v", cfg.Kernels["spare"])
+	}
+	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].PublicKey != "KEY-A" {
+		t.Errorf("the kernel that was refused a rename lost its record: %+v", cfg.Kernels["home"])
+	}
+	if got := loginNames(t); !slices.Contains(got, "alice@home") {
+		t.Errorf("logins after the refusal = %v, want alice@home still among them", got)
+	}
+}
+
+// loginNames is what `auth list` would name, in the order it finds them.
+func loginNames(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, l := range logins() {
+		out = append(out, l.String())
+	}
+	return out
 }

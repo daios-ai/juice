@@ -139,7 +139,38 @@ func validateTypedNode(typ string, node map[string]any, path string, depth int) 
 // ValidateInput checks that data conforms to schema.
 // Returns ErrSchemaViolation with a descriptive message on mismatch.
 func ValidateInput(schema map[string]any, data any) error {
-	return validateValue(schema, data, "#")
+	return validateValue(schema, data, "")
+}
+
+// fieldPath names a field inside a value: the top level has no name of its own, so its fields are
+// named as the caller wrote them rather than under a symbol for the document.
+func fieldPath(path, name string) string {
+	if path == "" {
+		return name
+	}
+	return path + "." + name
+}
+
+// jsonKind names a value the way the person who wrote it would: JSON has seven kinds and Go's
+// type names (float64, map[string]interface {}) are not among them (§14).
+func jsonKind(data any) string {
+	switch v := data.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	case float64, int, int64:
+		return "a number"
+	case map[string]any:
+		return "an object"
+	case []any:
+		return "a list"
+	default:
+		_ = v
+		return "something else"
+	}
 }
 
 func validateValue(schema map[string]any, data any, path string) error {
@@ -164,7 +195,7 @@ func validateValue(schema map[string]any, data any, path string) error {
 	case "object":
 		obj, ok := data.(map[string]any)
 		if !ok {
-			return ErrSchemaViolation.Wrapf("field %s: expected object, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected object, got %s", path, jsonKind(data))
 		}
 		props, _ := schema["properties"].(map[string]any)
 		var required []string
@@ -187,11 +218,11 @@ func validateValue(schema map[string]any, data any, path string) error {
 			val, present := obj[name]
 			if !present {
 				if reqSet[name] {
-					return ErrSchemaViolation.Wrapf("field %s.%s: required field missing", path, name)
+					return ErrSchemaViolation.Wrapf("field %s: required field missing", fieldPath(path, name))
 				}
 				continue
 			}
-			if err := validateValue(childSchema, val, path+"."+name); err != nil {
+			if err := validateValue(childSchema, val, fieldPath(path, name)); err != nil {
 				return err
 			}
 		}
@@ -209,7 +240,7 @@ func validateValue(schema map[string]any, data any, path string) error {
 		for _, r := range required {
 			if _, inProps := props[r]; !inProps {
 				if _, present := obj[r]; !present {
-					return ErrSchemaViolation.Wrapf("field %s.%s: required field missing", path, r)
+					return ErrSchemaViolation.Wrapf("field %s: required field missing", fieldPath(path, r))
 				}
 			}
 		}
@@ -217,7 +248,7 @@ func validateValue(schema map[string]any, data any, path string) error {
 	case "array":
 		arr, ok := data.([]any)
 		if !ok {
-			return ErrSchemaViolation.Wrapf("field %s: expected array, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected array, got %s", path, jsonKind(data))
 		}
 		items, _ := schema["items"].(map[string]any)
 		for i, elem := range arr {
@@ -228,7 +259,7 @@ func validateValue(schema map[string]any, data any, path string) error {
 
 	case "string":
 		if _, ok := data.(string); !ok {
-			return ErrSchemaViolation.Wrapf("field %s: expected string, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected string, got %s", path, jsonKind(data))
 		}
 
 	case "integer":
@@ -244,7 +275,7 @@ func validateValue(schema map[string]any, data any, path string) error {
 		case int64, int32, int16, int8, int, uint64, uint32, uint16, uint8, uint:
 			// native Go integer types are always whole numbers
 		default:
-			return ErrSchemaViolation.Wrapf("field %s: expected integer, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected integer, got %s", path, jsonKind(data))
 		}
 
 	case "number":
@@ -252,12 +283,12 @@ func validateValue(schema map[string]any, data any, path string) error {
 		case float64, json.Number:
 			// ok
 		default:
-			return ErrSchemaViolation.Wrapf("field %s: expected number, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected number, got %s", path, jsonKind(data))
 		}
 
 	case "boolean":
 		if _, ok := data.(bool); !ok {
-			return ErrSchemaViolation.Wrapf("field %s: expected boolean, got %T", path, data)
+			return ErrSchemaViolation.Wrapf("field %s: expected boolean, got %s", path, jsonKind(data))
 		}
 	}
 

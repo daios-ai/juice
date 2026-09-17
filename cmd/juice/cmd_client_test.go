@@ -136,11 +136,13 @@ func TestKernelListMarksWhereYouAre(t *testing.T) {
 			t.Errorf("listing omits %q:\n%s", want, out)
 		}
 	}
+	// Which kernel a bare command acts through is a column, in words, like everything else a list
+	// says about a row (§14).
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "lab") && !strings.HasPrefix(line, "*") {
+		if strings.HasPrefix(line, "lab") && !strings.Contains(line, "yes") {
 			t.Errorf("the selected kernel is not marked: %q", line)
 		}
-		if strings.Contains(line, "work") && strings.HasPrefix(line, "*") {
+		if strings.HasPrefix(line, "work") && strings.Contains(line, "yes") {
 			t.Errorf("an unselected kernel is marked: %q", line)
 		}
 	}

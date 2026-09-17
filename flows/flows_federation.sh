@@ -20,13 +20,12 @@ _fed_setup() {
     # Per-kernel extra config, optionally set by the caller before calling (e.g.
     # FED_RCFG=(lottery=1000)). Consumed and cleared here so it never leaks into the next flow.
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 "${FED_RCFG[@]:-}" || return 1
-    FED_BOOT=$(kernel_fed_addr "$FED_DBR")
+    know "$FED_DBR" "$FED_HR"
+    j "$FED_DBR" "$FED_HR" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
+    FED_BOOT=$(kernel_fed_addr "$FED_DBR" "$FED_HR")
     [ -n "$FED_BOOT" ] || return 1
     start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 "${FED_LCFG[@]:-}" || return 1
     unset FED_RCFG FED_LCFG
-    know "$FED_DBR" "$FED_HR"; know "$FED_DBL" "$FED_HL"
-    know "$FED_DBR" "$FED_HR"
-    j "$FED_DBR" "$FED_HR" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
 
@@ -384,7 +383,9 @@ flow_fed_discovery() {
     local bport; bport=$(backend_port); start_backend "$bport" 200 '{"greeting":"hi"}'
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 \
         || { fail "fed_discovery.setup" "R did not start"; return; }
-    local boot; boot=$(kernel_fed_addr "$dbr")
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     [ -n "$boot" ] || { fail "fed_discovery.boot" "no R fed addr"; return; }
     know "$dbr" "$hr"
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -457,7 +458,9 @@ flow_fed_peer_sync() {
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 \
         || { fail "fed_peer_sync.setup" "R did not start"; return; }
-    local boot; boot=$(kernel_fed_addr "$dbr")
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     [ -n "$boot" ] || { fail "fed_peer_sync.boot" "no R fed addr"; return; }
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
         || { fail "fed_peer_sync.l" "L did not start"; return; }
@@ -498,7 +501,9 @@ flow_fed_inspect_read_only() {
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=3600 \
         || { fail "fed_inspect_read_only.setup" "R did not start"; return; }
-    local boot; boot=$(kernel_fed_addr "$dbr")
+    know "$dbr" "$hr"
+    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     [ -n "$boot" ] || { fail "fed_inspect_read_only.boot" "no R fed addr"; return; }
     start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=3600 \
         || { fail "fed_inspect_read_only.l" "L did not start"; return; }
@@ -735,10 +740,10 @@ flow_transfer() {
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
 
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r || { fail "transfer.setup_r" "boot"; return; }
-    local boot; boot=$(kernel_fed_addr "$FED_DBR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
     know "$FED_DBR" "$FED_HR"
     j "$FED_DBR" "$FED_HR" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    local boot; boot=$(kernel_fed_addr "$FED_DBR" "$FED_HR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
@@ -833,9 +838,8 @@ flow_fed_provider_crash_recovery() {
     wait "$caller_pid" 2>/dev/null
 
     # The outcome is unknown, so the allocation stays reserved: not refunded, not spent.
-    local proc_line
-    proc_line=$(j "$FED_DBL" "$ha" process list --limit 5 | grep -c "awaiting-receipt" || true)
-    assert_eq "fed_crash.call_is_parked" yes "$([ "$proc_line" -ge 1 ] && echo yes || echo no)"
+    local parked; parked=$(awaiting "$FED_DBL" "$ha")
+    assert_eq "fed_crash.call_is_parked" yes "$([ "$parked" -ge 1 ] && echo yes || echo no)"
 
     # The provider returns at the address its peer knows it by — a restart keeps the configured
     # listen address, as a deployed kernel's does — and recovers its own interrupted work.
@@ -849,7 +853,7 @@ flow_fed_provider_crash_recovery() {
     # with the allocation released either way.
     local i settled=no
     for i in $(seq 1 20); do
-        if [ "$(j "$FED_DBL" "$ha" process list --limit 5 | grep -c "awaiting-receipt" || true)" -eq 0 ]; then
+        if [ "$(awaiting "$FED_DBL" "$ha")" -eq 0 ]; then
             settled=yes; break
         fi
         sleep 1
@@ -920,6 +924,15 @@ flow_compose_remote_child() {
     # The import fee on the inner leg stays on the kernel that imported it.
     assert_eq "compose_child.import_fee_retained" 53 \
         "$(( $(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available) - sb ))"
+    # Every movement between two accounts is a ledger posting, the cross-kernel ones included: what
+    # alice was paid for the call, and the import fee the operator keeps on the inner leg (D4).
+    # Each is read from the ledger rather than from a balance, which is the point of posting them:
+    # the number below must equal the balance change asserted just above it.
+    assert_eq "compose_child.settlement_is_posted" 897 \
+        "$(ledger_in "$FED_DBL" "$ha" "$tx_id")"
+    assert_eq "compose_child.import_fee_is_posted" 53 \
+        "$(ledger_in "$FED_DBL" "$FED_HL" "$(inner_tx "$FED_DBL" "$hc" "$(strfield "$out" trace_id)")")"
+
     # The seller has delivered one more obligation of 1050 and has not been paid for it.
     assert_eq "compose_child.seller_owed" 1050 \
         "$(( $(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure) - eb ))"
@@ -1356,7 +1369,7 @@ flow_compose_middle_crash() {
     # The caller's allocation must not stay reserved for ever: the call ends, one way or the other.
     local i ended=no
     for i in $(seq 1 40); do
-        if [ "$(j "$FED_DBL" "$hc" process list --limit 10 | grep -c "awaiting-receipt" || true)" -eq 0 ]; then
+        if [ "$(awaiting "$FED_DBL" "$hc")" -eq 0 ]; then
             ended=yes; break
         fi
         sleep 1

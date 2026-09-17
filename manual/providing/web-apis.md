@@ -60,8 +60,9 @@ path, then set the visibility required for their intended audience:
 
 ```
 $ juice action enable bob/greeter
-enabled bob/greeter/greet
-enabled bob/greeter/index
+CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
+enabled  bob/greeter/greet  0.50 fUSDT  yes     private
+enabled  bob/greeter/index  0.00 fUSDT  yes     private
 ```
 
 ## What the document must declare

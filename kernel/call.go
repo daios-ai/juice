@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +84,22 @@ type CallReply struct {
 	// `process show`/`end` when work parks (§14). Subcalls and step completions run inside a process
 	// the caller already addressed, so they omit it.
 	ProcessID string `json:"process_id,omitempty"`
+	// Charge is what the call drew from the caller — the receipt's own number (P5), in base units:
+	// the price on success, only what sub-work already delivered consumed on failure (U13), zero
+	// for a free action. Absent exactly when the transaction and receipt are, since a call whose
+	// settlement is deferred has drawn nothing yet (D3).
+	Charge *int64 `json:"charge,omitempty"`
+}
+
+// withSettlement attaches what a failed call settled to the error that carries it. A failure is
+// answered by an error alone, so without this the buyer of a call whose sub-work was delivered and
+// paid for could learn neither the charge nor the transaction it belongs to (U13, U15).
+func withSettlement(cause error, txID string, charge int64) error {
+	ke, ok := cause.(*KernelError)
+	if !ok {
+		return cause
+	}
+	return ke.WithMeta("tx_id", txID).WithMeta("charge", strconv.FormatInt(charge, 10))
 }
 
 // Deferred reports a reply whose outcome is known but not yet settled: a trace beneath the call is
@@ -706,7 +723,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		if deferred {
 			return &CallReply{TraceID: trace.ID}, cause
 		}
-		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID}, cause
+		return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: receipt.ID, Charge: &receipt.Charge},
+			withSettlement(cause, ktx.ID, receipt.Charge)
 	}
 
 	// 9. Execute. Remote proxy calls use ExecuteFederation directly with the stored idempotency key,
@@ -821,6 +839,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		TxID:      txID,
 		TraceID:   trace.ID,
 		ReceiptID: receipt.ID,
+		Charge:    &receipt.Charge,
 	}, nil
 }
 

@@ -1687,7 +1687,9 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("action.registered_native", "action_id", a.ID, "name", a.Name)
+	// Debug: every boot re-registers every native, so at info this is a screen of bookkeeping
+	// between the operator's last answer and the line that says the kernel is serving (§14).
+	k.log.With(ctx).Debug("action.registered_native", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
 
@@ -1746,7 +1748,7 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 		return err
 	}
 	k.indexForLookup(ctx, a)
-	k.log.With(ctx).Info("action.native_enabled", "action_id", actionID)
+	k.log.With(ctx).Debug("action.native_enabled", "action_id", actionID)
 	return nil
 }
 
@@ -2399,6 +2401,12 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 			servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment)
 		}
 		if seller.Available < lockPrice {
+			// This kernel serves foreign work from the provider's own balance (D14), and this
+			// provider cannot cover this call. The buyer abroad is told only that we declined; the
+			// reason is ours, and it is the provider's to fix, so it is said here where they can
+			// read it.
+			k.log.With(ctx).Info("call.provider_unfunded", "action", action.Name, "owner", seller.Handle,
+				"balance", seller.Available, "price", lockPrice)
 			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
 		}
 	} else if caller.Available < lockPrice+value {

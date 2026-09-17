@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -81,11 +80,9 @@ func KeyFromPeerID(id peer.ID) (string, error) {
 
 // ---- Host lifecycle ----
 
-// StdPort is the standard Juice federation port. A publicly-reachable kernel that binds it has a
-// stable, well-known address others can bootstrap to. Below the Linux ephemeral range (32768+),
-// uncommon, and echoes Ethereum's 30303. If it is already taken, the transport falls back to an
-// OS-assigned port (kernels are found by key via the DHT, so only a public bootstrap node needs
-// the fixed one) and warns.
+// StdPort is the standard Juice federation port: what a world's seed pins in its own config so
+// others can bootstrap to a stable address. Below the Linux ephemeral range (32768+), uncommon,
+// and echoes Ethereum's 30303. Every other kernel takes an OS-assigned port and is found by key.
 const StdPort = 31313
 
 // Transport is the running federation carrier: a libp2p host plus a Kademlia DHT for
@@ -157,28 +154,15 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return libp2p.New(append(baseOpts, libp2p.ListenAddrStrings(listen...))...)
 	}
 
-	ephemeral := []string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"}
-
-	// A caller-supplied ListenAddrs is used verbatim. In loopback/test mode (AllowPrivateAddrs)
-	// use OS-assigned ports so many kernels can share one host without colliding on the standard
-	// port. Otherwise bind the standard port (a public node needs a stable address); if it is
-	// taken, fall back to OS-assigned ports (found-by-key doesn't need a fixed port) and warn.
+	// A caller-supplied ListenAddrs is used verbatim; otherwise OS-assigned ports, so any number
+	// of kernels share one host and each is found by key. Only a seed pins StdPort, in its own
+	// config: binding it by default cannot be made safe, since libp2p opens its sockets with
+	// SO_REUSEPORT and a second bind of a held port succeeds instead of failing (§13, D20).
 	var h host.Host
-	switch {
-	case len(cfg.ListenAddrs) > 0:
+	if len(cfg.ListenAddrs) > 0 {
 		h, err = build(cfg.ListenAddrs)
-	case cfg.AllowPrivateAddrs:
-		h, err = build(ephemeral)
-	default:
-		std := []string{
-			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", StdPort),
-			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", StdPort),
-		}
-		h, err = build(std)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fed: standard port %d unavailable (%v); using an OS-assigned port instead — set a fixed listen address on a public bootstrap node\n", StdPort, err)
-			h, err = build(ephemeral)
-		}
+	} else {
+		h, err = build([]string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fed: build host: %w", err)

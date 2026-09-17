@@ -23,7 +23,8 @@ Specify the saved login for each invocation with `--as`:
 $ juice --as bot@acme run sys/lookup '{"query":"translate to german"}' --json
 ```
 
-Alternatively, set `JUICE_AS=bot@acme` in the environment.
+Alternatively, set `JUICE_AS=bot@acme` in the environment. Omit `--as` for
+`kernel` and `auth` commands and `user create`; those commands refuse it.
 
 Explicit selection keeps later invocations tied to the intended account even
 when a person changes the client's current login. If the named login does not
@@ -47,11 +48,16 @@ $ juice --as bot@acme run sys/time --json
   "tx_id": "98bb64e6-…",
   "trace_id": "f4fbbf15-…",
   "receipt_id": "0d60120d-…",
-  "process_id": "e9dbb283-…"
+  "process_id": "e9dbb283-…",
+  "charge": 0
 }
 $ juice --as bot@acme run sys/time --quiet
 821a9f33-…
 ```
+
+`POST /v1/run` returns `charge` in integer base units once the call settles.
+A free call has `charge: 0`; a deferred settlement omits the field until the
+charge is known. Choose either `--json` or `--quiet`; using both is refused.
 
 ## Handling errors
 
@@ -70,7 +76,7 @@ errors machine-readable JSON. Branch on the exit status using these meanings:
 | 6 | insufficient funds |
 | 7 | timeout |
 | 8 | consent required |
-| 9 | peer provably unreachable |
+| 9 | server unreachable, or peer provably not reached |
 | 10 | peer will not serve on credit |
 | 11 | terms changed |
 
@@ -79,7 +85,7 @@ classifier. Over HTTP, the response instead contains a stable `code`, a message,
 and, where applicable, `meta`:
 
 ```
-{"code":"schema_violation","error":"field #.msg: required field missing"}
+{"code":"schema_violation","error":"field msg: required field missing"}
 {"code":"grant_required","error":"grant required for bob/mail","meta":{"action":"bob/mail"}}
 ```
 
@@ -87,6 +93,8 @@ The metadata supplies context for recovery. For example, `grant_required`
 identifies the action requiring consent, while peer errors identify the remote
 kernel. A pending call includes `process_id`, `pending_since`, and
 `refund_eligible_at`, allowing the program to follow its existing execution.
+A settled failure carries `tx_id` and `charge` in the error's `meta`; the charge
+is a decimal string in base units, and can be zero.
 
 ## Units
 
@@ -103,7 +111,7 @@ POST /v1/run {"action":"sys/transfer","args":{"target":"bob","amount":1500000}}
 
 Both examples deliver the same amount, although `sys/transfer` may also have
 an execution price. Similarly, `GET /v1/me` returns `"available": 4795000`
-where the command line displays `4.795 credits`. Read `decimals` from
+where the command line displays `4.795 fUSDT`. Read `decimals` from
 `GET /health` when calculating conversions instead of hard-coding six.
 
 ## Separate planning from spending
@@ -235,7 +243,7 @@ the key and network you expect:
 ```
 $ curl -s localhost:4040/health
 {"decimals":6,"handle":"acme","network":"play","network_digest":"ef1fac03…",
- "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"credits","token":""}
+ "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"fUSDT","token":""}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

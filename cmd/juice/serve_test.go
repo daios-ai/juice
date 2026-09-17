@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -3294,5 +3295,114 @@ func TestServeImportOpenAPIName(t *testing.T) {
 	defer resp3.Body.Close()
 	if resp3.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("re-binding a name: got %d, want 422", resp3.StatusCode)
+	}
+}
+
+// TestServeRunReportsCharge: the reply of a run says what it drew, so a buyer — a person at the
+// CLI or a program calling the API — learns the cost of the call it just made without going to
+// look for the transaction. A failure answers with an error alone, so the same two facts ride in
+// the error's meta (D20, U15).
+func TestServeRunReportsCharge(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answer":42}`))
+	}))
+	defer backend.Close()
+
+	_, ownerTok := makeUser(t, k, "charge-owner")
+	buyerID, buyerTok := makeUser(t, k, "charge-buyer")
+	giveCredits(t, k, buyerID, 10_000)
+
+	create := func(name, path string) kernel.Action {
+		t.Helper()
+		resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+			"name": name, "kind": "http", "price": 500, "source": backend.URL + path,
+			"description": "priced action", "input_schema": minSchema, "output_schema": minSchema,
+		}, ownerTok)
+		var a kernel.Action
+		decodeResponse(t, resp, &a)
+		httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": a.ID}, ownerTok).Body.Close()
+		httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": a.ID, "visibility": "public"}, ownerTok).Body.Close()
+		return a
+	}
+	paid := create("paid", "/ok")
+	broken := create("broken", "/fail")
+
+	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": paid.ID, "args": map[string]any{}}, buyerTok)
+	var reply kernel.CallReply
+	decodeResponse(t, resp, &reply)
+	if reply.Charge == nil || *reply.Charge != 500 {
+		t.Fatalf("charge on success: got %v, want 500", reply.Charge)
+	}
+
+	// The failed call delivered nothing beneath it, so it drew nothing — and says so, rather than
+	// leaving the buyer to assume it.
+	resp = httpDo(t, srv, "POST", "/v1/run", map[string]any{"action": broken.ID, "args": map[string]any{}}, buyerTok)
+	defer resp.Body.Close()
+	var errBody struct {
+		Code string            `json:"code"`
+		Meta map[string]string `json:"meta"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errBody); err != nil {
+		t.Fatal(err)
+	}
+	if errBody.Code != "execution_failed" {
+		t.Fatalf("failed run: code %q", errBody.Code)
+	}
+	if errBody.Meta["charge"] != "0" {
+		t.Errorf("failed run: meta charge %q, want \"0\"", errBody.Meta["charge"])
+	}
+	if errBody.Meta["tx_id"] == "" {
+		t.Error("failed run: meta names no transaction")
+	}
+}
+
+// TestRegisterSelfRecordsTheServedKernel: after `kernel serve NAME`, this machine's client knows
+// that kernel — the operator logs in without copying an address out of a log line (D20). The
+// address recorded is one a client on this machine can dial, so a server listening on every
+// interface is recorded as loopback rather than as 0.0.0.0.
+func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
+	clientHomeFor(t)
+	old := flagServer
+	flagServer = ""
+	t.Cleanup(func() { flagServer = old })
+
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "handle": "acme", "public_key": "KEY-SELF",
+			"network": "play", "network_digest": "D", "decimals": 6, "symbol": "fUSDT",
+		})
+	})
+	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}
+	srv.Start()
+	defer srv.Close()
+
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	logger, err := log.New(log.Config{Level: "error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerSelf(context.Background(), "acme", net.JoinHostPort("0.0.0.0", port), logger)
+
+	k := loadClientConfig().Kernels["acme"]
+	if k == nil {
+		t.Fatal("the kernel this process serves is not in the client's records")
+	}
+	if want := "http://127.0.0.1:" + port; k.Endpoint != want {
+		t.Errorf("endpoint %q, want %q", k.Endpoint, want)
+	}
+	if k.PublicKey != "KEY-SELF" {
+		t.Errorf("public key %q, want the key /health reported", k.PublicKey)
 	}
 }

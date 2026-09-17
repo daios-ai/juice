@@ -103,8 +103,8 @@ A kernel belongs to one network, selected when it is created. This determines
 the money it uses and cannot be changed later. The three shipped networks serve
 different stages of use:
 
-- **`play`** uses credits with no real monetary value. The operator records
-  deposits, and no blockchain payment is required. It is suitable for learning
+- **`play`** counts in fUSDT (fake USDT), with six decimal places and no real
+  monetary value. The operator records deposits, and no blockchain payment is required. It is suitable for learning
   Juice and developing services.
 - **`test`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
   withdrawals, and settlement on a blockchain without using real money.
@@ -147,10 +147,10 @@ kernel, as in `alice@acme`. An action on the current kernel is written as
 owner's handle: `bob@weather/forecast`. The [identity chapter](calling/identity.html)
 explains how these names are assigned and resolved.
 
-Most examples use the `play` network, whose display unit is the credit. The
+Most examples use the `play` network, whose display unit is fUSDT. The
 command line accepts amounts such as `0.50`, while the HTTP API and action JSON
 use integer base units: `500000` represents the same amount. With six decimal
-places, the smallest unit is `0.000001` credits.
+places, the smallest unit is `0.000001` fUSDT.
 
 ## Background and related documents
 

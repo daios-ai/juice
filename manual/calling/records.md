@@ -14,7 +14,7 @@ produced it.
 ## Transactions
 
 Use `tx list` to find calls you are entitled to read and `tx show` to inspect one
-in detail:
+in detail. The list's `CHARGED` column shows `gross − refund`:
 
 ```
 $ juice tx list
@@ -28,10 +28,10 @@ $ juice tx show 116fd3a6-…
   args: { "msg": "hello" }
   result: { … }
   status: success
-  gross: 0.50 credits
-  net: 0.40 credits
-  fee: 0.10 credits
-  refund: 0.00 credits
+  gross: 0.50 fUSDT
+  net: 0.40 fUSDT
+  fee: 0.10 fUSDT
+  refund: 0.00 fUSDT
   reason:
   started_at: 2026-09-14T12:05:10Z
   ended_at: 2026-09-14T12:05:10Z
@@ -153,7 +153,8 @@ can also see its ratings, without the payer's identity:
 
 ```
 $ juice action ratings bob/echo
-1  2026-09-14T12:05:17Z  did what it said
+RATING  WHEN                  FROM   NOTE
+good    2026-09-14T12:05:17Z  local  did what it said
 ```
 
 Rating belongs to the account's supervisory interface. Code executing inside
@@ -167,8 +168,9 @@ Use the process commands to follow work that has not yet finished:
 
 ```
 $ juice process list
-e3539f75-…  open    available:0.00 credits  locked:0.00 credits
-25386daa-…  closed  available:0.00 credits  locked:0.00 credits
+PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
+e3539f75-…  open    0.00 fUSDT  0.00 fUSDT
+25386daa-…  closed  0.00 fUSDT  0.00 fUSDT
 $ juice process show e3539f75-…
 ```
 
@@ -186,7 +188,8 @@ of forced closure.
 ## What you can reconstruct
 
 Use call transactions together with the account ledger to follow your balance.
-Transactions explain execution charges, while the ledger records deposits,
-withdrawals, transfers, and delivered value. For a provider, readable call
-records identify the work behind its earnings; deposits and other account
-movements remain visible in the ledger.
+Transactions explain execution charges. The ledger records deposits,
+withdrawals, transfers, delivered value, and settlement postings such as provider
+payouts and fees. A settlement posting names its transaction, so you can follow
+the balance movement back to the work. Calls predating settlement postings
+remain readable through their transactions.

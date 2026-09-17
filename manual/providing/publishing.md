@@ -13,7 +13,7 @@ are separate, so you can prepare that interface before allowing calls.
 ## Creating an action
 
 The following example registers an HTTP endpoint that echoes a message. Its
-input schema describes the `msg` field, and its price is half a credit on
+input schema describes the `msg` field, and its price is 0.50 fUSDT on
 `play`:
 
 ```
@@ -26,7 +26,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
   kind: http
   active: false
   visibility: private
-  price: 0.50 credits
+  price: 0.50 fUSDT
   …
   quote_hash: 4965342976414282…
 ```
@@ -71,10 +71,11 @@ who may call it by setting its visibility:
 
 ```
 $ juice action enable bob/echo
-enabled bob/echo
+CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
+enabled  bob/echo  0.50 fUSDT  yes     private
 $ juice action update bob/echo --visibility local
-  …
-  visibility: local
+CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
+updated  bob/echo  0.50 fUSDT  yes     local
 ```
 
 | Visibility | Who can call it |
@@ -86,6 +87,11 @@ $ juice action update bob/echo --visibility local
 For an eligible action, `public` makes it available through federation without
 a separate listing or approval procedure. Actions using callers' delegated
 credentials remain local, as explained in the web API chapter.
+
+When you publish or enable a public action, the client warns if your balance
+cannot cover its price. Remote work is funded from the provider's account;
+local buyers fund their own calls. The warning shows your balance and the
+price, and does not prevent publication.
 
 Visibility and activity can be changed independently. Disabling temporarily
 prevents all calls while retaining the chosen audience for a later reactivation.
@@ -129,8 +135,9 @@ enabling `bob/greeter` can enable both operations in an application:
 
 ```
 $ juice action enable bob/greeter
-enabled bob/greeter/greet
-enabled bob/greeter/index
+CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
+enabled  bob/greeter/greet  0.50 fUSDT  yes     private
+enabled  bob/greeter/index  0.00 fUSDT  yes     private
 ```
 
 Price, visibility, and credentials can be updated across the selected path.

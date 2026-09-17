@@ -88,18 +88,13 @@ func kernelListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(body, output{id: "kernel", human: func([]byte) error {
-				fmt.Printf("  %-16s %-10s %-32s %s\n", "KERNEL", "NETWORK", "ADDRESS", "KEY")
-				for _, name := range names {
-					mark := " "
-					if name == here.Kernel {
-						mark = "*"
-					}
-					k := cfg.Kernels[name]
-					fmt.Printf("%s %-16s %-10s %-32s %s\n", mark, name, k.Network, k.Endpoint, k.PublicKey)
-				}
-				return nil
-			}})
+			return emit(body, output{id: "kernel", human: list(
+				column{"KERNEL", text("kernel")},
+				column{"NETWORK", text("network")},
+				column{"ADDRESS", text("endpoint")},
+				column{"IN USE", selected},
+				column{"KEY", text("public_key")},
+			)})
 		},
 	}
 }
@@ -166,12 +161,14 @@ func kernelForgetCmd() *cobra.Command {
 			if err := confirm(fmt.Sprintf("Forget %s and log out every login on it?", name), yes); err != nil {
 				return err
 			}
-			delete(cfg.Kernels, name)
-			if here, err := parseLogin(cfg.Current); err == nil && here.Kernel == name {
-				cfg.Current = ""
-			}
-			forgetLogins(name)
-			if err := saveClientConfig(cfg); err != nil {
+			if err := withClientConfig(func(cfg *clientConfig) (bool, error) {
+				delete(cfg.Kernels, name)
+				if here, perr := parseLogin(cfg.Current); perr == nil && here.Kernel == name {
+					cfg.Current = ""
+				}
+				forgetLogins(name)
+				return true, nil
+			}); err != nil {
 				return err
 			}
 			body, err := json.Marshal(map[string]any{"kernel": name, "forgotten": true})
@@ -203,31 +200,86 @@ func registerKernel(ctx context.Context, name, url string) (string, *kernelRec, 
 	if err := validateLocalName("kernel", name); err != nil {
 		return "", nil, "", err
 	}
-	cfg := loadClientConfig()
-	existing := cfg.Kernels[name]
+	var k *kernelRec
 	outcome := "added"
-	switch {
-	case existing == nil:
-	case sameKernel(name, existing, h) != nil:
-		// A name is one kernel's here, on the network it was registered for. Taking it for another
-		// would silently point every login and every reference made under it at a stranger, so the
-		// operator says which they mean.
-		return "", nil, "", sameKernel(name, existing, h)
-	case existing.Endpoint == url:
-		return name, existing, "already known", nil // nothing to do
-	default:
-		// The kernel answering is the one recorded — the same key, at whatever address it answers
-		// on today — so it keeps its logins: a session belongs to the kernel that issued it, and
-		// this is that kernel.
-		outcome = "moved; existing logins kept"
-	}
-	k := &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldDigest: h.Digest,
-		Network: h.Network, Decimals: h.Decimals, Symbol: h.Symbol}
-	cfg.Kernels[name] = k
-	if err := saveClientConfig(cfg); err != nil {
+	err = withClientConfig(func(cfg *clientConfig) (bool, error) {
+		// The destination is decided first, and nothing is moved until it is free. A name is one
+		// kernel's here, on the network it was registered for: taking it for another would silently
+		// point every login and every reference made under it at a stranger, so the operator says
+		// which they mean.
+		existing := cfg.Kernels[name]
+		if existing != nil {
+			if conflict := sameKernel(name, existing, h); conflict != nil {
+				return false, conflict
+			}
+		}
+		// A key is one kernel, and one kernel is one record: the name is this client's word for it,
+		// so naming a known kernel something else renames what is already there rather than
+		// keeping two records that drift apart and split its logins between them (D15). Safe now —
+		// the destination is either free or this same kernel.
+		if held, at := recordOfKey(cfg, h.PublicKey); held != nil && at != name {
+			renameKernelRecord(cfg, at, name)
+			existing = cfg.Kernels[name]
+			outcome = "renamed; existing logins kept"
+		}
+		switch {
+		case existing == nil:
+		case existing.Endpoint == url && outcome == "added":
+			k, outcome = existing, "already known"
+			return false, nil // nothing to do
+		case existing.Endpoint != url && outcome == "added":
+			// The kernel answering is the one recorded — the same key, at whatever address it answers
+			// on today — so it keeps its logins: a session belongs to the kernel that issued it, and
+			// this is that kernel.
+			outcome = "moved; existing logins kept"
+		}
+		k = &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldDigest: h.Digest,
+			Network: h.Network, Decimals: h.Decimals, Symbol: h.Symbol}
+		cfg.Kernels[name] = k
+		return true, nil
+	})
+	if err != nil {
 		return "", nil, "", err
 	}
 	return name, k, outcome, nil
+}
+
+// recordOfKey finds the record this client already holds for a kernel's key, and the name it holds
+// it under. The key is the kernel's identity; the name is only what this client calls it.
+func recordOfKey(cfg *clientConfig, publicKey string) (*kernelRec, string) {
+	if publicKey == "" {
+		return nil, ""
+	}
+	for name, k := range cfg.Kernels {
+		if k != nil && k.PublicKey == publicKey {
+			return k, name
+		}
+	}
+	return nil, ""
+}
+
+// renameKernelRecord moves a kernel's record, its logins and its selection to a new local name. The
+// sessions are the kernel's, not the name's, so they follow it.
+func renameKernelRecord(cfg *clientConfig, from, to string) {
+	cfg.Kernels[to], cfg.Kernels[from] = cfg.Kernels[from], nil
+	delete(cfg.Kernels, from)
+	for _, l := range logins() {
+		if l.Kernel != from {
+			continue
+		}
+		oldPath, err := credentialPath(l)
+		if err != nil {
+			continue
+		}
+		newPath, err := credentialPath(login{Handle: l.Handle, Kernel: to})
+		if err != nil {
+			continue
+		}
+		_ = os.Rename(oldPath, newPath)
+		if cfg.Current == l.String() {
+			cfg.Current = login{Handle: l.Handle, Kernel: to}.String()
+		}
+	}
 }
 
 // forgetLogins removes the credentials of every login on one kernel, and unselects one that was
@@ -363,16 +415,10 @@ func authListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(body, output{id: "login", human: func([]byte) error {
-				for _, l := range held {
-					mark := " "
-					if l == here {
-						mark = "*"
-					}
-					fmt.Printf("%s %s\n", mark, l)
-				}
-				return nil
-			}})
+			return emit(body, output{id: "login", human: list(
+				column{"LOGIN", text("login")},
+				column{"IN USE", selected},
+			)})
 		},
 	}
 }
@@ -533,12 +579,14 @@ func logoutCmd() *cobra.Command {
 					return rerr
 				}
 			}
-			cfg := loadClientConfig()
-			if cfg.Current == l.String() {
-				cfg.Current = ""
-				if serr := saveClientConfig(cfg); serr != nil {
-					return serr
+			if serr := withClientConfig(func(cfg *clientConfig) (bool, error) {
+				if cfg.Current != l.String() {
+					return false, nil
 				}
+				cfg.Current = ""
+				return true, nil
+			}); serr != nil {
+				return serr
 			}
 			body, berr := loginRecord(l, map[string]any{"revoked": revoked})
 			if berr != nil {
@@ -710,4 +758,13 @@ func recoverCmd() *cobra.Command {
 	cmd.Flags().StringVar(&phrase, "phrase", "", "Recovery phrase (prompted if omitted)")
 	cmd.Flags().StringVar(&newPassword, "password", "", "New password (prompted if omitted)")
 	return cmd
+}
+
+// selected marks the one record a bare command acts through: the kernel a login is held on, or the
+// login itself. One column rather than a symbol in the margin, so the reader is not decoding marks.
+func selected(row json.RawMessage) string {
+	if strField(row, "selected") == "true" {
+		return "yes"
+	}
+	return ""
 }

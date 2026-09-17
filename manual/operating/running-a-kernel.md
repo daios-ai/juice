@@ -37,8 +37,12 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
+INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
+
+The ready line names the kernel, network, HTTP address, and public key.
+Federation listening addresses are available through `juice admin kernel show`.
 
 On `test` and `real`, first boot also reaches the chain and records the block it
 starts watching for payments from. It asks nothing more: those networks name a
@@ -207,9 +211,11 @@ the records and keys needed to resolve them.
 
 ## Joining the network
 
-The default `bootstrap_peers` connect the kernel to the network, after which
-it discovers peers and exchanges public catalogs. Eligible public actions are
-then available to remote callers without another registration step.
+The world file supplies the default seeds used to find peers and exchange
+public catalogs. Set `bootstrap_peers` to override them, or to `[]` to disable
+discovery. `play` and `test` currently ship without seeds; configure a peer in
+the same world to connect their kernels. Eligible public actions then become
+available to remote callers without another registration step.
 
 Peers are identified by public key. A kernel behind a home router can be reached
 directly, through hole punching, or through a relay, without configuring port
@@ -227,6 +233,9 @@ Listen addresses:
 ```
 
 ## Checking it is up
+
+On the serving machine, `serve` has already registered `acme`; no `kernel add`
+is needed.
 
 ```
 $ juice kernel health acme

@@ -843,11 +843,12 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 		"charge", charge, "premium", premium, "import_fee", importFee, "draw", drawn)
 
 	if ktx.Status == TxSuccess {
-		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, nil
+		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &localReceipt.Charge}, nil
 	}
 	// Return the committed local receipt alongside the error so an inbound caller can settle
 	// the real charge (a re-proxied remote subcall may have settled with charge > 0).
-	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID}, failErr
+	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &localReceipt.Charge},
+		withSettlement(failErr, ktx.ID, localReceipt.Charge)
 }
 
 // drawPayment decides what one obligation actually pays and produces the payment to make when the

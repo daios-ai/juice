@@ -2494,3 +2494,40 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		t.Errorf("step must freeze the fee it was funded under, got %v", step.ImportBPS)
 	}
 }
+
+// TestStepSettlementPostsToLedger: a step is a call whose payment was parked earlier, and it
+// settles like any other call — so the money it moves between accounts is posted, and the accounts
+// it touches still hold exactly what their postings say (D4, G1).
+func TestStepSettlementPostsToLedger(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+
+	payer := setupUser(t, st, "payer", 0)
+	worker := setupUser(t, st, "worker", 0)
+	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 1000, "test", "seed-step"); err != nil {
+		t.Fatal(err)
+	}
+
+	action := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: worker.ID, Name: "finish",
+		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
+		InputSchema:  map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"},
+		CreatedAt:    time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, action); err != nil {
+		t.Fatal(err)
+	}
+	_, tr := beginTestRun(t, st, payer.ID, action)
+	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.RequiredCaller{UserID: worker.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.CompleteStep(ctx, worker.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	assertLedgerExplainsBalances(t, st, payer.ID, worker.ID, testIssuerUserID)
+}

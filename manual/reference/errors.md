@@ -11,6 +11,10 @@ including when `--json` is selected. HTTP errors contain a JSON body with a
 stable `code`, a message, and any relevant `meta` fields. Programs should
 classify errors by status or code; message wording is intended for people.
 
+The client prints one error line, followed by a remedy when one is available.
+Declining a confirmation prints `cancelled` once, without an `error:` prefix;
+the exit status is still nonzero.
+
 | Code | Exit | HTTP | Meaning and what to do |
 |---|---|---|---|
 | `unauthenticated` | 2 | 401 | No valid session, or the account is suspended. Check the credentials or refresh the session; contact the operator if suspension is reported. |
@@ -21,7 +25,7 @@ classify errors by status or code; message wording is intended for people.
 | `insufficient_funds` | 6 | 402 | Not enough available balance. For a cross-kernel call you need the price **and** the stake. |
 | `timeout` | 7 | 504 | The call may have executed. Do not re-run; find out what happened. |
 | `grant_required` | 8 | 403 | You have not connected the upstream account this action needs. `meta.action` names what to connect. Nothing was charged and no failure was recorded against the action. |
-| `peer_unreachable` | 9 | 502 | The call provably never left your kernel and was fully refunded. Safe to retry. `meta.peer` names the kernel. |
+| `peer_unreachable` | 9 | 502 | The client cannot reach a kernel, or a federated call provably never reached its peer and was fully refunded. Exit 9 also applies to an unreachable local server. `meta.kernel` names a registered server; `meta.peer` names a federation peer. |
 | `peer_unfunded` | 10 | 402 | The other kernel will not serve on credit: either it has lent your kernel as much as it allows, or its provider cannot fund the work. `meta.peer` names it. |
 | `terms_changed` | 11 | 409 | The pinned contract no longer matches. Nothing was charged; the message carries the current price and hash. |
 | `invalid_state` | 1 | 409 | The operation does not apply here: completing a step that is not waiting, using a model that is not configured, editing a cached remote action. |
@@ -35,6 +39,9 @@ classify errors by status or code; message wording is intended for people.
 |---|---|---|
 | `action` | `grant_required` | the action reference to connect |
 | `peer` | `peer_unreachable`, `peer_unfunded`, `unauthorized` from a peer | the petname if one is bound, otherwise the public key |
+| `kernel` | an unreachable registered server | its name in the client |
+| `tx_id` | a settled execution failure | the committed transaction |
+| `charge` | a settled execution failure | the amount drawn, in base units, encoded as a string |
 | `process_id` | a parked run | the process to follow |
 | `pending_since` | a parked run | when the call was dispatched |
 | `refund_eligible_at` | a parked run | the time after which the retry worker may refund the call if no receipt has arrived |

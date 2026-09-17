@@ -8,8 +8,8 @@ nav_order: 2
 This chapter follows a purchase from both sides: a provider publishes an action,
 and a buyer finds it, runs it, and checks the resulting payment. You will run a
 kernel on the `play` network and create accounts for both participants. Since
-`play` uses credits with no real monetary value, the walkthrough requires no
-blockchain wallet or payment.
+`play` uses fUSDT (fake USDT) with no real monetary value, the walkthrough
+requires no blockchain wallet or payment.
 
 The examples include the commands, their output, and the answers to interactive
 prompts. Keep the complete identifiers returned by your kernel; the printed
@@ -67,6 +67,7 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
+INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
@@ -85,20 +86,14 @@ First boot also creates the superuser account, `sys`. You will use it to fund
 the buyer's account on `play`; it also gives the operator access to account
 records and administrative commands.
 
-## Tell the client about the kernel
+## The client already knows the kernel
 
 The `juice` executable provides both the server and its command-line client.
-Starting the server does not register it with the client. Add its HTTP address
-so that subsequent commands can refer to it by name:
+On every boot, `kernel serve` registers the kernel under its nickname before
+reporting ready. The client already knows `acme` and its current HTTP address.
 
-```
-$ juice kernel add http://localhost:4040
-acme  network play  http://localhost:4040  L3ciw7zj…  (added)
-```
-
-The client contacts the address and records the kernel's public key and network.
-Since this command supplies no local name, it uses the nickname reported by the
-kernel, `acme`.
+Use `kernel add` for a kernel somebody else runs, as shown in
+[Using somebody else's kernel](#using-somebody-elses-kernel).
 
 ## Create an account and log in
 
@@ -112,11 +107,11 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
-  available: 0.00 credits
+  available: 0.00 fUSDT
   description:
   handle: alice
   id: 5b984930-…
-  locked: 0.00 credits
+  locked: 0.00 fUSDT
 ```
 
 Save Alice's recovery phrase as you did the superuser's. Juice has no email
@@ -135,13 +130,13 @@ confirm its identity and initial balance:
 
 ```
 $ juice user me
-  available: 0.00 credits
+  available: 0.00 fUSDT
   connections: []
   connectors: []
   description:
   handle: alice
   id: 5b984930-…
-  locked: 0.00 credits
+  locked: 0.00 fUSDT
 ```
 
 You can check execution before adding funds by calling `sys/time`, one of the
@@ -158,6 +153,7 @@ $ juice run sys/time
   trace_id: 7f5bd164-…
   receipt_id: 13382701-…
   process_id: 8816e98e-…
+  charge: 0.00 fUSDT
 ```
 
 ## Put money in the account
@@ -168,7 +164,7 @@ same network.
 
 On `play`, the operator records deposits directly, using a reference from their
 own records. Here, `demo-payment-1` identifies the demonstration deposit. Log
-in as `sys` to credit Alice with ten credits. On a chain network, funding
+in as `sys` to credit Alice with 10 fUSDT. On a chain network, funding
 instead requires a token payment, as described in
 [Deposits and withdrawals](money/deposits-and-withdrawals.html).
 
@@ -177,8 +173,8 @@ $ juice auth login sys@acme
 Password:
 sys@acme
 $ juice admin user deposit alice 10 --ref demo-payment-1
-Credit 10.00 credits to alice, acting as sys@acme? This cannot be undone. [y/N] y
-  amount: 10.00 credits
+Credit 10.00 fUSDT to alice, acting as sys@acme? This cannot be undone. [y/N] y
+  amount: 10.00 fUSDT
   reason:
   created_at: 2026-09-14T15:05:37Z
   operator_handle: sys
@@ -218,7 +214,7 @@ Password:
 bob@acme
 ```
 
-As Bob, register the endpoint with a description, a price of half a credit, and
+As Bob, register the endpoint with a description, a price of 0.50 fUSDT, and
 an input schema requiring a text field named `msg`:
 
 ```
@@ -231,7 +227,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
   kind: http
   active: false
   visibility: private
-  price: 0.50 credits
+  price: 0.50 fUSDT
   description: Echo a message back to the caller
   …
   quote_hash: 1f8ec43b…
@@ -243,12 +239,11 @@ it:
 
 ```
 $ juice action enable bob/echo
-enabled bob/echo
+CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
+enabled  bob/echo  0.50 fUSDT  yes     private
 $ juice action update bob/echo --visibility local
-  …
-  active: true
-  visibility: local
-  …
+CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
+updated  bob/echo  0.50 fUSDT  yes     local
 ```
 
 ### Alice finds it and buys it
@@ -277,7 +272,7 @@ $ juice run sys/lookup '{"query":"echo a message"}'
 
 The search result contains the reference to call, its description and schemas,
 and its price. Because this is an action's JSON result, `price` uses integer
-base units: `500000` represents `0.50 credits`. Use the returned reference to
+base units: `500000` represents `0.50 fUSDT`. Use the returned reference to
 send Bob's action a message:
 
 ```
@@ -292,14 +287,15 @@ $ juice run bob/echo '{"msg":"hello"}'
   trace_id: 709b18e0-…
   receipt_id: d2b67088-…
   process_id: 5027b6df-…
+  charge: 0.50 fUSDT
 ```
 
 After the successful call, Alice's available balance has decreased by the
-advertised half credit:
+advertised 0.50 fUSDT:
 
 ```
 $ juice user me
-  available: 9.50 credits
+  available: 9.50 fUSDT
   …
 ```
 
@@ -312,10 +308,10 @@ $ juice tx show e989c5e1-…
   args: { "msg": "hello" }
   result: { … }
   status: success
-  gross: 0.50 credits
-  net: 0.40 credits
-  fee: 0.10 credits
-  refund: 0.00 credits
+  gross: 0.50 fUSDT
+  net: 0.40 fUSDT
+  fee: 0.10 fUSDT
+  refund: 0.00 fUSDT
   started_at: 2026-09-14T15:05:54Z
   ended_at: 2026-09-14T15:05:54Z
   rating: null
@@ -324,7 +320,7 @@ $ juice tx show e989c5e1-…
   target_handle: bob
 ```
 
-The transaction accounts for the half credit Alice paid: Bob receives `0.40`,
+The transaction accounts for the 0.50 fUSDT Alice paid: Bob receives `0.40`,
 and the kernel receives `0.10`. Since the action bought no further work, its
 whole price is margin, on which the default fee is 20%.
 [Earnings](providing/earnings.html) extends this calculation to composed actions.
@@ -341,7 +337,8 @@ $ juice tx rate e989c5e1-… 1 --note "did what it said"
   created_at: 2026-09-14T15:06:11Z
   signature: Tl8Nz00hxO5v…
 $ juice action ratings bob/echo
-1  2026-09-14T15:06:11Z  did what it said
+RATING  WHEN                  FROM   NOTE
+good    2026-09-14T15:06:11Z  local  did what it said
 ```
 
 The rating is available to readers who can see the action. It remains attached

@@ -3955,3 +3955,34 @@ func TestUpdateRevokesGrantsRegardlessOfActiveState(t *testing.T) {
 		t.Error("a description change must not revoke consent")
 	}
 }
+
+// assertLedgerExplainsBalances is the ledger's own check on the accounts table: every movement
+// between two accounts is a posting, so what an account holds — spendable or locked inside an open
+// process — is exactly what its postings say arrived less what they say left (D4, G1). It reads
+// nothing but public store methods, so any settlement path can be followed by it.
+func assertLedgerExplainsBalances(t *testing.T, st kernel.Store, userIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, id := range userIDs {
+		u, err := st.ReadUser(ctx, id)
+		if err != nil {
+			t.Fatalf("ledger invariant: ReadUser %s: %v", id, err)
+		}
+		entries, err := st.ListLedgerByUser(ctx, id, 1000, 0)
+		if err != nil {
+			t.Fatalf("ledger invariant: ListLedgerByUser %s: %v", id, err)
+		}
+		var posted int64
+		for _, e := range entries {
+			if e.ToUserID == id {
+				posted += e.Amount
+			}
+			if e.FromUserID == id {
+				posted -= e.Amount
+			}
+		}
+		if got := u.Available + u.Locked; got != posted {
+			t.Errorf("ledger invariant for %s: available+locked=%d, postings sum to %d", u.Handle, got, posted)
+		}
+	}
+}

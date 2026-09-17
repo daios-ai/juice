@@ -22,8 +22,16 @@ stored with mode 0600.
 | `world` | none | the network this kernel serves for life: `play` (no money), `test` (Arbitrum Sepolia), `real` (Arbitrum One), or the path to a world file. First boot asks; the answer is then recorded in the database, which is what later boots read |
 | `rail_rpc` | empty | the URL the kernel uses to reach the chain, overriding the one its network names. `test` and `real` name a public node, so this is needed only for a network that names none, or to use a provider or your own node. Ordinary configuration: change it and restart |
 | `kernel_handle` | the directory name | the nickname this kernel reports |
-| `bootstrap_peers` | the project's public node | peers dialled to join the network. An empty list disables discovery |
-| `fed_listen_addrs` | OS-assigned | where this kernel answers peers. Give each kernel its own when running more than one. A public node pins port 31313 |
+| `bootstrap_peers` | the world's seeds | absent uses the world file's `seeds`; `[]` disables discovery; a list uses those peers instead. First boot leaves this key absent unless you supplied it |
+| `fed_listen_addrs` | OS-assigned | where this kernel answers peers. Empty uses OS-assigned ports; a public seed pins port 31313 |
+
+World files carry a `seeds` list of bootstrap addresses for their own network.
+The shipped `play` and `test` lists are empty. These are world-file settings,
+not an additional key in `config.json`.
+
+With no `fed_listen_addrs`, the transport asks the OS for ports directly. It
+does not try 31313 first: libp2p's `SO_REUSEPORT` can let another kernel bind
+the same port, so a successful bind would not establish that the port was free.
 
 ## Money
 
