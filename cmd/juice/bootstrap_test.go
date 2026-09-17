@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -538,4 +540,63 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	if a.Price != 7 {
 		t.Errorf("price after reconcile = %d, want 7", a.Price)
 	}
+}
+
+// A chain world used to stop first boot with a question nobody could answer from the words on
+// screen. The shipped worlds name a node, so there is nothing left to ask; a world written without
+// one still asks, and still refuses off a terminal rather than guessing.
+func TestTheEndpointIsAskedOnlyWhenTheWorldNamesNone(t *testing.T) {
+	t.Run("a shipped chain world asks nothing", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "config.json"),
+			[]byte(`{"world":"test"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := firstBootConfig("acme", home)
+		if err != nil {
+			t.Fatalf("a chain world with a node in it still demanded one: %v", err)
+		}
+		if cfg.RailRPC != "" {
+			t.Errorf("first boot wrote an endpoint nobody typed: %q", cfg.RailRPC)
+		}
+		w, err := rail.Load(cfg.World)
+		if err != nil || w.RPC == "" {
+			t.Fatalf("the shipped world names no node: %+v %v", w.RPC, err)
+		}
+	})
+
+	t.Run("a world of one's own with no node is asked, and refused headless", func(t *testing.T) {
+		home := t.TempDir()
+		world := filepath.Join(home, "mine.json")
+		raw, err := os.ReadFile(filepath.Join("..", "..", "rail", "worlds", "test.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["name"] = "mine"
+		doc["rpc"] = ""
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(world, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "config.json"),
+			[]byte(`{"world":`+strconv.Quote(world)+`}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = firstBootConfig("acme", home)
+		if err == nil {
+			t.Fatal("a world naming no node was accepted with no endpoint and no terminal")
+		}
+		for _, want := range []string{`"rail_rpc"`, "no terminal"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal must name %s: %v", want, err)
+			}
+		}
+	})
 }

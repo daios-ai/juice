@@ -122,7 +122,16 @@ func runServer(name, addr string) error {
 	// The rail witnesses external money (D23). A world whose chain or token is wrong refuses the
 	// boot; one whose endpoint is merely down serves, and money verbs wait for it. It runs before
 	// the network is bound, so a world that is not what it claims binds nothing.
-	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC)
+	//
+	// Whether this is the kernel's first boot is the superuser record, not the database file: a
+	// first boot that fails here leaves the file behind and is run again against it. The error is
+	// not swallowed — a database that cannot be read would otherwise read as a new kernel, which is
+	// the one answer that lets a chain kernel seed past deposits it already holds.
+	made, err := k.GetConfig(context.Background(), configKeySuperuser)
+	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
+		return err
+	}
+	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC, made == "")
 	if err != nil {
 		return fmt.Errorf("rail: %w", err)
 	}

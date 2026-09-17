@@ -40,10 +40,11 @@ Superuser "sys" created.
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
-For a chain network, first boot also asks for the RPC endpoint through which
-the kernel will read the chain and submit payments. See
-[Setting up on a chain](#setting-up-on-a-chain). Declining creation or stopping
-before the network is chosen leaves no kernel state on disk.
+On `test` and `real`, first boot also reaches the chain and records the block it
+starts watching for payments from. It asks nothing more: those networks name a
+node to reach them through. See [Setting up on a chain](#setting-up-on-a-chain).
+Declining creation or stopping before the network is chosen leaves no kernel
+state on disk.
 
 {: .warning }
 > The network cannot be changed afterwards. A kernel serves the one it was created
@@ -67,9 +68,24 @@ identifying the kernel, network, and public key.
 A kernel on `test` or `real` needs access to the chain and funds for transaction
 fees. It generates its own rail key during setup. The sequence is:
 
-**1. Obtain a chain endpoint.** Supply the URL of a hosted node or one you
-operate yourself. The kernel uses it to read payments and submit transactions.
-First boot stores it as `rail_rpc`, which you may change later.
+**1. Decide which node to use.** `test` and `real` name a public one, so there is
+nothing to do here. The kernel reads payments and submits transactions through
+it. To use a hosted node or your own instead, set `rail_rpc` in the kernel's
+configuration; it overrides the network's and may be changed later.
+
+The first boot must reach that node, and everything it checks there must answer:
+the chain is the one named, the token at that address is the one named, and the
+kernel can buy the gas that sends a payment. Creating a kernel fixes its network
+for life and publishes the address people pay to, and it records the block from
+which payments are watched for, which cannot be guessed afterwards. So a first
+boot that cannot reach the chain, or finds any of that wrong, creates no kernel:
+no superuser, nothing serving. What it had already written, including its chain
+key, stays where it is, so fixing the cause and starting again continues from
+there rather than beginning afresh.
+
+Once the kernel exists, that is behind it. An unreachable node or a broken
+venue only delays money: the kernel serves, and the payment commands wait and
+say what is unready.
 
 **2. Start the kernel.** First boot generates `rail.key` in the kernel's home.
 This key controls its account on the chain.
@@ -139,8 +155,8 @@ $ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve acme --addr :4040
 ```
 
 If required configuration is missing and no terminal is available, startup
-fails with a message identifying the missing setting. A chain network also
-requires `rail_rpc`.
+fails with a message identifying the missing setting. A network that names no
+node of its own also requires `rail_rpc`.
 
 ## The kernel's home
 

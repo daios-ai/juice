@@ -1,13 +1,12 @@
 {
   "name": "real",
   "chainId": 42161,
-  "rpc": "",
+  "rpc": "https://arb1.arbitrum.io/rpc",
   "token": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
   "decimals": 6,
   "symbol": "USDT",
   "description": "USDT on Arbitrum One",
   "finality": "finalized",
-  "fromBlock": 493710567,
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
     "quoter": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",

@@ -24,7 +24,7 @@ _chain_world() {
     cat > "$CHAIN_WORLD" <<EOF
 {
   "name": "anvil", "chainId": 31337, "token": "$CHAIN_TOKEN", "decimals": 6,
-  "finality": "finalized", "fromBlock": 0,
+  "finality": "finalized",
   "venue": {"router": "$router", "quoter": "$router", "weth": "$weth", "feeTier": 500},
   "gas": {"min": "20000000000000000", "max": "50000000000000000", "feeBound": "10000000000000000",
           "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000}
@@ -97,6 +97,25 @@ flow_rail_chain() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     _chain_world "$dir" rail_chain || return
     local token="$CHAIN_TOKEN"
+
+    # Serving publishes the address anyone pays, so a kernel that cannot reach its chain must not
+    # serve at all: it would have no record of the block its payments are looked for from, and a
+    # payment arriving meanwhile would be invisible. The boot is refused whole and run again.
+    local deadcfg=() c
+    for c in "${CHAIN_CFG[@]}"; do
+        case "$c" in rail_rpc=*) deadcfg+=("rail_rpc=http://127.0.0.1:9") ;; *) deadcfg+=("$c") ;; esac
+    done
+    if make_admin "$db" "$hs" "${deadcfg[@]}" >/dev/null 2>&1; then
+        fail "rail_chain.unreachable_chain_creates_nothing" "the kernel served without reaching its chain"
+        stop_server "$db" 2>/dev/null
+    else
+        ok "rail_chain.unreachable_chain_creates_nothing"
+    fi
+    assert_eq "rail_chain.refused_boot_made_no_superuser" 0 \
+        "$(sqlite3 "$db" "select count(*) from accounts" 2>/dev/null || echo -1)"
+
+    # The same home, the chain now reachable: the rail key it already made is kept, and this time
+    # the scan start is fixed and the kernel serves.
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -120,7 +139,7 @@ flow_rail_chain() {
     # own before it can sign anything, which is the one thing no ledger can supply.
     anvil_send "$ANVIL_KEY" "$vault" --value 1ether
     local before; before=$(anvil_uint "$token" "balanceOf(address)(uint256)" "$aaddr")
-    j "$db" "$ha" user withdraw "$(units 5)" --yes >/dev/null 2>&1
+    j "$db" "$ha" user withdraw "$(units 5000000)" --yes >/dev/null 2>&1
     local status="" hash="" row
     deadline=$(( $(date +%s) + 90 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -179,10 +198,14 @@ flow_rail_chain_settlement() {
     anvil_send "$ANVIL_KEY" "$rvault" --value 1ether
 
     # L buys from R and now owes it. With no lottery the obligation is paid exactly.
-    publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price "$(units 1000000)" >/dev/null
+    #
+    # The price is what the seller will serve on credit: admission raises R's exposure by the whole
+    # advertised maximum and refuses if that passes credit_limit, which this suite sets to 100000.
+    # mp 10000 → sr 10500, the obligation; q 11025 is what L locks, keeping the 525 import fee.
+    publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price "$(units 10000)" >/dev/null
     local tx; tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)
     assert_nonempty "rail_chain_settlement.call" "$tx"
-    local d ticket; d=1050000
+    local d ticket; d=10500
     ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$tx")" ticket_id)
     assert_nonempty "rail_chain_settlement.names_its_ticket" "$ticket"
     assert_eq "rail_chain_settlement.seller_is_owed" 1 "$(owed_count "$FED_DBR" "$FED_HR" "$lkey")"
@@ -215,8 +238,15 @@ flow_rail_chain_refill_and_halt() {
 
     _chain_world "$dir" rail_refill || return
 
-    # A kernel buys its own fuel from the venue named in its world file (D23 refill). Point the
-    # router at the token, which has no swap entry point, and that purchase can never be priced.
+    # The kernel is made first, against a chain that answers for everything: creating one binds its
+    # network for life and publishes the address people pay to, so that much must be true once.
+    make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot" "server did not start"; return; }
+
+    # Then the venue breaks under it, which is how a venue actually fails: while a kernel is
+    # running, not before it exists. A kernel buys its own fuel from the venue named in its world
+    # file (D23 refill); point the router at the token, which has no swap entry point, and that
+    # purchase can never be priced again.
+    stop_server "$db"
     python3 - "$CHAIN_WORLD" "$CHAIN_TOKEN" <<'PYEOF'
 import json, sys
 w = json.load(open(sys.argv[1]))
@@ -224,8 +254,7 @@ w["venue"]["router"] = sys.argv[2]
 w["venue"]["quoter"] = sys.argv[2]
 json.dump(w, open(sys.argv[1], "w"))
 PYEOF
-
-    make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot" "server did not start"; return; }
+    start_server "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.reboot" "server did not restart with a broken venue"; return; }
     make_user "$db" "$hs" "$ha" alice
 
     # §13: "Money verbs also refuse until the full domain check — chain, token, decimals, venue —
@@ -300,18 +329,16 @@ flow_rail_sepolia() {
 
     dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
 
-    # The shipped `test` world names Arbitrum Sepolia's mock USDT0. Its fromBlock is where the file
-    # was written; move it near the head so the scanner does not replay millions of blocks. That is
-    # an operational field: the network digest is over {name, chainId, token} alone, so the kernel
-    # is on the same network either way.
+    # The shipped `test` world names Arbitrum Sepolia's mock USDT0, and the kernel starts its scan
+    # at the head it reads on first boot, so nothing has to be moved near it here. The endpoint is
+    # the run's own, which is why the world is copied at all.
     local finalized
     finalized=$(cast block finalized --rpc-url "$rpc" -f number 2>/dev/null)
     [ -n "$finalized" ] || { fail "sepolia.reachable" "no answer from $rpc"; return; }
     world="$dir/world.json"
-    python3 - "$world" "$finalized" <<'PYEOF'
+    python3 - "$world" <<'PYEOF'
 import json, sys
 w = json.load(open("rail/worlds/test.json"))
-w["fromBlock"] = int(sys.argv[2]) - 200
 json.dump(w, open(sys.argv[1], "w"), indent=2)
 PYEOF
     local token; token=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['token'])" "$world")

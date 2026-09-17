@@ -40,6 +40,10 @@ type lib interface {
 	ScanDeposits(ctx context.Context) ([]jrail.Deposit, error)
 	Deposits() ([]jrail.Deposit, error)
 	DepositsScannedTo() (uint64, bool, error)
+	// SeedScan fixes where this account's payment scan begins, once: the block the chain reports
+	// settled the first time it is reached. An address cannot have been paid before it existed, so
+	// everything below that block is empty, and walking it is work that grows by a day every day.
+	SeedScan(ctx context.Context) (uint64, error)
 	SettledBalances(ctx context.Context) (*big.Int, *big.Int, uint64, error)
 	// The three below are how a purchase the ledger never recorded is found again: unresolved ones
 	// the rail still holds, and, once resolved, the nonce each intent owns.
@@ -64,6 +68,30 @@ func (l railLib) IntentByNonce(nonce uint64) (jrail.Intent, bool, error) {
 	return l.store.IntentByNonce(l.Account(), nonce)
 }
 
+// SeedScan records the settled head as this account's scan cursor, unless it already has one. The
+// cursor is the rail's own durable record and only ever advances, so a repeat is a read.
+func (l railLib) SeedScan(ctx context.Context) (uint64, error) {
+	if at, ok, err := l.store.Cursor(l.Account()); err != nil {
+		return 0, err
+	} else if ok {
+		return at, nil
+	}
+	// The domain's tag as a negative block number is how the settled head is named, the same read
+	// the rail makes of it everywhere else.
+	head, err := l.client.HeaderByNumber(ctx, big.NewInt(int64(l.Domain().Finality)))
+	if err != nil {
+		return 0, fmt.Errorf("read settled head: %w", err)
+	}
+	if head == nil {
+		return 0, fmt.Errorf("read settled head: no header")
+	}
+	at := head.Number.Uint64()
+	if err := l.store.PutCursor(l.Account(), at); err != nil {
+		return 0, err
+	}
+	return at, nil
+}
+
 // Chain is the adaptor over juice-rail. It translates the rail's outcomes and adds none of its own:
 // every fact it reports came from a finalized chain read.
 type Chain struct {
@@ -77,22 +105,22 @@ type Chain struct {
 
 // Open builds the rail a world calls for. The world's defining part decides — a chain and a token,
 // or neither — so nothing anywhere asks whether the world is called play or real.
-func Open(ctx context.Context, w World, home, rpc string) (kernel.Rail, error) {
+func Open(ctx context.Context, w World, home, rpc string, firstBoot bool) (kernel.Rail, error) {
 	if !w.Chained() {
 		return NewManual(), nil
 	}
-	return OpenChain(ctx, w, home, rpc)
+	return OpenChain(ctx, w, home, rpc, firstBoot)
 }
 
 // OpenChain wires juice-rail to this kernel's own key and records, both kept beside the ledger they
 // belong to. A domain that is wrong rather than merely unreachable refuses the boot: money sent on
 // the wrong chain is simply gone.
-func OpenChain(ctx context.Context, w World, home, rpc string) (*Chain, error) {
+func OpenChain(ctx context.Context, w World, home, rpc string, firstBoot bool) (*Chain, error) {
 	if rpc == "" {
 		rpc = w.RPC
 	}
 	if rpc == "" {
-		return nil, fmt.Errorf("world %q needs rail_rpc: an endpoint is the one thing only you can supply", w.Name)
+		return nil, fmt.Errorf("world %q names no endpoint and rail_rpc is not set", w.Name)
 	}
 	domain, err := w.Domain()
 	if err != nil {
@@ -115,14 +143,51 @@ func OpenChain(ctx context.Context, w World, home, rpc string) (*Chain, error) {
 		return nil, err
 	}
 	c := &Chain{rail: railLib{Rail: r, store: store, client: client}, key: key, addr: crypto.PubkeyToAddress(key.PublicKey)}
-	// A wrong chain, token, or venue is a configuration error and must stop the boot. An endpoint
-	// that is merely down is not: the kernel serves, and money verbs wait for Ready.
-	if err := c.Ready(ctx); err != nil {
-		if errors.Is(err, jrail.ErrWrongDomain) || errors.Is(err, jrail.ErrBadInput) {
-			return nil, err
+	// Creating a kernel is when the network is bound for life and the address anyone pays becomes
+	// public, so the chain answers for all of it or there is no kernel: the chain it claims to be,
+	// the token at the address named, and the fuel that sends a payment. A kernel that already
+	// exists is past that question — a chain it cannot reach only makes money wait (D23).
+	verified := c.Ready(ctx)
+	if verified != nil {
+		if firstBoot || errors.Is(verified, jrail.ErrWrongDomain) || errors.Is(verified, jrail.ErrBadInput) {
+			return nil, verified
 		}
 	}
+	if err := fixScanStart(ctx, c.rail, firstBoot, rpc, filepath.Join(home, "rail.db")); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// fixScanStart settles where this kernel looks for payments, before it serves. Serving publishes
+// the address anyone pays, and dialling an endpoint is not reaching it, so a kernel whose node is
+// down gets as far as here with nothing recorded. Three states, and only the first is ordinary:
+//
+//   - a cursor exists: the scan continues from it, and an endpoint that is down costs nothing but
+//     a wait, as it did before;
+//   - none, and this is the kernel's first boot: the settled head becomes the cursor, or the boot
+//     fails and is run again — a kernel that never served was never paid;
+//   - none, and the kernel is already made: it has had an address in the world with nobody
+//     watching, so there is no honest answer and it refuses.
+//
+// Whether the chain answered for itself is settled in OpenChain before this runs: a first boot that
+// failed its check never reaches here, so a seed only ever follows a verified chain.
+func fixScanStart(ctx context.Context, l lib, firstBoot bool, endpoint, records string) error {
+	_, seeded, err := l.DepositsScannedTo()
+	if err != nil {
+		return err
+	}
+	if seeded {
+		return nil
+	}
+	if !firstBoot {
+		return fmt.Errorf("this kernel has a payment address but no record of where to look for "+
+			"payments, so one already made would be missed: restore %s, or serve a new kernel", records)
+	}
+	if _, err := l.SeedScan(ctx); err != nil {
+		return fmt.Errorf("first boot must reach %s to fix where payments are looked for: %w", endpoint, err)
+	}
+	return nil
 }
 
 // newChain builds an adaptor over an arbitrary library implementation, for tests.

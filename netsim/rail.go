@@ -251,8 +251,8 @@ func (a *anvilRail) Prepare(n *Net, s Shape) error {
 	a.token = token
 	world := map[string]any{
 		"name": "netsim-anvil", "chainId": 31337, "token": token, "decimals": 6,
-		"finality": "finalized", "fromBlock": 0,
-		"venue": map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
+		"finality": "finalized",
+		"venue":    map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
 		"gas": map[string]any{"min": "20000000000000000", "max": "50000000000000000",
 			"feeBound": "10000000000000000", "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000},
 	}
@@ -355,8 +355,9 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 			"deliberately or run it on anvil; the story is not reduced to fit", want, shape.Settlements, shape.PayingUsers, cap)
 	}
 	s.cap, s.estimate = cap, want
-	head, err := strconv.ParseInt(castOut("block", "finalized", "--rpc-url", s.rpc, "-f", "number"), 10, 64)
-	if err != nil {
+	// A finalized head is what says this endpoint answers at all, which is worth failing on here
+	// rather than inside a kernel's first boot.
+	if _, err := strconv.ParseInt(castOut("block", "finalized", "--rpc-url", s.rpc, "-f", "number"), 10, 64); err != nil {
 		return fmt.Errorf("no finalized head from %s", s.rpc)
 	}
 	raw, err := os.ReadFile("rail/worlds/test.json")
@@ -367,11 +368,11 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return err
 	}
-	// Only {name, chainId, token} fix the network digest. fromBlock near the head spares the scanner
-	// millions of blocks; the shipped gas band suits a kernel running for months, and one that lives
-	// for a run needs only enough for its payments — which also keeps it off the refill path this
-	// chain's shallow pool cannot serve (refill is exercised on anvil).
-	w["fromBlock"] = head - 200
+	// Only {name, chainId, token} fix the network digest, so the gas band is the run's to choose:
+	// the shipped one suits a kernel running for months, and one that lives for a run needs only
+	// enough for its payments — which also keeps it off the refill path this chain's shallow pool
+	// cannot serve (refill is exercised on anvil). Where the scan starts is not set here at all:
+	// the kernel reads the head at first boot.
 	if gas, ok := w["gas"].(map[string]any); ok {
 		gas["min"], gas["max"], gas["feeBound"] = "20000000000000", "60000000000000", "20000000000000"
 	}

@@ -61,7 +61,7 @@ client port and the peer transport alike. One server per kernel, enforced by the
 
 A kernel is created by its first boot, and only on the operator's word: a `config.json` written in
 advance, or an answer given at a terminal after they are told which kernels are here. It then asks
-for what the kernel cannot revise — its network, and the chain endpoint where the network has one —
+for what the kernel cannot revise — its network, and the chain endpoint where the network names none —
 and refuses off a terminal, naming the key and the file that would have answered. That first boot is
 the only writer of `config.json`, and it writes nothing until the answers are in hand, so a boot that
 is declined or unanswered leaves nothing behind. The network is recorded once the rail has verified

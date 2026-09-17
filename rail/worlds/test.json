@@ -1,13 +1,12 @@
 {
   "name": "test",
   "chainId": 421614,
-  "rpc": "",
+  "rpc": "https://sepolia-rollup.arbitrum.io/rpc",
   "token": "0x8e87deee3BF1eFE27E8e96ABf205BEDF802ed568",
   "decimals": 6,
   "symbol": "USDT",
   "description": "fake USDT on the Arbitrum Sepolia test chain",
   "finality": "latest",
-  "fromBlock": 297184700,
   "venue": {
     "router": "0x101F443B4d1b059569D643917553c771E1b9663E",
     "quoter": "0x2779a0CC1c3e0E44D2542EC3e79E3864Ae93Ef0B",

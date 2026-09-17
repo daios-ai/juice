@@ -72,8 +72,7 @@ Superuser "sys" created.
 INF server.ready handle=acme network=play addr=:4040 public_key=Kl8eObRJ…
 ```
 
-Declining, or interrupting before the money is chosen, leaves nothing behind. On a chain
-world one more question follows, for the endpoint that reaches it.
+Declining, or interrupting before the money is chosen, leaves nothing behind.
 
 **Write the phrase down**: it is the only way to reset the superuser password
 (`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
@@ -337,7 +336,7 @@ The ones you are most likely to touch:
 | `kernel_handle` / `bootstrap_peers` | Federation identity and the peers dialed to join the network |
 | `fed_listen_addrs` | Where this kernel answers peers; give each kernel its own when running more than one (as `--addr` does for clients) |
 | `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
-| `rail_rpc` | Endpoint of the chain the world names — required only for a world that has one |
+| `rail_rpc` | The node this kernel reaches its chain through, over the one its world names; needed only for a world naming none |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
 | `lottery` / `lottery_max` / `credit_limit` | The ticket this kernel settles a cross-kernel charge by (`0` pays every charge exactly), the largest ticket it accepts from a buyer, and the ceiling on work delivered and unpaid |

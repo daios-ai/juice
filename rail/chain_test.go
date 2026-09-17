@@ -36,6 +36,15 @@ type fakeLib struct {
 	nonce      uint64
 	byNonce    map[uint64]jrail.Intent
 
+	// The scan cursor as the rail keeps it: absent until something seeds it, and what the chain
+	// would answer if asked for its settled head.
+	cursor     uint64
+	hasCursor  bool
+	head       uint64
+	headErr    error
+	seeded     int
+	scannedErr error
+
 	prepared  int
 	sent      int
 	refilled  int
@@ -85,7 +94,29 @@ func (f *fakeLib) RefillCost(context.Context, jrail.ID) (*big.Int, error) {
 func (f *fakeLib) Intent(jrail.ID) (jrail.Intent, bool, error)           { return f.intent, true, nil }
 func (f *fakeLib) ScanDeposits(context.Context) ([]jrail.Deposit, error) { return nil, nil }
 func (f *fakeLib) Deposits() ([]jrail.Deposit, error)                    { return f.deposits, nil }
-func (f *fakeLib) DepositsScannedTo() (uint64, bool, error)              { return 7, true, nil }
+func (f *fakeLib) DepositsScannedTo() (uint64, bool, error) {
+	if f.scannedErr != nil {
+		return 0, false, f.scannedErr
+	}
+	if !f.hasCursor {
+		return 0, false, nil
+	}
+	return f.cursor, true, nil
+}
+
+// SeedScan is the library's own behaviour: the cursor if there is one, else the settled head,
+// stored. It counts its calls so a test can show the seed happens once.
+func (f *fakeLib) SeedScan(context.Context) (uint64, error) {
+	if f.hasCursor {
+		return f.cursor, nil
+	}
+	if f.headErr != nil {
+		return 0, f.headErr
+	}
+	f.seeded++
+	f.cursor, f.hasCursor = f.head, true
+	return f.head, nil
+}
 func (f *fakeLib) SettledBalances(context.Context) (*big.Int, *big.Int, uint64, error) {
 	return big.NewInt(500), big.NewInt(1), 9, nil
 }
@@ -493,4 +524,121 @@ func TestChainWitnessAcceptsTheKeyItMinted(t *testing.T) {
 	if _, err := c.Witness(ctx, all[0].TxHash, 0); err == nil {
 		t.Error("a hash carrying two payments must still be refused without an index")
 	}
+}
+
+// seedCases covers where a kernel's payment scan begins. Serving publishes the address anyone pays,
+// so the answer must exist before that, and it must never be "the head" for an address that has
+// already been in the world unwatched.
+func TestWhereTheScanBegins(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a new kernel starts at the settled head, once", func(t *testing.T) {
+		_, l := testChain(t)
+		l.head = 12345
+		at, err := l.SeedScan(ctx)
+		if err != nil || at != 12345 {
+			t.Fatalf("seed: %d %v", at, err)
+		}
+		// Twice is a read: the rail's cursor only advances, and a boot that already has one asks
+		// the chain nothing.
+		l.head = 99999
+		if at, err = l.SeedScan(ctx); err != nil || at != 12345 {
+			t.Fatalf("a second seed moved the cursor: %d %v", at, err)
+		}
+		if l.seeded != 1 {
+			t.Fatalf("seeded %d times, want once", l.seeded)
+		}
+	})
+
+	t.Run("an existing cursor is what the scan uses", func(t *testing.T) {
+		_, l := testChain(t)
+		l.cursor, l.hasCursor, l.head = 500, true, 900
+		at, err := l.SeedScan(ctx)
+		if err != nil || at != 500 {
+			t.Fatalf("an existing cursor was not preserved: %d %v", at, err)
+		}
+		if l.seeded != 0 {
+			t.Fatal("a kernel with a cursor asked the chain for a head it does not need")
+		}
+	})
+
+	// The three states the boot decides between, which is where the rule actually lives.
+	t.Run("a first boot with no cursor seeds and serves", func(t *testing.T) {
+		_, l := testChain(t)
+		l.head = 4242
+		if err := fixScanStart(ctx, l, true, "http://node", "/home/k/rail.db"); err != nil {
+			t.Fatalf("first boot refused a reachable chain: %v", err)
+		}
+		at, ok, _ := l.DepositsScannedTo()
+		if !ok || at != 4242 {
+			t.Fatalf("cursor %d present=%v, want the settled head", at, ok)
+		}
+	})
+
+	t.Run("a first boot that cannot reach the chain refuses", func(t *testing.T) {
+		_, l := testChain(t)
+		l.headErr = errors.New("connection refused")
+		err := fixScanStart(ctx, l, true, "http://node", "/home/k/rail.db")
+		if err == nil {
+			t.Fatal("a kernel served without knowing where to look for payments")
+		}
+		if !strings.Contains(err.Error(), "http://node") {
+			t.Fatalf("the refusal does not name what to fix: %v", err)
+		}
+		if _, ok, _ := l.DepositsScannedTo(); ok {
+			t.Fatal("a failed first boot left a cursor behind")
+		}
+	})
+
+	t.Run("a made kernel with no cursor refuses rather than guess", func(t *testing.T) {
+		_, l := testChain(t)
+		l.head = 4242
+		err := fixScanStart(ctx, l, false, "http://node", "/home/k/rail.db")
+		if err == nil {
+			t.Fatal("a kernel that has been in the world seeded itself at the head, skipping whatever it was paid")
+		}
+		if !strings.Contains(err.Error(), "/home/k/rail.db") {
+			t.Fatalf("the refusal does not name what is missing: %v", err)
+		}
+		if l.seeded != 0 {
+			t.Fatal("it seeded anyway")
+		}
+	})
+
+	t.Run("a cursor already there is left alone, chain or no chain", func(t *testing.T) {
+		_, l := testChain(t)
+		l.cursor, l.hasCursor = 77, true
+		l.headErr = errors.New("connection refused")
+		for _, first := range []bool{true, false} {
+			if err := fixScanStart(ctx, l, first, "http://node", "/home/k/rail.db"); err != nil {
+				t.Fatalf("firstBoot=%v: a kernel with a cursor was refused over an outage: %v", first, err)
+			}
+		}
+		if at, _, _ := l.DepositsScannedTo(); at != 77 {
+			t.Fatalf("the cursor moved to %d", at)
+		}
+	})
+
+	t.Run("a store that cannot be read is not a new kernel", func(t *testing.T) {
+		_, l := testChain(t)
+		l.scannedErr = errors.New("disk failure")
+		l.head = 4242
+		if err := fixScanStart(ctx, l, true, "http://node", "/home/k/rail.db"); err == nil {
+			t.Fatal("an unreadable cursor was taken for an absent one, which would seed past real payments")
+		}
+		if l.seeded != 0 {
+			t.Fatal("it seeded over a store it could not read")
+		}
+	})
+
+	t.Run("an unreachable chain seeds nothing", func(t *testing.T) {
+		_, l := testChain(t)
+		l.headErr = errors.New("dial tcp: connection refused")
+		if _, err := l.SeedScan(ctx); err == nil {
+			t.Fatal("a seed against an unreachable chain reported success")
+		}
+		if _, ok, _ := l.DepositsScannedTo(); ok {
+			t.Fatal("a failed seed left a cursor behind, so the scan would start from a block nobody read")
+		}
+	})
 }

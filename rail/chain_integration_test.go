@@ -305,7 +305,9 @@ func (f *chainFixture) open(w World, home string) (*Chain, error) {
 	if home == "" {
 		home = f.home
 	}
-	return OpenChain(context.Background(), w, home, "")
+	// A home with no rail database is a first boot: the scan is seeded at the head before anything
+	// serves, which is what the kernel does.
+	return OpenChain(context.Background(), w, home, "", true)
 }
 
 func pack(t *testing.T, method string, args ...any) []byte {

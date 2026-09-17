@@ -72,8 +72,14 @@ func firstBootConfig(name, home string) (ServerConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if world.Chained() && cfg.RailRPC == "" {
-		rpc, aerr := ask(fmt.Sprintf("Where does this kernel reach the %s chain", world.Name), "rail_rpc", path)
+	// A world that names an endpoint has answered this already; only one written without a default
+	// has to ask, and it says what it wants, since nobody can answer "where does it reach the chain"
+	// from the words alone.
+	if world.Chained() && world.RPC == "" && cfg.RailRPC == "" {
+		fmt.Fprintf(os.Stderr, "\n%s needs a node on the chain its money is on (%s).\n",
+			name, world.Description)
+		fmt.Fprintf(os.Stderr, "Give the web address of one, your own or a provider's.\n")
+		rpc, aerr := ask("Node address", "rail_rpc", path)
 		if aerr != nil {
 			return cfg, aerr
 		}

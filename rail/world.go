@@ -59,11 +59,14 @@ type World struct {
 	Symbol      string `json:"symbol"`
 	Description string `json:"description"`
 
-	RPC       string   `json:"rpc"`
-	Finality  string   `json:"finality"`
-	FromBlock uint64   `json:"fromBlock"`
-	Venue     venueCfg `json:"venue"`
-	Gas       gasCfg   `json:"gas"`
+	// RPC is the network's default endpoint, which a kernel's own `rail_rpc` overrides. A world
+	// that names none asks its operator at first boot. There is no field for where the payment scan
+	// starts: that is not the network's to say and not the operator's either — it is the block the
+	// chain reports when a kernel first reaches it, recorded then as the rail's own cursor.
+	RPC      string   `json:"rpc"`
+	Finality string   `json:"finality"`
+	Venue    venueCfg `json:"venue"`
+	Gas      gasCfg   `json:"gas"`
 }
 
 type venueCfg struct {
@@ -215,7 +218,9 @@ func (w World) Domain() (jrail.Domain, error) {
 	}
 	d := jrail.Domain{
 		Name: w.Name, ChainID: new(big.Int).SetUint64(w.ChainID), Token: token,
-		Decimals: w.Decimals, Finality: finality, FromBlock: w.FromBlock,
+		// FromBlock is left at zero: the rail reads it only when its own cursor is absent, and
+		// OpenChain seeds that cursor before any scan can run, so it is never consulted.
+		Decimals: w.Decimals, Finality: finality,
 		Venue: jrail.Venue{Router: router, Quoter: quoter, WETH: weth,
 			FeeTier: w.Venue.FeeTier, Router02: w.Venue.Router02},
 		Gas: gas,

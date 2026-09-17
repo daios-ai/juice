@@ -129,7 +129,7 @@ func TestOperationalFieldsDoNotMoveTheDigest(t *testing.T) {
 	base := writeWorld(t, doc)
 
 	doc["rpc"] = "https://example.invalid/rpc"
-	doc["fromBlock"] = float64(1)
+	doc["finality"] = "safe"
 	doc["gas"].(map[string]any)["slippageBps"] = float64(999)
 	moved := writeWorld(t, doc)
 
@@ -140,6 +140,36 @@ func TestOperationalFieldsDoNotMoveTheDigest(t *testing.T) {
 	doc["chainId"] = float64(1)
 	if writeWorld(t, doc) == base {
 		t.Fatal("a different chain must be a different network")
+	}
+}
+
+// A world once said where the payment scan begins. That is the block a kernel's own address came
+// into existence at, which no file can know and no two kernels share, so the key is gone and a file
+// still carrying it is refused by name rather than quietly ignored.
+func TestAWorldMayNotSayWhereTheScanBegins(t *testing.T) {
+	raw, err := os.ReadFile("worlds/real.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["fromBlock"] = float64(493710567)
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "w.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = rail.Load(p)
+	if err == nil {
+		t.Fatal("a world naming fromBlock was accepted")
+	}
+	if !strings.Contains(err.Error(), "fromBlock") {
+		t.Fatalf("the refusal does not name the key: %v", err)
 	}
 }
 
