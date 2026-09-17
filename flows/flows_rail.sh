@@ -167,7 +167,7 @@ flow_rail_world_mismatch() {
     local log="$(dirname "$db")/mismatch.log"
     write_config "$db" world="$other"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --addr 127.0.0.1:0 >"$log" 2>&1
+        "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --listen-addr 127.0.0.1:0 >"$log" 2>&1
     local code=$?
     assert_ne "rail_world_mismatch.refused" 0 "$code"
     assert_contains "rail_world_mismatch.says_why" "network" "$(cat "$log")"
@@ -185,7 +185,7 @@ flow_rail_lock() {
 
     local log="$(dirname "$db")/second.log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --addr 127.0.0.1:0 >"$log" 2>&1
+        "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --listen-addr 127.0.0.1:0 >"$log" 2>&1
     assert_ne "rail_lock.second_refused" 0 "$?"
     assert_contains "rail_lock.says_why" "another server" "$(cat "$log")"
 
@@ -377,9 +377,10 @@ flow_first_boot() {
     assert_contains "first_boot.name_required" "juice kernel serve NAME" "$out"
     assert_eq "first_boot.nothing_created" "no" "$([ -d "$root/kernels" ] && echo yes || echo no)"
 
-    # A name nothing here answers to, with nobody to ask: creating a kernel is the operator's act,
-    # so it is refused, it says what exists, and it leaves not even a directory behind.
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --addr 127.0.0.1:0 2>&1)
+    # A name nothing here answers to, with nobody to ask and nothing said about what to make:
+    # creating a kernel is the operator's act, so it is refused, it says what exists, and it
+    # leaves not even a directory behind.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme 2>&1)
     assert_contains "first_boot.unknown_kernel_refused" "no kernel named acme" "$out"
     assert_contains "first_boot.refusal_says_what_to_write" '"world"' "$out"
     assert_eq "first_boot.nothing_written" "no" "$([ -d "$root/kernels/acme" ] && echo yes || echo no)"
@@ -387,20 +388,22 @@ flow_first_boot() {
     # A written configuration is consent, but not an answer to the question a kernel cannot revise.
     mkdir -p "$root/kernels/acme"
     echo '{"kernel_handle":"acme"}' > "$root/kernels/acme/config.json"
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --addr 127.0.0.1:0 2>&1)
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 2>&1)
     assert_contains "first_boot.world_required" "world" "$out"
     assert_eq "first_boot.no_database" "no" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
 
     # A misspelled key is not a key: the setting the operator meant keeps its default otherwise.
     echo '{"wolrd":"play"}' > "$root/kernels/acme/config.json"
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --addr 127.0.0.1:0 2>&1)
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 2>&1)
     assert_contains "first_boot.unknown_key_refused" "wolrd" "$out"
 
     # Named world, named kernel: it boots, and says which kernel on which network.
     echo '{"world":"play","bootstrap_peers":[],"log_format":"json"}' > "$root/kernels/acme/config.json"
     local log="$dir/first.log"
+    # Its own federation addresses: this machine may already be running a kernel on the standard
+    # port, and a second kernel is refused it rather than given a share of it.
     JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
-        "$JUICE" kernel serve acme --addr 127.0.0.1:0 >"$log" 2>&1 &
+        "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local i
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log" 2>/dev/null && break; sleep 0.1; done
@@ -419,10 +422,35 @@ p = sys.argv[1]
 c = json.load(open(p)); c.pop("world", None); json.dump(c, open(p, "w"))
 PY
     local log2="$dir/second.log"
-    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve acme --addr 127.0.0.1:0 >"$log2" 2>&1 &
+    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log2" 2>&1 &
     pid=$!; track_pid "$pid"
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log2" 2>/dev/null && break; sleep 0.1; done
     assert_contains "first_boot.network_from_the_record" '"network":"play"' "$(cat "$log2")"
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+    # Every setting of the file is also an option, and an option wins for that run only: the kernel
+    # answers to the name given here, and the file still says what the kernel is.
+    local log3="$dir/third.log"
+    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
+        --kernel-handle bravo >"$log3" 2>&1 &
+    pid=$!; track_pid "$pid"
+    for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log3" 2>/dev/null && break; sleep 0.1; done
+    assert_contains "first_boot.option_wins_over_the_file" '"handle":"bravo"' "$(cat "$log3")"
+    assert_contains "first_boot.option_is_not_written_down" '"kernel_handle": "acme"' "$(cat "$root/kernels/acme/config.json")"
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+
+    # Naming the network on the command line is the same consent as writing it in a file: a machine
+    # with no terminal creates a kernel with nothing written down first.
+    local log4="$dir/cli.log"
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
+        "$JUICE" kernel serve cli --world play --listen-addr 127.0.0.1:0 \
+        --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
+        --bootstrap-peers= --log-format json >"$log4" 2>&1 &
+    pid=$!; track_pid "$pid"
+    for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log4" 2>/dev/null && break; sleep 0.1; done
+    assert_contains "first_boot.created_from_the_command_line" '"handle":"cli"' "$(cat "$log4")"
+    assert_contains "first_boot.command_line_network" '"network":"play"' "$(cat "$log4")"
+    assert_contains "first_boot.command_line_written_down" '"world": "play"' "$(cat "$root/kernels/cli/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
     # A second kernel is named, and a name this installation does not know is told what it does.

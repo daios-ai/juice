@@ -3406,3 +3406,32 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 		t.Errorf("public key %q, want the key /health reported", k.PublicKey)
 	}
 }
+
+// A kernel publishes where peers dial it, so an operator checking their own node from outside — and
+// a client turning a client address into a federation address — reads it from the node itself
+// rather than from a log line on the machine that runs it.
+func TestHealthPublishesTheFederationAddresses(t *testing.T) {
+	k, _ := newRemoteTestKernel(t)
+	addr := "/ip4/198.51.100.7/tcp/31313/p2p/12D3KooWTest"
+	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{addrs: []string{addr}}}
+
+	rec := httptest.NewRecorder()
+	srv.getHealth(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var body struct {
+		FedAddrs []string `json:"fed_addrs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health: %v (%s)", err, rec.Body.String())
+	}
+	if len(body.FedAddrs) != 1 || body.FedAddrs[0] != addr {
+		t.Fatalf("fed_addrs = %v, want [%s]", body.FedAddrs, addr)
+	}
+
+	// Before the transport starts, the field is an empty list rather than absent or null: a reader
+	// finds a list either way.
+	rec = httptest.NewRecorder()
+	(&server{kernel: k, log: log.Discard()}).getHealth(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if !strings.Contains(rec.Body.String(), `"fed_addrs":[]`) {
+		t.Fatalf("health with no transport: %s", rec.Body.String())
+	}
+}

@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/spf13/pflag"
 )
 
 func TestRemoteRetryInterval(t *testing.T) {
@@ -504,5 +507,123 @@ func TestKernelsHereNamesOnlyRealKernels(t *testing.T) {
 	}
 	if got := kernelsHere(); len(got) != 1 || got[0] != "alpha" {
 		t.Errorf("kernels here: got %v, want [alpha]", got)
+	}
+}
+
+// ---- Command-line overrides ----
+
+// Every setting of the configuration file is settable on the command line, because the flags are
+// derived from the struct: a setting added later gets its flag without anyone remembering to add
+// one. The exception is the credentials key, which would otherwise stand in the process table for
+// every user of the machine to read.
+func TestEveryConfigKeyHasAFlag(t *testing.T) {
+	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	holder := DefaultServerConfig()
+	bindConfigFlags(fs, &holder)
+
+	var missing []string
+	configFields(&holder, func(name string, _ reflect.Value) {
+		if name == "credentials-key" {
+			if fs.Lookup(name) != nil {
+				t.Error("the credentials key is settable on the command line, where the machine can read it")
+			}
+			return
+		}
+		if fs.Lookup(name) == nil {
+			missing = append(missing, name)
+		}
+	})
+	if len(missing) > 0 {
+		t.Fatalf("settings with no flag: %s", strings.Join(missing, ", "))
+	}
+	// A spot check that the spelling is the key's, so the operator reads one vocabulary.
+	for _, name := range []string{"listen-addr", "fed-listen-addrs", "fee-bps", "native.llm.url", "native.lookup.default-limit"} {
+		if fs.Lookup(name) == nil {
+			t.Errorf("no flag named %s", name)
+		}
+	}
+}
+
+// What the command line says wins over the file, for the settings named on it and no others.
+func TestCommandLineWinsOverTheFile(t *testing.T) {
+	file := DefaultServerConfig()
+	file.ListenAddr = ":9999"
+	file.FeeBPS = 1234
+	file.World = "play"
+	file.AllowLocalSources = true
+	file.Native.LLM.URL = "http://file:11434"
+	file.Native.Lookup.DefaultLimit = 7
+	file.FedListenAddrs = []string{"/ip4/0.0.0.0/tcp/1"}
+	lot := int64(11)
+	file.Lottery = &lot
+
+	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	serveOverride = DefaultServerConfig()
+	bindConfigFlags(fs, &serveOverride)
+	serveFlags = fs
+	t.Cleanup(func() { serveFlags = nil })
+	if err := fs.Parse([]string{"--listen-addr", ":4141", "--fee-bps", "500",
+		"--allow-local-sources=false", "--native.llm.url", "http://flag:11434",
+		"--native.lookup.default-limit", "3", "--fed-listen-addrs", "/ip4/0.0.0.0/tcp/2",
+		"--lottery", "22"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	got := file
+	applyConfigFlags(&got)
+	if got.ListenAddr != ":4141" || got.FeeBPS != 500 || got.AllowLocalSources {
+		t.Fatalf("plain settings not overridden: %+v", got)
+	}
+	if got.Native.LLM.URL != "http://flag:11434" || got.Native.Lookup.DefaultLimit != 3 {
+		t.Fatalf("nested settings not overridden: %+v", got.Native)
+	}
+	if len(got.FedListenAddrs) != 1 || got.FedListenAddrs[0] != "/ip4/0.0.0.0/tcp/2" {
+		t.Fatalf("list setting not overridden: %v", got.FedListenAddrs)
+	}
+	if got.Lottery == nil || *got.Lottery != 22 {
+		t.Fatalf("pointer setting not overridden: %v", got.Lottery)
+	}
+	// Untyped on that command line, so the file still decides it.
+	if got.World != "play" {
+		t.Fatalf("a setting nobody typed was overwritten: world = %q", got.World)
+	}
+	// And the file itself is unchanged: an override lasts for the run, not for the kernel.
+	if file.ListenAddr != ":9999" || file.FeeBPS != 1234 {
+		t.Fatalf("the loaded configuration was mutated: %+v", file)
+	}
+}
+
+// With no serve command in play — every other command, and every test that does not parse flags —
+// the configuration is the file's alone.
+func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
+	serveFlags = nil
+	cfg := DefaultServerConfig()
+	cfg.FeeBPS = 4321
+	applyConfigFlags(&cfg)
+	if cfg.FeeBPS != 4321 {
+		t.Fatalf("configuration changed with no flags parsed: %d", cfg.FeeBPS)
+	}
+}
+
+// A setting that says three things keeps all three on the command line: absent leaves the file's
+// answer, a list replaces it, and an empty list is the answer "no discovery" rather than silence.
+func TestAnEmptyListOnTheCommandLineIsAnAnswer(t *testing.T) {
+	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	serveOverride = DefaultServerConfig()
+	bindConfigFlags(fs, &serveOverride)
+	serveFlags = fs
+	t.Cleanup(func() { serveFlags = nil })
+	if err := fs.Parse([]string{"--bootstrap-peers="}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	cfg := DefaultServerConfig()
+	seeds := []string{"/dns4/seed.example/tcp/31313/p2p/k"}
+	cfg.BootstrapPeers = &seeds
+	applyConfigFlags(&cfg)
+	if cfg.BootstrapPeers == nil {
+		t.Fatal("an empty list read as silence: the world's seeds would be dialled anyway")
+	}
+	if len(*cfg.BootstrapPeers) != 0 {
+		t.Fatalf("bootstrap_peers = %v, want an empty list", *cfg.BootstrapPeers)
 	}
 }

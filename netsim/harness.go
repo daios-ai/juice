@@ -356,7 +356,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(n.Binary, "kernel", "serve", name, "--addr", "127.0.0.1:0")
+	cmd := exec.Command(n.Binary, "kernel", "serve", name, "--listen-addr", "127.0.0.1:0")
 	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass",
 		"JUICE_HOME="+dir, "HOME="+n.home("sysop-"+name))
 	cmd.Stdout, cmd.Stderr = lf, lf

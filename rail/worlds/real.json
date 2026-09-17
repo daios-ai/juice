@@ -7,7 +7,7 @@
   "symbol": "USDT",
   "description": "USDT on Arbitrum One",
   "seeds": [
-    "/dns4/daios.ai/tcp/31313/p2p/12D3KooWE2MELSd8JvKxdNDwqGczfJ4ki3VKfNeWFiYJKjwqCuVx"
+    "/dns4/daios.ai/tcp/31313/p2p/12D3KooWSFjAPY5Uk4t6B7zuYx5gBp5sURKD2rLebXs1rxKZszBb"
   ],
   "finality": "finalized",
   "venue": {

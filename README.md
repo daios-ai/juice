@@ -47,7 +47,7 @@ make install        # copies it to ~/.juice/bin, where install.sh puts it
 Either way, the first kernel is one command:
 
 ```bash
-juice kernel serve acme --addr :4040
+juice kernel serve acme --listen-addr :4040
 ```
 
 `acme` is the kernel's nickname: what it calls itself on the network,
@@ -80,15 +80,18 @@ Declining, or interrupting before the money is chosen, leaves nothing behind.
 the kernel's own database — and each repeats the ready line, which is where the kernel
 says which nickname, which network and which key answered.
 
-To boot without a terminal, write the configuration first and set the password in the
-environment. That file is the consent a machine with no terminal can give, so `serve`
-creates the kernel without asking:
+To boot without a terminal, name the network on the command line and set the password in
+the environment. Saying what the kernel is, is the consent a machine with no terminal can
+give, so `serve` creates it without asking:
 
 ```bash
-mkdir -p ~/.juice/kernels/acme
-echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
-JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve acme
+JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve acme --world play
 ```
+
+Every setting of `config.json` is an option here — the key with underscores written as
+dashes, a nested key as a path (`--native.llm.url`) — and an option applies to that run
+only, except on a first boot, which writes what you give it as the new kernel's
+configuration. Writing the file yourself first does the same thing.
 
 A kernel's whole state lives in that one directory: the database (which holds the signing
 key), `config.json`, and the rail's key and records. A second kernel is a second name, so
@@ -348,7 +351,8 @@ The ones you are most likely to touch:
 |---|---|
 | `kernel_handle` | The nickname this kernel reports |
 | `bootstrap_peers` | Absent: use the world's seeds; `[]`: disable discovery; a list: use those peers instead. `play` and `test` currently have no seeds |
-| `fed_listen_addrs` | Where this kernel answers peers; empty uses OS-assigned ports. A public seed pins its listening address |
+| `listen_addr` | Where this kernel answers clients (default `:4040`) |
+| `fed_listen_addrs` | Where this kernel answers peers; empty binds the standard port 31313, and a second kernel on the same machine needs its own |
 | `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
 | `rail_rpc` | The node this kernel reaches its chain through, over the one its world names; needed only for a world naming none |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |

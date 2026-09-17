@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -80,10 +81,45 @@ func KeyFromPeerID(id peer.ID) (string, error) {
 
 // ---- Host lifecycle ----
 
-// StdPort is the standard Juice federation port: what a world's seed pins in its own config so
-// others can bootstrap to a stable address. Below the Linux ephemeral range (32768+), uncommon,
-// and echoes Ethereum's 30303. Every other kernel takes an OS-assigned port and is found by key.
+// StdPort is the standard Juice federation port, bound by default the way 8333 is bitcoin's and
+// 30303 Ethereum's: a kernel is dialable at a known number, so a firewall rule or a port forward
+// can be written before the kernel exists. Below the Linux ephemeral range (32768+) and uncommon.
+// A second kernel on one host sets fed_listen_addrs; it does not get the port silently (claimPort).
 const StdPort = 31313
+
+// stdListenAddrs is what a kernel binds when its configuration names no addresses, over both
+// transports on the one port: TCP for ordinary dialing, QUIC for the hole punching a kernel behind
+// a home router needs.
+func stdListenAddrs(port int) []string {
+	return []string{
+		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", port),
+		fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port),
+	}
+}
+
+// claimPort fails when anything already holds the port a kernel is about to bind. libp2p opens its
+// sockets with SO_REUSEPORT, so its own bind of a held port SUCCEEDS and two kernels share it, each
+// taking a share of the other's connections; the collision has to be detected before libp2p binds.
+// These two sockets are plain, without that option, so the operating system refuses them whenever
+// the port is held at all, and they are closed again immediately.
+func claimPort(port int) error {
+	held := func(what string, err error) error {
+		return fmt.Errorf("fed: %s port %d is already in use by another program; give this kernel "+
+			"its own federation addresses (fed_listen_addrs in config.json, or --fed-listen-addrs): %w",
+			what, port, err)
+	}
+	l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return held("tcp", err)
+	}
+	_ = l.Close()
+	pc, err := net.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", port))
+	if err != nil {
+		return held("udp", err)
+	}
+	_ = pc.Close()
+	return nil
+}
 
 // Transport is the running federation carrier: a libp2p host plus a Kademlia DHT for
 // resolve-by-key, with the §13 protocols registered. It implements the outbound client
@@ -110,10 +146,18 @@ type option func(*buildOptions)
 type buildOptions struct {
 	dhtMode    dht.ModeOpt
 	dhtModeSet bool
+	stdPort    int // the standard port, overridden by tests that must not bind the real one
 }
 
 func withDHTMode(m dht.ModeOpt) option {
 	return func(o *buildOptions) { o.dhtMode = m; o.dhtModeSet = true }
+}
+
+// withStdPort moves the standard port for one transport, so a test can exercise the real
+// production path — claim the port, then bind it — without binding the port of a kernel this
+// machine may be running.
+func withStdPort(p int) option {
+	return func(o *buildOptions) { o.stdPort = p }
 }
 
 // New builds and starts a transport host from cfg. It listens, connects to the bootstrap peers,
@@ -123,7 +167,7 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 }
 
 func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, error) {
-	var bo buildOptions
+	bo := buildOptions{stdPort: StdPort}
 	for _, opt := range opts {
 		opt(&bo)
 	}
@@ -154,15 +198,21 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return libp2p.New(append(baseOpts, libp2p.ListenAddrStrings(listen...))...)
 	}
 
-	// A caller-supplied ListenAddrs is used verbatim; otherwise OS-assigned ports, so any number
-	// of kernels share one host and each is found by key. Only a seed pins StdPort, in its own
-	// config: binding it by default cannot be made safe, since libp2p opens its sockets with
-	// SO_REUSEPORT and a second bind of a held port succeeds instead of failing (§13, D20).
+	// A caller-supplied ListenAddrs is bound verbatim and unprobed: the operator chose it, and a
+	// failure to bind it is libp2p's to report. Loopback mode runs a whole network on one host, so
+	// there the default is OS-assigned ports. Otherwise the standard port, claimed first so a
+	// second kernel on this host is refused rather than silently sharing it (§13, D12).
 	var h host.Host
-	if len(cfg.ListenAddrs) > 0 {
+	switch {
+	case len(cfg.ListenAddrs) > 0:
 		h, err = build(cfg.ListenAddrs)
-	} else {
+	case cfg.AllowPrivateAddrs:
 		h, err = build([]string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"})
+	default:
+		if err = claimPort(bo.stdPort); err != nil {
+			return nil, err
+		}
+		h, err = build(stdListenAddrs(bo.stdPort))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fed: build host: %w", err)

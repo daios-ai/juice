@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
+
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/rail"
@@ -599,4 +601,42 @@ func TestTheEndpointIsAskedOnlyWhenTheWorldNamesNone(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A command line says everything a file says, so it is equally the operator's instruction to make
+// this kernel: a headless install can create one without writing a file first. What it does not say
+// is still refused — naming the network is the one answer nobody else can give.
+func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
+	bind := func(args ...string) func() {
+		fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+		serveOverride = DefaultServerConfig()
+		bindConfigFlags(fs, &serveOverride)
+		if err := fs.Parse(args); err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		serveFlags = fs
+		return func() { serveFlags = nil }
+	}
+
+	home := t.TempDir()
+	done := bind("--world", "play", "--kernel-handle", "acme")
+	cfg, err := firstBootConfig("acme", home)
+	done()
+	if err != nil {
+		t.Fatalf("a first boot answered entirely on the command line was refused: %v", err)
+	}
+	if cfg.World != "play" || cfg.KernelHandle != "acme" {
+		t.Fatalf("config: world=%q handle=%q", cfg.World, cfg.KernelHandle)
+	}
+	if _, serr := os.Stat(filepath.Join(home, "config.json")); !os.IsNotExist(serr) {
+		t.Error("first boot wrote the file itself; the caller writes it under the home's lock")
+	}
+
+	// Settings that leave the network unanswered do not answer it, and there is no terminal to ask.
+	done = bind("--log-level", "debug")
+	_, err = firstBootConfig("acme", t.TempDir())
+	done()
+	if err == nil || !strings.Contains(err.Error(), "--world") {
+		t.Fatalf("a first boot with no network named must be refused, naming the option: %v", err)
+	}
 }

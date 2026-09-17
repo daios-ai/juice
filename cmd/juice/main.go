@@ -132,6 +132,8 @@ func initConfig() error {
 		return kernel.ErrInvalidInput.Wrapf("config: %v", err)
 	}
 	applyEnvOverrides(&cfg)
+	// Last word to the command line, over both the file and the environment (§14).
+	applyConfigFlags(&cfg)
 	globalCfg = cfg
 	return nil
 }

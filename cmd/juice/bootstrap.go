@@ -40,18 +40,24 @@ func firstBootConfig(name, home string) (ServerConfig, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return cfg, err
 	}
-	// A configuration file written in advance is the operator saying, in the only way a machine with
-	// no terminal can, that this kernel should exist. Without one, they are asked — and told what is
-	// already here, since a name that is not on that list is usually a name mistyped.
-	if os.IsNotExist(err) {
+	// A first boot has no file to override, so what the command line says is simply what the
+	// kernel is: it answers the questions below rather than being asked them, and is written out
+	// as the kernel's own configuration (§14).
+	applyConfigFlags(&cfg)
+	// A configuration written in advance is the operator saying that this kernel should exist —
+	// in the file, or on the command line, which says the same things. Without either, they are
+	// asked, and told what is already here, since a name that is not on that list is usually a
+	// name mistyped.
+	if os.IsNotExist(err) && !configFlagsGiven() {
 		here := "No kernels here yet."
 		if others := kernelsHere(); len(others) > 0 {
 			here = "Kernels here: " + strings.Join(others, ", ") + "."
 		}
 		if !interactiveTTY() {
 			return cfg, fmt.Errorf("there is no kernel named %s, and no terminal to ask. %s\n"+
-				"       To create it without a terminal, write %s to %s and run this again",
-				name, here, worldChoices(), path)
+				"       To create it without a terminal, run this again with --world %s,\n"+
+				"       or write %s to %s",
+				name, here, rail.Shipped[0], worldChoices(), path)
 		}
 		fmt.Fprintf(os.Stderr, "There is no kernel named %s. %s\n", name, here)
 		if aerr := askYesNo(fmt.Sprintf("Create %s as a new kernel?", name)); aerr != nil {
@@ -106,8 +112,9 @@ func worldChoices() string {
 // that a network is called a world here or what is on the other end of the name.
 func askWorld(name, path string) (string, error) {
 	if !interactiveTTY() {
-		return "", fmt.Errorf("kernel %s: no %q in %s and there is no terminal to ask.\n"+
-			"       Write %s to that file and run this again", name, "world", path, worldChoices())
+		return "", fmt.Errorf("kernel %s: no network named, and there is no terminal to ask.\n"+
+			"       Run this again with --world %s, or write %s to %s",
+			name, rail.Shipped[0], worldChoices(), path)
 	}
 	fmt.Fprintf(os.Stderr, "\nWhich money will %s use? This cannot be changed later.\n", name)
 	for _, w := range rail.Shipped {

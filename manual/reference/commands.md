@@ -48,7 +48,13 @@ The JSON input can be supplied inline or read from a file with `@file.json`.
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |
 | `juice kernel forget NAME` | drop the record and its logins' credentials |
 
-For `kernel serve`, `--addr` selects the HTTP listening address used by clients.
+For `kernel serve`, every setting of the kernel's `config.json` is also an option,
+written as the key with underscores replaced by dashes and a nested key as a path:
+`--listen-addr :4141` selects the address clients reach, `--fed-listen-addrs` the
+addresses peers dial, `--native.llm.url` the language-model endpoint. An option
+applies to that run and is not written to the file, except on a first boot, which
+writes what you pass as the new kernel's configuration
+([Configuration](config.html)).
 
 `kernel serve` registers its kernel before reporting ready, so `kernel health NAME`
 works on the serving machine without a separate `kernel add`.

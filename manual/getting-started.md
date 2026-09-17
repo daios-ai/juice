@@ -46,7 +46,7 @@ In this walkthrough, the kernel is called `acme` and accepts HTTP clients on
 port 4040:
 
 ```
-$ juice kernel serve acme --addr :4040
+$ juice kernel serve acme --listen-addr :4040
 ```
 
 Because this is the first start of `acme`, the command asks you to confirm its

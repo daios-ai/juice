@@ -7,7 +7,7 @@
 #      in-process, so a flow can never bypass the binary. This is the whole point.
 #   2. Every spawned process is killed. One registry + one trap; leaks are impossible.
 #
-# Servers bind an OS-assigned port (--addr 127.0.0.1:0) and announce it via a JSON
+# Servers bind an OS-assigned port (--listen-addr 127.0.0.1:0) and announce it via a JSON
 # `server.ready` log line the harness reads. No port allocator, no /dev/null, no polling
 # a fixed port. Requires: bash>=4, python3, curl.
 
@@ -208,7 +208,7 @@ start_server() {
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" kernel serve "$inst" --addr 127.0.0.1:0 >>"$log" 2>&1 &
+        "$JUICE" kernel serve "$inst" --listen-addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/rail"
@@ -102,6 +105,7 @@ type ServerConfig struct {
 	LogFile                    string       `json:"log_file"`
 	LogFormat                  string       `json:"log_format"`
 	AllowLocalSources          bool         `json:"allow_local_sources"`
+	ListenAddr                 string       `json:"listen_addr"`                   // address the client API binds, host:port; host omitted ⇒ every interface, port 0 ⇒ OS-assigned
 	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
 	World                      string       `json:"world"`                         // the network this kernel serves: play, test, real, or a world file's path (D23)
@@ -166,6 +170,7 @@ func DefaultServerConfig() ServerConfig {
 		TokenTTL:          "15m",
 		AuthIssuer:        "",
 		AuthAudience:      "",
+		ListenAddr:        ":4040",
 		LogLevel:          "info",
 		LogFile:           "",
 		LogFormat:         "text",
@@ -225,6 +230,113 @@ func isTruthyEnv(v string) bool {
 	default:
 		return false
 	}
+}
+
+// ---- Command-line overrides ----
+
+// Every setting of config.json is also a flag of `kernel serve`, spelled as its key with `_`
+// written `-` and a nested key as a path (`--native.llm.url`), and a flag typed on the command line
+// wins over the file for that run. This is the arrangement bitcoin, redis and the docker daemon
+// use; the alternative is a file and nothing else (IPFS, nginx). What juice had was neither: one
+// port was a flag with no key and the other a key with no flag (§14).
+//
+// The flags are derived from the struct rather than declared one by one, so a new setting is a new
+// flag and the two cannot drift apart.
+var (
+	serveFlags    *pflag.FlagSet // the flags `kernel serve` parsed; nil under every other command
+	serveOverride ServerConfig   // what those flags parsed into
+)
+
+// bindConfigFlags registers one flag per setting on fs, parsing into `into`. Help shows the real
+// defaults, because `into` starts as the shipped configuration.
+func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
+	configFields(into, func(name string, f reflect.Value) {
+		// The credentials key is the one setting with no flag: a process's command line is
+		// readable by every user of the machine, and the key seals every stored credential.
+		// It is read from the file, or from JUICE_CREDENTIALS_KEY for a run that must not
+		// write it down.
+		if name == "credentials-key" {
+			return
+		}
+		usage := "sets " + strings.ReplaceAll(name, "-", "_") + " for this run"
+		// A setting held as a pointer says three things — absent, empty, and a value — so it is
+		// given a place to parse into before it is bound. Nothing is copied out of it unless the
+		// flag was actually typed, so the file keeps its own three states.
+		if f.Kind() == reflect.Ptr {
+			f.Set(reflect.New(f.Type().Elem()))
+			f = f.Elem()
+		}
+		switch p := f.Addr().Interface().(type) {
+		case *string:
+			fs.StringVar(p, name, *p, usage)
+		case *int:
+			fs.IntVar(p, name, *p, usage)
+		case *int64:
+			fs.Int64Var(p, name, *p, usage)
+		case *bool:
+			fs.BoolVar(p, name, *p, usage)
+		case *[]string:
+			fs.StringSliceVar(p, name, *p, usage)
+		}
+	})
+}
+
+// applyConfigFlags copies the settings named on the command line onto cfg, and only those: a flag
+// nobody typed leaves the file's value, and the file's silence, alone. It is not written back —
+// the file is what the kernel is, the command line what this run of it is — except on a first
+// boot, which has no file yet and writes the effective configuration as the kernel's own.
+func applyConfigFlags(cfg *ServerConfig) {
+	if serveFlags == nil {
+		return
+	}
+	dst := map[string]reflect.Value{}
+	configFields(cfg, func(name string, f reflect.Value) { dst[name] = f })
+	configFields(&serveOverride, func(name string, f reflect.Value) {
+		if target, ok := dst[name]; ok && serveFlags.Changed(name) {
+			target.Set(f)
+		}
+	})
+}
+
+// configFlagsGiven reports whether this command line carried any setting of the kernel's own. It
+// counts settings and nothing else — `--json` is a word to the client, not an instruction to make
+// a kernel — so a first boot can treat them as the operator's consent, exactly as a written file is.
+func configFlagsGiven() bool {
+	if serveFlags == nil {
+		return false
+	}
+	given := false
+	configFields(&serveOverride, func(name string, _ reflect.Value) {
+		if serveFlags.Changed(name) {
+			given = true
+		}
+	})
+	return given
+}
+
+// configFields visits every leaf setting of a configuration, naming each as the flag that sets it.
+// It is the single walk behind both halves above, so a flag is registered and applied under one name.
+func configFields(c *ServerConfig, visit func(name string, field reflect.Value)) {
+	var walk func(v reflect.Value, prefix string)
+	walk = func(v reflect.Value, prefix string) {
+		t := v.Type()
+		for i := 0; i < t.NumField(); i++ {
+			key, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+			if key == "" || key == "-" {
+				continue
+			}
+			name := strings.ReplaceAll(key, "_", "-")
+			if prefix != "" {
+				name = prefix + "." + name
+			}
+			if f := v.Field(i); f.Kind() == reflect.Struct {
+				walk(f, name)
+			} else {
+				visit(name, f)
+			}
+		}
+	}
+	walk(reflect.ValueOf(c).Elem(), "")
 }
 
 func writeConfig(path string, cfg ServerConfig) error {

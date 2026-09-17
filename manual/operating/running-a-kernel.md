@@ -14,11 +14,11 @@ network participation. Routine supervision is covered in
 ## Starting one
 
 ```
-$ juice kernel serve acme --addr :4040
+$ juice kernel serve acme --listen-addr :4040
 ```
 
 The name `acme` selects the kernel's directory and supplies its initial nickname.
-The `--addr` option sets its HTTP listening address. On first start, the command
+The `--listen-addr` option sets its HTTP listening address. On first start, the command
 asks you to confirm creation and select the network whose money the kernel will
 use:
 
@@ -42,7 +42,8 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
 The ready line names the kernel, network, HTTP address, and public key.
-Federation listening addresses are available through `juice admin kernel show`.
+Federation listening addresses are available through `juice admin kernel show`
+and `GET /health`.
 
 On `test` and `real`, first boot also reaches the chain and records the block it
 starts watching for payments from. It asks nothing more: those networks name a
@@ -148,15 +149,17 @@ from the ETH supplied for blockchain fees.
 
 ## Starting without a terminal
 
-For unattended first boot, create the configuration with the network choice
-in advance and provide the superuser password through
-`JUICE_BOOTSTRAP_PASSWORD`:
+For unattended first boot, name the network on the command line and provide the
+superuser password through `JUICE_BOOTSTRAP_PASSWORD`:
 
 ```
-$ mkdir -p ~/.juice/kernels/acme
-$ echo '{"world":"play"}' > ~/.juice/kernels/acme/config.json
-$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve acme --addr :4040
+$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve acme --world play --listen-addr :4040
 ```
+
+Naming settings is consent to create the kernel, so nothing is asked. Writing
+them to `config.json` beforehand does the same, and the two can be mixed. On a
+first boot the effective settings are written to that file as the new kernel's
+configuration; on every later boot an option applies to that run alone.
 
 If required configuration is missing and no terminal is available, startup
 fails with a message identifying the missing setting. A network that names no
@@ -183,12 +186,12 @@ To run another kernel under the same Juice installation, choose a different
 name:
 
 ```
-$ juice kernel serve beta --addr :4242
+$ juice kernel serve beta --listen-addr :4242
 ```
 
-Choose a distinct HTTP listening address. Federation uses OS-assigned ports
-by default; if you configure fixed `fed_listen_addrs`, avoid collisions there
-as well. An exclusive lock permits only one server to use a kernel's home at
+Choose a distinct HTTP listening address, and give the second kernel its own
+`fed_listen_addrs`: the first one holds the standard federation port, and the
+second refuses to start rather than share it. An exclusive lock permits only one server to use a kernel's home at
 a time. Its database and configuration locations follow from the home rather
 than separate `--db` or `--config` options.
 
@@ -220,7 +223,8 @@ available to remote callers without another registration step.
 Peers are identified by public key. A kernel behind a home router can be reached
 directly, through hole punching, or through a relay, without configuring port
 forwarding. Publicly reachable kernels also support routing and relay traffic;
-public bootstrap nodes conventionally listen on port 31313.
+every kernel listens on port 31313 unless its configuration says otherwise, so
+a seed is dialable at a known address with nothing to configure.
 
 Discovery is separated by network, so `play`, `test`, and `real` kernels find
 peers in their own network. You can inspect the local transport addresses with:
@@ -229,8 +233,11 @@ peers in their own network. You can inspect the local transport addresses with:
 $ juice admin kernel show
 …
 Listen addresses:
-  /ip4/127.0.0.1/tcp/31401/p2p/12D3KooWJHdK…
+  /ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…
 ```
+
+From another machine, request `GET /health` at the kernel's HTTP address. Its
+`fed_addrs` field lists the federation addresses; no login is needed.
 
 ## Checking it is up
 

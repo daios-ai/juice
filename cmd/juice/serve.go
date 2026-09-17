@@ -33,7 +33,6 @@ import (
 // kernelServeCmd is built like every other command, so a test can exercise its argument rules
 // without starting a server. It is registered under the kernel noun (see kernel.go).
 func kernelServeCmd() *cobra.Command {
-	var addr string
 	cmd := &cobra.Command{
 		Use:   "serve NAME",
 		Short: "Start a kernel",
@@ -49,11 +48,15 @@ func kernelServeCmd() *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(_ *cobra.Command, args []string) error {
-			return runServer(args[0], addr)
+		RunE: func(c *cobra.Command, args []string) error {
+			// Announced here rather than at registration: every setting typed on this command
+			// line now outranks the file, for this run only (§14).
+			serveFlags = c.Flags()
+			return runServer(args[0])
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", ":4040", "Address to listen on for clients")
+	serveOverride = DefaultServerConfig()
+	bindConfigFlags(cmd.Flags(), &serveOverride)
 	return cmd
 }
 
@@ -76,7 +79,7 @@ func holdHome() (func(), error) {
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
 
-func runServer(name, addr string) error {
+func runServer(name string) error {
 	if err := validateLocalName("kernel", name); err != nil {
 		return err
 	}
@@ -183,11 +186,11 @@ func runServer(name, addr string) error {
 
 	registerRoutes(r, srv)
 
-	// Bind explicitly so a bind failure is a real, immediate error, and so --addr host:0
-	// (OS-assigned port) works: we then advertise the address we actually bound.
-	ln, err := net.Listen("tcp", addr)
+	// Bind explicitly so a bind failure is a real, immediate error, and so a listen address
+	// ending in :0 (OS-assigned port) works: we then advertise the address we actually bound.
+	ln, err := net.Listen("tcp", globalCfg.ListenAddr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+		return fmt.Errorf("listen %s: %w", globalCfg.ListenAddr, err)
 	}
 	// Callback base URL for capability composition (§9): configured value, else derived from the
 	// bound port as a loopback URL — enough for the co-located (same-machine) endpoint.
@@ -282,8 +285,8 @@ func runServer(name, addr string) error {
 	// server.ready is emitted only after a successful bind — the harness waits on this line, and
 	// it is the last thing an operator sees at first boot, so it says what answered and nothing
 	// else: the kernel, its network, where clients reach it, and the key that is its identity.
-	// The federation addresses are `admin kernel show`'s to report; only a world's seed publishes
-	// one, and the peer id inside it is this same key in libp2p's spelling (D15, §14).
+	// The federation addresses are reported by /health and by `admin kernel show`, so the line
+	// stays short; the peer id inside them is this same key in libp2p's spelling (D15, §14).
 	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
 	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
 		"addr", ln.Addr().String(), "public_key", pubKey)
@@ -601,7 +604,25 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 		"symbol":         net.Symbol,
 		"token":          net.Token,
 		"rail_address":   s.railAddress(r.Context()),
+		// Where peers dial this kernel. Public already — the kernel advertises these in the
+		// routing table — and the one place a person outside can read them, which is what an
+		// operator checking their own node from elsewhere, and a client turning a client address
+		// into a federation address, both need (§13).
+		"fed_addrs": s.fedAddrs(),
 	})
+}
+
+// fedAddrs are the addresses the transport is reachable on, each ending in this kernel's peer id.
+// Empty before the transport starts, and never nil, so a reader finds a list either way.
+func (s *server) fedAddrs() []string {
+	if s.fed == nil {
+		return []string{}
+	}
+	addrs := s.fed.ListenAddrs()
+	if addrs == nil {
+		return []string{}
+	}
+	return addrs
 }
 
 func registerRoutes(r chi.Router, srv *server) {

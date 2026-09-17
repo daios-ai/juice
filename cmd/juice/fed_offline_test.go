@@ -34,6 +34,7 @@ type fakeFed struct {
 	stepStatus    int             // status Step returns alongside stepBody
 	stepMidStream bool            // Step fails after dispatch (may have executed remotely)
 	lastStep      fed.StepRequest // the last outbound step request, for assertions
+	addrs         []string        // what ListenAddrs reports, for the handlers that publish them
 }
 
 func (f *fakeFed) Gossip(_ context.Context, _ string, _ string) (json.RawMessage, error) {
@@ -74,7 +75,7 @@ func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 	}
 	return fed.Reachability{Path: p}
 }
-func (f *fakeFed) ListenAddrs() []string { return nil }
+func (f *fakeFed) ListenAddrs() []string { return f.addrs }
 func (f *fakeFed) Close() error          { return nil }
 
 // seedPeer creates a proxy peer with one active+public imported proxy action, returning its

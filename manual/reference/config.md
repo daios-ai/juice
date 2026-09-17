@@ -23,15 +23,29 @@ stored with mode 0600.
 | `rail_rpc` | empty | the URL the kernel uses to reach the chain, overriding the one its network names. `test` and `real` name a public node, so this is needed only for a network that names none, or to use a provider or your own node. Ordinary configuration: change it and restart |
 | `kernel_handle` | the directory name | the nickname this kernel reports |
 | `bootstrap_peers` | the world's seeds | absent uses the world file's `seeds`; `[]` disables discovery; a list uses those peers instead. First boot leaves this key absent unless you supplied it |
-| `fed_listen_addrs` | OS-assigned | where this kernel answers peers. Empty uses OS-assigned ports; a public seed pins port 31313 |
+| `listen_addr` | `:4040` | where this kernel answers clients, as `host:port`. Omit the host to answer on every interface; use port `0` to let the system choose one |
+| `fed_listen_addrs` | port 31313 | where this kernel answers peers. Empty binds the standard port on both transports; set it to give this kernel its own addresses |
 
 World files carry a `seeds` list of bootstrap addresses for their own network.
 The shipped `play` and `test` lists are empty. These are world-file settings,
 not an additional key in `config.json`.
 
-With no `fed_listen_addrs`, the transport asks the OS for ports directly. It
-does not try 31313 first: libp2p's `SO_REUSEPORT` can let another kernel bind
-the same port, so a successful bind would not establish that the port was free.
+With no `fed_listen_addrs`, the kernel binds port 31313, the standard Juice
+federation port, over both TCP and QUIC. If another program already holds it,
+the kernel refuses to start and names this key, rather than starting on a port
+nobody can predict. The check uses an ordinary socket, because libp2p opens its
+own with `SO_REUSEPORT`: its bind would succeed against a held port and the two
+kernels would share it. To run a second kernel on one machine, give this one
+its own addresses, for example `["/ip4/0.0.0.0/tcp/31314", "/ip4/0.0.0.0/udp/31314/quic-v1"]`.
+
+Every key on this page is also an option of `juice kernel serve`, written as the
+key with underscores replaced by dashes, and a nested key as a path:
+`--listen-addr :4141`, `--fee-bps 500`, `--native.llm.url http://localhost:11434`.
+An option given on the command line applies to that run only and is not written
+to the file. On a first boot, where there is no file yet, what you pass is
+written as the new kernel's configuration. The one key with no option is
+`credentials_key`, because anyone with an account on the machine can read
+another process's command line.
 
 ## Money
 

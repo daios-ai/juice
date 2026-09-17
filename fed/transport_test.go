@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
@@ -460,5 +461,106 @@ func TestStreamFloodFromOnePeerLeavesAnHonestPeerServed(t *testing.T) {
 	}
 	if leaked := runtime.NumGoroutine() - before; leaked > streams {
 		t.Errorf("goroutines grew by %d after a %d-stream flood; readers are not being reclaimed", leaked, streams)
+	}
+}
+
+// ---- The standard port ----
+
+// freePort returns a port nothing holds, so a test can exercise the standard-port path without
+// binding 31313, which a kernel on the developer's own machine may be serving.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find a free port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// The second kernel on one host must be refused the standard port, not given a share of it. This
+// is the whole reason the port is claimed before libp2p binds: libp2p sets SO_REUSEPORT, so its
+// own bind succeeds against a port another libp2p host already holds, and both kernels then take
+// turns receiving each other's connections — the failure that made two kernels on this machine
+// unable to resolve each other.
+func TestSecondKernelIsRefusedTheStandardPort(t *testing.T) {
+	port := freePort(t)
+	build := func() (*Transport, error) {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		return newTransport(context.Background(), Config{
+			Namespace:  testNamespace,
+			SigningKey: priv,
+			Handlers:   &fakeHandlers{},
+		}, withStdPort(port))
+	}
+	first, err := build()
+	if err != nil {
+		t.Fatalf("first kernel: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if !strings.Contains(strings.Join(first.ListenAddrs(), " "), fmt.Sprintf("/tcp/%d/", port)) {
+		t.Fatalf("first kernel did not bind the standard port: %v", first.ListenAddrs())
+	}
+
+	second, err := build()
+	if err == nil {
+		_ = second.Close()
+		t.Fatal("second kernel took the standard port instead of being refused it")
+	}
+	if !strings.Contains(err.Error(), "already in use") || !strings.Contains(err.Error(), "fed_listen_addrs") {
+		t.Fatalf("refusal does not say what is wrong or how to fix it: %v", err)
+	}
+}
+
+// Both transports of the standard port are claimed: a kernel that bound only the free one would be
+// half-reachable, answering ordinary dials and silently missing the QUIC ones NAT traversal needs.
+func TestClaimPortSeesAHeldPortOnEitherTransport(t *testing.T) {
+	t.Run("free", func(t *testing.T) {
+		if err := claimPort(freePort(t)); err != nil {
+			t.Fatalf("a free port was reported held: %v", err)
+		}
+	})
+	t.Run("tcp held", func(t *testing.T) {
+		port := freePort(t)
+		l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+		if err != nil {
+			t.Skipf("cannot hold tcp %d: %v", port, err)
+		}
+		defer l.Close()
+		if err := claimPort(port); err == nil {
+			t.Fatal("a port held over tcp was reported free")
+		}
+	})
+	t.Run("udp held", func(t *testing.T) {
+		port := freePort(t)
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", port))
+		if err != nil {
+			t.Skipf("cannot hold udp %d: %v", port, err)
+		}
+		defer pc.Close()
+		if err := claimPort(port); err == nil {
+			t.Fatal("a port held over udp was reported free")
+		}
+	})
+}
+
+// Configured addresses are bound as given and never probed: the operator said where this kernel
+// listens, and two kernels sharing an address on purpose (one host, one port, distinct interfaces)
+// is theirs to arrange.
+func TestConfiguredAddressesAreBoundVerbatim(t *testing.T) {
+	port := freePort(t)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	tr, err := newTransport(context.Background(), Config{
+		Namespace:   testNamespace,
+		SigningKey:  priv,
+		Handlers:    &fakeHandlers{},
+		ListenAddrs: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", port)},
+	}, withStdPort(freePort(t)))
+	if err != nil {
+		t.Fatalf("configured address: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	if !strings.Contains(strings.Join(tr.ListenAddrs(), " "), fmt.Sprintf("/tcp/%d/", port)) {
+		t.Fatalf("bound something other than the configured address: %v", tr.ListenAddrs())
 	}
 }
