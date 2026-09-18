@@ -8,10 +8,16 @@
 
 # Globals set by _fed_setup: FED_DBL FED_DBR FED_HL FED_HR FED_BPORT FED_RID FED_PROXY FED_RKEY FED_LKEY FED_BOOT.
 _fed_setup() {
-    local dir="$1"
-    FED_DBL="$(kdb "$dir/l")"; FED_DBR="$(kdb "$dir/r")"
+    local dir="$1" world=play
+    # Both kernels serve one network. FED_WORLDFILE names a world this build does not ship — the
+    # chain gate's — and is the file each installation gets; its own name is the world's.
+    [ -n "${FED_WORLDFILE:-}" ] && world=$(basename "${FED_WORLDFILE%.json}")
+    FED_DBL="$(kdb "$dir/l" "$world")"; FED_DBR="$(kdb "$dir/r" "$world")"
     FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
     mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
+    if [ -n "${FED_WORLDFILE:-}" ]; then
+        install_world "$FED_DBL" "$FED_WORLDFILE"; install_world "$FED_DBR" "$FED_WORLDFILE"
+    fi
 
     FED_BPORT=$(backend_port); start_backend "$FED_BPORT" 200 '{"greeting":"hello"}'
     # R boots first and is the flow's bootstrap+relay; L (and T, in the gossip flow) dial it. A short
@@ -24,8 +30,8 @@ _fed_setup() {
     j "$FED_DBR" "$FED_HR" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
     FED_BOOT=$(kernel_fed_addr "$FED_DBR" "$FED_HR")
     [ -n "$FED_BOOT" ] || return 1
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 "${FED_LCFG[@]:-}" || return 1
-    unset FED_RCFG FED_LCFG
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l seed="$FED_BOOT" discovery_interval_seconds=2 "${FED_LCFG[@]:-}" || return 1
+    unset FED_RCFG FED_LCFG FED_WORLDFILE
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
 
@@ -245,7 +251,7 @@ flow_fed_import_duty() {
     # 1050 + ceil(1050*2000/10000) = 1260 — with no re-resolve and no manifest change. Before this,
     # the total was frozen at import and only never-imported actions ever saw a fee change.
     stop_server "$FED_DBL"
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l import_bps=2000 bootstrap_peers="$FED_BOOT" \
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l import_bps=2000 seed="$FED_BOOT" \
         || { fail "fed_pricing.restart_l" "L did not restart"; return; }
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -314,7 +320,7 @@ flow_fed_gossip_discovery() {
     # Third kernel T joins the network via the seed and must discover R purely from gossip: its
     # discovery loop pulls gossip and indexes R's public action into T's lookup docs.
     local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
-    make_admin "$dbt" "$ht" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
+    make_admin "$dbt" "$ht" kernel_handle=kernel-t seed="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
 
     # Poll T's discovery cache until R's action surfaces in sys/lookup as a kernel-qualified reference.
     local found=no
@@ -398,7 +404,7 @@ flow_fed_discovery() {
     local rid; rid=$(publish "$dbr" "$hr" greet --kind http --source "http://127.0.0.1:$bport" --description greet --price "$(units 1000)")
 
     # L joins with R as its ONLY bootstrap peer; it must discover R without subscribing to it.
-    start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
+    start_server "$dbl" "$hl" kernel_handle=kernel-l seed="$boot" discovery_interval_seconds=2 \
         || { fail "fed_discovery.l" "L did not start"; return; }
     know "$dbl" "$hl"
     j "$dbl" "$hl" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -462,7 +468,7 @@ flow_fed_peer_sync() {
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     [ -n "$boot" ] || { fail "fed_peer_sync.boot" "no R fed addr"; return; }
-    start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=2 \
+    start_server "$dbl" "$hl" kernel_handle=kernel-l seed="$boot" discovery_interval_seconds=2 \
         || { fail "fed_peer_sync.l" "L did not start"; return; }
     know "$dbr" "$hr"
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -505,7 +511,7 @@ flow_fed_inspect_read_only() {
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     [ -n "$boot" ] || { fail "fed_inspect_read_only.boot" "no R fed addr"; return; }
-    start_server "$dbl" "$hl" kernel_handle=kernel-l bootstrap_peers="$boot" discovery_interval_seconds=3600 \
+    start_server "$dbl" "$hl" kernel_handle=kernel-l seed="$boot" discovery_interval_seconds=3600 \
         || { fail "fed_inspect_read_only.l" "L did not start"; return; }
     know "$dbr" "$hr"
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -743,7 +749,7 @@ flow_transfer() {
     know "$FED_DBR" "$FED_HR"
     j "$FED_DBR" "$FED_HR" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local boot; boot=$(kernel_fed_addr "$FED_DBR" "$FED_HR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l bootstrap_peers="$boot" || { fail "transfer.setup_l" "boot"; return; }
+    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l seed="$boot" || { fail "transfer.setup_l" "boot"; return; }
     know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
@@ -1232,7 +1238,7 @@ flow_compose_underfunded() {
 _fed_chain() {
     local dir="$1" leaf="${2:-1000}" wrap="${3:-2000}"; shift 3 2>/dev/null || shift $#
     FED3_DBT="$(kdb "$dir/t")"; FED3_HT="$dir/tsys"; mkdir -p "$dir/t" "$FED3_HT/.juice"
-    make_admin "$FED3_DBT" "$FED3_HT" kernel_handle=kernel-t bootstrap_peers="$FED_BOOT" \
+    make_admin "$FED3_DBT" "$FED3_HT" kernel_handle=kernel-t seed="$FED_BOOT" \
         discovery_interval_seconds=2 remote_retry_interval_seconds=2 "$@" || return 1
     FED3_TKEY=$(kernel_key "$FED3_DBT" "$FED3_HT")
     [ -n "$FED3_TKEY" ] || return 1

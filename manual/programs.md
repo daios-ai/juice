@@ -243,7 +243,7 @@ the key and network you expect:
 ```
 $ curl -s localhost:4040/health
 {"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
- "handle":"acme","network":"play","network_digest":"ef1fac03…",
+ "handle":"acme","network":"play","network_digest":"baed18ae…",
  "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"fUSDT","token":""}
 ```
 

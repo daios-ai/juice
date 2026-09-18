@@ -31,6 +31,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/daios-ai/juice/rail"
 )
 
 // Net is one run: the kernels, where its artifacts go, and what it has recorded.
@@ -310,7 +312,7 @@ type bootOpts struct {
 // it. A restart rewrites the file, so it starts from what is already there: first boot mints the
 // credentials key that seals every stored credential, and a kernel whose key has gone refuses to
 // serve rather than hold secrets it cannot read.
-func writeKernelConfig(path string, o bootOpts, railCfg map[string]any) error {
+func writeKernelConfig(path string, o bootOpts) error {
 	cfg := map[string]any{}
 	if prev, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(prev, &cfg)
@@ -321,33 +323,63 @@ func writeKernelConfig(path string, o bootOpts, railCfg map[string]any) error {
 		"credit_limit": o.CreditLimit, "lottery": o.Lottery, "lottery_max": o.LotteryMax,
 		"token_ttl": "60m", "log_level": "info", "log_format": "json",
 		"allow_local_sources": true, "kernel_handle": o.Handle,
-		"bootstrap_peers":               []string{},
 		"remote_retry_interval_seconds": o.RetrySeconds,
 		"discovery_interval_seconds":    2,
 	} {
-		cfg[key] = val
-	}
-	if o.Bootstrap != "" {
-		cfg["bootstrap_peers"] = []string{o.Bootstrap}
-	}
-	for key, val := range railCfg {
 		cfg[key] = val
 	}
 	b, _ := json.MarshalIndent(cfg, "", " ")
 	return os.WriteFile(path, b, 0o600)
 }
 
+// installWorld gives one kernel the world it will serve. The binary installs the worlds it ships
+// the first time it serves, so a shipped world is read back from there and a rail's own is written
+// beside them; either way this run's meeting point goes into the file, which is exactly what an
+// operator edits to join a network. Rewritten on every boot, so a restart rejoins the same way.
+func (n *Net) installWorld(dir, boot string) (string, error) {
+	worlds := filepath.Join(dir, "worlds")
+	if err := rail.Install(worlds); err != nil {
+		return "", err
+	}
+	name, doc := n.Rail.World()
+	path := filepath.Join(worlds, name+".json")
+	if doc == nil {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		doc = map[string]any{}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return "", err
+		}
+	}
+	seeds := []string{}
+	if boot != "" {
+		seeds = []string{boot}
+	}
+	doc["seeds"] = seeds
+	n.Run.WorldDigest = fmt.Sprintf("%s/%v/%v", name, doc["chainId"], doc["token"])
+	b, _ := json.MarshalIndent(doc, "", " ")
+	return name, os.WriteFile(path, b, 0o600)
+}
+
 // Boot starts (or restarts) a kernel that outlives the call. Restarting on the same directory is
 // how the story kills and revives a provider, so the two paths are one function.
 func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	dir := filepath.Join(n.Root, name)
-	if err := os.MkdirAll(filepath.Join(dir, "kernels", name), 0o700); err != nil {
+	world, err := n.installWorld(dir, o.Bootstrap)
+	if err != nil {
+		return nil, err
+	}
+	// One installation, one kernel per world, so each participant gets an installation of its own —
+	// which is what a separate machine is, and what the story is about.
+	if err := os.MkdirAll(filepath.Join(dir, "kernels", world), 0o700); err != nil {
 		return nil, err
 	}
 	if o.Handle == "" {
 		o.Handle = name
 	}
-	if err := writeKernelConfig(filepath.Join(dir, "kernels", name, "config.json"), o, n.Rail.Config()); err != nil {
+	if err := writeKernelConfig(filepath.Join(dir, "kernels", world, "config.json"), o); err != nil {
 		return nil, err
 	}
 
@@ -356,7 +388,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(n.Binary, "kernel", "serve", name, "--listen-addr", "127.0.0.1:0")
+	cmd := exec.Command(n.Binary, "kernel", "serve", world, "--listen-addr", "127.0.0.1:0")
 	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass",
 		"JUICE_HOME="+dir, "HOME="+n.home("sysop-"+name))
 	cmd.Stdout, cmd.Stderr = lf, lf
@@ -412,14 +444,29 @@ func (k *Kernel) Stop() {
 	time.Sleep(300 * time.Millisecond)
 }
 
-// FedAddr is the multiaddress a peer bootstraps from.
+// FedAddr is the multiaddress a peer bootstraps from, read from /health, which is where a kernel
+// says where peers dial it. The transport binds after the HTTP server, so the field is empty for a
+// moment after the ready line; it is polled rather than read once.
 func (k *Kernel) FedAddr() string {
-	s, err := waitFor(filepath.Join(k.Dir, "server.log"),
-		`(/ip4/127\.0\.0\.1/tcp/[0-9]+/p2p/[A-Za-z0-9]+)`, 10*time.Second)
-	if err != nil {
-		return ""
-	}
-	return s
+	addr := ""
+	poll(10*time.Second, 200*time.Millisecond, func() bool {
+		var h struct {
+			FedAddrs []string `json:"fed_addrs"`
+		}
+		if json.Unmarshal([]byte(k.Get("", "/health")), &h) != nil {
+			return false
+		}
+		for _, a := range h.FedAddrs {
+			// A TCP address on loopback: the run is one host, and a quic address cannot be dialled
+			// by a peer that has not opened a UDP socket of its own.
+			if strings.HasPrefix(a, "/ip4/127.0.0.1/tcp/") && strings.Contains(a, "/p2p/") {
+				addr = a
+				return true
+			}
+		}
+		return false
+	})
+	return addr
 }
 
 // poll waits for a condition with a bound, and says which way it ended. Every wait in the suite is

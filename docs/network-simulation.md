@@ -182,8 +182,9 @@ made and becomes final, and what the run cost. A test fails if `story.go` so muc
   buyer's own signed reveal, so cross-kernel debts close with nobody acting. Play money.
 - **anvil** — a local chain, real contracts and signatures, blocks made on demand, currency free.
 - **sepolia** — Arbitrum Sepolia, and nowhere else: the rail refuses any chain but 421614. The
-  shipped test world settles at `latest`, Arbitrum's own confirmation; a run that must wait for
-  Ethereum finality instead sets `finality` to `finalized` in `rail/worlds/test.json`.
+  shipped `arbitrum-sepolia` world settles at `latest`, Arbitrum's own confirmation; a run that must
+  wait for Ethereum finality instead sets `finality` to `finalized` in
+  `rail/worlds/arbitrum-sepolia.json`.
 
 Before spending anything the Sepolia rail prices the complete story — every mint, deposit, kernel
 gas provision and ticket payment, from the declared shape — and refuses if it exceeds the cap

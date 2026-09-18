@@ -42,7 +42,7 @@ The JSON input can be supplied inline or read from a file with `@file.json`.
 
 | Command | |
 |---|---|
-| `juice kernel serve NAME` | start the kernel in `$JUICE_HOME/kernels/NAME/` ([Running a kernel](../operating/running-a-kernel.html)) |
+| `juice kernel serve WORLD` | serve the network WORLD, whose kernel is `$JUICE_HOME/kernels/WORLD/` ([Running a kernel](../operating/running-a-kernel.html)) |
 | `juice kernel add URL [NAME]` | register a kernel this client can reach ([Identity](../calling/identity.html#registering-and-trusting-a-kernel)) |
 | `juice kernel list` | the kernels known, marking the one in use |
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |
@@ -56,8 +56,9 @@ applies to that run and is not written to the file, except on a first boot, whic
 writes what you pass as the new kernel's configuration
 ([Configuration](config.html)).
 
-`kernel serve` registers its kernel before reporting ready, so `kernel health NAME`
-works on the serving machine without a separate `kernel add`.
+`kernel serve` registers its kernel under its own nickname before reporting ready,
+so `kernel health NAME` works on the serving machine without a separate
+`kernel add`.
 
 ## auth
 

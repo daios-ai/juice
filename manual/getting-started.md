@@ -40,27 +40,28 @@ it afresh.
 
 ## Start a kernel
 
-A kernel needs a name when it is first created. That name determines its local
-directory and supplies the nickname it initially reports to other kernels.
-In this walkthrough, the kernel is called `acme` and accepts HTTP clients on
+A kernel serves one network, named when it is started. A network is a **world**:
+a file in `~/.juice/worlds/` describing the money it uses and the servers to meet
+it through. The shipped ones are written there the first time you serve. This
+walkthrough uses `play`, whose money is not real, and accepts HTTP clients on
 port 4040:
 
 ```
-$ juice kernel serve acme --listen-addr :4040
+$ juice kernel serve play --listen-addr :4040
 ```
 
-Because this is the first start of `acme`, the command asks you to confirm its
-creation and select its network. Choose `play` for this walkthrough:
+Because there is no kernel on `play` here yet, the command asks you to confirm
+its creation and to name it. The name is what other operators see; the world's
+name is shared by everyone on it, so the kernel needs one of its own. This
+walkthrough calls it `acme`:
 
 ```
-There is no kernel named acme. No kernels here yet.
-Create acme as a new kernel? [y/N] y
+There is no kernel on play here. No kernels here yet.
+play is no real money: you credit accounts yourself and keep the records.
+Create a kernel on play? [y/N] y
 
-Which money will acme use? This cannot be changed later.
-  play  no real money: you credit accounts yourself and keep the records
-  test  fake USDT on the Arbitrum Sepolia test chain
-  real  USDT on Arbitrum One
-Choice [play/test/real]: play
+What will this kernel call itself on the network? Other operators see this name.
+Name: acme
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
@@ -76,8 +77,8 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 > only way to reset the superuser password.
 
 {: .warning }
-> The network is fixed when the kernel is created. To use another network later,
-> create a separate kernel.
+> The network is fixed when the kernel is created. To use another one later, serve
+> that world instead: it gets a kernel of its own.
 
 The kernel remains running in this terminal. Open a second terminal for the
 client commands that follow, leaving the first available for server output.
@@ -368,7 +369,7 @@ before sending funds.
 
 - [Concepts](concepts.html) defines the terms used from here on.
 - [Money](money/) covers balances, deposits and withdrawals in full, including
-  putting real money into an account on `test` or `real`.
+  putting real money into an account on `arbitrum-sepolia` or `arbitrum-one`.
 - [Calling actions](calling/) covers finding, running, paying and rating.
 - [Providing actions](providing/) covers publishing, pricing and composition.
 - [Operating a kernel](operating/) covers running the kernel you started above.

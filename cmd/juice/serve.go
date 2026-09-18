@@ -34,17 +34,21 @@ import (
 // without starting a server. It is registered under the kernel noun (see kernel.go).
 func kernelServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "serve NAME",
-		Short: "Start a kernel",
-		Long: "Start the kernel called NAME, or create it if this is its first boot.\n\n" +
-			"NAME is the kernel's nickname: what it calls itself on the network, and the name of its\n" +
-			"home under ~/.juice/kernels/. A first boot fixes three things for the life of the kernel —\n" +
-			"its nickname, the network it serves, and its signing key — and asks for whatever its\n" +
-			"configuration does not already say.",
+		Use:   "serve WORLD",
+		Short: "Start a kernel on a network",
+		Long: "Start this installation's kernel on the network WORLD, or create it if this is its\n" +
+			"first boot.\n\n" +
+			"A world is a file in ~/.juice/worlds/ describing one network: the money it uses and the\n" +
+			"servers to meet it through. The worlds this build ships are written there the first time\n" +
+			"you serve, and yours to edit; adding a file adds a network. One installation runs one\n" +
+			"kernel per world, in ~/.juice/kernels/WORLD/.\n\n" +
+			"A first boot fixes what a kernel cannot revise — the network it serves, the name it calls\n" +
+			"itself on that network, and its signing key — and asks for whatever its configuration does\n" +
+			"not already say.",
 		// Cobra's own arity message names an argument count; an operator needs the name.
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return kernel.ErrInvalidInput.Wrap("name the kernel to serve: juice kernel serve NAME")
+				return kernel.ErrInvalidInput.Wrap("name the network to serve: juice kernel serve WORLD")
 			}
 			return nil
 		},
@@ -80,25 +84,29 @@ func holdHome() (func(), error) {
 }
 
 func runServer(name string) error {
-	if err := validateLocalName("kernel", name); err != nil {
+	if err := validateLocalName("world", name); err != nil {
 		return err
 	}
-	kernelName = name
-	// A kernel made before kernels were named lives one directory up. Move it before anything opens
-	// or creates a home, so the first boot after the upgrade continues with the same ledger and
-	// the same identity rather than quietly starting an empty second kernel beside it.
-	if err := migrateLegacyHome(); err != nil {
+	worldName = name
+	// Every installation keeps its own copy of the worlds this build ships, so what a kernel serves
+	// is a file the operator can read and edit, and an upgrade never rewrites one they changed.
+	// It runs before the world is looked up, so an operator who mistypes still gets a directory
+	// holding every world they could have meant (D23).
+	if err := rail.Install(worldsDir()); err != nil {
+		return fmt.Errorf("worlds: %w", err)
+	}
+	world, err := rail.Load(worldsDir(), name)
+	if err != nil {
 		return err
 	}
 	// A kernel with no database has not been created yet. Ask before taking the lock, so declining
 	// leaves not even a directory behind; write the answers after taking it, so two `serve` of one
-	// name cannot each mint a different credentials key for the same home.
+	// world cannot each mint a different credentials key for the same home.
 	dbFile := filepath.Join(kernelHome(), "juice.db")
 	fresh := !exists(dbFile)
 	var cfg ServerConfig
 	if fresh {
-		var err error
-		if cfg, err = firstBootConfig(name, kernelHome()); err != nil {
+		if cfg, err = firstBootConfig(world, kernelHome()); err != nil {
 			return err
 		}
 	}
@@ -109,14 +117,14 @@ func runServer(name string) error {
 	defer release()
 	if fresh {
 		if exists(dbFile) {
-			return kernel.ErrInvalidState.Wrapf("kernel %s was created while this boot was being answered; run it again", name)
+			return kernel.ErrInvalidState.Wrapf("the kernel on %s was created while this boot was being answered; run it again", name)
 		}
 		if err := writeConfig(filepath.Join(kernelHome(), "config.json"), cfg); err != nil {
 			return err
 		}
 	}
 
-	k, db, logger, httpExec, fedAdapter, specs, world, err := openKernel()
+	k, db, logger, httpExec, fedAdapter, specs, err := openKernel(world)
 	if err != nil {
 		return err
 	}
@@ -134,7 +142,7 @@ func runServer(name string) error {
 	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
 		return err
 	}
-	railway, err := rail.Open(context.Background(), world, kernelHome(), globalCfg.RailRPC, made == "")
+	railway, err := rail.Open(context.Background(), world, kernelHome(), made == "")
 	if err != nil {
 		return fmt.Errorf("rail: %w", err)
 	}
@@ -240,8 +248,8 @@ func runServer(name string) error {
 	// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
 	// the configured bootstrap seeds, and known counterparties, verifying each first-party. Live
 	// kernels re-advertise every pass, so the network fills in progressively with no home-grown
-	// membership state. With no bootstrap_peers the directory leg is skipped and only counterparties
-	// are synced. Best-effort; stops with runServer.
+	// membership state. A world naming no seeds skips the directory leg and syncs counterparties
+	// only. Best-effort; stops with runServer.
 	discCtx, discCancel := context.WithCancel(context.Background())
 	defer discCancel()
 	go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
@@ -1656,7 +1664,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(50, 100)}
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
-		BootstrapPeers:    globalCfg.bootstrapPeers(world),
+		BootstrapPeers:    world.Seeds,
 		ListenAddrs:       globalCfg.FedListenAddrs,
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,

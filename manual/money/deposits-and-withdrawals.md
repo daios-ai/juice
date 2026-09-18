@@ -34,9 +34,9 @@ records without making an external payment. These funds have no real monetary
 value, allowing you to learn and test the system without handling funds on a
 blockchain.
 
-## On `test` and `real`
+## On `arbitrum-sepolia` and `arbitrum-one`
 
-On `test` and `real`, deposits and withdrawals use the token specified by the
+On `arbitrum-sepolia` and `arbitrum-one`, deposits and withdrawals use the token specified by the
 network: a test token on Arbitrum Sepolia, or USDT on Arbitrum One.
 
 The following examples use a local chain to demonstrate the commands and their
@@ -49,9 +49,9 @@ than the local demonstration chain.
 Your wallet needs the network's token for the deposit and ETH for the
 transaction fee. They serve different purposes.
 
-**USDT** is the unit used for account balances on `real`. A deposit of
+**USDT** is the unit used for account balances on `arbitrum-one`. A deposit of
 `250.00 USDT` credits that amount to the account, and a withdrawal pays USDT
-back to the registered address. The `test` network uses a test token with no
+back to the registered address. The `arbitrum-sepolia` network uses a test token with no
 real monetary value.
 
 **ETH** pays the blockchain fee for sending the deposit. This fee is spent by
@@ -64,13 +64,13 @@ Use a wallet configured for the kernel's chain that can sign a message and
 send the required token. Message signing proves ownership of your address;
 the token transfer supplies the deposit.
 
-| | `test` | `real` |
+| | `arbitrum-sepolia` | `arbitrum-one` |
 |---|---|---|
 | Chain | Arbitrum Sepolia | Arbitrum One |
 | The money | a test token, worth nothing | USDT, real dollars |
 | Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDT |
 
-If you need test funds, the operator may be able to supply them. Even on `test`,
+If you need test funds, the operator may be able to supply them. Even on `arbitrum-sepolia`,
 an account credit must be supported by a witnessed payment. The operator can
 send you tokens or arrange and attribute a payment on your behalf.
 
@@ -161,8 +161,8 @@ After sending the token, the kernel detects the payment and waits for the
 network's required confirmation. It then credits the account registered to the
 sender address without a further command from you.
 
-The shipped `test` world accepts a payment once it is included in a block.
-The `real` world waits for finality, so confirmation takes longer. Actual
+The shipped `arbitrum-sepolia` world accepts a payment once it is included in a block.
+The `arbitrum-one` world waits for finality, so confirmation takes longer. Actual
 waiting times depend on the chain and the kernel's progress reading it.
 
 ```
@@ -179,7 +179,7 @@ payments and the kernel's view of chain progress.
 
 ```
 $ juice user withdraw 50
-Withdraw 50.00 USDT on real to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
+Withdraw 50.00 USDT on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
   id: 58e1e97f-…
   kind: payout
   amount: 50.00 USDT

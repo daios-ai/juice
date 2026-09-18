@@ -167,7 +167,7 @@ observations.
 
 ## Money on a chain
 
-On `test` and `real`, the kernel holds tokens and sends payments on the chain.
+On `arbitrum-sepolia` and `arbitrum-one`, the kernel holds tokens and sends payments on the chain.
 After [initial setup](running-a-kernel.html#setting-up-on-a-chain), supervision
 centres on fuel, blocked payments, unattributed deposits, and the agreement
 between custody and the account books.

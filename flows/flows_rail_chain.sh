@@ -19,18 +19,20 @@ _chain_world() {
     router=$(anvil_deploy MockRouter 10ether \
         "$(cast abi-encode 'f(address,address,uint24,uint256)' "$CHAIN_TOKEN" "$weth" 500 3000000000)")
     [ -n "$router" ] || { fail "$pfx.venue" "venue did not deploy"; return 1; }
-    # A world is the juice-rail domain document plus a name: this one names the chain just deployed.
-    CHAIN_WORLD="$dir/world.json"
+    # A world is the juice-rail domain document plus its name, which is its file's: this one is the
+    # chain just deployed, and the kernels below are served as `anvil` because of it.
+    CHAIN_WORLD="$dir/anvil.json"
     cat > "$CHAIN_WORLD" <<EOF
 {
-  "name": "anvil", "chainId": 31337, "token": "$CHAIN_TOKEN", "decimals": 6,
-  "finality": "finalized",
+  "rail": "evm", "chainId": 31337, "rpc": "$ANVIL_RPC", "token": "$CHAIN_TOKEN", "decimals": 6,
+  "symbol": "USDT", "description": "the local chain this flow deployed",
+  "finality": "finalized", "seeds": [],
   "venue": {"router": "$router", "quoter": "$router", "weth": "$weth", "feeTier": 500},
   "gas": {"min": "20000000000000000", "max": "50000000000000000", "feeBound": "10000000000000000",
           "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000}
 }
 EOF
-    CHAIN_CFG=(world="$CHAIN_WORLD" rail_rpc="$ANVIL_RPC" remote_retry_interval_seconds=1)
+    CHAIN_CFG=(remote_retry_interval_seconds=1)
 }
 
 # _chain_pay_in db home wallet_key amount — the logged-in user registers the wallet by signing the
@@ -94,18 +96,21 @@ flow_rail_chain() {
     rail_contracts >/dev/null \
         || { fail "rail_chain.contracts" "no compiled mocks: run 'forge build' in juice-rail/contracts, or set JUICE_RAIL_CONTRACTS"; return; }
 
-    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir" anvil)"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     _chain_world "$dir" rail_chain || return
     local token="$CHAIN_TOKEN"
 
     # Serving publishes the address anyone pays, so a kernel that cannot reach its chain must not
     # serve at all: it would have no record of the block its payments are looked for from, and a
-    # payment arriving meanwhile would be invisible. The boot is refused whole and run again.
-    local deadcfg=() c
-    for c in "${CHAIN_CFG[@]}"; do
-        case "$c" in rail_rpc=*) deadcfg+=("rail_rpc=http://127.0.0.1:9") ;; *) deadcfg+=("$c") ;; esac
-    done
-    if make_admin "$db" "$hs" "${deadcfg[@]}" >/dev/null 2>&1; then
+    # payment arriving meanwhile would be invisible. The boot is refused whole and run again. The
+    # node is the world's, so an unreachable one is a world file naming it.
+    python3 - "$CHAIN_WORLD" "$dir/dead.json" <<'PYEOF'
+import json, sys
+w = json.load(open(sys.argv[1])); w["rpc"] = "http://127.0.0.1:9"
+json.dump(w, open(sys.argv[2], "w"), indent=2)
+PYEOF
+    install_world "$db" "$dir/dead.json"
+    if make_admin "$db" "$hs" "${CHAIN_CFG[@]}" >/dev/null 2>&1; then
         fail "rail_chain.unreachable_chain_creates_nothing" "the kernel served without reaching its chain"
         stop_server "$db" 2>/dev/null
     else
@@ -116,6 +121,7 @@ flow_rail_chain() {
 
     # The same home, the chain now reachable: the rail key it already made is kept, and this time
     # the scan start is fixed and the kernel serves.
+    install_world "$db" "$CHAIN_WORLD"
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -179,6 +185,7 @@ flow_rail_chain_settlement() {
         || { fail "rail_chain_settlement.foundry" "anvil and cast must be on PATH"; return; }
     local dir; dir=$(new_dir)
     _chain_world "$dir" rail_chain_settlement || return
+    FED_WORLDFILE="$CHAIN_WORLD"
     FED_RCFG=("${CHAIN_CFG[@]}")
     FED_LCFG=("${CHAIN_CFG[@]}")
     _fed_setup "$dir" || { fail "rail_chain_settlement.setup" "setup failed"; return; }
@@ -233,7 +240,7 @@ flow_rail_chain_settlement() {
 flow_rail_chain_refill_and_halt() {
     echo "=== FLOW rail_chain_refill_and_halt ==="
     local dir db hs ha akey
-    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    dir=$(new_dir); db="$(kdb "$dir" arbitrum-sepolia)"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     akey=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 
     _chain_world "$dir" rail_refill || return
@@ -254,6 +261,7 @@ w["venue"]["router"] = sys.argv[2]
 w["venue"]["quoter"] = sys.argv[2]
 json.dump(w, open(sys.argv[1], "w"))
 PYEOF
+    install_world "$db" "$CHAIN_WORLD"
     start_server "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.reboot" "server did not restart with a broken venue"; return; }
     make_user "$db" "$hs" "$ha" alice
 
@@ -327,24 +335,26 @@ flow_rail_sepolia() {
     fi
     key=$(tr -d '[:space:]' < "$keyfile")
 
-    dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    dir=$(new_dir); db="$(kdb "$dir" arbitrum-sepolia)"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
 
-    # The shipped `test` world names Arbitrum Sepolia's mock USDT0, and the kernel starts its scan
+    # The shipped `arbitrum-sepolia` world names that chain's mock USDT0, and the kernel starts its scan
     # at the head it reads on first boot, so nothing has to be moved near it here. The endpoint is
     # the run's own, which is why the world is copied at all.
     local finalized
     finalized=$(cast block finalized --rpc-url "$rpc" -f number 2>/dev/null)
     [ -n "$finalized" ] || { fail "sepolia.reachable" "no answer from $rpc"; return; }
-    world="$dir/world.json"
-    python3 - "$world" <<'PYEOF'
+    world="$dir/arbitrum-sepolia.json"
+    python3 - "$world" "$rpc" <<'PYEOF'
 import json, sys
-w = json.load(open("rail/worlds/test.json"))
+w = json.load(open("rail/worlds/arbitrum-sepolia.json"))
+w["rpc"] = sys.argv[2]
 json.dump(w, open(sys.argv[1], "w"), indent=2)
 PYEOF
     local token; token=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['token'])" "$world")
-    echo "  network: test (Arbitrum Sepolia), token $token, finalized head $finalized"
+    echo "  network: arbitrum-sepolia, token $token, finalized head $finalized"
 
-    make_admin "$db" "$hs" world="$world" rail_rpc="$rpc" \
+    install_world "$db" "$world"
+    make_admin "$db" "$hs" \
         || { fail "sepolia.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 

@@ -256,10 +256,10 @@ func TestJuiceHomeResolution(t *testing.T) {
 	if got, want := juiceHome(), root; got != want {
 		t.Errorf("juiceHome: got %q, want %q", got, want)
 	}
-	if got, want := kernelHome(), filepath.Join(root, "kernels", kernelName); got != want {
+	if got, want := kernelHome(), filepath.Join(root, "kernels", worldName); got != want {
 		t.Errorf("kernelHome: got %q, want %q", got, want)
 	}
-	if got, want := cacheDir(), filepath.Join(root, "kernels", kernelName, "cache"); got != want {
+	if got, want := cacheDir(), filepath.Join(root, "kernels", worldName, "cache"); got != want {
 		t.Errorf("cacheDir: got %q, want %q", got, want)
 	}
 

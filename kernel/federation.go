@@ -1270,7 +1270,7 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, desired string, exa
 			seed = NormalizeHandle(rk.Nickname)
 		}
 	}
-	if validateHandle(seed) != nil {
+	if ValidateHandle(seed) != nil {
 		if exact {
 			return "", ErrInvalidInput.Wrapf("petname %q is not a valid bare name", desired)
 		}
@@ -1939,7 +1939,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	}
 	// A verified pull requires a valid (bare) identity (§3, §14); an empty or non-bare handle is a
 	// failed pull, not a success — so it never resets attempts and counts toward stub eviction.
-	if err := validateHandle(gossip.Handle); err != nil {
+	if err := ValidateHandle(gossip.Handle); err != nil {
 		return "", ErrInvalidInput.Wrap("gossip handle invalid")
 	}
 	// A reply from another world is not ours to accumulate: nothing it carries could verify here,

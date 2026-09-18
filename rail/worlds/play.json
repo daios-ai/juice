@@ -1,5 +1,5 @@
 {
-  "name": "play",
+  "rail": "manual",
   "decimals": 6,
   "symbol": "fUSDT",
   "description": "no real money: you credit accounts yourself and keep the records",

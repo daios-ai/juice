@@ -44,7 +44,7 @@ func TestTheRailInterfaceOffersNoStoryChoices(t *testing.T) {
 	}
 	iface := between(string(src), "type Rail interface {", "\n}")
 	allowed := map[string]bool{
-		"Name": true, "Prepare": true, "Config": true, "Scale": true, "GasUp": true,
+		"Name": true, "Prepare": true, "World": true, "Scale": true, "GasUp": true,
 		"Fund": true, "Credit": true, "SettleWait": true, "Finish": true,
 	}
 	for _, line := range strings.Split(iface, "\n") {

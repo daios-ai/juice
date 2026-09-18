@@ -291,7 +291,7 @@ func (f *chainFixture) transferCount(from, to common.Address) int {
 // world is the world file this chain answers to: the shipped shape, pointed at the deployment.
 func (f *chainFixture) world() World {
 	return World{
-		Name: "anvil", ChainID: anvilChainID, Token: f.token.Hex(), Decimals: 6,
+		Name: "anvil", Rail: RailEVM, ChainID: anvilChainID, Token: f.token.Hex(), Decimals: 6,
 		RPC: f.rpcURL, Finality: "finalized",
 		Venue: venueCfg{Router: f.router.Hex(), Quoter: f.router.Hex(), WETH: wethPlaceholder.Hex(), FeeTier: feeTier},
 		Gas: gasCfg{Min: "20000000000000000", Max: "50000000000000000", FeeBound: "10000000000000000",
@@ -307,7 +307,7 @@ func (f *chainFixture) open(w World, home string) (*Chain, error) {
 	}
 	// A home with no rail database is a first boot: the scan is seeded at the head before anything
 	// serves, which is what the kernel does.
-	return OpenChain(context.Background(), w, home, "", true)
+	return OpenChain(context.Background(), w, home, true)
 }
 
 func pack(t *testing.T, method string, args ...any) []byte {

@@ -19,16 +19,16 @@ stored with mode 0600.
 
 | Key | Default | |
 |---|---|---|
-| `world` | none | the network this kernel serves for life: `play` (no money), `test` (Arbitrum Sepolia), `real` (Arbitrum One), or the path to a world file. First boot asks; the answer is then recorded in the database, which is what later boots read |
-| `rail_rpc` | empty | the URL the kernel uses to reach the chain, overriding the one its network names. `test` and `real` name a public node, so this is needed only for a network that names none, or to use a provider or your own node. Ordinary configuration: change it and restart |
-| `kernel_handle` | the directory name | the nickname this kernel reports |
-| `bootstrap_peers` | the world's seeds | absent uses the world file's `seeds`; `[]` disables discovery; a list uses those peers instead. First boot leaves this key absent unless you supplied it |
+| `kernel_handle` | none | the nickname this kernel reports on the network. First boot asks for it, since every kernel on a network shares the world's name |
 | `listen_addr` | `:4040` | where this kernel answers clients, as `host:port`. Omit the host to answer on every interface; use port `0` to let the system choose one |
 | `fed_listen_addrs` | port 31313 | where this kernel answers peers. Empty binds the standard port on both transports; set it to give this kernel its own addresses |
 
-World files carry a `seeds` list of bootstrap addresses for their own network.
-The shipped `play` and `test` lists are empty. These are world-file settings,
-not an additional key in `config.json`.
+The network itself is not configured here. It is the world named on
+`juice kernel serve`, whose file in `~/.juice/worlds/` carries the money, the
+node a chain world is reached through (`rpc`), and the `seeds` where peers are
+met — the only place a meeting point is named. The shipped worlds name no seed
+yet, so write one in to connect kernels. The network a kernel was created on is
+recorded in its database, and a boot offering it another is refused.
 
 With no `fed_listen_addrs`, the kernel binds port 31313, the standard Juice
 federation port, over both TCP and QUIC. If another program already holds it,

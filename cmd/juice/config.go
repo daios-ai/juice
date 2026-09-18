@@ -9,13 +9,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/pflag"
 
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/rail"
 )
 
 // NativeLLMConfig holds configuration for the @sys/llm/* native actions.
@@ -108,9 +106,6 @@ type ServerConfig struct {
 	ListenAddr                 string       `json:"listen_addr"`                   // address the client API binds, host:port; host omitted ⇒ every interface, port 0 ⇒ OS-assigned
 	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
 	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
-	World                      string       `json:"world"`                         // the network this kernel serves: play, test, real, or a world file's path (D23)
-	RailRPC                    string       `json:"rail_rpc"`                      // endpoint the chain adaptor dials; required where the world has a chain
-	BootstrapPeers             *[]string    `json:"bootstrap_peers,omitempty"`     // seed multiaddrs; absent = the world's own seeds, [] = no announce/discovery, set = these instead (§13, D23)
 	FedListenAddrs             []string     `json:"fed_listen_addrs"`              // multiaddrs the peer transport binds; empty = OS-assigned ports; a world's seed pins one so members find it at the same address after a restart (§13)
 	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
@@ -131,7 +126,8 @@ func (c ServerConfig) remoteRetryInterval() time.Duration {
 // discoveryInterval is how often the running server refreshes the known network (§13): advertise
 // under the discovery rendezvous, enumerate providers, and pull gossip from bootstrap + discovered
 // peers. Like remoteRetryInterval, a non-positive value falls back to the default so discovery
-// works out of the box; the kill switch is an empty bootstrap_peers (no announce, no discover).
+// works out of the box; a world naming no seed is what leaves a kernel announcing and discovering
+// nothing (D23).
 func (c ServerConfig) discoveryInterval() time.Duration {
 	if c.DiscoveryIntervalSeconds <= 0 {
 		return 300 * time.Second
@@ -158,8 +154,6 @@ func DefaultServerConfig() ServerConfig {
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
-		// World has no default. A kernel joins one network for life, so which one is the operator's
-		// to state (first boot asks); a default here would answer it for them, silently and once.
 		ScriptTimeoutMS:   10000,
 		ScriptMemoryBytes: 64 * 1024 * 1024,
 		FeeBPS:            2000,
@@ -167,16 +161,14 @@ func DefaultServerConfig() ServerConfig {
 		ImportBPS:         500,
 		// The three money amounts are left unset here so they come from one place, the shipped
 		// economy (kernel.DefaultEconomy), which a written-out file then shows the operator.
-		TokenTTL:          "15m",
-		AuthIssuer:        "",
-		AuthAudience:      "",
-		ListenAddr:        ":4040",
-		LogLevel:          "info",
-		LogFile:           "",
-		LogFormat:         "text",
-		AllowLocalSources: false,
-		// No default meeting point here: it belongs to the world (D23), which is what decides
-		// whose network a kernel is joining. An absent key takes the world's seeds.
+		TokenTTL:                   "15m",
+		AuthIssuer:                 "",
+		AuthAudience:               "",
+		ListenAddr:                 ":4040",
+		LogLevel:                   "info",
+		LogFile:                    "",
+		LogFormat:                  "text",
+		AllowLocalSources:          false,
 		RemoteRetryIntervalSeconds: 60,
 		PeerRetentionDays:          90,
 		DiscoveryIntervalSeconds:   300,
@@ -416,10 +408,10 @@ func (c ServerConfig) Economy() (kernel.Economy, error) {
 	return econ, nil
 }
 
-// kernelName is the nickname of the kernel this process serves, given positionally to `serve`: what
-// it calls itself on the network (D15) and, being the one name chosen by the time a home is created,
-// that home's directory name. The directory may be renamed without the network noticing.
-var kernelName string
+// worldName is the world this process serves, given positionally to `serve`: the file in
+// $JUICE_HOME/worlds/ that defines the network, and the name of the home that kernel lives in. One
+// installation serves one kernel per world, so this one string says which kernel is meant.
+var worldName string
 
 // validateLocalName accepts the labels this installation may turn into one file or directory name:
 // a kernel under kernels/, a context under client/. The rules are the filesystem's, not the
@@ -448,12 +440,17 @@ func validateLocalName(kind, name string) error {
 	return nil
 }
 
-// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<name>/, holding the database
+// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<world>/, holding the database
 // (and with it the signing key), config.json, the rail key and its records, the single-server lock
 // and the purgeable cache. Everything that binds a kernel to its identity sits in this one
 // directory, so it backs up, moves and locks as a unit, and a second kernel on the machine is a
 // sibling of the first rather than a second installation.
-func kernelHome() string { return filepath.Join(juiceHome(), "kernels", kernelName) }
+func kernelHome() string { return filepath.Join(juiceHome(), "kernels", worldName) }
+
+// worldsDir is where this installation keeps its world files: one directory for the whole machine,
+// since a world is a network's definition and not one kernel's property. Install writes the shipped
+// ones here; an operator adds or edits others (D23).
+func worldsDir() string { return filepath.Join(juiceHome(), "worlds") }
 
 // exists reports whether a path is there, which for a kernel's database is the whole of "has this
 // kernel been created".
@@ -478,57 +475,4 @@ func kernelsHere() []string {
 		}
 	}
 	return names
-}
-
-// legacyKernelHome is the layout before kernels were named, where the root held exactly one. It is
-// read only by migrateLegacyHome.
-func legacyKernelHome() string { return filepath.Join(juiceHome(), "kernel") }
-
-// migrateLegacyHome moves an unnamed legacy kernel into the named home and is the only writer of that
-// path. Both directories live under one root, so the move is a single rename: it either happened or
-// it did not, and an interrupted boot leaves no half-moved ledger. It refuses rather than merges
-// when a server still holds the old home or when the destination already exists, since either case
-// means two kernels are in play and only the operator can say which is wanted. Running it again
-// finds nothing to move.
-func migrateLegacyHome() error {
-	legacy := legacyKernelHome()
-	if _, err := os.Stat(filepath.Join(legacy, "juice.db")); err != nil {
-		return nil // no legacy kernel here
-	}
-	dest := kernelHome()
-	if _, err := os.Stat(dest); err == nil {
-		return kernel.ErrInvalidState.Wrapf(
-			"both %s and %s hold a kernel; move or remove one, since only you can say which this installation serves", legacy, dest)
-	}
-	// The old home's own lock is what a running server holds. Taking it proves nothing is serving
-	// that ledger, so the rename cannot pull the database out from under a live process.
-	lock, err := os.OpenFile(filepath.Join(legacy, "serve.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return kernel.ErrInvalidState.Wrapf("lock %s: %v", legacy, err)
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return kernel.ErrInvalidState.Wrapf("a server is still running for %s; stop it before this kernel moves to %s", legacy, dest)
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	if err := os.MkdirAll(filepath.Join(juiceHome(), "kernels"), 0o700); err != nil {
-		return kernel.ErrInvalidState.Wrapf("create %s: %v", filepath.Dir(dest), err)
-	}
-	if err := os.Rename(legacy, dest); err != nil {
-		return kernel.ErrInvalidState.Wrapf("move %s to %s: %v", legacy, dest, err)
-	}
-	fmt.Fprintf(os.Stderr, "moved kernel home %s to %s\n", legacy, dest)
-	return nil
-}
-
-// bootstrapPeers is where this kernel looks for the network before it knows anyone. The world
-// names its own seeds (D23), because a seed serving another network can only ever answer that it
-// serves another network. The config key overrides them in three states an operator can tell
-// apart: absent takes the world's, an empty list means no meeting point at all (announce and
-// discover nothing), and a list of addresses replaces them.
-func (c ServerConfig) bootstrapPeers(w rail.World) []string {
-	if c.BootstrapPeers != nil {
-		return *c.BootstrapPeers
-	}
-	return w.Seeds
 }

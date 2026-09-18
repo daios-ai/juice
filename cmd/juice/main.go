@@ -245,21 +245,21 @@ func kernelSecret(db *store.DB) string {
 	return stored
 }
 
-func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, rail.World, error) {
+func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, error) {
 	if err := initConfig(); err != nil {
-		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	// Reserve the purgeable cache subdir so the component layout exists for any writer.
 	_ = os.MkdirAll(cacheDir(), 0o700)
 	db, err := store.Open(dbPath)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("open db: %w", err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("open db: %w", err)
 	}
 
 	cfg, err := globalCfg.KernelConfig(kernelSecret(db))
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
 	logger, err := log.New(log.Config{
@@ -269,7 +269,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	})
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf("log_file %s: %w", globalCfg.LogFile, err)
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("log_file %s: %w", globalCfg.LogFile, err)
 	}
 
 	exec := script.New(script.Config{
@@ -287,19 +287,18 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	}
 	chatter := kernel.Chatter(ollamaChatter)
 
-	// The world this kernel serves fixes its network, whose digest binds every signature it makes
-	// and the namespace it discovers on (D23). A kernel that already has one is not asked again:
-	// the database is where that answer lives.
-	world, err := worldFor(context.Background(), db, globalCfg.World, resolvedConfigPath)
-	if err != nil {
+	// The world this kernel serves fixes its network, whose fingerprint binds every signature it
+	// makes and the namespace it discovers on (D23). A database made on another network is refused
+	// here, before the rail is opened, so a kernel served from the wrong world dials nothing.
+	if err := checkNetwork(context.Background(), db, world); err != nil {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	cfg.Network = world.Network()
 	// Every money rule comes from one place, the operator's own configuration (P10).
 	econ, err := globalCfg.Economy()
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: cfg.AllowLocalSources}
@@ -324,13 +323,13 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 	keyBytes, err := base64.RawURLEncoding.DecodeString(globalCfg.CredentialsKey)
 	if err != nil || len(keyBytes) != 32 {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, rail.World{}, fmt.Errorf(
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf(
 			"credentials_key in %s is not a 32-byte base64url key; it seals every stored credential, so restore it from your backup", resolvedConfigPath)
 	}
 	box, err := newAESGCMBox(keyBytes)
 	if err != nil {
 		db.Close()
-		return nil, nil, nil, nil, nil, nil, rail.World{}, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	k.SetSecretBox(box)
 	// The §9 authenticator shares the box (to open sealed auth configs and grant tokens)
@@ -370,7 +369,7 @@ func openKernel() (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, 
 		fedAdapter.SetLocalPubKey(pub)
 	}
 
-	return k, db, logger, httpExec, fedAdapter, specs, world, nil
+	return k, db, logger, httpExec, fedAdapter, specs, nil
 }
 
 // promptPassword reads a password from the terminal without echo. It is a
@@ -464,8 +463,8 @@ func remedy(err error) string {
 	// can change it, so the buyer is told what happened and not sent to inspect their own books.
 	case errors.Is(err, kernel.ErrPeerUnreachable):
 		switch {
-		case ke.Meta["kernel_is_local"] == "yes":
-			return "Start it with: juice kernel serve " + ke.Meta["kernel"]
+		case ke.Meta["world"] != "":
+			return "Start it with: juice kernel serve " + ke.Meta["world"]
 		case peer != "":
 			return "Nothing was charged. Try again when " + peer + " is back."
 		case ke.Meta["kernel"] != "":

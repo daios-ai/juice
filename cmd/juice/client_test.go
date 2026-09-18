@@ -1938,3 +1938,27 @@ func loginNames(t *testing.T) []string {
 	}
 	return out
 }
+
+// TestAnUnreachableLocalKernelNamesItsWorld: the remedy for a kernel that does not answer is the
+// command that starts it, and that command takes the network, not the name this client chose for
+// it. A kernel somewhere else cannot be started by the reader and is told to wait instead.
+func TestAnUnreachableLocalKernelNamesItsWorld(t *testing.T) {
+	home := testHome(t)
+	_ = home
+	resetClient()
+	cfg := loadClientConfig()
+	cfg.Kernels["work"] = &kernelRec{Endpoint: "http://127.0.0.1:4999", PublicKey: "KEY-A", Network: "arbitrum-one"}
+	cfg.Kernels["away"] = &kernelRec{Endpoint: "http://kernel.example.org:4040", PublicKey: "KEY-B", Network: "play"}
+	if err := saveClientConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	resetClient()
+
+	local := remedy(unreachable("http://127.0.0.1:4999"))
+	if local != "Start it with: juice kernel serve arbitrum-one" {
+		t.Errorf("a local kernel's remedy must name the world serve takes: %q", local)
+	}
+	if remote := remedy(unreachable("http://kernel.example.org:4040")); strings.Contains(remote, "kernel serve") {
+		t.Errorf("a kernel on another machine cannot be started here: %q", remote)
+	}
+}

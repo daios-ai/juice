@@ -225,7 +225,7 @@ func TestAMissingPrivacyProjectionFailsTheRun(t *testing.T) {
 func TestARestartKeepsWhatFirstBootMinted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	o := bootOpts{Handle: "shop", FeeBps: 2000}
-	if err := writeKernelConfig(path, o, map[string]any{"world": "play"}); err != nil {
+	if err := writeKernelConfig(path, o); err != nil {
 		t.Fatal(err)
 	}
 	// First boot mints the key into the file the harness wrote.
@@ -237,7 +237,7 @@ func TestARestartKeepsWhatFirstBootMinted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeKernelConfig(path, o, map[string]any{"world": "play"}); err != nil {
+	if err := writeKernelConfig(path, o); err != nil {
 		t.Fatal(err)
 	}
 	again := map[string]any{}
@@ -245,7 +245,7 @@ func TestARestartKeepsWhatFirstBootMinted(t *testing.T) {
 	if again["credentials_key"] != first["credentials_key"] {
 		t.Errorf("credentials_key after restart: got %v, want %v", again["credentials_key"], first["credentials_key"])
 	}
-	if again["kernel_handle"] != "shop" || again["world"] != "play" {
+	if again["kernel_handle"] != "shop" || again["fee_bps"] != float64(2000) {
 		t.Errorf("restart lost the harness's own settings: %v", again)
 	}
 }

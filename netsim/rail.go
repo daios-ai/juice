@@ -28,8 +28,11 @@ type Rail interface {
 	// Prepare runs before any kernel starts, given what the story will ask for, so a rail with a
 	// spending limit refuses in advance instead of running dry halfway.
 	Prepare(n *Net, s Shape) error
-	// Config is merged into every kernel's configuration file.
-	Config() map[string]any
+	// World is the network every kernel of this run serves: its name, and its document where the
+	// rail defines one of its own. A nil document means a world the binary ships, which the kernel
+	// installs for itself; either way the harness adds this run's meeting point to the file, as an
+	// operator does to join a network.
+	World() (string, map[string]any)
 	// Scale is how many base units make one credit.
 	Scale() int64
 	// GasUp gives a kernel gas for the payments it will make. A kernel funded for one when it owes
@@ -73,8 +76,8 @@ func NewRail(name string) (Rail, error) {
 type playRail struct{}
 
 func (playRail) Name() string                        { return "play" }
+func (playRail) World() (string, map[string]any)     { return "play", nil }
 func (playRail) Prepare(n *Net, s Shape) error       { return nil }
-func (playRail) Config() map[string]any              { return map[string]any{"world": "play", "rail_rpc": ""} }
 func (playRail) Scale() int64                        { return 1_000_000 }
 func (playRail) GasUp(k *Kernel, payments int) error { return nil }
 func (playRail) Finish(n *Net) (map[string]any, error) {
@@ -97,7 +100,8 @@ func (playRail) SettleWait() time.Duration { return 30 * time.Second }
 // takes, which is what the fields hold.
 
 type chainRail struct {
-	rpc, payer, token, worldFile string
+	rpc, payer, token, worldName string
+	worldDoc                     map[string]any
 	scale                        int64
 	await                        time.Duration
 	gas                          func(payments int) string
@@ -105,10 +109,8 @@ type chainRail struct {
 	vaults                       []string // every kernel vault this run put gas into
 }
 
-func (c *chainRail) Config() map[string]any {
-	return map[string]any{"world": c.worldFile, "rail_rpc": c.rpc}
-}
-func (c *chainRail) Scale() int64 { return c.scale }
+func (c *chainRail) World() (string, map[string]any) { return c.worldName, c.worldDoc }
+func (c *chainRail) Scale() int64                    { return c.scale }
 
 func (c *chainRail) GasUp(k *Kernel, payments int) error {
 	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "kernel", "show")
@@ -249,15 +251,13 @@ func (a *anvilRail) Prepare(n *Net, s Shape) error {
 		return fmt.Errorf("deploying the router: %w", err)
 	}
 	a.token = token
-	world := map[string]any{
-		"name": "netsim-anvil", "chainId": 31337, "token": token, "decimals": 6,
-		"finality": "finalized",
-		"venue":    map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
+	a.worldName = "netsim-anvil"
+	a.worldDoc = map[string]any{
+		"rail": "evm", "chainId": 31337, "rpc": a.rpc, "token": token, "decimals": 6,
+		"symbol": "USDT", "description": "the netsim local chain", "finality": "finalized",
+		"venue": map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
 		"gas": map[string]any{"min": "20000000000000000", "max": "50000000000000000",
 			"feeBound": "10000000000000000", "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000},
-	}
-	if a.worldFile, err = writeWorld(n, world); err != nil {
-		return err
 	}
 	if a.wallet, err = newPayingWallet(n, a.rpc, a.payer, s.PayingUsers); err != nil {
 		return err
@@ -360,7 +360,7 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 	if _, err := strconv.ParseInt(castOut("block", "finalized", "--rpc-url", s.rpc, "-f", "number"), 10, 64); err != nil {
 		return fmt.Errorf("no finalized head from %s", s.rpc)
 	}
-	raw, err := os.ReadFile("rail/worlds/test.json")
+	raw, err := os.ReadFile("rail/worlds/arbitrum-sepolia.json")
 	if err != nil {
 		return err
 	}
@@ -368,7 +368,9 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return err
 	}
-	// Only {name, chainId, token} fix the network digest, so the gas band is the run's to choose:
+	w["rpc"] = s.rpc
+	// Only {name, rail, chainId, token} fix the network digest, so the gas band and the endpoint
+	// are the run's to choose:
 	// the shipped one suits a kernel running for months, and one that lives for a run needs only
 	// enough for its payments — which also keeps it off the refill path this chain's shallow pool
 	// cannot serve (refill is exercised on anvil). Where the scan starts is not set here at all:
@@ -377,9 +379,7 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 		gas["min"], gas["max"], gas["feeBound"] = "20000000000000", "60000000000000", "20000000000000"
 	}
 	s.token, _ = w["token"].(string)
-	if s.worldFile, err = writeWorld(n, w); err != nil {
-		return err
-	}
+	s.worldName, s.worldDoc = "arbitrum-sepolia", w
 	// An estimate is not a cap. The run never spends from the funder: exactly the cap is moved
 	// into a wallet made for this run, and whatever the estimate got wrong, the run cannot exceed
 	// what that wallet holds.
@@ -464,16 +464,6 @@ func (s *sepoliaRail) Finish(n *Net) (map[string]any, error) {
 }
 
 // ---- shared -----------------------------------------------------------------
-
-// writeWorld records the world file and the digest that names the network a chain rail talked to.
-// Only {name, chainId, token} define it, so it is stable across runs that tune gas or the scan
-// start and different across runs that do not share a network.
-func writeWorld(n *Net, w map[string]any) (string, error) {
-	n.Run.WorldDigest = fmt.Sprintf("%v/%v/%v", w["name"], w["chainId"], w["token"])
-	b, _ := json.MarshalIndent(w, "", " ")
-	path := filepath.Join(n.Root, "world.json")
-	return path, os.WriteFile(path, b, 0o644)
-}
 
 // cast runs Foundry's tool and keeps its error. Turning a failure into an empty string makes a
 // failed deployment look like an empty address and an unsent transaction look sent.

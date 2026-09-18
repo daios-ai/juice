@@ -1,14 +1,12 @@
 {
-  "name": "real",
+  "rail": "evm",
   "chainId": 42161,
   "rpc": "https://arb1.arbitrum.io/rpc",
   "token": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
   "decimals": 6,
   "symbol": "USDT",
   "description": "USDT on Arbitrum One",
-  "seeds": [
-    "/dns4/daios.ai/tcp/31313/p2p/12D3KooWSFjAPY5Uk4t6B7zuYx5gBp5sURKD2rLebXs1rxKZszBb"
-  ],
+  "seeds": [],
   "finality": "finalized",
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",

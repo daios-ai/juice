@@ -103,25 +103,22 @@ type Chain struct {
 	checked bool
 }
 
-// Open builds the rail a world calls for. The world's defining part decides — a chain and a token,
-// or neither — so nothing anywhere asks whether the world is called play or real.
-func Open(ctx context.Context, w World, home, rpc string, firstBoot bool) (kernel.Rail, error) {
-	if !w.Chained() {
+// Open builds the rail a world calls for. The world says which one it settles on, so nothing
+// anywhere infers it from which fields the file happens to carry.
+func Open(ctx context.Context, w World, home string, firstBoot bool) (kernel.Rail, error) {
+	switch w.Rail {
+	case RailManual:
 		return NewManual(), nil
+	case RailEVM:
+		return OpenChain(ctx, w, home, firstBoot)
 	}
-	return OpenChain(ctx, w, home, rpc, firstBoot)
+	return nil, fmt.Errorf("world %q names rail %q", w.Name, w.Rail)
 }
 
 // OpenChain wires juice-rail to this kernel's own key and records, both kept beside the ledger they
 // belong to. A domain that is wrong rather than merely unreachable refuses the boot: money sent on
 // the wrong chain is simply gone.
-func OpenChain(ctx context.Context, w World, home, rpc string, firstBoot bool) (*Chain, error) {
-	if rpc == "" {
-		rpc = w.RPC
-	}
-	if rpc == "" {
-		return nil, fmt.Errorf("world %q names no endpoint and rail_rpc is not set", w.Name)
-	}
+func OpenChain(ctx context.Context, w World, home string, firstBoot bool) (*Chain, error) {
 	domain, err := w.Domain()
 	if err != nil {
 		return nil, err
@@ -134,9 +131,9 @@ func OpenChain(ctx context.Context, w World, home, rpc string, firstBoot bool) (
 	if err != nil {
 		return nil, err
 	}
-	client, err := ethclient.DialContext(ctx, rpc)
+	client, err := ethclient.DialContext(ctx, w.RPC)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", rpc, err)
+		return nil, fmt.Errorf("dial %s: %w", w.RPC, err)
 	}
 	r, err := jrail.New(domain, store, client, key)
 	if err != nil {
@@ -153,7 +150,7 @@ func OpenChain(ctx context.Context, w World, home, rpc string, firstBoot bool) (
 			return nil, verified
 		}
 	}
-	if err := fixScanStart(ctx, c.rail, firstBoot, rpc, filepath.Join(home, "rail.db")); err != nil {
+	if err := fixScanStart(ctx, c.rail, firstBoot, w.RPC, filepath.Join(home, "rail.db")); err != nil {
 		return nil, err
 	}
 	return c, nil

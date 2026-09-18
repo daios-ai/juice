@@ -987,16 +987,18 @@ type CreateUserRequest struct {
 
 // NormalizeHandle canonicalizes a user handle by trimming surrounding whitespace only —
 // handles are bare, carrying no sigil (§3, §14). It is the single input-cleaning chokepoint
-// for handles; a `@`-prefixed input therefore survives to validateHandle, which rejects it.
-// Idempotent; leaves "" untouched (validateHandle rejects it).
+// for handles; a `@`-prefixed input therefore survives to ValidateHandle, which rejects it.
+// Idempotent; leaves "" untouched (ValidateHandle rejects it).
 func NormalizeHandle(h string) string {
 	return strings.TrimSpace(h)
 }
 
-// validateHandle rejects empty handles and handles containing @ or /, enforcing the invariant
+// ValidateHandle rejects empty handles and handles containing @ or /, enforcing the invariant
 // that owner/name and owner@kernel/name references are unambiguous (handles ≡ hostnames: bare,
 // no @ or /). A valid handle is ≥1 non-sigil character after NormalizeHandle trims whitespace.
-func validateHandle(handle string) error {
+// Exported because a kernel's own nickname is held to the same rule: peers apply it to what they
+// hear in gossip, so the name an operator is asked for at first boot must satisfy it here too.
+func ValidateHandle(handle string) error {
 	if handle == "" {
 		return ErrInvalidInput.Wrap("handle is required")
 	}
@@ -1020,7 +1022,7 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Accoun
 	logger := k.log.With(ctx)
 	req.Handle = NormalizeHandle(req.Handle)
 	logger.Info("user.create.start", "handle", req.Handle)
-	if err := validateHandle(req.Handle); err != nil {
+	if err := ValidateHandle(req.Handle); err != nil {
 		return nil, err
 	}
 	if err := validatePassword(req.Password); err != nil {
@@ -1178,7 +1180,7 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 		return nil, err
 	}
 	newHandle = NormalizeHandle(newHandle)
-	if err := validateHandle(newHandle); err != nil {
+	if err := ValidateHandle(newHandle); err != nil {
 		return nil, err
 	}
 	target, err := k.store.ReadUser(ctx, targetID)

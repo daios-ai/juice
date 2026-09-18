@@ -23,12 +23,12 @@ of the ordinary balance and can be spent or withdrawn.
 
 ## What differs between the three networks
 
-The account model and command syntax are shared by `play`, `test`, and `real`.
+The account model and command syntax are shared by `play`, `arbitrum-sepolia`, and `arbitrum-one`.
 Each uses six decimal places, and each records local transfers and call charges
 in the same way. Their differences concern the value of the balance and the
 external payment system that supports deposits, withdrawals, and settlement:
 
-| | `play` | `test` | `real` |
+| | `play` | `arbitrum-sepolia` | `arbitrum-one` |
 |---|---|---|---|
 | What a balance is | fUSDT (fake USDT) recorded by the operator | a test token on Arbitrum Sepolia | USDT on Arbitrum One |
 | What it is worth | nothing | nothing | dollars |

@@ -4,10 +4,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -19,51 +17,68 @@ import (
 	"github.com/daios-ai/juice/store"
 )
 
-// TestServeRequiresAKernelName: the kernel is named positionally, so there is no path on which a
-// kernel is created unnamed. Cobra refuses the bare command; what may name one is
+// TestServeRequiresAWorld: the world is named positionally, so there is no path on which a kernel
+// is created without one. Cobra refuses the bare command; what may name one is
 // TestKernelNameValidation's subject.
-func TestServeRequiresAKernelName(t *testing.T) {
+func TestServeRequiresAWorld(t *testing.T) {
 	if _, err := execTestCmd(t, kernelServeCmd()); err == nil {
-		t.Fatal("juice serve with no name was accepted")
+		t.Fatal("juice kernel serve with no world was accepted")
 	}
 }
 
-// TestFirstBootConfigAsksOrRefuses: a kernel joins one network for life, so first boot takes the
-// world from what the operator already wrote, and refuses off a terminal rather than choosing.
+// testWorld is the world a first-boot test is answered with: `kernel serve` has already read it
+// from the installation's worlds directory by the time the configuration is gathered.
+func testWorld(t *testing.T) rail.World {
+	t.Helper()
+	dir := t.TempDir()
+	if err := rail.Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	w, err := rail.Load(dir, "play")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// TestFirstBootConfigAsksOrRefuses: creating a kernel is the operator's act, so first boot takes
+// what they already wrote and refuses off a terminal rather than choosing for them. The name this
+// kernel goes by on the network is the one answer the world cannot supply, since every kernel on a
+// network shares its name.
 func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
+	w := testWorld(t)
 	home := t.TempDir()
-	// No file and nobody to ask: creating a kernel is the operator's act, so it is refused, and the
-	// refusal says what to write and where.
-	_, err := firstBootConfig("acme", home)
+	// No file and nobody to ask: refused, and the refusal says what to write and where.
+	_, err := firstBootConfig(w, home)
 	if err == nil {
 		t.Fatal("a headless first boot with no configuration was accepted")
 	}
-	for _, want := range []string{"no kernel named acme", "no terminal", `"world"`, filepath.Join(home, "config.json")} {
+	for _, want := range []string{"no kernel on play here", "no terminal", "--kernel-handle", filepath.Join(home, "config.json")} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal must name %s: %v", want, err)
 		}
 	}
 
-	// A file with no world is consent to create, but not an answer to the one question that cannot
-	// be revised.
+	// A file that says nothing about the name is consent to create, but not an answer.
 	seeded := filepath.Join(home, "config.json")
-	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"acme"}`), 0o600); err != nil {
+	if err := os.WriteFile(seeded, []byte(`{"log_level":"debug"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := firstBootConfig("acme", home); err == nil || !strings.Contains(err.Error(), `"world"`) {
-		t.Errorf("a seeded file with no world must be refused, naming the key: %v", err)
+	if _, err := firstBootConfig(w, home); err == nil ||
+		!strings.Contains(err.Error(), `"kernel_handle"`) || !strings.Contains(err.Error(), "--kernel-handle") {
+		t.Errorf("a seeded file with no name must be refused, naming the key and the option: %v", err)
 	}
 
 	// Pre-seeded in full, as a headless install does it: the answers are taken and nothing is asked.
-	if err := os.WriteFile(seeded, []byte(`{"world":"play"}`), 0o600); err != nil {
+	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"acme"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := firstBootConfig("acme", home)
+	cfg, err := firstBootConfig(w, home)
 	if err != nil {
 		t.Fatalf("seeded first boot: %v", err)
 	}
-	if cfg.World != "play" || cfg.KernelHandle != "acme" {
-		t.Fatalf("config: world=%q handle=%q", cfg.World, cfg.KernelHandle)
+	if cfg.KernelHandle != "acme" {
+		t.Fatalf("config: handle=%q", cfg.KernelHandle)
 	}
 	if cfg.CredentialsKey == "" {
 		t.Error("first boot must mint the credentials key, since nothing later may write the file")
@@ -76,20 +91,36 @@ func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
 	if err := writeConfig(seeded, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if again, lerr := LoadConfig(seeded); lerr != nil || again.World != "play" {
-		t.Fatalf("reload: %+v %v", again.World, lerr)
+	if again, lerr := LoadConfig(seeded); lerr != nil || again.KernelHandle != "acme" {
+		t.Fatalf("reload: %+v %v", again.KernelHandle, lerr)
+	}
+
+	// The name is held to the rule peers apply to it, so a kernel cannot take one they would refuse.
+	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"two@names"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstBootConfig(w, home); err == nil {
+		t.Error("a name no peer would accept was written down")
 	}
 }
 
-// TestWorldForReadsTheRecord: a kernel's network is fixed the first time and read from its own
-// database ever after, so one made before `world` was written into config.json goes on serving.
-func TestWorldForReadsTheRecord(t *testing.T) {
+// TestCheckNetworkReadsTheRecord: a kernel serves one network for life. The database records which,
+// and a world that is not it is refused before anything is opened — naming both fingerprints, since
+// nothing maps one back to the world that produced it.
+func TestCheckNetworkReadsTheRecord(t *testing.T) {
 	ctx := context.Background()
-	play, err := rail.Load("play")
+	dir := t.TempDir()
+	if err := rail.Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	play, err := rail.Load(dir, "play")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	other, err := rail.Load(dir, "arbitrum-sepolia")
+	if err != nil {
+		t.Fatal(err)
+	}
 	fresh := func() *store.DB {
 		db, derr := store.Open(filepath.Join(t.TempDir(), "juice.db"))
 		if derr != nil {
@@ -106,40 +137,23 @@ func TestWorldForReadsTheRecord(t *testing.T) {
 		return db
 	}
 
-	// The record answers, with nothing in the configuration to ask.
-	if w, werr := worldFor(ctx, recorded(play.Network().Digest), "", cfgPath); werr != nil || w.Name != "play" {
-		t.Errorf("recorded network: %q %v", w.Name, werr)
+	// The world it was created on: served.
+	if err := checkNetwork(ctx, recorded(play.Network().Digest), play); err != nil {
+		t.Errorf("a kernel was refused its own network: %v", err)
 	}
-	// A configuration that disagrees with the record is refused, naming both.
-	test, err := rail.Load("test")
-	if err != nil {
-		t.Fatal(err)
+	// Another: refused, naming the network it holds, the world asked for, and that world's network.
+	err = checkNetwork(ctx, recorded(play.Network().Digest), other)
+	if err == nil {
+		t.Fatal("a kernel was served on a network it was not created on")
 	}
-	_, err = worldFor(ctx, recorded(test.Network().Digest), "play", cfgPath)
-	if err == nil || !strings.Contains(err.Error(), "test") || !strings.Contains(err.Error(), "play") {
-		t.Errorf("a configuration against the record must be refused, naming both: %v", err)
+	for _, want := range []string{play.Network().Digest, "arbitrum-sepolia", other.Network().Digest} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %s: %v", want, err)
+		}
 	}
-	// A digest this build cannot place needs the world file named, and says so.
-	_, err = worldFor(ctx, recorded("00ff"), "", cfgPath)
-	if err == nil || !strings.Contains(err.Error(), "does not ship") {
-		t.Errorf("an unplaceable digest must be refused: %v", err)
-	}
-	// A database that predates the rail belongs to play, and may not be moved onto a token world.
-	made := fresh()
-	if serr := made.SetConfig(ctx, configKeySuperuser, "sys"); serr != nil {
-		t.Fatal(serr)
-	}
-	if w, werr := worldFor(ctx, made, "", cfgPath); werr != nil || w.Name != "play" {
-		t.Errorf("pre-rail database: %q %v", w.Name, werr)
-	}
-	if _, werr := worldFor(ctx, made, "test", cfgPath); werr == nil {
-		t.Error("a pre-rail database must not be bound to a token world")
-	}
-	// Nothing recorded and nothing configured is a first boot with no answer: refused, naming key
-	// and file rather than falling back to a network nobody chose.
-	_, err = worldFor(ctx, fresh(), "", cfgPath)
-	if err == nil || !strings.Contains(err.Error(), `"world"`) || !strings.Contains(err.Error(), cfgPath) {
-		t.Errorf("an unanswered first boot must be refused, naming the key and the file: %v", err)
+	// A database with no record is a first boot: nothing to disagree with.
+	if err := checkNetwork(ctx, fresh(), other); err != nil {
+		t.Errorf("a first boot was refused: %v", err)
 	}
 }
 
@@ -544,68 +558,9 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	}
 }
 
-// A chain world used to stop first boot with a question nobody could answer from the words on
-// screen. The shipped worlds name a node, so there is nothing left to ask; a world written without
-// one still asks, and still refuses off a terminal rather than guessing.
-func TestTheEndpointIsAskedOnlyWhenTheWorldNamesNone(t *testing.T) {
-	t.Run("a shipped chain world asks nothing", func(t *testing.T) {
-		home := t.TempDir()
-		if err := os.WriteFile(filepath.Join(home, "config.json"),
-			[]byte(`{"world":"test"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := firstBootConfig("acme", home)
-		if err != nil {
-			t.Fatalf("a chain world with a node in it still demanded one: %v", err)
-		}
-		if cfg.RailRPC != "" {
-			t.Errorf("first boot wrote an endpoint nobody typed: %q", cfg.RailRPC)
-		}
-		w, err := rail.Load(cfg.World)
-		if err != nil || w.RPC == "" {
-			t.Fatalf("the shipped world names no node: %+v %v", w.RPC, err)
-		}
-	})
-
-	t.Run("a world of one's own with no node is asked, and refused headless", func(t *testing.T) {
-		home := t.TempDir()
-		world := filepath.Join(home, "mine.json")
-		raw, err := os.ReadFile(filepath.Join("..", "..", "rail", "worlds", "test.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var doc map[string]any
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			t.Fatal(err)
-		}
-		doc["name"] = "mine"
-		doc["rpc"] = ""
-		b, err := json.Marshal(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(world, b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(home, "config.json"),
-			[]byte(`{"world":`+strconv.Quote(world)+`}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err = firstBootConfig("acme", home)
-		if err == nil {
-			t.Fatal("a world naming no node was accepted with no endpoint and no terminal")
-		}
-		for _, want := range []string{`"rail_rpc"`, "no terminal"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("the refusal must name %s: %v", want, err)
-			}
-		}
-	})
-}
-
 // A command line says everything a file says, so it is equally the operator's instruction to make
 // this kernel: a headless install can create one without writing a file first. What it does not say
-// is still refused — naming the network is the one answer nobody else can give.
+// is still refused — the name this kernel goes by is nobody else's to give.
 func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
 	bind := func(args ...string) func() {
 		fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
@@ -618,25 +573,26 @@ func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
 		return func() { serveFlags = nil }
 	}
 
+	w := testWorld(t)
 	home := t.TempDir()
-	done := bind("--world", "play", "--kernel-handle", "acme")
-	cfg, err := firstBootConfig("acme", home)
+	done := bind("--kernel-handle", "acme")
+	cfg, err := firstBootConfig(w, home)
 	done()
 	if err != nil {
 		t.Fatalf("a first boot answered entirely on the command line was refused: %v", err)
 	}
-	if cfg.World != "play" || cfg.KernelHandle != "acme" {
-		t.Fatalf("config: world=%q handle=%q", cfg.World, cfg.KernelHandle)
+	if cfg.KernelHandle != "acme" {
+		t.Fatalf("config: handle=%q", cfg.KernelHandle)
 	}
 	if _, serr := os.Stat(filepath.Join(home, "config.json")); !os.IsNotExist(serr) {
 		t.Error("first boot wrote the file itself; the caller writes it under the home's lock")
 	}
 
-	// Settings that leave the network unanswered do not answer it, and there is no terminal to ask.
+	// Settings that leave the name unanswered do not answer it, and there is no terminal to ask.
 	done = bind("--log-level", "debug")
-	_, err = firstBootConfig("acme", t.TempDir())
+	_, err = firstBootConfig(w, t.TempDir())
 	done()
-	if err == nil || !strings.Contains(err.Error(), "--world") {
-		t.Fatalf("a first boot with no network named must be refused, naming the option: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--kernel-handle") {
+		t.Fatalf("a first boot with no name given must be refused, naming the option: %v", err)
 	}
 }

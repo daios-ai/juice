@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ const (
 // there is — every later boot reads it and leaves it alone, so a runtime-only override
 // (JUICE_CREDENTIALS_KEY) never reaches the disk. What the operator pre-seeded stands; the rest is
 // asked, because these are the facts a kernel cannot revise.
-func firstBootConfig(name, home string) (ServerConfig, error) {
+func firstBootConfig(w rail.World, home string) (ServerConfig, error) {
 	path := filepath.Join(home, "config.json")
 	cfg, err := LoadConfig(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -46,7 +47,7 @@ func firstBootConfig(name, home string) (ServerConfig, error) {
 	applyConfigFlags(&cfg)
 	// A configuration written in advance is the operator saying that this kernel should exist —
 	// in the file, or on the command line, which says the same things. Without either, they are
-	// asked, and told what is already here, since a name that is not on that list is usually a
+	// asked, and told what is already here, since a world that is not on that list is usually a
 	// name mistyped.
 	if os.IsNotExist(err) && !configFlagsGiven() {
 		here := "No kernels here yet."
@@ -54,42 +55,28 @@ func firstBootConfig(name, home string) (ServerConfig, error) {
 			here = "Kernels here: " + strings.Join(others, ", ") + "."
 		}
 		if !interactiveTTY() {
-			return cfg, fmt.Errorf("there is no kernel named %s, and no terminal to ask. %s\n"+
-				"       To create it without a terminal, run this again with --world %s,\n"+
+			return cfg, fmt.Errorf("there is no kernel on %s here, and no terminal to ask. %s\n"+
+				"       To create it without a terminal, run this again with --kernel-handle NAME,\n"+
 				"       or write %s to %s",
-				name, here, rail.Shipped[0], worldChoices(), path)
+				w.Name, here, `"kernel_handle": "NAME"`, path)
 		}
-		fmt.Fprintf(os.Stderr, "There is no kernel named %s. %s\n", name, here)
-		if aerr := askYesNo(fmt.Sprintf("Create %s as a new kernel?", name)); aerr != nil {
+		fmt.Fprintf(os.Stderr, "There is no kernel on %s here. %s\n", w.Name, here)
+		fmt.Fprintf(os.Stderr, "%s is %s.\n", w.Name, w.Description)
+		if aerr := askYesNo(fmt.Sprintf("Create a kernel on %s?", w.Name)); aerr != nil {
 			return cfg, aerr
 		}
 	}
 	if cfg.KernelHandle == "" {
-		cfg.KernelHandle = name
-	}
-	if cfg.World == "" {
-		w, aerr := askWorld(name, path)
+		h, aerr := askHandle(path)
 		if aerr != nil {
 			return cfg, aerr
 		}
-		cfg.World = w
+		cfg.KernelHandle = h
 	}
-	world, err := rail.Load(cfg.World)
-	if err != nil {
-		return cfg, err
-	}
-	// A world that names an endpoint has answered this already; only one written without a default
-	// has to ask, and it says what it wants, since nobody can answer "where does it reach the chain"
-	// from the words alone.
-	if world.Chained() && world.RPC == "" && cfg.RailRPC == "" {
-		fmt.Fprintf(os.Stderr, "\n%s needs a node on the chain its money is on (%s).\n",
-			name, world.Description)
-		fmt.Fprintf(os.Stderr, "Give the web address of one, your own or a provider's.\n")
-		rpc, aerr := ask("Node address", "rail_rpc", path)
-		if aerr != nil {
-			return cfg, aerr
-		}
-		cfg.RailRPC = rpc
+	// Whatever answered — the file, the command line, the prompt — the name is held to the rule
+	// peers apply to it, so no kernel can take one the network would refuse to hear.
+	if verr := kernel.ValidateHandle(cfg.KernelHandle); verr != nil {
+		return cfg, fmt.Errorf("%s %q: %w", "kernel_handle", cfg.KernelHandle, verr)
 	}
 	if cfg.CredentialsKey == "" {
 		raw := make([]byte, 32)
@@ -101,123 +88,53 @@ func firstBootConfig(name, home string) (ServerConfig, error) {
 	return cfg, nil
 }
 
-// worldChoices writes the `world` key the way it goes in the file, so a refusal can be obeyed by
-// copying it rather than by translating a list of names into JSON.
-func worldChoices() string {
-	return `"world": "` + strings.Join(rail.Shipped, `", "`) + `"`
-}
-
-// askWorld asks which money a new kernel uses. The question is the operator's, not the code's: the
-// choice is permanent, and each world says in its own words what it means, so nobody has to know
-// that a network is called a world here or what is on the other end of the name.
-func askWorld(name, path string) (string, error) {
+// askHandle asks what this kernel calls itself on the network, reading a whole line so an answer
+// with a space reaches the validator that refuses it. Every kernel on one network shares the
+// world's name, so this is the name that tells them apart, and the rule is the one peers apply to
+// it when they hear it, never a looser local one. Off a terminal it refuses, naming the key and
+// the file that would have supplied it.
+func askHandle(path string) (string, error) {
 	if !interactiveTTY() {
-		return "", fmt.Errorf("kernel %s: no network named, and there is no terminal to ask.\n"+
-			"       Run this again with --world %s, or write %s to %s",
-			name, rail.Shipped[0], worldChoices(), path)
+		return "", fmt.Errorf("no %q in %s, and no terminal to ask.\n"+
+			"       Run this again with --kernel-handle NAME, or write it to that file", "kernel_handle", path)
 	}
-	fmt.Fprintf(os.Stderr, "\nWhich money will %s use? This cannot be changed later.\n", name)
-	for _, w := range rail.Shipped {
-		world, err := rail.Load(w)
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(os.Stderr, "  %-5s %s\n", w, world.Description)
-	}
+	fmt.Fprintf(os.Stderr, "\nWhat will this kernel call itself on the network? Other operators see this name.\n")
 	for {
-		choice, err := ask("Choice ["+strings.Join(rail.Shipped, "/")+"]", "world", path)
-		if err != nil {
-			return "", err
-		}
-		if _, lerr := rail.Load(choice); lerr != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", lerr)
+		fmt.Fprintf(os.Stderr, "Name: ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		h := strings.TrimSpace(line)
+		if h == "" {
+			if err != nil {
+				return "", fmt.Errorf("%s is required", "kernel_handle")
+			}
 			continue
 		}
-		return choice, nil
+		if verr := kernel.ValidateHandle(h); verr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", verr)
+			continue
+		}
+		return h, nil
 	}
 }
 
-// ask reads one answer from the terminal, or refuses off one naming the key and the file that would
-// have supplied it. A whole line is read, so an answer with a space reaches the validator that
-// refuses it rather than being silently truncated.
-func ask(prompt, key, path string) (string, error) {
-	if !interactiveTTY() {
-		return "", fmt.Errorf("no %q in %s, and no terminal to ask", key, path)
+// checkNetwork refuses a database that was made on another network. A kernel serves one network
+// for life (D23): its balances, receipts and debts mean one thing only. Nothing maps a network
+// back to a name — the name is the file that produced it — so the refusal reports both
+// fingerprints and the world it was asked to serve.
+func checkNetwork(ctx context.Context, db *store.DB, w rail.World) error {
+	// A database that cannot be read must not read as one that was never bound: that is the one
+	// answer that would serve a kernel's ledger under a second meaning.
+	stored, err := db.GetConfig(ctx, configKeyWorldDigest)
+	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
+		return err
 	}
-	for {
-		fmt.Fprintf(os.Stderr, "%s: ", prompt)
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if v := strings.TrimSpace(line); v != "" {
-			return v, nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("%s is required", key)
-		}
+	if stored != "" && stored != w.Network().Digest {
+		return kernel.ErrInvalidState.Wrapf(
+			"this kernel is bound to network %s, and %s is network %s; one kernel serves one network "+
+				"for life, so serve it as the world it was created on or create a new kernel",
+			stored, w.Name, w.Network().Digest)
 	}
-}
-
-// worldFor decides which network this kernel serves. One kernel, one network, for life (D23):
-// balances, receipts and debts mean one thing only, so the answer is fixed the first time and read
-// from the database ever after. `configured` is config.json's `world`, needed only where the digest
-// alone cannot name the network — a first boot, or a world file this build does not ship — and
-// checked against the record wherever both exist.
-//
-// A kernel that already has a network is therefore never asked for one, which is what lets a
-// database made before `world` was written into config.json go on serving.
-func worldFor(ctx context.Context, db *store.DB, configured, configPath string) (rail.World, error) {
-	stored, _ := db.GetConfig(ctx, configKeyWorldDigest)
-	if made, _ := db.GetConfig(ctx, configKeySuperuser); stored == "" && made != "" {
-		// A kernel with a superuser but no digest was made before networks existed, and belongs to
-		// play, whose credits were always the operator's own records. Reading it as play's record
-		// rather than as a special case is what keeps binding it to a token world impossible: credits
-		// by fiat would become claims on a token.
-		play, err := rail.Load("play")
-		if err != nil {
-			return rail.World{}, err
-		}
-		stored = play.Network().Digest
-	}
-	if stored == "" { // a first boot: only the configuration can say
-		if configured == "" {
-			return rail.World{}, fmt.Errorf("no %q in %s", "world", configPath)
-		}
-		return rail.Load(configured)
-	}
-	was, known := shippedWorld(stored)
-	if configured == "" {
-		if !known {
-			return rail.World{}, fmt.Errorf(
-				"this kernel was created on a network this build does not ship; name its world file in %q of %s",
-				"world", configPath)
-		}
-		return was, nil
-	}
-	// Named as well as recorded: the two must be the same network. They are compared by digest, so
-	// the same world under a file path is the same network, and a different one is refused by name.
-	w, err := rail.Load(configured)
-	if err != nil {
-		return rail.World{}, err
-	}
-	if w.Network().Digest != stored {
-		name := "a world this build does not ship"
-		if known {
-			name = was.Name
-		}
-		return rail.World{}, fmt.Errorf("this kernel was created on network %s; config.json selects %s — "+
-			"one kernel serves one network for life, so serve it as %s or create a new kernel", name, w.Name, name)
-	}
-	return w, nil
-}
-
-// shippedWorld is the world whose digest this is, among those this build carries. A digest is a
-// hash, so naming the network it stands for is a lookup rather than a decoding.
-func shippedWorld(digest string) (rail.World, bool) {
-	for _, name := range rail.Shipped {
-		if w, err := rail.Load(name); err == nil && w.Network().Digest == digest {
-			return w, true
-		}
-	}
-	return rail.World{}, false
+	return nil
 }
 
 // bootstrap runs the idempotent startup tasks, and on a first boot (no superuser configured) asks

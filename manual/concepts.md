@@ -37,10 +37,13 @@ kernel cannot choose this name, it cannot claim an existing local name merely
 by announcing a matching nickname.
 
 A **world**, also called a **network**, defines the money and external payment
-system a kernel uses. The shipped worlds are `play`, which counts in fUSDT
-(fake USDT), with six decimal places and no real monetary value; `test`, which uses a test token on Arbitrum Sepolia; and
-`real`, which uses USDT on Arbitrum One. The choice is fixed when the kernel is
-created, and kernels federate only within the same network.
+system a kernel uses. It is a file in `~/.juice/worlds/`, named by that file, and
+a kernel serves the world it is started with. The shipped worlds are `play`,
+which counts in fUSDT (fake USDT), with six decimal places and no real monetary
+value; `arbitrum-sepolia`, which uses a test token on Arbitrum Sepolia; and
+`arbitrum-one`, which uses USDT on Arbitrum One. A world you write yourself is a
+network of its own. The choice is fixed when the kernel is created, and kernels
+federate only within the same network.
 
 ## Actions
 

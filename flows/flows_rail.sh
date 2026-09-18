@@ -122,18 +122,19 @@ flow_rail_settlement() {
 flow_rail_isolation() {
     echo "=== FLOW rail_isolation ==="
     local dir; dir=$(new_dir)
-    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l")" hl="$dir/lsys"
+    local dbr="$(kdb "$dir/r")" hr="$dir/rsys" dbl="$(kdb "$dir/l" otherworld)" hl="$dir/lsys"
     mkdir -p "$(dirname "$dbr")" "$(dirname "$dbl")" "$hr/.juice" "$hl/.juice"
 
-    # A world of somebody's own: same shape, different name, therefore a different network.
+    # A world of somebody's own: a file this build does not ship, therefore a different network.
     local other="$dir/other-world.json"
-    printf '{"name":"otherworld","decimals":6}\n' > "$other"
+    printf '{"rail":"manual","decimals":6,"symbol":"OTHER","description":"a network of my own","seeds":[]}\n' > "$other"
+    install_world "$dbl" "$other"
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 || { fail "rail_isolation.boot_r" "no start"; return; }
     know "$dbr" "$hr"
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
     local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
-    start_server "$dbl" "$hl" kernel_handle=kernel-l world="$other" bootstrap_peers="$boot" discovery_interval_seconds=2 \
+    start_server "$dbl" "$hl" kernel_handle=kernel-l seed="$boot" discovery_interval_seconds=2 \
         || { fail "rail_isolation.boot_l" "no start"; return; }
     know "$dbr" "$hr"
     j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -162,18 +163,20 @@ flow_rail_world_mismatch() {
     make_admin "$db" "$hs" || { fail "rail_world_mismatch.boot" "server did not start"; return; }
     stop_server "$db"
 
-    local other="$dir/other-world.json"
-    printf '{"name":"otherworld","decimals":6}\n' > "$other"
-    local log="$(dirname "$db")/mismatch.log"
-    write_config "$db" world="$other"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --listen-addr 127.0.0.1:0 >"$log" 2>&1
-    local code=$?
-    assert_ne "rail_world_mismatch.refused" 0 "$code"
-    assert_contains "rail_world_mismatch.says_why" "network" "$(cat "$log")"
+    # The same home, offered to another network: its ledger, its key and its debts mean one thing
+    # only, so the boot refuses and names both networks rather than serving under a second meaning.
+    local root; root=$(khome "$db")
+    mv "$root/kernels/play" "$root/kernels/arbitrum-sepolia"
+    local log="$dir/mismatch.log"
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$root" \
+        "$JUICE" kernel serve arbitrum-sepolia --listen-addr 127.0.0.1:0 >"$log" 2>&1
+    assert_ne "rail_world_mismatch.refused" 0 "$?"
+    assert_contains "rail_world_mismatch.says_why" "bound to network" "$(cat "$log")"
+    # It refuses before the rail: a chain world whose node is unreachable is never dialled.
+    assert_not_contains "rail_world_mismatch.dialled_nothing" "dial" "$(cat "$log")"
 
     # Its own network still starts.
-    write_config "$db"
+    mv "$root/kernels/arbitrum-sepolia" "$root/kernels/play"
     start_server "$db" "$hs" || fail "rail_world_mismatch.own_world_starts" "did not start"
 }
 
@@ -242,7 +245,7 @@ flow_rail_economic_loop() {
     # A third kernel, C, bootstrapped to the same node so B can reach it.
     local dbc="$(kdb "$dir/c")" hc="$dir/csys"
     mkdir -p "$(dirname "$dbc")" "$hc/.juice"
-    start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$FED_BOOT" discovery_interval_seconds=2 \
+    start_server "$dbc" "$hc" kernel_handle=kernel-c seed="$FED_BOOT" discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.boot_c" "no start"; return; }
     know "$dbc" "$hc"
     j "$dbc" "$hc" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -283,7 +286,7 @@ flow_rail_economic_loop() {
     # B was the node the others dialed, and it comes back on a new port, so C is pointed at where B
     # is now — the ordinary consequence of restarting a node others reach through.
     stop_server "$dbc"
-    start_server "$dbc" "$hc" kernel_handle=kernel-c bootstrap_peers="$(kernel_fed_addr "$FED_DBR" "$FED_HR")" \
+    start_server "$dbc" "$hc" kernel_handle=kernel-c seed="$(kernel_fed_addr "$FED_DBR" "$FED_HR")" \
         discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.restart_c" "did not restart"; return; }
     await_login "$dbc" "$hc" || { fail "rail_economic_loop.c_answers" "not serving after restart"; return; }
@@ -303,19 +306,22 @@ flow_rail_economic_loop() {
     assert_jnum "rail_economic_loop.b_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
 }
 
-# Two kernels under one installation: a kernel is a named directory, so a second kernel is a
-# sibling of the first — its own ledger, its own key, its own address — and a client names each by
-# its own context rather than by whatever holds a port.
+# Two kernels under one installation: a kernel belongs to the world it serves, so a kernel on a
+# second network is a sibling of the first — its own ledger, its own key, its own address — and a
+# client names each by the name it registered rather than by whatever holds a port.
 flow_two_kernels() {
     echo "=== FLOW two_kernels ==="
     local dir; dir=$(new_dir)
-    local dba dbb hc; dba="$(kdb "$dir" alpha)"; dbb="$(kdb "$dir" beta)"; hc="$dir/client"
+    local dba dbb hc; dba="$(kdb "$dir" play)"; dbb="$(kdb "$dir" otherworld)"; hc="$dir/client"
+    mkdir -p "$(dirname "$dbb")"
+    printf '{"rail":"manual","decimals":6,"symbol":"OTHER","description":"a second network","seeds":[]}\n' > "$dir/beta-world.json"
+    install_world "$dbb" "$dir/beta-world.json"
     mkdir -p "$hc/.juice"
     start_server "$dba" "$hc" kernel_handle=kernel-alpha || { fail "two_kernels.boot_alpha" "no start"; return; }
     start_server "$dbb" "$hc" kernel_handle=kernel-beta  || { fail "two_kernels.boot_beta" "no start"; return; }
 
-    assert_eq "two_kernels.alpha_home" "yes" "$([ -f "$dir/kernels/alpha/juice.db" ] && echo yes || echo no)"
-    assert_eq "two_kernels.beta_home" "yes" "$([ -f "$dir/kernels/beta/juice.db" ] && echo yes || echo no)"
+    assert_eq "two_kernels.alpha_home" "yes" "$([ -f "$dir/kernels/play/juice.db" ] && echo yes || echo no)"
+    assert_eq "two_kernels.beta_home" "yes" "$([ -f "$dir/kernels/otherworld/juice.db" ] && echo yes || echo no)"
     assert_ne "two_kernels.separate_addresses" "$(url "$dba")" "$(url "$dbb")"
 
     # One client, two kernels, one login on each. Each login reaches its own.
@@ -342,120 +348,91 @@ flow_two_kernels() {
         "$(JUICE_AS=sys@beta HOME="$hc" "$JUICE" admin user list)"
 }
 
-# A kernel made before kernels were named keeps its ledger and its identity: the first boot after the
-# upgrade moves its whole home into kernels/default/ and carries on, rather than starting an empty
-# second kernel beside it.
-flow_home_migration() {
-    echo "=== FLOW home_migration ==="
-    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    make_admin "$db" "$hs" || { fail "home_migration.boot" "server did not start"; return; }
-    make_user "$db" "$hs" "$ha" alice
-    deposit "$db" "$hs" alice 400
-    local key_before; key_before=$(kernel_key "$db" "$hs")
-    stop_server "$db"
-
-    # Put the home back where a legacy kernel kept it.
-    mv "$dir/kernels/default" "$dir/kernel" || { fail "home_migration.setup" "could not move home"; return; }
-    rmdir "$dir/kernels"
-
-    start_server "$db" "$hs" keep_config=1 || { fail "home_migration.reboot" "did not start after the move"; return; }
-    assert_eq "home_migration.moved_back" "yes" "$([ -f "$dir/kernels/default/juice.db" ] && echo yes || echo no)"
-    assert_eq "home_migration.old_home_gone" "no" "$([ -d "$dir/kernel" ] && echo yes || echo no)"
-    assert_eq "home_migration.same_identity" "$key_before" "$(kernel_key "$db" "$hs")"
-    assert_jnum "home_migration.ledger_survived" "$(jj "$db" "$ha" user me)" available 400
-}
-
-# A kernel is created once, and the three things it can never revise are asked for rather than
-# defaulted: its nickname on the command line, its network and its key at first boot.
+# A kernel is created once, and what it can never revise is asked for rather than defaulted: the
+# network on the command line, its name on the network and its key at first boot. The worlds this
+# build ships are written where the operator can read and edit them, and a world of their own is a
+# file they drop beside those.
 flow_first_boot() {
     echo "=== FLOW first_boot ==="
     local dir; dir=$(new_dir); local root="$dir/root"
     mkdir -p "$root"
 
-    # No name: there is no kernel to serve, so nothing is created.
+    # No world: there is no kernel to serve, so nothing is created.
     local out; out=$(JUICE_HOME="$root" "$JUICE" kernel serve 2>&1)
-    assert_contains "first_boot.name_required" "juice kernel serve NAME" "$out"
+    assert_contains "first_boot.world_required" "juice kernel serve WORLD" "$out"
     assert_eq "first_boot.nothing_created" "no" "$([ -d "$root/kernels" ] && echo yes || echo no)"
 
-    # A name nothing here answers to, with nobody to ask and nothing said about what to make:
-    # creating a kernel is the operator's act, so it is refused, it says what exists, and it
-    # leaves not even a directory behind.
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme 2>&1)
-    assert_contains "first_boot.unknown_kernel_refused" "no kernel named acme" "$out"
-    assert_contains "first_boot.refusal_says_what_to_write" '"world"' "$out"
-    assert_eq "first_boot.nothing_written" "no" "$([ -d "$root/kernels/acme" ] && echo yes || echo no)"
+    # A world nobody ships and nobody wrote: refused, naming the file that would have said what the
+    # network is, and leaving no kernel behind.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve nope 2>&1)
+    assert_contains "first_boot.unknown_world_refused" "$root/worlds/nope.json" "$out"
+    assert_eq "first_boot.nothing_written" "no" "$([ -d "$root/kernels/nope" ] && echo yes || echo no)"
+    # Looking for it installed the worlds this build does ship, so what an operator can serve, and
+    # edit, is in front of them.
+    for w in play arbitrum-sepolia arbitrum-one; do
+        assert_eq "first_boot.installed_$w" "yes" "$([ -f "$root/worlds/$w.json" ] && echo yes || echo no)"
+    done
 
-    # A written configuration is consent, but not an answer to the question a kernel cannot revise.
-    mkdir -p "$root/kernels/acme"
-    echo '{"kernel_handle":"acme"}' > "$root/kernels/acme/config.json"
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 2>&1)
-    assert_contains "first_boot.world_required" "world" "$out"
-    assert_eq "first_boot.no_database" "no" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
+    # A world with nobody to ask: creating a kernel is the operator's act, and the one answer no
+    # world can give is what this kernel calls itself on the network.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve play 2>&1)
+    assert_contains "first_boot.unnamed_kernel_refused" "no kernel on play here" "$out"
+    assert_contains "first_boot.refusal_says_what_to_write" "--kernel-handle" "$out"
+    assert_eq "first_boot.no_home" "no" "$([ -d "$root/kernels/play" ] && echo yes || echo no)"
 
     # A misspelled key is not a key: the setting the operator meant keeps its default otherwise.
-    echo '{"wolrd":"play"}' > "$root/kernels/acme/config.json"
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 2>&1)
-    assert_contains "first_boot.unknown_key_refused" "wolrd" "$out"
+    mkdir -p "$root/kernels/play"
+    echo '{"kernle_handle":"acme"}' > "$root/kernels/play/config.json"
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 2>&1)
+    assert_contains "first_boot.unknown_key_refused" "kernle_handle" "$out"
 
-    # Named world, named kernel: it boots, and says which kernel on which network.
-    echo '{"world":"play","bootstrap_peers":[],"log_format":"json"}' > "$root/kernels/acme/config.json"
+    # Named kernel on a named world: it boots, and says which kernel on which network.
+    echo '{"kernel_handle":"acme","log_format":"json"}' > "$root/kernels/play/config.json"
     local log="$dir/first.log"
     # Its own federation addresses: this machine may already be running a kernel on the standard
     # port, and a second kernel is refused it rather than given a share of it.
     JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
-        "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log" 2>&1 &
+        "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local i
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log" 2>/dev/null && break; sleep 0.1; done
     assert_contains "first_boot.ready_names_the_kernel" '"handle":"acme"' "$(cat "$log")"
     assert_contains "first_boot.ready_names_the_network" '"network":"play"' "$(cat "$log")"
-    assert_eq "first_boot.database_created" "yes" "$([ -f "$root/kernels/acme/juice.db" ] && echo yes || echo no)"
+    assert_eq "first_boot.database_created" "yes" "$([ -f "$root/kernels/play/juice.db" ] && echo yes || echo no)"
     # The key it minted is in the file it wrote, which nothing later rewrites.
-    assert_contains "first_boot.key_minted" "credentials_key" "$(cat "$root/kernels/acme/config.json")"
-    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-
-    # A kernel's network is its database's record. Take the key out of the file — as every kernel
-    # made before the key existed has it — and it still serves the network it was created on.
-    python3 - "$root/kernels/acme/config.json" <<'PY'
-import json, sys
-p = sys.argv[1]
-c = json.load(open(p)); c.pop("world", None); json.dump(c, open(p, "w"))
-PY
-    local log2="$dir/second.log"
-    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log2" 2>&1 &
-    pid=$!; track_pid "$pid"
-    for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log2" 2>/dev/null && break; sleep 0.1; done
-    assert_contains "first_boot.network_from_the_record" '"network":"play"' "$(cat "$log2")"
+    assert_contains "first_boot.key_minted" "credentials_key" "$(cat "$root/kernels/play/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
     # Every setting of the file is also an option, and an option wins for that run only: the kernel
     # answers to the name given here, and the file still says what the kernel is.
     local log3="$dir/third.log"
-    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve acme --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
+    JUICE_HOME="$root" HOME="$dir" "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
         --kernel-handle bravo >"$log3" 2>&1 &
     pid=$!; track_pid "$pid"
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log3" 2>/dev/null && break; sleep 0.1; done
     assert_contains "first_boot.option_wins_over_the_file" '"handle":"bravo"' "$(cat "$log3")"
-    assert_contains "first_boot.option_is_not_written_down" '"kernel_handle": "acme"' "$(cat "$root/kernels/acme/config.json")"
+    assert_contains "first_boot.option_is_not_written_down" '"kernel_handle": "acme"' "$(cat "$root/kernels/play/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
-    # Naming the network on the command line is the same consent as writing it in a file: a machine
-    # with no terminal creates a kernel with nothing written down first.
+    # Naming the kernel on the command line is the same consent as writing it in a file: a machine
+    # with no terminal creates a kernel with nothing written down first. It serves a world of the
+    # operator's own, which is a file and nothing else — no registration, no name in the program.
+    printf '{"rail":"manual","decimals":6,"symbol":"MINE","description":"a network of my own","seeds":[]}\n' > "$root/worlds/mine.json"
     local log4="$dir/cli.log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
-        "$JUICE" kernel serve cli --world play --listen-addr 127.0.0.1:0 \
+        "$JUICE" kernel serve mine --kernel-handle cli --listen-addr 127.0.0.1:0 \
         --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
-        --bootstrap-peers= --log-format json >"$log4" 2>&1 &
+        --log-format json >"$log4" 2>&1 &
     pid=$!; track_pid "$pid"
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log4" 2>/dev/null && break; sleep 0.1; done
     assert_contains "first_boot.created_from_the_command_line" '"handle":"cli"' "$(cat "$log4")"
-    assert_contains "first_boot.command_line_network" '"network":"play"' "$(cat "$log4")"
-    assert_contains "first_boot.command_line_written_down" '"world": "play"' "$(cat "$root/kernels/cli/config.json")"
+    assert_contains "first_boot.command_line_network" '"network":"mine"' "$(cat "$log4")"
+    assert_contains "first_boot.command_line_written_down" '"kernel_handle": "cli"' "$(cat "$root/kernels/mine/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
-    # A second kernel is named, and a name this installation does not know is told what it does.
-    out=$(JUICE_HOME="$root" "$JUICE" kernel serve second 2>&1)
-    assert_contains "first_boot.lists_what_exists" "Kernels here: acme" "$out"
+    # A world this installation does not know is told what it does hold.
+    out=$(JUICE_HOME="$root" "$JUICE" kernel serve arbitrum-one 2>&1)
+    assert_contains "first_boot.lists_what_exists" "Kernels here: mine, play" "$out"
 }
 
 # Money is written one way. What a command takes is what it shows, and an amount is never rendered

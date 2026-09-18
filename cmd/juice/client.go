@@ -381,21 +381,25 @@ type serverHealth struct {
 // whatever. It names the kernel by the name this client knows it under, so the reader recognises
 // it, and carries that name for the remedy to use (§14).
 func unreachable(base string) *kernel.KernelError {
-	name, local := kernelNameOfAddress(base)
+	name, network, local := kernelNameOfAddress(base)
 	if name == "" {
 		return kernel.ErrPeerUnreachable.Wrapf("cannot reach a kernel at %s", base)
 	}
 	err := kernel.ErrPeerUnreachable.Wrapf("cannot reach kernel %s at %s", name, base).WithMeta("kernel", name)
-	if local {
-		err = err.WithMeta("kernel_is_local", "yes")
+	// Only a kernel on this machine can be started by the reader, and only one whose network this
+	// client recorded can be named in the command that starts it.
+	if local && network != "" {
+		err = err.WithMeta("world", network)
 	}
 	return err
 }
 
-// kernelNameOfAddress is what this client calls the kernel at an address, and whether that address
-// is on this machine — which is what decides whether starting it is something the reader can do.
-func kernelNameOfAddress(base string) (string, bool) {
-	for name, k := range loadClientConfig().Kernels {
+// kernelNameOfAddress is what this client calls the kernel at an address, the network it recorded
+// for it, and whether that address is on this machine — which is what decides whether starting it
+// is something the reader can do. The network is what `kernel serve` is given, so a remedy names
+// that rather than the local name, which this client chose and the server never hears.
+func kernelNameOfAddress(base string) (name, network string, local bool) {
+	for n, k := range loadClientConfig().Kernels {
 		if k == nil || !sameAddress(k.Endpoint, base) {
 			continue
 		}
@@ -404,9 +408,9 @@ func kernelNameOfAddress(base string) (string, bool) {
 			host = u.Hostname()
 		}
 		ip := net.ParseIP(host)
-		return name, host == "localhost" || (ip != nil && ip.IsLoopback())
+		return n, k.Network, host == "localhost" || (ip != nil && ip.IsLoopback())
 	}
-	return "", false
+	return "", "", false
 }
 
 // checkAddress refuses an address that is not one before anything is sent. A kernel is named by a

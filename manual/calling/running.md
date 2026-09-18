@@ -175,7 +175,7 @@ If the client cannot reach your local kernel, it reports the name and address:
 
 ```
 error: cannot reach kernel acme at http://127.0.0.1:4040
-       Start it with: juice kernel serve acme
+       Start it with: juice kernel serve play
 ```
 
 ### When the other kernel cannot be reached

@@ -38,7 +38,7 @@ flow_network_reachability() {
     mkdir -p "$dir/n" "$hm/.juice"
     # allow_local_sources=false: a REAL network run, public addresses only. Only the public bootstrap
     # is configured — the remote peer must be found through routing discovery, never a manual address.
-    start_server "$db" "$hm" kernel_handle=net-node bootstrap_peers="$boot" discovery_interval_seconds=5 || {
+    start_server "$db" "$hm" kernel_handle=net-node seed="$boot" discovery_interval_seconds=5 || {
         fail "net.boot" "kernel did not start"; return; }
     know "$db" "$hm"
     j "$db" "$hm" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
@@ -92,7 +92,7 @@ flow_network_reachability() {
         sleep 1
         stop_server "$db"
         wait "$caller" 2>/dev/null
-        start_server "$db" "$hm" kernel_handle=net-node bootstrap_peers="$boot" discovery_interval_seconds=5 \
+        start_server "$db" "$hm" kernel_handle=net-node seed="$boot" discovery_interval_seconds=5 \
             || { fail "net.restart" "kernel did not come back"; return; }
         await_login "$db" "$hm" || { fail "net.restart_serving" "not serving after restart"; return; }
         local i settled=no

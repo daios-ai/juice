@@ -294,7 +294,11 @@ func TestServeHealth(t *testing.T) {
 // The token travels from the world file to the banner unchanged: it is the one fact that says which
 // money this kernel takes, and a depositor acts on it.
 func TestServeHealthCarriesTheWorldsToken(t *testing.T) {
-	world, err := rail.Load("test")
+	dir := t.TempDir()
+	if err := rail.Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	world, err := rail.Load(dir, "arbitrum-sepolia")
 	if err != nil {
 		t.Fatal(err)
 	}

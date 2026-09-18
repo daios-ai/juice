@@ -9,12 +9,14 @@ package rail
 import (
 	"bytes"
 	"crypto/sha256"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -25,31 +27,33 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// The shipped worlds. A world file is the juice-rail domain document plus a name: the operator may
-// write their own and get an isolated economy, isolated rather than private, since anyone holding
-// the file can join.
-var (
-	//go:embed worlds/play.json
-	worldPlay []byte
-	//go:embed worlds/test.json
-	worldTest []byte
-	//go:embed worlds/real.json
-	worldReal []byte
+// The worlds this build ships. They are carried only to be written into the installation's own
+// worlds directory the first time it is served: from then on the files on disk are the worlds, so
+// an operator who edits an endpoint or a seed list keeps that edit across an upgrade, and adds a
+// network by adding a file. A world file is the juice-rail domain document plus its seeds: the
+// operator may write their own and get an isolated economy, isolated rather than private, since
+// anyone holding the file can join.
+//
+//go:embed worlds
+var shipped embed.FS
+
+// The adaptors a world may name. The field decides which one witnesses this network's money, so a
+// world says what it settles on rather than leaving it to be inferred from which fields it happens
+// to carry — and a future adaptor is a new value here, not a new guess.
+const (
+	RailManual = "manual"
+	RailEVM    = "evm"
 )
 
-// Shipped names the worlds this build carries, in the order they are offered to an operator: no
-// money, then money that is not real, then money that is. It is the one list — Load reads it, and
-// anything that offers a choice or names a digest walks it rather than repeating the names.
-var Shipped = []string{"play", "test", "real"}
-
-// worldFile is what each of those names embeds.
-var worldFile = map[string][]byte{"play": worldPlay, "test": worldTest, "real": worldReal}
-
-// World is one network's definition. The defining part — name, chain, token — is identical for every
-// member and fixes the network digest; everything else is operational and belongs to whoever runs
-// the kernel, so changing an endpoint or a gas policy never changes the network.
+// World is one network's definition. The defining part — name, rail, chain, token — is identical
+// for every member and fixes the network digest; everything else is operational and belongs to
+// whoever runs the kernel, so changing an endpoint or a gas policy never changes the network.
 type World struct {
-	Name     string `json:"name"`
+	// Name is the file's own name, never a field inside it: one string names the world on the
+	// command line, the directory the kernel lives in, and the network itself, so the three
+	// cannot disagree.
+	Name     string `json:"-"`
+	Rail     string `json:"rail"`
 	ChainID  uint64 `json:"chainId"`
 	Token    string `json:"token"`
 	Decimals uint8  `json:"decimals"`
@@ -62,14 +66,14 @@ type World struct {
 	// Seeds are the bootstrap addresses of this network's own kernels — the meeting point a new
 	// member dials before it knows anyone. Each world has its own, since a kernel that dialled
 	// another world's seed would be told, every pass, that it serves a network this one is not.
-	// A kernel's own `bootstrap_peers` overrides them; an empty list is a world with no meeting
-	// point, where members introduce each other by configuration.
+	// An empty list is a network whose members introduce each other by editing this file.
 	Seeds []string `json:"seeds"`
 
-	// RPC is the network's default endpoint, which a kernel's own `rail_rpc` overrides. A world
-	// that names none asks its operator at first boot. There is no field for where the payment scan
-	// starts: that is not the network's to say and not the operator's either — it is the block the
-	// chain reports when a kernel first reaches it, recorded then as the rail's own cursor.
+	// RPC is where this kernel reaches its chain. A chain world must name one; an operator who
+	// wants their own node edits it here, beside the chain it belongs to. There is no field for
+	// where the payment scan starts: that is not the network's to say and not the operator's
+	// either — it is the block the chain reports when a kernel first reaches it, recorded then as
+	// the rail's own cursor.
 	RPC      string   `json:"rpc"`
 	Finality string   `json:"finality"`
 	Venue    venueCfg `json:"venue"`
@@ -93,23 +97,63 @@ type gasCfg struct {
 	SwapGas     uint64 `json:"swapGas"`
 }
 
-// Load resolves a shipped world by name, or reads one from a file path. An unknown bare name is an
-// error rather than a path attempt, so a typo never silently becomes "file not found".
-func Load(nameOrPath string) (World, error) {
-	raw, ok := worldFile[nameOrPath]
-	if !ok {
-		if nameOrPath == "" {
-			return World{}, fmt.Errorf("world name is empty")
+// Install writes every shipped world into dir that is not there already, and leaves the rest alone:
+// a file an operator has edited is the world they serve, and an upgrade must not undo it. Each is
+// written under a temporary name, flushed, and linked into place, so a crash cannot leave a
+// half-written file under a name that would then never be rewritten; a link refused because the
+// file now exists is another `serve` having won the race, which is success.
+func Install(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(shipped, "worlds")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		path := filepath.Join(dir, e.Name())
+		if _, err := os.Stat(path); err == nil {
+			continue
 		}
-		if !strings.ContainsAny(nameOrPath, "/.") {
-			return World{}, fmt.Errorf("unknown world %q: use %s, or the path to a world file",
-				nameOrPath, strings.Join(Shipped, ", "))
-		}
-		b, err := os.ReadFile(nameOrPath)
+		body, err := fs.ReadFile(shipped, "worlds/"+e.Name())
 		if err != nil {
-			return World{}, fmt.Errorf("read world file: %w", err)
+			return err
 		}
-		raw = b
+		// A name of this attempt's own: two kernels of one installation may be started at once, and
+		// a shared temporary name would have each truncating and removing the other's file.
+		tmp, err := os.CreateTemp(dir, e.Name()+".*")
+		if err != nil {
+			return err
+		}
+		tmp.Close()
+		if err := writeSynced(tmp.Name(), string(body)); err != nil {
+			os.Remove(tmp.Name())
+			return err
+		}
+		lerr := os.Link(tmp.Name(), path)
+		os.Remove(tmp.Name())
+		if lerr != nil && !os.IsExist(lerr) {
+			return lerr
+		}
+	}
+	return syncDir(dir)
+}
+
+// Load reads the world named name from dir. The name is the file's, minus `.json`; a world that is
+// not there is named as the path it would be, since that is the file to write or to correct.
+func Load(dir, name string) (World, error) {
+	// Before anything is read: a name is one file in dir, never a path through it, so no caller can
+	// reach outside the directory of worlds by naming one.
+	if err := validName(name); err != nil {
+		return World{}, err
+	}
+	path := filepath.Join(dir, name+".json")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return World{}, fmt.Errorf("there is no world called %s: %s does not exist, and a world is a file in that directory", name, path)
+	}
+	if err != nil {
+		return World{}, err
 	}
 	// Strict, as config.json is: a key this build does not know is a setting the operator meant to
 	// have an effect and that would silently have none, so the refusal names it.
@@ -124,6 +168,7 @@ func Load(nameOrPath string) (World, error) {
 	if dec.More() {
 		return World{}, fmt.Errorf("parse world file: more than one document")
 	}
+	w.Name = name
 	if err := w.validate(); err != nil {
 		return World{}, err
 	}
@@ -133,39 +178,53 @@ func Load(nameOrPath string) (World, error) {
 // validate rejects a world nobody could serve. A chain world must name every field the rail needs
 // before any money depends on it.
 func (w World) validate() error {
-	if w.Name == "" {
-		return fmt.Errorf("world file has no name")
-	}
-	if strings.ContainsAny(w.Name, "/@ ") {
-		return fmt.Errorf("world name %q must be a bare name", w.Name)
-	}
-	if !w.Chained() {
-		if w.ChainID != 0 || w.Token != "" {
-			return fmt.Errorf("world %q names only one of chainId and token; a chain world needs both", w.Name)
-		}
-		return nil
-	}
-	if _, err := jrail.ParseAddress(w.Token, "token"); err != nil {
+	if err := validName(w.Name); err != nil {
 		return err
 	}
-	// The ledger holds 64-bit integers, so a token whose unit needs more than 18 decimals could not
-	// have even ten of itself represented; such a world is refused rather than silently wrapped.
-	if w.Decimals == 0 || w.Decimals > 18 {
-		return fmt.Errorf("world %q must state the token's decimals, at most 18", w.Name)
+	switch w.Rail {
+	case RailManual:
+		if w.ChainID != 0 || w.Token != "" {
+			return fmt.Errorf("world %q settles on no chain, so it names neither chainId nor token", w.Name)
+		}
+		return nil
+	case RailEVM:
+		if _, err := jrail.ParseAddress(w.Token, "token"); err != nil {
+			return err
+		}
+		if w.ChainID == 0 {
+			return fmt.Errorf("world %q must name the chainId its token is on", w.Name)
+		}
+		if w.RPC == "" {
+			return fmt.Errorf("world %q must name the node it reaches its chain through, in %q", w.Name, "rpc")
+		}
+		// The ledger holds 64-bit integers, so a token whose unit needs more than 18 decimals could
+		// not have even ten of itself represented; such a world is refused rather than silently wrapped.
+		if w.Decimals == 0 || w.Decimals > 18 {
+			return fmt.Errorf("world %q must state the token's decimals, at most 18", w.Name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("world %q names rail %q; this build settles on %q or %q", w.Name, w.Rail, RailManual, RailEVM)
+	}
+}
+
+// validName accepts what may name a world: one plain name, since it is at once a file in the worlds
+// directory, the directory its kernel lives in, and the network itself.
+func validName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\@ `) {
+		return fmt.Errorf("world name %q must be a bare name", name)
 	}
 	return nil
 }
 
-// Chained reports whether this world settles on a chain. It reads the defining part alone, which is
-// what selects the adaptor: no code anywhere asks whether the world is called play or real.
-func (w World) Chained() bool { return w.ChainID != 0 && w.Token != "" }
-
 // definingPart is exactly what every member of a network shares, and nothing else. Its canonical
 // form is hashed into the digest, so two kernels agree iff they run the same network — whatever
-// endpoint, gas policy, or file name each of them uses locally.
+// endpoint, gas policy, or file name each of them uses locally. The adaptor is in it because two
+// worlds settling by different rules are different money even where everything else matches.
 type definingPart struct {
 	ChainID uint64 `json:"chain_id"`
 	Name    string `json:"name"`
+	Rail    string `json:"rail"`
 	Token   string `json:"token"`
 }
 
@@ -177,9 +236,9 @@ func (w World) Network() kernel.Network {
 	if w.Token != "" {
 		token = strings.ToLower(common.HexToAddress(w.Token).Hex())
 	}
-	canon, err := kernel.CanonicalJSON(definingPart{ChainID: w.ChainID, Name: w.Name, Token: token})
+	canon, err := kernel.CanonicalJSON(definingPart{ChainID: w.ChainID, Name: w.Name, Rail: w.Rail, Token: token})
 	if err != nil {
-		// definingPart is three scalars; it cannot fail to canonicalize.
+		// definingPart is four scalars; it cannot fail to canonicalize.
 		panic("rail: canonicalize world: " + err.Error())
 	}
 	sum := sha256.Sum256(canon)
@@ -189,7 +248,7 @@ func (w World) Network() kernel.Network {
 
 // Domain converts the world into the rail library's domain. Only a chain world has one.
 func (w World) Domain() (jrail.Domain, error) {
-	if !w.Chained() {
+	if w.Rail != RailEVM {
 		return jrail.Domain{}, fmt.Errorf("world %q has no chain", w.Name)
 	}
 	token, err := jrail.ParseAddress(w.Token, "token")

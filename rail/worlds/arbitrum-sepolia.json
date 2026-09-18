@@ -1,5 +1,5 @@
 {
-  "name": "test",
+  "rail": "evm",
   "chainId": 421614,
   "rpc": "https://sepolia-rollup.arbitrum.io/rpc",
   "token": "0x8e87deee3BF1eFE27E8e96ABf205BEDF802ed568",

@@ -44,25 +44,33 @@ make build          # or: go build -o juice ./cmd/juice/
 make install        # copies it to ~/.juice/bin, where install.sh puts it
 ```
 
-Either way, the first kernel is one command:
+Either way, the first kernel is one command, naming the network to serve:
 
 ```bash
-juice kernel serve acme --listen-addr :4040
+juice kernel serve play --listen-addr :4040
 ```
 
-`acme` is the kernel's nickname: what it calls itself on the network,
-and the name of its directory. There is no kernel of that name yet, so `serve` says what
-is here, asks whether to create one, and asks the two things it can never revise:
+A **world** is a network: the money it uses and the servers to meet it through, written in
+a file. Three are shipped and written into `~/.juice/worlds/` the first time you serve, to
+read and to edit:
+
+| World | Money |
+|---|---|
+| `play` | no real money: you credit accounts yourself and keep the records |
+| `arbitrum-sepolia` | fake USDT on the Arbitrum Sepolia test chain |
+| `arbitrum-one` | USDT on Arbitrum One |
+
+One installation runs one kernel per world, in `~/.juice/kernels/<world>/`. There is no
+kernel on `play` yet, so `serve` says what is here, asks whether to create one, and asks
+what it can never revise:
 
 ```
-There is no kernel named acme. No kernels here yet.
-Create acme as a new kernel? [y/N] y
+There is no kernel on play here. No kernels here yet.
+play is no real money: you credit accounts yourself and keep the records.
+Create a kernel on play? [y/N] y
 
-Which money will acme use? This cannot be changed later.
-  play  no real money: you credit accounts yourself and keep the records
-  test  fake USDT on the Arbitrum Sepolia test chain
-  real  USDT on Arbitrum One
-Choice [play/test/real]: play
+What will this kernel call itself on the network? Other operators see this name.
+Name: acme
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
@@ -73,20 +81,25 @@ INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=Kl8eObRJ…
 ```
 
-Declining, or interrupting before the money is chosen, leaves nothing behind.
+Declining, or interrupting before those answers, leaves nothing behind.
 
 **Write the phrase down**: it is the only way to reset the superuser password
 (`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
-the kernel's own database — and each repeats the ready line, which is where the kernel
-says which nickname, which network and which key answered.
+the kernel's own database, and a kernel offered another one refuses — and each repeats the
+ready line, which is where the kernel says which nickname, which network and which key
+answered.
 
-To boot without a terminal, name the network on the command line and set the password in
+To boot without a terminal, name the kernel on the command line and set the password in
 the environment. Saying what the kernel is, is the consent a machine with no terminal can
 give, so `serve` creates it without asking:
 
 ```bash
-JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve acme --world play
+JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve play --kernel-handle acme
 ```
+
+To join a network juice does not ship, put its file in `~/.juice/worlds/` and serve it by
+that file's name. Writing one of your own gives an economy of its own: its money is its
+own, and nothing signed on it verifies anywhere else.
 
 Every setting of `config.json` is an option here — the key with underscores written as
 dashes, a nested key as a path (`--native.llm.url`) — and an option applies to that run
@@ -153,13 +166,13 @@ The ledger also shows provider payouts, operator fees, and import fees, each lin
 to the transaction that settled it.
 
 On `play` amounts are shown in fUSDT (fake USDT), with six decimal places like
-the other worlds. No crypto is involved. The operator records the payments they
+the other shipped worlds. No crypto is involved. The operator records the payments they
 receive from people; `--ref` is whatever names one in their own books. What
 another kernel owes needs no such record: its own signed message saying it paid
 is the payment here, so those debts close by themselves. `play` money is backed
 by nothing and is meant for trying the system out.
 
-On a world with a chain (`test`, `real`), money arrives and leaves over that chain, and
+On a world with a chain (`arbitrum-sepolia`, `arbitrum-one`), money arrives and leaves over it, and
 amounts are written the way that token is written — `1.50`, not `1500000`:
 
 ```bash
@@ -297,11 +310,10 @@ sys/time`.
 ## Federation
 
 Kernels reach each other by public key over libp2p — no URLs, no port forwarding; a
-kernel behind home NAT federates like any other. By default, it joins through the
-seeds in its world file. `bootstrap_peers` overrides those seeds: leave it absent
-to use the world's list, set `[]` to disable discovery, or supply a list to use
-those peers instead. `play` and `test` currently ship without seeds, so their
-operators must configure a meeting point. Serving is just marking an action
+kernel behind home NAT federates like any other. It joins through the seeds in its
+world file, which is the one place a meeting point is named: to use another, edit
+that file. The shipped worlds currently name none, so their operators write in one.
+Serving is just marking an action
 `public`. Calling is just naming it:
 
 ```bash
@@ -343,18 +355,16 @@ nothing. `admin kernel show` shows the position.
 ## Configuration
 
 `config.json` sits next to the database, inside the kernel's own directory, and is written
-once by first boot; nothing rewrites it afterwards. Safe defaults apply when a key is
+once by first boot; nothing rewrites it afterwards. What belongs to the network rather than
+to this kernel — its money, its chain endpoint, its seeds — is in the world file instead. Safe defaults apply when a key is
 absent, and a key that is not a key is a startup error rather than a silent default.
 The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
 | `kernel_handle` | The nickname this kernel reports |
-| `bootstrap_peers` | Absent: use the world's seeds; `[]`: disable discovery; a list: use those peers instead. `play` and `test` currently have no seeds |
 | `listen_addr` | Where this kernel answers clients (default `:4040`) |
 | `fed_listen_addrs` | Where this kernel answers peers; empty binds the standard port 31313, and a second kernel on the same machine needs its own |
-| `world` | The network this kernel serves for life: `play` (no crypto), `test`, `real`, or a path to a world file. There is no default: first boot asks, and the answer cannot be revised |
-| `rail_rpc` | The node this kernel reaches its chain through, over the one its world names; needed only for a world naming none |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |
 | `remote_bps` / `import_bps` | Markup for serving peers / import duty on remote calls (default `500` each) |
 | `lottery` / `lottery_max` / `credit_limit` | The ticket this kernel settles a cross-kernel charge by (`0` pays every charge exactly), the largest ticket it accepts from a buyer, and the ceiling on work delivered and unpaid |
@@ -390,6 +400,7 @@ log/         Structured logging
 
 - [requirements.md](requirements.md) — the kernel specification (authoritative).
 - [API.md](API.md) — the full HTTP/CLI reference.
+- [docs/worlds.md](docs/worlds.md) — what a world is, and how to write one of your own.
 - [docs/oauth.md](docs/oauth.md) — wrapping APIs that need per-user consent.
 - [flows/](flows/) — runnable end-to-end shell flows (`flows_test.sh` drives them).
 
@@ -412,7 +423,7 @@ fails. **[docs/network-simulation.md](docs/network-simulation.md)** describes th
 what each measurement proves, and what it does not claim.
 `RAIL=anvil` runs the same economy against a local chain (needs Foundry) and `RAIL=sepolia` against
 the live testnet (needs `JUICE_SEPOLIA_RPC` and `JUICE_SEPOLIA_KEY_FILE`, mode 600); on both, money
-is real token transfers, credited at the world's settlement tag: `latest` on the shipped test world,
+is real token transfers, credited at the world's settlement tag: `latest` on `arbitrum-sepolia`,
 so a credit lands in seconds; `finalized` waits for Ethereum.
 
 It is one economy on all three. The participants, actions, prices, trades, compositions, attacks

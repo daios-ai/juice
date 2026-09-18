@@ -13,8 +13,8 @@ keeps clusters apart from users. Only the terms are ours.
 
 - **Installation** — one machine's Juice state, rooted at `$JUICE_HOME` (default `~/.juice`). One
   per operating-system user. Several people on one machine are several installations.
-- **Kernel** — one server: its database and signing key, world, rail key, configuration and lock,
-  in one directory named for its nickname.
+- **Kernel** — one server: its database and signing key, rail key, configuration and lock, in one
+  directory named for the world it serves. One installation runs one kernel per world.
 - **Account** — a principal on one kernel. `sys` is one account per kernel.
 - **Login** — one account at one kernel, written `handle@kernel`, holding that session's access and
   refresh tokens. What every program names, and what says both who a command acts as and where.
@@ -26,7 +26,8 @@ keeps clusters apart from users. Only the terms are ours.
 ```
 $JUICE_HOME/
   bin/                   the family's executables, where the installer puts them
-  kernels/<name>/        one kernel: juice.db, config.json, the rail key and its records,
+  worlds/<world>.json    one network's definition: its money, and the servers to meet it through
+  kernels/<world>/       one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected
   client/credentials/    one file per login, named handle@kernel, 0600, holding its tokens
@@ -36,8 +37,10 @@ $JUICE_HOME/
 ```
 
 A kernel's home is one directory because everything in it binds to everything else: the ledger, the
-signing key its receipts are signed with, the rail key that settles them, and the world all three
-are valid on. It backs up, moves and locks as a unit. `cache/` is regenerable and safe to delete.
+signing key its receipts are signed with, and the rail key that settles them. The world those three
+are valid on is not in it — it is the network's, shared by every kernel on it and held once per
+installation in `worlds/`, which is why the home is named for it. The home backs up, moves and locks
+as a unit; `cache/` is regenerable and safe to delete.
 
 Everything else belongs to the component that owns it and outlives any kernel. Removing a kernel
 never removes an agent's memory, a service's state, or the interface's history. `bin/` is the one
@@ -46,26 +49,28 @@ and a person deletes them without losing anything.
 
 ## 3. Kernels
 
-`juice kernel serve <name>` serves `kernels/<name>/`. The name may hold letters, digits, dot, dash and
-underscore, up to 64 characters, may not begin with a dot, and is bare — it is a nickname as well as
-a directory.
+`juice kernel serve <world>` serves `kernels/<world>/`. The world is a file in `worlds/`, named by
+that file: the name may hold letters, digits, dot, dash and underscore, up to 64 characters, and may
+not begin with a dot. The worlds this installation's binary ships are written into `worlds/` the
+first time it serves and never overwritten, so an operator's edit — their own node, their own
+meeting point — outlives an upgrade, and a network this build does not ship is a file they add.
 
-It is the kernel's nickname (D15): what the kernel calls itself on the network, and, because it is
-the one name the operator has given by the time a home is created, the name of that home. Neither is
-the kernel's identity, which is its key and does not exist until first boot. The directory may be
-renamed and the network will not notice; a nickname already written in the configuration is kept.
+One installation runs one kernel per world, so the world is the whole of what `serve` is told. The
+kernel's own nickname (D15) — what it calls itself on the network, since every kernel on one shares
+the world's name — is asked for at first boot and kept in its `config.json`. Neither is the kernel's
+identity, which is its key and does not exist until that boot.
 
-Each kernel is started with its own `--addr` and carries its own `fed_listen_addrs` in its own
+Each kernel is started with its own `--listen-addr` and carries its own `fed_listen_addrs` in its own
 `config.json`. Nothing allocates ports for them; a collision is a bind failure at startup, for the
 client port and the peer transport alike. One server per kernel, enforced by the lock in its home.
 
 A kernel is created by its first boot, and only on the operator's word: a `config.json` written in
 advance, or an answer given at a terminal after they are told which kernels are here. It then asks
-for what the kernel cannot revise — its network, and the chain endpoint where the network names none —
-and refuses off a terminal, naming the key and the file that would have answered. That first boot is
-the only writer of `config.json`, and it writes nothing until the answers are in hand, so a boot that
-is declined or unanswered leaves nothing behind. The network is recorded once the rail has verified
-it, and from then on that record is the kernel's network: later boots read it rather than the file.
+for what the kernel cannot revise — the name it goes by on the network — and refuses off a terminal,
+naming the key and the file that would have answered. That first boot is the only writer of
+`config.json`, and it writes nothing until the answers are in hand, so a boot that is declined or
+unanswered leaves nothing behind. The network is recorded once the rail has verified it, and from
+then on a boot offering that kernel another world is refused before anything is opened.
 
 Removing a kernel is not a lifecycle verb. Its directory holds a ledger, a signing key, a rail
 key and possibly unsettled obligations, so it is archived or destroyed deliberately by the operator,

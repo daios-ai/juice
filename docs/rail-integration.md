@@ -6,10 +6,11 @@ Supersedes `money-rail.md`.
 
 ## Networks
 
-A Juice network is defined by a shared world file:
+A Juice network is defined by a shared world file, named by that file and installed in
+`$JUICE_HOME/worlds/` (see [worlds.md](worlds.md)):
 
-- **defining** (identical for every member): network name, chain id, token address.
-- **operational** (each kernel's own): adaptor choice and config, RPC endpoint, gas policy.
+- **defining** (identical for every member): network name, adaptor, chain id, token address.
+- **operational** (each kernel's own): RPC endpoint, gas policy, seeds.
 
 A digest of the defining part is in every signature prefix, so any artifact from another network
 fails verification everywhere (EIP-155 pattern). Discovery runs per network (`juice/<name>`) —
@@ -21,27 +22,27 @@ The digest is a full federation protocol break, upgraded in lockstep: every sign
 discovery namespace, identity, settlement records, config, migrations, and the test catalog
 change together. The revisions section enumerates them.
 
-Shipped files: **play** (default, manual rail: same money rules, the operator's records are the
-finalized facts, no chain), **test** (Arbitrum Sepolia, mock USDT0), **real** (Arbitrum One, USDT0).
+Shipped files: **play** (manual rail: same money rules, the operator's records are the finalized
+facts, no chain), **arbitrum-sepolia** (mock USDT0), **arbitrum-one** (USDT0).
 Anyone can write a world file and gets an isolated economy — isolated, not private: anyone
 holding the file can join.
 
 ## Kernels
 
-A kernel = one `juice kernel serve` + one home: ledger, identity key, world file, port, and — on a
-chain rail — rail db and key. One kernel, one network, permanently; no switching, only
-separate kernels.
+A kernel = one `juice kernel serve <world>` + one home: ledger, identity key, port, and — on a
+chain rail — rail db and key. The world is not in the home: it is the network's, held once per
+installation. One kernel, one network, permanently; no switching, only separate kernels, one per
+world.
 First boot writes the digest into `juice.db`; startup refuses a mismatched world file (as D9
 refuses missing keys).
 
 ## Rails are adaptors
 
 `kernel` owns the interface, imports no chain code; `juice-rail` is the first adaptor. One set
-of money rules runs everywhere; the defining part selects only the witness: no chain/token → the
-**manual** adaptor, whose finalized facts are the operator's own records of what people pay and
-the buyer's own signed reveal of what a peer pays (`Pay` confirms at
-once, `Refills` is empty); present → a chain adaptor. Never `if world == real`, and never
-`if railed`.
+of money rules runs everywhere; the world's `rail` field selects only the witness: `manual`, whose
+finalized facts are the operator's own records of what people pay and the buyer's own signed reveal
+of what a peer pays (`Pay` confirms at once, `Refills` is empty); `evm`, a chain adaptor. Never
+`if world == "arbitrum-one"`, and never a guess from which fields the file carries.
 
 The adaptor is a thin translation of the rail's actual outcomes — it adds none and hides none:
 

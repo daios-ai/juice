@@ -14,23 +14,26 @@ network participation. Routine supervision is covered in
 ## Starting one
 
 ```
-$ juice kernel serve acme --listen-addr :4040
+$ juice kernel serve play --listen-addr :4040
 ```
 
-The name `acme` selects the kernel's directory and supplies its initial nickname.
-The `--listen-addr` option sets its HTTP listening address. On first start, the command
-asks you to confirm creation and select the network whose money the kernel will
-use:
+The argument names the network to serve. It is a world: a file in
+`~/.juice/worlds/` describing one network — the money it uses and the servers to
+meet it through. The worlds this build ships (`play`, `arbitrum-sepolia`,
+`arbitrum-one`) are written there the first time you serve, to read and to edit,
+and a network juice does not ship is a file you add. One installation runs one
+kernel per world, in `~/.juice/kernels/<world>/`.
+
+The `--listen-addr` option sets the HTTP listening address. On first start, the
+command asks you to confirm creation and to name the kernel on the network:
 
 ```
-There is no kernel named acme. No kernels here yet.
-Create acme as a new kernel? [y/N] y
+There is no kernel on play here. No kernels here yet.
+play is no real money: you credit accounts yourself and keep the records.
+Create a kernel on play? [y/N] y
 
-Which money will acme use? This cannot be changed later.
-  play  no real money: you credit accounts yourself and keep the records
-  test  fake USDT on the Arbitrum Sepolia test chain
-  real  USDT on Arbitrum One
-Choice [play/test/real]: play
+What will this kernel call itself on the network? Other operators see this name.
+Name: acme
 Superuser password:
 Confirm password:
 sys recovery phrase (write this down; it is shown only once and cannot be recovered):
@@ -41,15 +44,17 @@ INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
-The ready line names the kernel, network, HTTP address, and public key.
+The name is the kernel's nickname, which every operator on the network sees;
+the world's name is shared by all of them, which is why the kernel needs one of
+its own. The ready line names the kernel, network, HTTP address, and public key.
 Federation listening addresses are available through `juice admin kernel show`
 and `GET /health`.
 
-On `test` and `real`, first boot also reaches the chain and records the block it
-starts watching for payments from. It asks nothing more: those networks name a
-node to reach them through. See [Setting up on a chain](#setting-up-on-a-chain).
-Declining creation or stopping before the network is chosen leaves no kernel
-state on disk.
+On a chain network, first boot also reaches the chain and records the block it
+starts watching for payments from. It asks nothing more: the world names the node
+to reach it through. See [Setting up on a chain](#setting-up-on-a-chain).
+Declining creation, or stopping before those answers, leaves no kernel state on
+disk.
 
 {: .warning }
 > The network cannot be changed afterwards. A kernel serves the one it was created
@@ -57,8 +62,9 @@ state on disk.
 
 After verification, the selected network is recorded in the database. Later
 starts use that record to ensure the kernel continues on the same network.
-Operational settings such as listening addresses, fees, bootstrap peers, and
-the chain endpoint can be changed in configuration.
+Operational settings such as listening addresses and fees can be changed in
+configuration; what belongs to the network — its chain endpoint and its meeting
+points — is in the world file.
 
 {: .warning }
 > Save the recovery phrase before pressing Enter. It is shown once, it is the only
@@ -70,13 +76,14 @@ identifying the kernel, network, and public key.
 
 ## Setting up on a chain
 
-A kernel on `test` or `real` needs access to the chain and funds for transaction
-fees. It generates its own rail key during setup. The sequence is:
+A kernel on `arbitrum-sepolia` or `arbitrum-one` needs access to the chain and
+funds for transaction fees. It generates its own rail key during setup. The sequence is:
 
-**1. Decide which node to use.** `test` and `real` name a public one, so there is
-nothing to do here. The kernel reads payments and submits transactions through
-it. To use a hosted node or your own instead, set `rail_rpc` in the kernel's
-configuration; it overrides the network's and may be changed later.
+**1. Decide which node to use.** Both shipped chain worlds name a public one, so
+there is nothing to do here. The kernel reads payments and submits transactions
+through it. To use a hosted node or your own instead, edit `rpc` in that world's
+file in `~/.juice/worlds/`, which is where the node belongs and may be changed
+at any time.
 
 The first boot must reach that node, and everything it checks there must answer:
 the chain is the one named, the token at that address is the one named, and the
@@ -106,7 +113,7 @@ and logging in as `sys`, inspect its rail address:
 ```
 $ juice admin kernel show
 Handle:     bank
-Network:    real
+Network:    arbitrum-one
 Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 Holdings:   0.00 USDT (gas 0.00) as of block 13
 …
@@ -149,11 +156,11 @@ from the ETH supplied for blockchain fees.
 
 ## Starting without a terminal
 
-For unattended first boot, name the network on the command line and provide the
+For unattended first boot, name the kernel on the command line and provide the
 superuser password through `JUICE_BOOTSTRAP_PASSWORD`:
 
 ```
-$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve acme --world play --listen-addr :4040
+$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve play --kernel-handle acme --listen-addr :4040
 ```
 
 Naming settings is consent to create the kernel, so nothing is asked. Writing
@@ -162,8 +169,7 @@ first boot the effective settings are written to that file as the new kernel's
 configuration; on every later boot an option applies to that run alone.
 
 If required configuration is missing and no terminal is available, startup
-fails with a message identifying the missing setting. A network that names no
-node of its own also requires `rail_rpc`.
+fails with a message identifying the missing setting.
 
 ## The kernel's home
 
@@ -214,10 +220,10 @@ the records and keys needed to resolve them.
 
 ## Joining the network
 
-The world file supplies the default seeds used to find peers and exchange
-public catalogs. Set `bootstrap_peers` to override them, or to `[]` to disable
-discovery. `play` and `test` currently ship without seeds; configure a peer in
-the same world to connect their kernels. Eligible public actions then become
+The world file supplies the seeds used to find peers and exchange public
+catalogs, and is the only place a meeting point is named: to use another, edit
+`seeds` in that file. The shipped worlds currently name none, so write in a peer
+of the same network to connect them. Eligible public actions then become
 available to remote callers without another registration step.
 
 Peers are identified by public key. A kernel behind a home router can be reached
@@ -226,8 +232,8 @@ forwarding. Publicly reachable kernels also support routing and relay traffic;
 every kernel listens on port 31313 unless its configuration says otherwise, so
 a seed is dialable at a known address with nothing to configure.
 
-Discovery is separated by network, so `play`, `test`, and `real` kernels find
-peers in their own network. You can inspect the local transport addresses with:
+Discovery is separated by network, so kernels find peers on their own network
+and nowhere else. You can inspect the local transport addresses with:
 
 ```
 $ juice admin kernel show

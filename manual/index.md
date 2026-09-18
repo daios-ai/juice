@@ -97,23 +97,24 @@ and outputs. This gives participants a record of experience with a service,
 while preserving the distinction between evidence of a trade and an assurance
 of quality.
 
-## The three networks
+## The shipped networks
 
-A kernel belongs to one network, selected when it is created. This determines
-the money it uses and cannot be changed later. The three shipped networks serve
+A kernel belongs to one network, named when it is created. This determines the
+money it uses and cannot be changed later. A network is a **world**: a file in
+`~/.juice/worlds/` naming its money and the servers to meet it through, so a
+network this build does not ship is a file you add. The three shipped ones serve
 different stages of use:
 
 - **`play`** counts in fUSDT (fake USDT), with six decimal places and no real
   monetary value. The operator records deposits, and no blockchain payment is required. It is suitable for learning
   Juice and developing services.
-- **`test`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
+- **`arbitrum-sepolia`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
   withdrawals, and settlement on a blockchain without using real money.
-- **`real`** uses USDT on Arbitrum One. Accounts and prices are denominated in
+- **`arbitrum-one`** uses USDT on Arbitrum One. Accounts and prices are denominated in
   USDT, and external payments settle on that chain.
 
-Kernels federate within their own network. All three shipped networks use six
-decimal places, but their balances remain separate and have different monetary
-value. [Money](money/) explains funding and withdrawals for each.
+Kernels federate within their own network. All three use six decimal places, but
+their balances remain separate and have different monetary value. [Money](money/) explains funding and withdrawals for each.
 
 ## Where to start
 

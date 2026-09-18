@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -118,7 +117,7 @@ func TestLoadConfig_ReadsExistingOntoDefaults(t *testing.T) {
 }
 
 // A key the operator misspelled reads exactly like a key they never wrote, and the setting they
-// meant to change silently keeps its default — which for `world` is a decision they cannot revisit.
+// meant to change silently keeps its default.
 func TestLoadConfig_UnknownKeyIsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"wolrd":"real"}`), 0o600); err != nil {
@@ -130,14 +129,6 @@ func TestLoadConfig_UnknownKeyIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "wolrd") {
 		t.Errorf("the refusal must name the key: %v", err)
-	}
-}
-
-// There is no default world: a kernel joins one network for life, so which one is the operator's
-// to state and first boot asks for it.
-func TestDefaultConfigNamesNoWorld(t *testing.T) {
-	if w := DefaultServerConfig().World; w != "" {
-		t.Errorf("DefaultServerConfig().World = %q, want empty", w)
 	}
 }
 
@@ -339,30 +330,34 @@ func TestEconomyDefaultsAndIndependence(t *testing.T) {
 	}
 }
 
-// testHome isolates an installation root and restores the served kernel afterwards.
+// testHome isolates an installation root and restores the served world afterwards.
 func testHome(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("JUICE_HOME", root)
-	old := kernelName
-	kernelName = "acme"
-	t.Cleanup(func() { kernelName = old })
+	old := worldName
+	worldName = "play"
+	t.Cleanup(func() { worldName = old })
 	return root
 }
 
-// TestInstanceHomeIsPerKernel pins the layout: a kernel's whole home is one named directory under
-// the installation root, so a second kernel is a sibling rather than a second installation.
-func TestInstanceHomeIsPerKernel(t *testing.T) {
+// TestInstanceHomeIsPerWorld pins the layout: a kernel's whole home is one directory named for the
+// world it serves, so a kernel on a second network is a sibling rather than a second installation,
+// while the worlds themselves and the client's records belong to the installation.
+func TestInstanceHomeIsPerWorld(t *testing.T) {
 	root := testHome(t)
-	if got, want := kernelHome(), filepath.Join(root, "kernels", "acme"); got != want {
-		t.Errorf("named kernel: got %q, want %q", got, want)
+	if got, want := kernelHome(), filepath.Join(root, "kernels", "play"); got != want {
+		t.Errorf("served world: got %q, want %q", got, want)
 	}
-	kernelName = "second"
-	if got, want := kernelHome(), filepath.Join(root, "kernels", "second"); got != want {
-		t.Errorf("named kernel: got %q, want %q", got, want)
+	worldName = "arbitrum-one"
+	if got, want := kernelHome(), filepath.Join(root, "kernels", "arbitrum-one"); got != want {
+		t.Errorf("served world: got %q, want %q", got, want)
 	}
-	if got, want := cacheDir(), filepath.Join(root, "kernels", "second", "cache"); got != want {
+	if got, want := cacheDir(), filepath.Join(root, "kernels", "arbitrum-one", "cache"); got != want {
 		t.Errorf("cache: got %q, want %q", got, want)
+	}
+	if got, want := worldsDir(), filepath.Join(root, "worlds"); got != want {
+		t.Errorf("worlds: got %q, want %q", got, want)
 	}
 	// Client records belong to the installation, not to any one kernel.
 	if got, want := clientHome(), filepath.Join(root, "client"); got != want {
@@ -370,122 +365,18 @@ func TestInstanceHomeIsPerKernel(t *testing.T) {
 	}
 }
 
-// TestKernelNameValidation pins what may name a kernel. The name is both the nickname the network
-// carries and this machine's directory for it, so it must satisfy both: bare, as every handle is,
-// and one path segment, as every label under this root is.
+// TestKernelNameValidation pins what may name a world on this machine. The name becomes a file
+// under worlds/ and a directory under kernels/, so it is one path segment and nothing else.
 func TestKernelNameValidation(t *testing.T) {
 	for _, ok := range []string{"acme", "second", "a-b_c.1", "PROD"} {
-		if err := validateLocalName("kernel", ok); err != nil {
+		if err := validateLocalName("world", ok); err != nil {
 			t.Errorf("%q rejected: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{"", ".", "..", ".hidden", "a/b", "a@b", "a b", strings.Repeat("x", 65)} {
-		if err := validateLocalName("kernel", bad); err == nil {
+		if err := validateLocalName("world", bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
-	}
-}
-
-// seedLegacyHome writes an unnamed legacy kernel home: a database and the files that sit beside it.
-func seedLegacyHome(t *testing.T) string {
-	t.Helper()
-	legacy := legacyKernelHome()
-	if err := os.MkdirAll(filepath.Join(legacy, "cache"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, body := range map[string]string{
-		"juice.db":    "LEDGER",
-		"config.json": `{"world":"play"}`,
-		"rail.key":    "RAILKEY",
-	} {
-		if err := os.WriteFile(filepath.Join(legacy, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return legacy
-}
-
-// TestLegacyHomeMovesWholeAndOnce pins the kernel's own migration: the home moves entire — ledger,
-// config, rail key and anything else beside them — in one rename, and a second boot finds nothing
-// left to do. A ledger and a signing key are not worth a file-by-file protocol that can stop half
-// way, and both paths share a root, so one rename is all it takes.
-func TestLegacyHomeMovesWholeAndOnce(t *testing.T) {
-	root := testHome(t)
-	legacy := seedLegacyHome(t)
-
-	if err := migrateLegacyHome(); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	dest := filepath.Join(root, "kernels", "acme")
-	for _, name := range []string{"juice.db", "config.json", "rail.key", "cache"} {
-		if _, err := os.Stat(filepath.Join(dest, name)); err != nil {
-			t.Errorf("%s did not move: %v", name, err)
-		}
-	}
-	if body, _ := os.ReadFile(filepath.Join(dest, "juice.db")); string(body) != "LEDGER" {
-		t.Error("the ledger that moved is not the ledger that was there")
-	}
-	if _, err := os.Stat(legacy); err == nil {
-		t.Error("the old home is still in place, so the next boot would see two kernels")
-	}
-	// Idempotent: nothing left to move, and the moved kernel is untouched.
-	if err := migrateLegacyHome(); err != nil {
-		t.Fatalf("second run: %v", err)
-	}
-	if body, _ := os.ReadFile(filepath.Join(dest, "juice.db")); string(body) != "LEDGER" {
-		t.Error("a second run disturbed the moved kernel")
-	}
-}
-
-// TestLegacyHomeRefusesRatherThanMerges pins both refusals. A destination that already holds a
-// kernel means two ledgers and only the operator can say which this installation serves; a home a
-// server still holds must not be pulled out from under it.
-func TestLegacyHomeRefusesRatherThanMerges(t *testing.T) {
-	root := testHome(t)
-	seedLegacyHome(t)
-	dest := filepath.Join(root, "kernels", "acme")
-	if err := os.MkdirAll(dest, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateLegacyHome(); err == nil {
-		t.Fatal("a destination that already exists must be refused, never merged")
-	}
-	if _, err := os.Stat(filepath.Join(legacyKernelHome(), "juice.db")); err != nil {
-		t.Error("the refused migration disturbed the old home")
-	}
-	if err := os.Remove(dest); err != nil {
-		t.Fatal(err)
-	}
-
-	// A running server holds the old home's lock.
-	f, err := os.OpenFile(filepath.Join(legacyKernelHome(), "serve.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateLegacyHome(); err == nil {
-		t.Fatal("a home a server still holds must not be moved")
-	}
-	if _, err := os.Stat(filepath.Join(legacyKernelHome(), "juice.db")); err != nil {
-		t.Error("the refused migration disturbed the old home")
-	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	if err := migrateLegacyHome(); err != nil {
-		t.Fatalf("once the server has stopped, the move proceeds: %v", err)
-	}
-}
-
-// TestNoLegacyHomeIsNotAMigration: a fresh installation has nothing to move and says nothing.
-func TestNoLegacyHomeIsNotAMigration(t *testing.T) {
-	root := testHome(t)
-	if err := migrateLegacyHome(); err != nil {
-		t.Fatalf("fresh install: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "kernels")); err == nil {
-		t.Error("a migration that had nothing to do still created a home")
 	}
 }
 
@@ -549,7 +440,7 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	file := DefaultServerConfig()
 	file.ListenAddr = ":9999"
 	file.FeeBPS = 1234
-	file.World = "play"
+	file.KernelHandle = "acme"
 	file.AllowLocalSources = true
 	file.Native.LLM.URL = "http://file:11434"
 	file.Native.Lookup.DefaultLimit = 7
@@ -584,8 +475,8 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 		t.Fatalf("pointer setting not overridden: %v", got.Lottery)
 	}
 	// Untyped on that command line, so the file still decides it.
-	if got.World != "play" {
-		t.Fatalf("a setting nobody typed was overwritten: world = %q", got.World)
+	if got.KernelHandle != "acme" {
+		t.Fatalf("a setting nobody typed was overwritten: kernel_handle = %q", got.KernelHandle)
 	}
 	// And the file itself is unchanged: an override lasts for the run, not for the kernel.
 	if file.ListenAddr != ":9999" || file.FeeBPS != 1234 {
@@ -602,28 +493,5 @@ func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
 	applyConfigFlags(&cfg)
 	if cfg.FeeBPS != 4321 {
 		t.Fatalf("configuration changed with no flags parsed: %d", cfg.FeeBPS)
-	}
-}
-
-// A setting that says three things keeps all three on the command line: absent leaves the file's
-// answer, a list replaces it, and an empty list is the answer "no discovery" rather than silence.
-func TestAnEmptyListOnTheCommandLineIsAnAnswer(t *testing.T) {
-	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
-	serveOverride = DefaultServerConfig()
-	bindConfigFlags(fs, &serveOverride)
-	serveFlags = fs
-	t.Cleanup(func() { serveFlags = nil })
-	if err := fs.Parse([]string{"--bootstrap-peers="}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	cfg := DefaultServerConfig()
-	seeds := []string{"/dns4/seed.example/tcp/31313/p2p/k"}
-	cfg.BootstrapPeers = &seeds
-	applyConfigFlags(&cfg)
-	if cfg.BootstrapPeers == nil {
-		t.Fatal("an empty list read as silence: the world's seeds would be dialled anyway")
-	}
-	if len(*cfg.BootstrapPeers) != 0 {
-		t.Fatalf("bootstrap_peers = %v, want an empty list", *cfg.BootstrapPeers)
 	}
 }

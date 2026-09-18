@@ -64,26 +64,23 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # ---------------------------------------------------------------------------
 # write_config db [key=value ...]  — config.json next to db. The CLI dials the real bound address
 # via --server (see the wrappers below). log_format is json so `server.ready` is machine-readable.
-# bootstrap_peers seeds the federation transport (§13); empty = no discovery.
-# Keys: fee_bps import_bps script_timeout_ms kernel_handle bootstrap_peers.
+# Keys: fee_bps import_bps script_timeout_ms kernel_handle. `seed=` is not one of them: a meeting
+# point belongs to the world (D23), and seed_world below writes it into this kernel's world file.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" bootstrap_peers="" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 world="play" rail_rpc="" fed_listen_addrs=""
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" remote_retry_interval_seconds=60 discovery_interval_seconds=300
+    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
         script_timeout_ms=*)             script_timeout_ms=${a#*=} ;;
         kernel_handle=*)                 kernel_handle=${a#*=} ;;
-        bootstrap_peers=*)               bootstrap_peers=${a#*=} ;;
         remote_retry_interval_seconds=*) remote_retry_interval_seconds=${a#*=} ;;
         discovery_interval_seconds=*)    discovery_interval_seconds=${a#*=} ;;
         lottery=*)                       lottery=${a#*=} ;;
         lottery_max=*)                   lottery_max=${a#*=} ;;
         credit_limit=*)                  credit_limit=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
-        world=*)                         world=${a#*=} ;;
-        rail_rpc=*)                      rail_rpc=${a#*=} ;;
         fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
     esac; done
     # Whatever first boot minted stays minted: read it back before the file is replaced.
@@ -95,8 +92,7 @@ try:
 except Exception:
     print("")
 ' "$(dirname "$db")/config.json")
-    local bp_json="[]" fl_json="[]"
-    [ -n "$bootstrap_peers" ] && bp_json="[\"$bootstrap_peers\"]"
+    local fl_json="[]"
     [ -n "$fed_listen_addrs" ] && fl_json="[\"$fed_listen_addrs\"]"
     cat > "$(dirname "$db")/config.json" <<EOF
 {
@@ -111,10 +107,7 @@ except Exception:
   "log_level": "info",
   "log_format": "json",
   "allow_local_sources": true,
-  "world": "$world",
-  "rail_rpc": "$rail_rpc",
   "kernel_handle": "$kernel_handle",
-  "bootstrap_peers": $bp_json,
   "fed_listen_addrs": $fl_json,
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
   "discovery_interval_seconds": $discovery_interval_seconds
@@ -191,24 +184,23 @@ kernel_key() {
 # returns 1 (never a silent timeout).
 start_server() {
     local db="$1" home="$2"; shift 2
-    # A kernel is named, and the name is its directory: serving a second one under one installation
-    # root needs nothing but a second name (D20).
-    local inst; inst=$(basename "$(dirname "$db")")
-    # keep_config=1 leaves whatever configuration is already in the home alone — for the boot that
-    # has to find an untouched legacy home and move it.
-    local keep=0 a cfg=()
-    for a in "$@"; do case "$a" in keep_config=1) keep=1 ;; *) cfg+=("$a") ;; esac; done
-    if [ "$keep" = 0 ]; then
-        mkdir -p "$(dirname "$db")"
-        write_config "$db" ${cfg[@]+"${cfg[@]}"}
-    fi
+    # A kernel is one world's: the world names the file that defines the network, this installation's
+    # directory for the kernel, and what `serve` is given (D20, D23).
+    local world; world=$(basename "$(dirname "$db")")
+    # seed= is the world's, not the configuration's: it is taken out here and written into the
+    # world file, which is the only place a meeting point is named.
+    local a cfg=() boot=""
+    for a in "$@"; do case "$a" in seed=*) boot=${a#*=} ;; *) cfg+=("$a") ;; esac; done
+    mkdir -p "$(dirname "$db")"
+    write_config "$db" ${cfg[@]+"${cfg[@]}"}
+    seed_world "$db" "$boot"
     local log; log=$(server_log "$db")
     # Truncate here, in the parent, before the server is launched: the redirection below truncates
     # only once the background child runs, and on a restart the wait loop could otherwise grep this
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
     JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
-        "$JUICE" kernel serve "$inst" --listen-addr 127.0.0.1:0 >>"$log" 2>&1 &
+        "$JUICE" kernel serve "$world" --listen-addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
     while :; do
@@ -266,13 +258,48 @@ j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
 q()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --quiet "$@" 2>/dev/null; }
 
-# kdb root — the database of the kernel served under an installation root. One kernel is one named
-# directory, kernels/<name>/, holding the ledger, the config, the rail key and the single-server
-# lock (D23); the flows name the kernel they serve.
-kdb() { echo "$1/kernels/${2:-default}/juice.db"; }
+# kdb root [world] — the database of the kernel this installation serves on a world. One kernel is
+# one world's, in kernels/<world>/, holding the ledger, the config, the rail key and the
+# single-server lock (D23); the flows serve `play` unless they are about another network.
+kdb() { echo "$1/kernels/${2:-play}/juice.db"; }
 
 # khome db — the installation root a database belongs to, the inverse of kdb.
 khome() { dirname "$(dirname "$(dirname "$1")")"; }
+
+# install_world db path — put a world file of this flow's own into an installation, under the name
+# the kernel is served as. This is how an operator joins a network juice does not ship.
+install_world() {
+    local db="$1" path="$2" world
+    world=$(basename "$(dirname "$db")")
+    mkdir -p "$(khome "$db")/worlds"
+    cp "$path" "$(khome "$db")/worlds/$world.json"
+}
+
+# The worlds this build ships, as source files. A kernel installs its own copy on its first serve,
+# but a flow that must name a meeting point has to write the file before that boot, so it copies the
+# same file the binary carries.
+SHIPPED_WORLDS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/rail/worlds"
+
+# seed_world db [multiaddr] — write this kernel's meeting point into the world it serves, which is
+# where a meeting point lives (D23): no kernel setting names one. A world this build does not ship
+# is the flow's own (install_world), already in place.
+seed_world() {
+    local db="$1" boot="${2:-}" world file
+    world=$(basename "$(dirname "$db")")
+    file="$(khome "$db")/worlds/$world.json"
+    if [ ! -f "$file" ]; then
+        [ -f "$SHIPPED_WORLDS/$world.json" ] || return 0
+        mkdir -p "$(dirname "$file")"
+        cp "$SHIPPED_WORLDS/$world.json" "$file"
+    fi
+    python3 -c '
+import json, sys
+path, boot = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d["seeds"] = [boot] if boot else []
+json.dump(d, open(path, "w"), indent=2)
+' "$file" "$boot"
+}
 
 # await_login db home — log in and wait until the server actually answers as that user. A restart
 # under load can bind its port a moment before it is serving, and a flow that reads too early sees
@@ -773,6 +800,9 @@ run_flows() {
     local f
     for f in "$@"; do
         [ -n "${FLOW:-}" ] && [ "$f" != "$FLOW" ] && continue
+        # A flow named here but not defined is coverage that left silently — a rename or a deletion
+        # that nobody was told about. The suite must not pass on the strength of a missing test.
+        if ! declare -F "$f" >/dev/null; then fail "$f" "named in the suite but not defined"; continue; fi
         "$f"
         reap
     done

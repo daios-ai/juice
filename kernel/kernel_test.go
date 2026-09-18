@@ -686,7 +686,7 @@ func TestCreateUser(t *testing.T) {
 
 func TestNormalizeHandle(t *testing.T) {
 	// NormalizeHandle trims whitespace only; it never strips a sigil — a "@"-prefixed input
-	// survives so validateHandle can reject it (handles are bare, §3, §14).
+	// survives so ValidateHandle can reject it (handles are bare, §3, §14).
 	cases := []struct{ in, want string }{
 		{"bob", "bob"},
 		{"  carol  ", "carol"},
