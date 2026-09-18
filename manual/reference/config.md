@@ -26,8 +26,9 @@ stored with mode 0600.
 The network itself is not configured here. It is the world named on
 `juice kernel serve`, whose file in `~/.juice/worlds/` carries the money, the
 node a chain world is reached through (`rpc`), and the `seeds` where peers are
-met — the only place a meeting point is named. The shipped worlds name no seed
-yet, so write one in to connect kernels. The network a kernel was created on is
+met — the only place a meeting point is named. `arbitrum-one` names this
+project's seed; `play` and `arbitrum-sepolia` name none, so write one in to
+connect kernels on them. The network a kernel was created on is
 recorded in its database, and a boot offering it another is refused.
 
 With no `fed_listen_addrs`, the kernel binds port 31313, the standard Juice

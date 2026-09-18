@@ -312,7 +312,7 @@ sys/time`.
 Kernels reach each other by public key over libp2p — no URLs, no port forwarding; a
 kernel behind home NAT federates like any other. It joins through the seeds in its
 world file, which is the one place a meeting point is named: to use another, edit
-that file. The shipped worlds currently name none, so their operators write in one.
+that file. `arbitrum-one` names this project's seed; on the others, operators write in one.
 Serving is just marking an action
 `public`. Calling is just naming it:
 

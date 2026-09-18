@@ -6,7 +6,9 @@
   "decimals": 6,
   "symbol": "USDT",
   "description": "USDT on Arbitrum One",
-  "seeds": [],
+  "seeds": [
+    "/dns4/daios.ai/tcp/31313/p2p/12D3KooWGi5252vn6HJU4Wrkq6ovHKgPHS1vWCgfkfpMjsDFhjJQ"
+  ],
   "finality": "finalized",
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",

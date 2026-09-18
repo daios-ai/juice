@@ -222,8 +222,8 @@ the records and keys needed to resolve them.
 
 The world file supplies the seeds used to find peers and exchange public
 catalogs, and is the only place a meeting point is named: to use another, edit
-`seeds` in that file. The shipped worlds currently name none, so write in a peer
-of the same network to connect them. Eligible public actions then become
+`seeds` in that file. `arbitrum-one` names this project's seed; on `play` and
+`arbitrum-sepolia`, write in a peer of the same network to connect them. Eligible public actions then become
 available to remote callers without another registration step.
 
 Peers are identified by public key. A kernel behind a home router can be reached
