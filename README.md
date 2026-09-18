@@ -77,6 +77,9 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   bomb buffalo march shock slim obvious stairs time usage grace habit window
 Press Enter once you have written it down:
 Superuser "sys" created.
+INF action.registered_native name=lookup
+INF action.native_enabled name=lookup
+…
 INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=Kl8eObRJ…
 ```
@@ -85,9 +88,9 @@ Declining, or interrupting before those answers, leaves nothing behind.
 
 **Write the phrase down**: it is the only way to reset the superuser password
 (`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
-the kernel's own database, and a kernel offered another one refuses — and each repeats the
+the kernel's own database, and a kernel offered another one refuses — and print only the
 ready line, which is where the kernel says which nickname, which network and which key
-answered.
+answered. The pair of lines per standard action belongs to the boot that installs them.
 
 To boot without a terminal, name the kernel on the command line and set the password in
 the environment. Saying what the kernel is, is the consent a machine with no terminal can

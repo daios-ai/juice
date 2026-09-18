@@ -571,6 +571,91 @@ func TestPruneOrphanedNativeActions(t *testing.T) {
 	}
 }
 
+// A native's row is created once and reconciled on every boot after that. What an operator reads at
+// info is the creation and any boot that corrected something; the no-op reconciliations are debug,
+// or a restart buries the ready line under the whole stdlib (§14).
+func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
+	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
+	out := map[string]any{"type": "object"}
+	newIn := map[string]any{"type": "object", "properties": map[string]any{"y": map[string]any{"type": "integer", "description": "y"}}}
+
+	setup := func(t *testing.T, level string) (*kernel.Kernel, string, string) {
+		t.Helper()
+		st := newTestStore(t)
+		logPath := filepath.Join(t.TempDir(), "boot.log")
+		logger, err := log.New(log.Config{Level: level, FilePath: logPath, Format: "json"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		k := newKernel(testConfig(), kernel.Dependencies{Store: st, Logger: logger})
+		owner := setupUser(t, st, "sys", 0)
+		a, err := k.RegisterNativeAction(context.Background(), kernel.CreateActionRequest{
+			OwnerUserID: owner.ID, Name: "native-log", Kind: kernel.KindNative,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k, a.ID, logPath
+	}
+	count := func(t *testing.T, path, event string) int {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(data), event)
+	}
+
+	ctx := context.Background()
+	k, id, logPath := setup(t, "info")
+	if got := count(t, logPath, "action.registered_native"); got != 1 {
+		t.Errorf("registering a native logged %d info lines, want 1", got)
+	}
+	// Activating an inactive row is a state change, so the first boot reports it.
+	if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(t, logPath, "action.native_enabled"); got != 1 {
+		t.Fatalf("first activation logged %d info lines, want 1", got)
+	}
+	if got := count(t, logPath, `"name":"native-log"`); got != 2 {
+		t.Errorf("native log lines naming the action: %d, want 2", got)
+	}
+	// Every later boot passes the same spec and must say nothing at info.
+	for i := 0; i < 3; i++ {
+		if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count(t, logPath, "action.native_enabled"); got != 1 {
+		t.Errorf("unchanged reconciliation logged %d info lines, want 1", got)
+	}
+	// A build that changes a price or a contract has changed the row, and says so.
+	if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 7, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(t, logPath, "action.native_enabled"); got != 2 {
+		t.Errorf("price correction logged %d info lines, want 2", got)
+	}
+	if err := k.ActivateNativeAction(ctx, id, "desc", newIn, out, 7, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(t, logPath, "action.native_enabled"); got != 3 {
+		t.Errorf("schema correction logged %d info lines, want 3", got)
+	}
+
+	// The quiet reconciliation is still recorded, one level down.
+	kd, idd, debugPath := setup(t, "debug")
+	for i := 0; i < 2; i++ {
+		if err := kd.ActivateNativeAction(ctx, idd, "desc", in, out, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := count(t, debugPath, "action.native_enabled"); got != 2 {
+		t.Errorf("debug log has %d native_enabled lines, want 2", got)
+	}
+}
+
 func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

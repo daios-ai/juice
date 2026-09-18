@@ -1689,9 +1689,9 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 	if err := k.store.CreateAction(ctx, a); err != nil {
 		return nil, err
 	}
-	// Debug: every boot re-registers every native, so at info this is a screen of bookkeeping
-	// between the operator's last answer and the line that says the kernel is serving (§14).
-	k.log.With(ctx).Debug("action.registered_native", "action_id", a.ID, "name", a.Name)
+	// The row is created once in the life of a kernel, so this is the one line saying that a new
+	// kernel installed its stdlib; a later boot finds the row and writes nothing (§14).
+	k.log.With(ctx).Info("action.registered_native", "action_id", a.ID, "name", a.Name)
 	return a, nil
 }
 
@@ -1735,6 +1735,12 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	if a.Kind != KindNative {
 		return ErrInvalidInput.Wrap("action is not native")
 	}
+	// Every boot reconciles every native, so the write is a no-op on all but the boot that
+	// corrects something. That boot is the one an operator needs to read: a row whose price,
+	// contract or state this build changed says so at info, an unchanged one is bookkeeping (§14).
+	changed := !a.Active || a.Price != price || a.Effect != effect || a.Description != description ||
+		a.Visibility != VisibilityLocal || !jsonEqual(a.InputSchema, inputSchema) ||
+		!jsonEqual(a.OutputSchema, outputSchema)
 	a.Price = price
 	a.Effect = effect
 	a.Description = description
@@ -1750,7 +1756,11 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 		return err
 	}
 	k.indexForLookup(ctx, a)
-	k.log.With(ctx).Debug("action.native_enabled", "action_id", actionID)
+	if changed {
+		k.log.With(ctx).Info("action.native_enabled", "action_id", a.ID, "name", a.Name)
+	} else {
+		k.log.With(ctx).Debug("action.native_enabled", "action_id", a.ID, "name", a.Name)
+	}
 	return nil
 }
 

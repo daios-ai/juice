@@ -1,7 +1,7 @@
 ---
 title: Operator duties
 parent: Operating a kernel
-nav_order: 2
+nav_order: 3
 ---
 
 # Operator duties

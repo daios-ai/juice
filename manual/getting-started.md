@@ -68,6 +68,9 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
+INF action.registered_native name=lookup
+INF action.native_enabled name=lookup
+…
 INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
@@ -83,8 +86,8 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 The kernel remains running in this terminal. Open a second terminal for the
 client commands that follow, leaving the first available for server output.
 
-First boot also creates the superuser account, `sys`. You will use it to fund
-the buyer's account on `play`; it also gives the operator access to account
+First boot installs the standard actions, which is what the `action.` lines
+report, and creates the superuser account, `sys`. It also gives the operator access to account
 records and administrative commands.
 
 ## The client already knows the kernel

@@ -6,7 +6,7 @@ nav_order: 4
 
 # Configuration
 
-Each kernel reads `config.json` from `$JUICE_HOME/kernels/<name>/`. First boot
+Each kernel reads `config.json` from `$JUICE_HOME/kernels/<world>/`. First boot
 creates this file; later starts read it without rewriting it. Apply a
 configuration change by editing the file and restarting the kernel.
 
@@ -30,6 +30,8 @@ met — the only place a meeting point is named. `arbitrum-one` names this
 project's seed; `play` and `arbitrum-sepolia` name none, so write one in to
 connect kernels on them. The network a kernel was created on is
 recorded in its database, and a boot offering it another is refused.
+See [Configuring worlds](../operating/worlds.html) for the file's contents and
+how to configure a network of your own.
 
 With no `fed_listen_addrs`, the kernel binds port 31313, the standard Juice
 federation port, over both TCP and QUIC. If another program already holds it,

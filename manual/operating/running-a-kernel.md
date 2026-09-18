@@ -22,7 +22,8 @@ The argument names the network to serve. It is a world: a file in
 meet it through. The worlds this build ships (`play`, `arbitrum-sepolia`,
 `arbitrum-one`) are written there the first time you serve, to read and to edit,
 and a network juice does not ship is a file you add. One installation runs one
-kernel per world, in `~/.juice/kernels/<world>/`.
+kernel per world, in `~/.juice/kernels/<world>/`. See
+[Configuring worlds](worlds.html) to edit a world or create one of your own.
 
 The `--listen-addr` option sets the HTTP listening address. On first start, the
 command asks you to confirm creation and to name the kernel on the network:
@@ -40,6 +41,9 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
+INF action.registered_native name=lookup
+INF action.native_enabled name=lookup
+…
 INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
@@ -176,7 +180,7 @@ fails with a message identifying the missing setting.
 Each kernel has a home directory containing the state needed to run it:
 
 ```
-~/.juice/kernels/acme/
+~/.juice/kernels/play/
   juice.db        accounts, actions, ledger, and the signing key
   config.json     configuration, written once at first boot
   serve.lock      held by the running server
@@ -188,11 +192,12 @@ records. Keep these files together when moving or backing up the kernel: the
 account ledger, signing identity, and external payments belong to the same
 installation state.
 
-To run another kernel under the same Juice installation, choose a different
-name:
+To run another kernel under the same Juice installation, choose another world.
+For example, after creating `workshop.json` as described in
+[Configuring worlds](worlds.html#creating-a-world), start it with:
 
 ```
-$ juice kernel serve beta --listen-addr :4242
+$ juice kernel serve workshop --listen-addr :4242 --fed-listen-addrs /ip4/0.0.0.0/tcp/31314
 ```
 
 Choose a distinct HTTP listening address, and give the second kernel its own

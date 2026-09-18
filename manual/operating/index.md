@@ -8,8 +8,8 @@ has_children: true
 
 Operating a kernel involves maintaining its persistent state, managing accounts
 and access, and overseeing the funds it holds. These chapters cover setup and
-maintenance, routine administrative duties, and the economics of serving other
-kernels.
+maintenance, [world configuration](worlds.html), routine administrative duties,
+and the economics of serving other kernels.
 
 The operator uses the `sys` account. It has access to administrative commands
 and a wider view of ordinary records, while using the same client and HTTP API

@@ -1,7 +1,7 @@
 ---
 title: The network economy
 parent: Operating a kernel
-nav_order: 3
+nav_order: 4
 ---
 
 # The network economy
