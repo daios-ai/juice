@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"math"
 	"time"
 
@@ -28,12 +29,12 @@ type Economy struct {
 }
 
 // DefaultEconomy is the shipped money rules, whole: a domestic fee of 20%, serving and import
-// markups of 5% each, a ticket of one unit drawn against a maximum of five, and five hundred of
+// markups of 5% each, a ticket of one unit drawn against a maximum of five, and fifty of
 // unpaid delivered service. The two ticket figures are this kernel's own, not the world's — every
 // shipped world counts in millionths, so one number means the same amount on all of them.
 func DefaultEconomy() Economy {
 	return Economy{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500,
-		Lottery: 1_000_000, LotteryMax: 5_000_000, CreditLimit: 500_000_000}
+		Lottery: 1_000_000, LotteryMax: 5_000_000, CreditLimit: 50_000_000}
 }
 
 // Fee splits a taxable amount into what the provider keeps and what the operator takes.
@@ -284,6 +285,10 @@ type BuyerTerms struct {
 	Lottery     int64
 	RailAddress string
 	RailProof   string
+	// IdempotencyKey is the call's own name, as the buyer signed it. It is frozen with the rest of
+	// the admitted terms so every receipt this kernel signs for the call names the request it
+	// answers (P4, P5).
+	IdempotencyKey string
 }
 
 // RevealPayload is what a buyer signs to tell the seller how a draw came out (P10). The secret makes
@@ -372,17 +377,35 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 	return r, nil
 }
 
-// RevealPending tells every seller still waiting how its obligation came out, and keeps telling them
-// until each has heard: a losing draw the seller never learns about leaves it owed forever. The
-// store returns only the calls revealable now, so nothing blocks the queue behind it.
+// revealsPerPass bounds one pass, so telling sellers never becomes the whole of a cycle.
+const revealsPerPass = 25
+
+// RevealPending tells sellers still waiting how their obligations came out, and keeps telling them
+// until each has heard: a losing draw the seller never learns about leaves it owed forever. Those
+// never tried come first and the rest longest-untried first, so one unreachable peer delays the
+// others by a pass rather than blocking them for good (P10).
 func (k *Kernel) RevealPending(ctx context.Context) {
-	pending, err := k.store.ListPendingReveals(ctx, 200)
+	pending, err := k.store.ListPendingReveals(ctx, revealsPerPass)
 	if err != nil {
 		return
 	}
 	for _, d := range pending {
-		if err := k.Reveal(ctx, d); err != nil {
+		err := k.Reveal(ctx, d)
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrNotFound):
+			// The seller has no such obligation: it has repudiated the ticket, and no message we
+			// can send will make it accept one. Retiring it stops a reveal that can never succeed
+			// from being retried forever ahead of ones that can (P10).
+			k.log.With(ctx).Warn("owed.reveal_repudiated", "obligation_id", d.ID)
+			if merr := k.store.MarkRevealed(ctx, d.TraceID); merr != nil {
+				k.log.With(ctx).Error("owed.reveal_retire_failed", "obligation_id", d.ID, "error", merr)
+			}
+		default:
 			k.log.With(ctx).Warn("owed.reveal_failed", "obligation_id", d.ID, "error", err)
+			if merr := k.store.MarkRevealFailed(ctx, d.TraceID, time.Now().UTC()); merr != nil {
+				k.log.With(ctx).Error("owed.reveal_mark_failed", "obligation_id", d.ID, "error", merr)
+			}
 		}
 	}
 }

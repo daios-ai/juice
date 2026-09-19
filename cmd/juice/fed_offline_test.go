@@ -37,7 +37,7 @@ type fakeFed struct {
 	addrs         []string        // what ListenAddrs reports, for the handlers that publish them
 }
 
-func (f *fakeFed) Gossip(_ context.Context, _ string, _ string) (json.RawMessage, error) {
+func (f *fakeFed) Gossip(_ context.Context, _ string, _ fed.GossipRequest) (json.RawMessage, error) {
 	if f.inspectDoc == nil {
 		return nil, errors.New("fed: cannot resolve peer (offline)")
 	}
@@ -97,7 +97,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	m := kernel.ActionManifest{
 		ActionID: "act-1", OwnerHandle: handle, Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
-		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x", Stats: &kernel.Stats{},
+		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x",
 		UpdatedAt: time.Now(),
 	}
 	sig, _ := testNet.SignManifest(priv, &m)
@@ -218,12 +218,12 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 	doc, _ := json.Marshal(kernel.GossipResponse{
 		Handle: handle, PublicKey: key, ActionManifests: []*kernel.ActionManifest{&m},
 	})
-	if err := db.ReplaceDiscoveryDocs(ctx, key, []*kernel.DiscoveryDoc{{
+	if err := db.ApplyCatalogPage(ctx, key, []*kernel.DiscoveryDoc{{
 		KernelPublicKey: key, ActionID: "act-1", Name: "greet",
 		Description: "greet", ServingPrice: 21, ObservedAt: time.Now().UTC(),
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
-	}}); err != nil {
+	}}, "", 0); err != nil {
 		t.Fatal(err)
 	}
 

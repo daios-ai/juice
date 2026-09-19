@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -1350,7 +1349,8 @@ func stagePendingRemoteChild(t *testing.T, st kernel.Store, prefix string, paren
 	remoteAct := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID,
 		Name: prefix + "-remote-act", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityLocal, Price: childPrice,
+		RemoteActionID: prefix + "-remote-id",
+		Active:         true, Visibility: kernel.VisibilityLocal, Price: childPrice,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := st.CreateAction(ctx, remoteAct); err != nil {
@@ -1516,8 +1516,8 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			childHTTP := &blockingHTTP{release: make(chan struct{}), fail: tc.childFails}
 			k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec, HTTP: childHTTP})
 			rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "icc-" + name, CounterpartyUserID: peer.ID,
-				CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
-			if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+				CreatedAt: time.Now().UTC()}
+			if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 				t.Fatal(err)
 			}
 
@@ -1527,7 +1527,7 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			}
 			done := make(chan outcome, 1)
 			go func() {
-				r, err := k.RunFederated(ctx, peer.ID, provider.ID, parent.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+				r, err := k.RunFederated(ctx, peer.ID, parent, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 				done <- outcome{r, err}
 			}()
 			// The child has started when two traces of the process are unsettled.
@@ -1549,8 +1549,8 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			if got.err == nil || !got.reply.Deferred() {
 				t.Fatalf("the served call must fail with its outcome deferred: reply=%+v err=%v", got.reply, got.err)
 			}
-			if r, _ := st.ReadIdempotencyRecordByID(ctx, rec.ID); r.Status != "pending" {
-				t.Fatalf("the peer's record must stay pending until the charge is final, got %q", r.Status)
+			if _, err := st.ReadIdempotencyRecordByID(ctx, rec.ID); err != nil {
+				t.Fatalf("the peer's lock must be held until the charge is final: %v", err)
 			}
 
 			close(childHTTP.release)
@@ -1574,10 +1574,13 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			if receipt.Charge != tc.wantCharge {
 				t.Errorf("the buyer is charged %d, want %d: what the child consumed and nothing else", receipt.Charge, tc.wantCharge)
 			}
-			if r, _ := st.ReadIdempotencyRecordByID(ctx, rec.ID); r.Status != "complete" {
-				t.Errorf("the peer's record is %q, want complete once the charge is final", r.Status)
-			} else if !strings.Contains(r.ResultJSON, `"code":"`+kernel.ErrExecutionFailed.Code+`"`) {
-				t.Errorf("a deferred failure replays as %s, want the class it failed with (%s)", r.ResultJSON, kernel.ErrExecutionFailed.Code)
+			// Once the charge is final the lock is gone and the receipt is the answer: a peer
+			// replaying now is told what it was charged, not that its call is in flight.
+			if _, err := st.ReadIdempotencyRecordByID(ctx, rec.ID); err == nil {
+				t.Error("the lock must be released once the charge is final")
+			}
+			if receipt.Status != kernel.TxFailure {
+				t.Errorf("the replayable outcome is %q, want the failure it settled as", receipt.Status)
 			}
 			if proc, _ := st.ReadProcess(ctx, procID); proc.Status != kernel.ProcessClosed {
 				t.Errorf("process %q, want closed", proc.Status)
@@ -1870,7 +1873,7 @@ func (reparkFails) ResetStepAndRepark(context.Context, string) error { return er
 
 type settleFails struct{ kernel.Store }
 
-func (settleFails) CommitFailedCall(context.Context, *kernel.Transaction, func(int64) (*kernel.Receipt, error), string, string, string, string, int64, *kernel.Stats, string, string, string) error {
+func (settleFails) CommitFailedCall(context.Context, *kernel.Transaction, func(int64) (*kernel.Receipt, error), string, string, string, string, int64, *kernel.Stats, string, string) error {
 	return errDiskGone
 }
 
@@ -2025,7 +2028,7 @@ func settleTrace(t *testing.T, st kernel.Store, processID, traceID, ownerID, wal
 		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: testIssuerUserID, TxID: tx.ID, TraceID: traceID,
 			Status: status, Gross: gross, Charge: gross - refund, CreatedAt: time.Now().UTC()}, nil
 	}
-	if err := st.CommitFailedCall(ctx, tx, build, traceID, walletID, walletKind, testIssuerUserID, gross, nil, "", "interrupted", ""); err != nil {
+	if err := st.CommitFailedCall(ctx, tx, build, traceID, walletID, walletKind, testIssuerUserID, gross, nil, "", ""); err != nil {
 		t.Fatalf("settleTrace: %v", err)
 	}
 }
@@ -2056,10 +2059,10 @@ func TestRecoveryHonoursARecordedOutcome(t *testing.T) {
 	if tr.OutcomeJSON == nil || json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil || o.Status != kernel.TxSuccess {
 		t.Fatalf("recovery overwrote the recorded success: %v", tr.OutcomeJSON)
 	}
-	// The child expires; the sweep settles the parent as what it recorded.
-	cfg := testConfig()
-	cfg.RemotePendingMaxAge = time.Minute
-	newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{receiptJSON: ""}}).RetryPendingRemoteDispatches(ctx)
+	// The child settles on its own terms; the ready sweep then settles the parent as what it
+	// recorded (D3).
+	settleTrace(t, st, p.ID, child.ID, caller.ID, kernel.CallerTrace, root.ID, 0, kernel.TxFailure)
+	k.SettleReady(ctx)
 	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID})
 	for _, tx := range txs {
 		if tx.TraceID == root.ID && tx.Status != kernel.TxSuccess {
@@ -2091,15 +2094,11 @@ func TestDeferredParentSettlesAfterItsChild(t *testing.T) {
 	if got := unsettledTraces(t, st, p.ID); len(got) != 2 {
 		t.Fatalf("parent and child must both be unsettled while the child is pending, unsettled=%v", got)
 	}
-	// Then the pending bound expires and the child settles, after its parent. A kernel with a
-	// shorter bound is the same running server one hour later.
-	cfg := testConfig()
-	cfg.RemotePendingMaxAge = time.Minute
-	expire := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: &fakeFederationHTTP{receiptJSON: ""}})
-	expire.RetryPendingRemoteDispatches(ctx)
-
+	// Then the child settles, and its parent settles after it (D3).
+	settleTrace(t, st, p.ID, child.ID, caller.ID, kernel.CallerTrace, root.ID, childPrice, kernel.TxFailure)
+	k.SettleReady(ctx)
 	if got := unsettledTraces(t, st, p.ID); len(got) != 0 {
-		t.Fatalf("unsettled traces after the bound expired: got %v, want none", got)
+		t.Fatalf("unsettled traces after the child settled: got %v, want none", got)
 	}
 	var rootTx *kernel.Transaction
 	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID}); true {
@@ -2445,7 +2444,7 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		ActionID: "ra-step-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
-		ArtifactHash: "h", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		ArtifactHash: "h", UpdatedAt: time.Now(),
 	}
 	m.Signature, _ = testNet.SignManifest(priv, &m)
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})

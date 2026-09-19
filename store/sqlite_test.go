@@ -4,7 +4,10 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1153,7 +1156,7 @@ func TestTransferEffectRefundedOnFailure(t *testing.T) {
 			ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxFailure, CreatedAt: time.Now().UTC(),
 		}, nil
 	}
-	if err := db.CommitFailedCall(ctx, tx, buildReceipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, 0, nil, "", "execution_failed", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, buildReceipt, sub.ID, parent.ID, kernel.CallerTrace, sys.ID, 0, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if cu, _ := db.ReadUser(ctx, C.ID); cu.Available != 500 || cu.Locked != 0 {
@@ -1206,7 +1209,7 @@ func TestAFailedCallReleasesItsStake(t *testing.T) {
 		charge := price - refund // a full refund charges nothing
 		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: tx.ID, TraceID: root.ID, ActionID: "dummy", Status: kernel.TxFailure, Charge: charge, CreatedAt: now}, nil
 	}
-	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, sys.ID, price, nil, "", "recovered", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, sys.ID, price, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Stake fully released: locked back to 0, available restored — no leak.
@@ -1243,7 +1246,7 @@ func TestCommitFailedCallRecordsRefund(t *testing.T) {
 			CreatedAt: time.Now().UTC(),
 		}, nil
 	}
-	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 70, nil, "", "execution_failed", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 70, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1315,7 +1318,7 @@ func TestCommitFailedCallRefundExcludesSettledDescendants(t *testing.T) {
 			Charge: 70 - refund, CreatedAt: time.Now().UTC()}, nil
 	}
 	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess,
-		sys.ID, 70, nil, "", "execution_failed", ""); err != nil {
+		sys.ID, 70, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1366,7 +1369,7 @@ func TestEndProcess(t *testing.T) {
 		}, nil
 	}
 	// CallerProcess: root call's caller wallet is the process itself.
-	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 600, nil, "", "failure", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, failTx, buildReceipt, root.ID, p.ID, kernel.CallerProcess, "", 600, nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1951,7 +1954,6 @@ func TestRevokeRefreshToken(t *testing.T) {
 	tok := &kernel.RefreshToken{
 		Token:     "test-token-abc",
 		UserID:    u.ID,
-		ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := db.CreateRefreshToken(ctx, tok); err != nil {
@@ -2426,7 +2428,10 @@ func TestReadAccountByKernelKey(t *testing.T) {
 
 // ---- Idempotency record tests ----
 
-func TestIdempotencyStateMachine(t *testing.T) {
+// TestIdempotencyLockLifecycle: the record is a lock, not an outcome. Taking it twice tells the
+// second caller who holds it; releasing it lets a later request through. What a repeated request
+// is answered with is the receipt, which outlives the lock (P4).
+func TestIdempotencyLockLifecycle(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -2438,73 +2443,49 @@ func TestIdempotencyStateMachine(t *testing.T) {
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     "sm-key-1",
 		CounterpartyUserID: cp.ID,
+		ArgsJSON:           `{"a":1}`,
 		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
+	}
+	held, err := db.InsertPendingIdempotencyRecord(ctx, rec)
+	if err != nil || held != nil {
+		t.Fatalf("first insert should take the lock: held=%v err=%v", held, err)
 	}
 
-	// InsertPendingIdempotencyRecord succeeds on first call.
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
-		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
-	}
-
-	// Status is "pending".
-	got, err := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)
-	if err != nil {
-		t.Fatalf("ReadIdempotencyRecord: %v", err)
-	}
-	if got.Status != "pending" {
-		t.Errorf("status: want pending, got %q", got.Status)
-	}
-
-	// Duplicate insert returns unique constraint error.
+	// A second arrival of the same request is told the lock is held, and by which record — not an
+	// error to interpret, and no driver error text to match on.
 	dup := &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     "sm-key-1",
 		CounterpartyUserID: cp.ID,
 		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
 	}
-	if err := db.InsertPendingIdempotencyRecord(ctx, dup); err == nil {
-		t.Error("expected unique constraint error on duplicate pending insert")
+	held, err = db.InsertPendingIdempotencyRecord(ctx, dup)
+	if err != nil {
+		t.Fatalf("duplicate insert must report the holder, not fail: %v", err)
 	}
-
-	// completeIdempotencyRecord transitions to "complete" with result JSON.
-	if err := db.completeIdempotencyRecord(ctx, rec.ID, `{"answer":42}`, ""); err != nil {
-		t.Fatalf("completeIdempotencyRecord: %v", err)
+	if held == nil || held.ID != rec.ID {
+		t.Fatalf("duplicate insert returned %v, want the record holding the lock", held)
 	}
-	got2, _ := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID)
-	if got2.Status != "complete" {
-		t.Errorf("status after complete: want complete, got %q", got2.Status)
-	}
-	if got2.ResultJSON != `{"answer":42}` {
-		t.Errorf("result_json: got %q", got2.ResultJSON)
+	if held.ArgsJSON != `{"a":1}` {
+		t.Errorf("the held record must carry the arguments recovery signs over, got %q", held.ArgsJSON)
 	}
 
-	// DeleteIdempotencyRecord removes the record so retry is possible.
-	rec2 := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "sm-key-2",
-		CounterpartyUserID: cp.ID,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
-	}
-	_ = db.InsertPendingIdempotencyRecord(ctx, rec2)
-	if err := db.DeleteIdempotencyRecord(ctx, rec2.ID); err != nil {
+	// Releasing it lets the request through again: a call that never executed must not be locked
+	// out by a key that produced no outcome.
+	if err := db.DeleteIdempotencyRecord(ctx, rec.ID); err != nil {
 		t.Fatalf("DeleteIdempotencyRecord: %v", err)
 	}
-	if _, err := db.ReadIdempotencyRecord(ctx, "sm-key-2", cp.ID); err == nil {
-		t.Error("expected ErrNotFound after delete")
+	if _, err := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID); err == nil {
+		t.Error("expected ErrNotFound after release")
 	}
-	// Re-insert is possible after delete.
-	rec2b := &kernel.IdempotencyRecord{
+	again := &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
-		IdempotencyKey:     "sm-key-2",
+		IdempotencyKey:     "sm-key-1",
 		CounterpartyUserID: cp.ID,
 		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
 	}
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec2b); err != nil {
-		t.Errorf("re-insert after delete should succeed: %v", err)
+	if held, err := db.InsertPendingIdempotencyRecord(ctx, again); err != nil || held != nil {
+		t.Errorf("re-taking the lock after release should succeed: held=%v err=%v", held, err)
 	}
 }
 
@@ -2671,11 +2652,10 @@ func newIdempotencyRecord(cpID string) *kernel.IdempotencyRecord {
 		IdempotencyKey:     uuid.New().String(),
 		CounterpartyUserID: cpID,
 		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
 	}
 }
 
-func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
+func TestCommitCallReleasesIdempotencyLockAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -2695,7 +2675,7 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	}
 
 	rec := newIdempotencyRecord(cp.ID)
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	if _, err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
 	}
 
@@ -2716,23 +2696,14 @@ func TestCommitCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 		t.Fatalf("CommitCall: %v", err)
 	}
 
-	got, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID)
-	if err != nil {
-		t.Fatalf("ReadIdempotencyRecord: %v", err)
-	}
-	if got.Status != "complete" {
-		t.Errorf("status: want complete, got %q", got.Status)
-	}
-	if got.ResultJSON != `{"ok":true}` {
-		t.Errorf("result_json: got %q, want {\"ok\":true}", got.ResultJSON)
-	}
-	var storedReceipt kernel.Receipt
-	if err := json.Unmarshal([]byte(got.ReceiptJSON), &storedReceipt); err != nil {
-		t.Errorf("receipt_json is not valid receipt JSON: %v", err)
+	// The commit that wrote the outcome released the lock in the same transaction. From here the
+	// receipt is the answer to a repeat of the request, so nothing else is kept.
+	if _, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID); err == nil {
+		t.Error("the lock must be released by the commit that writes the receipt")
 	}
 }
 
-func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
+func TestCommitFailedCallReleasesIdempotencyLockAtomically(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -2748,7 +2719,7 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 	}
 
 	rec := newIdempotencyRecord(cp.ID)
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	if _, err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatalf("InsertPendingIdempotencyRecord: %v", err)
 	}
 
@@ -2767,23 +2738,13 @@ func TestCommitFailedCallCompletesIdempotencyRecordAtomically(t *testing.T) {
 
 	// Root call: callerWalletID=p.ID, callerWalletKind=CallerProcess
 	buildFn := func(_ int64) (*kernel.Receipt, error) { return receipt, nil }
-	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, "", 100, nil, rec.ID, "execution_failed", ""); err != nil {
+	if err := db.CommitFailedCall(ctx, tx, buildFn, root.ID, p.ID, kernel.CallerProcess, "", 100, nil, rec.ID, ""); err != nil {
 		t.Fatalf("CommitFailedCall: %v", err)
 	}
 
-	got, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID)
-	if err != nil {
-		t.Fatalf("ReadIdempotencyRecord: %v", err)
-	}
-	if got.Status != "complete" {
-		t.Errorf("status: want complete, got %q", got.Status)
-	}
-	var result map[string]string
-	if err := json.Unmarshal([]byte(got.ResultJSON), &result); err != nil {
-		t.Errorf("result_json is not valid JSON: %v", err)
-	}
-	if result["error"] != "execution failed" {
-		t.Errorf("result_json[\"error\"]: got %q, want \"execution failed\"", result["error"])
+	// A settled failure releases the lock too: it is an outcome, and the receipt records it.
+	if _, err := db.ReadIdempotencyRecord(ctx, rec.IdempotencyKey, cp.ID); err == nil {
+		t.Error("a settled failure must release the lock")
 	}
 }
 
@@ -2957,14 +2918,6 @@ func (s *DB) createRating(ctx context.Context, r *kernel.Rating) error {
 		timeToStr(r.CreatedAt), r.Signature,
 	)
 	return dbErr(err, "create rating")
-}
-
-func (s *DB) completeIdempotencyRecord(ctx context.Context, id, resultJSON, receiptJSON string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-		resultJSON, receiptJSON, id,
-	)
-	return dbErr(err, "complete idempotency record")
 }
 
 func TestDeactivateImportedIfHash(t *testing.T) {
@@ -3177,7 +3130,7 @@ func settleTrace(t *testing.T, db *DB, processID, traceID, ownerID, walletKind, 
 	} else {
 		tx.Reason = "process force-closed"
 		err = db.CommitFailedCall(ctx, tx, func(refund int64) (*kernel.Receipt, error) { return receipt(gross - refund), nil },
-			traceID, walletID, walletKind, ownerID, gross, nil, "", "interrupted", "")
+			traceID, walletID, walletKind, ownerID, gross, nil, "", "")
 	}
 	if err != nil {
 		t.Fatalf("settleTrace: %v", err)
@@ -3268,7 +3221,7 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID,
 			ActionID: act.ID, Status: kernel.TxFailure, Gross: 100, Charge: 100 - refund, CreatedAt: time.Now().UTC()}, nil
 	}
-	err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", "execution_failed", "step-x")
+	err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", "step-x")
 	if !errors.Is(err, kernel.ErrSettlementDeferred) {
 		t.Fatalf("a failure commit over an unsettled child: want ErrSettlementDeferred, got %v", err)
 	}
@@ -3611,7 +3564,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", "", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ReplaceDiscoveryDocs(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}); err != nil {
+	if err := db.ApplyCatalogPage(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpsertEvidence(ctx, &kernel.EvidenceRow{IssuerPublicKey: "staleKey", ReceiptHash: "rh1", SubjectKernelPublicKey: "staleKey", SubjectActionID: "sa1", EvidenceReceiptJSON: "{}", ReceiptCreatedAt: old, EffectiveAt: old, ObservedAt: old}); err != nil {
@@ -4132,11 +4085,10 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 
 }
 
-// Scenario (design review): CommitRemoteSettlement completes the idempotency record with
-// ktx.ReplyJSON, which settleRemoteCall sets only on SUCCESS. A remote FAILURE therefore stores
-// result_json "null", so a replaying peer reads no "error" key and gets HTTP 200 — a settled
-// failure replaying as success, which §15 forbids. Written from the scenario before the fix.
-func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
+// A settled remote failure releases the lock like any other outcome, and the receipt it wrote is
+// what a replaying peer is answered with — so a settled failure can never replay as a success
+// (P4, P5).
+func TestCommitRemoteSettlementReleasesTheLock(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -4159,9 +4111,9 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 	}
 	rec := &kernel.IdempotencyRecord{
 		ID: uuid.New().String(), IdempotencyKey: "k-rs", CounterpartyUserID: proxy.ID,
-		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+		CreatedAt: time.Now().UTC(),
 	}
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	if _, err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4173,29 +4125,27 @@ func TestCommitRemoteSettlementStoresFailureResult(t *testing.T) {
 		ActionID: act.ID, ActionName: act.Name, Status: kernel.TxFailure,
 		Gross: 10, Reason: "remote call failed", StartedAt: now, EndedAt: now,
 	}
+	const proxyKernelKey = "rs-peer-key"
 	receipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: ktx.ID, TraceID: root.ID,
 		ActionID: act.ID, CallerUserID: owner.ID, ProcessID: p.ID,
+		IdempotencyKey: "k-rs", Counterparty: proxyKernelKey,
 		Status: "failure", Gross: 10, StartedAt: now, CreatedAt: now,
 	}
 	if err := db.CommitRemoteSettlement(ctx, ktx, receipt, root.ID, p.ID, kernel.CallerProcess,
-		sys.ID, 0, 0, nil, &kernel.Stats{ActionID: act.ID}, rec.ID, "", kernel.ErrExecutionFailed.Code); err != nil {
+		sys.ID, 0, 0, nil, &kernel.Stats{ActionID: act.ID}, rec.ID, ""); err != nil {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 
-	got, err := db.ReadIdempotencyRecord(ctx, "k-rs", proxy.ID)
+	if _, err := db.ReadIdempotencyRecord(ctx, "k-rs", proxy.ID); err == nil {
+		t.Error("a settled remote failure must release the lock")
+	}
+	stored, _, err := db.ReadFederatedOutcome(ctx, proxyKernelKey, "k-rs")
 	if err != nil {
-		t.Fatalf("GetIdempotencyRecord: %v", err)
+		t.Fatalf("the outcome must be replayable from the receipt: %v", err)
 	}
-	var result map[string]any
-	if err := json.Unmarshal([]byte(got.ResultJSON), &result); err != nil {
-		t.Fatalf("stored result_json %q is not an object: %v", got.ResultJSON, err)
-	}
-	if result["error"] == nil {
-		t.Errorf("a settled remote FAILURE must store an error body so a replay cannot report success; got %q", got.ResultJSON)
-	}
-	if result["code"] != kernel.ErrExecutionFailed.Code {
-		t.Errorf("stored code = %v, want %q", result["code"], kernel.ErrExecutionFailed.Code)
+	if stored.Status != kernel.TxFailure {
+		t.Errorf("replayed outcome status = %q, want failure", stored.Status)
 	}
 }
 
@@ -4231,7 +4181,10 @@ func TestListReceiptsForGossip(t *testing.T) {
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
 		OwnerUserID: peer.ID, CallerUserID: peer.ID, TargetUserID: owner.ID,
 		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 10, Net: 8, Fee: 2,
-		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC(),
+		// Eligibility is decided by the kernel when the call settles and stored with it; the
+		// store serves what that decision said (P9).
+		EvidenceEligible: true,
+		StartedAt:        time.Now().UTC(), EndedAt: time.Now().UTC(),
 	}
 	receipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: owner.ID, TxID: tx.ID, TraceID: root.ID, ActionID: act.ID,
@@ -4248,7 +4201,7 @@ func TestListReceiptsForGossip(t *testing.T) {
 	}
 	var found *kernel.GossipReceiptRow
 	for _, r := range rows {
-		if r.Receipt != nil && r.Receipt.ActionID == act.ID {
+		if r.SubjectActionID == act.ID {
 			found = r
 		}
 	}
@@ -4264,10 +4217,39 @@ func TestListReceiptsForGossip(t *testing.T) {
 	if found.Cursor == "" {
 		t.Error("gossip row must carry a cursor high-watermark")
 	}
-	// A leg-(a) own-execution row has no outbound idempotency key; the field is populated only for a
-	// leg-(b) receipt-backed proxy row, where the kernel uses it to drop signed rejections (§13).
-	if found.IdempotencyKey != "" {
-		t.Errorf("own-execution row must have an empty IdempotencyKey, got %q", found.IdempotencyKey)
+	// The page carries what the projection sends and nothing else, from the one statement that
+	// read it: the receipt's stored hash rather than the receipt, so nothing private to the two
+	// parties is even loaded, and no page costs 1+2N statements.
+	wantHash, err := kernel.ReceiptHash(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.ReceiptHash != wantHash {
+		t.Errorf("receipt hash = %q, want the stored canonical hash %q", found.ReceiptHash, wantHash)
+	}
+	if found.Status != kernel.TxSuccess || found.CreatedAt.IsZero() {
+		t.Errorf("the row must carry what the trade says happened and when: %s %v", found.Status, found.CreatedAt)
+	}
+	if found.Rating != nil {
+		t.Errorf("an unrated trade must carry no rating, got %+v", found.Rating)
+	}
+	ratedNote := "did what it said"
+	rated := &kernel.Rating{ID: uuid.New().String(), RatedTxID: tx.ID, RatedReceiptHash: "rh",
+		RaterUserID: peer.ID, Rating: 1, Note: &ratedNote, CreatedAt: time.Now().UTC(), Signature: "sig"}
+	if err := db.CreateRatingAndUpdateStats(ctx, rated, act.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = db.ListReceiptsForGossip(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.SubjectActionID == act.ID {
+			if r.Rating == nil || r.Rating.RatedReceiptHash != "rh" || r.Rating.Rating != 1 ||
+				r.Rating.Note == nil || *r.Rating.Note != ratedNote || r.Rating.CreatedAt.IsZero() {
+				t.Errorf("the page must carry the rating that names the receipt, got %+v", r.Rating)
+			}
+		}
 	}
 }
 
@@ -4550,8 +4532,8 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 		{KernelPublicKey: "pk", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
 		{KernelPublicKey: "pk", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
 	}
-	if err := db.ReplaceDiscoveryDocs(ctx, "pk", docs); err != nil {
-		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	if err := db.ApplyCatalogPage(ctx, "pk", docs, "", 0); err != nil {
+		t.Fatalf("ApplyCatalogPage: %v", err)
 	}
 	got, err := db.ListDiscoveryDocs(ctx)
 	if err != nil {
@@ -4566,9 +4548,9 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 	}
 
 	// A negative serving price is rejected by the column CHECK, not silently stored.
-	err = db.ReplaceDiscoveryDocs(ctx, "pk", []*kernel.DiscoveryDoc{
+	err = db.ApplyCatalogPage(ctx, "pk", []*kernel.DiscoveryDoc{
 		{KernelPublicKey: "pk", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
-	})
+	}, "", 0)
 	if err == nil {
 		t.Error("a negative serving_price must be rejected by the CHECK constraint")
 	}
@@ -4633,12 +4615,12 @@ func TestMigration046DropsDiscoveryKind(t *testing.T) {
 		}
 	}
 
-	// Repopulation path: a replace and a lexical search work against the new shape.
-	if err := db.ReplaceDiscoveryDocs(ctx, "pk", []*kernel.DiscoveryDoc{
+	// Repopulation path: a stored page and a lexical search work against the new shape.
+	if err := db.ApplyCatalogPage(ctx, "pk", []*kernel.DiscoveryDoc{
 		{KernelPublicKey: "pk", Handle: "prov", ActionID: "a1", Name: "weather",
 			Description: "forecast", ServingPrice: 10, ObservedAt: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
+	}, "", 0); err != nil {
+		t.Fatalf("ApplyCatalogPage: %v", err)
 	}
 	keys, err := db.SearchDiscoveryLexical(ctx, "weather", 10)
 	if err != nil {
@@ -4659,11 +4641,11 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 	// Under LIKE 'kernel_A/%', '_' would match the 'X' in kernelXA.
 	const k1, k2 = "kernel_A", "kernelXA"
 	seed := func(key, name string) {
-		if err := db.ReplaceDiscoveryDocs(ctx, key, []*kernel.DiscoveryDoc{
+		if err := db.ApplyCatalogPage(ctx, key, []*kernel.DiscoveryDoc{
 			{KernelPublicKey: key, Handle: "prov", ActionID: "a1", Name: name,
 				Description: name, ServingPrice: 1, ObservedAt: now},
-		}); err != nil {
-			t.Fatalf("ReplaceDiscoveryDocs(%s): %v", key, err)
+		}, "", 0); err != nil {
+			t.Fatalf("ApplyCatalogPage(%s): %v", key, err)
 		}
 	}
 	seed(k1, "alpha")
@@ -4814,10 +4796,10 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 	}
 }
 
-// An inbound call's arguments live on its idempotency record, so that a provider killed mid-call
-// can settle the trace at restart over the arguments it was given. The record must be readable by
-// id whatever its age: recovery settles what it finds, and a caller may still be waiting.
-func TestIdempotencyRecordKeepsItsArgsAndIsReadableByIDAfterExpiry(t *testing.T) {
+// A lock keeps the arguments the recovery path signs over, and is readable by id however old it
+// is: an inbound call whose trace is still unsettled must be settleable whenever the peer returns,
+// and the receipt it will produce is what answers any later replay (P4, G4).
+func TestIdempotencyLockKeepsItsArgsForRecovery(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
 	peer := newUser("peer-args", 0)
@@ -4825,19 +4807,23 @@ func TestIdempotencyRecordKeepsItsArgsAndIsReadableByIDAfterExpiry(t *testing.T)
 		t.Fatal(err)
 	}
 	rec := &kernel.IdempotencyRecord{ID: "rec-args", IdempotencyKey: "k1", CounterpartyUserID: peer.ID,
-		ArgsJSON: `{"msg":"kept"}`, CreatedAt: time.Now().Add(-48 * time.Hour), ExpiresAt: time.Now().Add(-24 * time.Hour)}
-	if err := s.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		ArgsJSON: `{"msg":"kept"}`, CreatedAt: time.Now().Add(-48 * time.Hour)}
+	if _, err := s.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReadIdempotencyRecord(ctx, "k1", peer.ID); err == nil {
-		t.Fatal("an expired record must not serve a replay by key")
+	// Age retires nothing: the lock stands until the commit that settles the call releases it, so
+	// a peer returning after two days is answered rather than served a second execution.
+	held, err := s.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+		ID: "rec-args-2", IdempotencyKey: "k1", CounterpartyUserID: peer.ID, CreatedAt: time.Now()})
+	if err != nil || held == nil || held.ID != "rec-args" {
+		t.Fatalf("an old lock must still be held: held=%v err=%v", held, err)
 	}
 	got, err := s.ReadIdempotencyRecordByID(ctx, "rec-args")
 	if err != nil {
-		t.Fatalf("recovery could not read the record by id: %v", err)
+		t.Fatalf("recovery could not read the lock by id: %v", err)
 	}
-	if got.ArgsJSON != `{"msg":"kept"}` || got.Status != "pending" {
-		t.Errorf("record read back as args=%q status=%q", got.ArgsJSON, got.Status)
+	if got.ArgsJSON != `{"msg":"kept"}` {
+		t.Errorf("lock read back as args=%q", got.ArgsJSON)
 	}
 }
 
@@ -4864,5 +4850,201 @@ func TestANewerDatabaseRefusesAnOlderBinary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "099_from_the_future") || !strings.Contains(err.Error(), "newer juice") {
 		t.Errorf("the refusal must name the version and the remedy: %v", err)
+	}
+}
+
+// The window a sender serves is the window a receiver retains (§13): the newest E trades per
+// subject action. Serving more would stream history the consumer evicts on arrival — work and
+// bandwidth spent to deliver nothing, and, since cursors only move forward, the newest rows would
+// be the ones left behind.
+func TestGossipServesOnlyTheNewestWindowPerAction(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("wprov", 0)
+	_ = db.CreateUser(ctx, owner)
+	caller := newUser("wcaller", 0)
+	_ = db.CreateUser(ctx, caller)
+
+	act := newAction(owner.ID, "windowed", 0, true)
+	act.Kind = kernel.KindHTTP
+	act.Visibility = kernel.VisibilityPublic
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+
+	const total = 220 // more than the window, so the oldest are outside it
+	base := time.Now().UTC().Add(-time.Duration(total) * time.Minute)
+	served := make(map[string]time.Time, total)
+	for i := 0; i < total; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		p := newProcess(caller.ID)
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: at}
+		if err := db.BeginRun(ctx, p, tr, caller.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: tr.ID,
+			OwnerUserID: caller.ID, CallerUserID: caller.ID, TargetUserID: owner.ID, ActionID: act.ID,
+			Status: kernel.TxSuccess, EvidenceEligible: true, StartedAt: at, EndedAt: at}
+		r := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: owner.ID, TxID: tx.ID, TraceID: tr.ID,
+			ActionID: act.ID, ArgsHash: "ah", ReplyHash: "rh", Status: kernel.TxSuccess, CreatedAt: at}
+		if err := db.CommitCall(ctx, tx, r, tr.ID, p.ID, kernel.CallerProcess, owner.ID, "", 0, 0, nil, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		hash, herr := kernel.ReceiptHash(r)
+		if herr != nil {
+			t.Fatal(herr)
+		}
+		served[hash] = at
+	}
+
+	// Drain every page the sender will serve for this action.
+	got, cursor := map[string]bool{}, ""
+	for {
+		rows, err := db.ListReceiptsForGossip(ctx, cursor, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, row := range rows {
+			if row.SubjectActionID == act.ID {
+				got[row.ReceiptHash] = true
+			}
+			cursor = row.Cursor
+		}
+	}
+	if len(got) != kernelEvidenceCap {
+		t.Fatalf("served %d receipts for one action, want the newest %d", len(got), kernelEvidenceCap)
+	}
+	cutoff := base.Add(time.Duration(total-kernelEvidenceCap) * time.Minute)
+	for hash, at := range served {
+		if at.Before(cutoff) && got[hash] {
+			t.Errorf("the trade of %s is outside the window and must not be served", at)
+		}
+		if !at.Before(cutoff) && !got[hash] {
+			t.Errorf("the trade of %s is inside the window and must be served", at)
+		}
+	}
+}
+
+// The epoch begins only when no cross-kernel call is in doubt. A call answered under the old rule
+// and settled under the new one is the one thing the upgrade cannot be asked to reconcile, so the
+// kernel refuses to start until the operator has let each one finish (P4).
+func TestRequestBindingUpgradeRefusesWhileACallIsInDoubt(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	for _, tc := range []struct {
+		name, want string
+		seed       func(*sql.DB)
+	}{
+		{"ours is parked on a peer", "awaiting a peer's receipt", func(raw *sql.DB) {
+			mustExec(t, raw, `INSERT INTO processes (id,owner_user_id,status,created_at) VALUES ('p1','u1','open',?)`, now)
+			mustExec(t, raw, `INSERT INTO "traces" (id,process_id,caller_user_id,idempotency_key,created_at)
+			                  VALUES ('tr-parked','p1','u1','key-parked',?)`, now)
+		}},
+		{"theirs is running here", "has not finished", func(raw *sql.DB) {
+			mustExec(t, raw, `INSERT INTO "accounts" (id,kernel_public_key,available,locked,created_at,updated_at)
+			                  VALUES ('peer','peerkey',0,0,?,?)`, now, now)
+			mustExec(t, raw, `INSERT INTO processes (id,owner_user_id,status,created_at) VALUES ('p1','u1','open',?)`, now)
+			mustExec(t, raw, `INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,status,created_at,expires_at)
+			                  VALUES ('rec-live','key-live','peer','pending',?,?)`, now, now)
+			mustExec(t, raw, `INSERT INTO "traces" (id,process_id,caller_user_id,idempotency_record_id,created_at)
+			                  VALUES ('tr-live','p1','peer','rec-live',?)`, now)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := dbBeforeMigration(t, "052", tc.seed)
+			_, err := Open(path)
+			if err == nil {
+				t.Fatal("the upgrade ran with a call still in doubt")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal must say which calls to drain, got %v", err)
+			}
+		})
+	}
+}
+
+// Nothing already signed is touched. A receipt keeps the exact bytes its signature covers — which
+// is why the binding columns are not backfilled — and a trade that happened before the epoch stays
+// out of the evidence stream, because whether it was public then cannot be read off the action now
+// (P5, P9, G3).
+func TestRequestBindingUpgradeLeavesSignedHistoryAlone(t *testing.T) {
+	net := kernel.Network{Name: "play", Digest: "testdigest"}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	now := time.Now().UTC().Truncate(time.Second)
+	nowStr := timeToStr(now)
+
+	// A call this kernel served to a peer before the upgrade, with its receipt signed as it was.
+	served := &kernel.Receipt{
+		ID: "r-done", IssuerUserID: "u1", TxID: "tx-done", TraceID: "tr-done", ActionID: "a",
+		Status: kernel.TxSuccess, StartedAt: now, CreatedAt: now,
+	}
+	payload, err := net.ReceiptSigningBytes(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, payload))
+
+	path := dbBeforeMigration(t, "052", func(raw *sql.DB) {
+		mustExec(t, raw, `INSERT INTO "accounts" (id,kernel_public_key,available,locked,created_at,updated_at)
+		                  VALUES ('peer','peerkey',0,0,?,?)`, nowStr, nowStr)
+		mustExec(t, raw, `INSERT INTO processes (id,owner_user_id,status,created_at) VALUES ('p1','u1','closed',?)`, nowStr)
+		mustExec(t, raw, `INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,status,created_at,expires_at)
+		                  VALUES ('rec-done','key-done','peer','complete',?,?)`, nowStr, nowStr)
+		mustExec(t, raw, `INSERT INTO "traces" (id,process_id,caller_user_id,idempotency_record_id,created_at)
+		                  VALUES ('tr-done','p1','peer','rec-done',?)`, nowStr)
+		mustExec(t, raw, `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,
+		                    target_user_id,action_id,status,started_at,ended_at)
+		                  VALUES ('tx-done','p1','tr-done','','u1','peer','u1','a','success',?,?)`, nowStr, nowStr)
+		mustExec(t, raw, `INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,status,started_at,created_at,signature)
+		                  VALUES (?,?,?,?,?,?,?,?,?)`,
+			served.ID, served.IssuerUserID, served.TxID, served.TraceID, served.ActionID,
+			string(served.Status), nowStr, nowStr, served.Signature)
+	})
+
+	db := openAt(t, path)
+	ctx := context.Background()
+
+	stored, err := db.ReadReceiptByTxID(ctx, "tx-done")
+	if err != nil || stored == nil {
+		t.Fatalf("read migrated receipt: %v %v", stored, err)
+	}
+	if stored.IdempotencyKey != "" || stored.Counterparty != "" {
+		t.Errorf("the upgrade bound an old receipt: key=%q counterparty=%q — its signature covers neither",
+			stored.IdempotencyKey, stored.Counterparty)
+	}
+	// The proof that nothing moved under the signature: it still verifies, byte for byte.
+	after, err := net.ReceiptSigningBytes(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(stored.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(pub, after, sig) {
+		t.Error("the migrated receipt no longer verifies: the upgrade rewrote signed history")
+	}
+
+	var eligible, records int
+	if err := db.db.QueryRowContext(ctx, `SELECT
+	      (SELECT COUNT(*) FROM transactions WHERE evidence_eligible = 1),
+	      (SELECT COUNT(*) FROM idempotency_records)`).Scan(&eligible, &records); err != nil {
+		t.Fatal(err)
+	}
+	if eligible != 0 {
+		t.Error("a trade from before the epoch was published as evidence; the action's visibility today cannot say what it was then")
+	}
+	if records != 0 {
+		t.Error("a finished record was carried over; the lock exists only while work may be running")
+	}
+}
+
+// mustExec runs one seed statement or fails the test with it.
+func mustExec(t *testing.T, raw *sql.DB, q string, args ...any) {
+	t.Helper()
+	if _, err := raw.Exec(q, args...); err != nil {
+		t.Fatalf("%s: %v", q, err)
 	}
 }

@@ -38,9 +38,6 @@ type Config struct {
 	IssuerUserID string // @sys user ID, set during bootstrap
 	AuthIssuer   string // config.json auth_issuer — iss claim in JWTs; empty = no claim
 	AuthAudience string // config.json auth_audience — aud claim in JWTs; empty = no validation
-	// RemotePendingMaxAge bounds how long a remote-proxy call may stay pending before it settles
-	// as a failure with full refund, so a silent peer can't pin a process open. 0 = default 24h.
-	RemotePendingMaxAge time.Duration
 	// PeerRetention bounds how long a peer may stay idle at zero balance before it is purged
 	// (§13 Retention). 0 = disabled (never purge). Set from peer_retention_days.
 	PeerRetention time.Duration
@@ -628,6 +625,38 @@ func validRating(value float64, note *string) error {
 	}
 	return nil
 }
+
+// markEvidenceEligible decides, once and for all, whether this call's receipt is public evidence
+// (P9). Own execution: an action this kernel would describe to a stranger, carrying no value.
+// Proxy execution: a foreign execution this kernel admitted — settled against the peer's signed
+// receipt, and neither a refusal nor a quarantine. It is stored with the transaction because it is
+// a fact about the trade, not about the catalogue as it stands later.
+func (k *Kernel) markEvidenceEligible(ctx context.Context, action *Action, tx *Transaction) {
+	if tx.Status == "" || action == nil {
+		return
+	}
+	if action.Kind == KindRemoteProxy {
+		tx.EvidenceEligible = tx.RemoteReceiptJSON != "" && tx.RemoteSignerKey != "" &&
+			!isRejectionReceipt(remoteReceiptTxID(tx.RemoteReceiptJSON)) &&
+			!strings.HasPrefix(tx.Reason, reasonRemoteReceiptInvalidPrefix)
+		return
+	}
+	// An action with an execution effect moves value, and value is nobody else's business (P9,
+	// U39); every other exportable action's execution is evidence.
+	tx.EvidenceEligible = k.exportable(action) == nil && action.Effect == ""
+}
+
+// MaxReplyBytes is the most an action may return. Half a federation frame, so a reply and the
+// receipt and envelope that carry it both fit inside one, in either direction and over a relay
+// (D12). One number for every action: a reply that a buyer on another kernel could not be given is
+// not a reply this kernel will charge for, and which kind of caller asked is not the reply's
+// business.
+const MaxReplyBytes = 4 << 20
+
+// EvidenceRetainedPerReporter is how many trades this kernel keeps per reporter per action: the
+// window a derived row describes, and the same number the sender serves, so nothing is stored that
+// is about to be evicted (§13).
+const EvidenceRetainedPerReporter = gossipEvidenceCap
 
 // gossipEvidenceCap (E) is the number of most-recent evidence rows retained and gossiped per
 // (issuer, subject_kernel, subject_action) (§13). Fixed, not configurable.
@@ -2404,14 +2433,19 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		}
 		buyer.RailAddress = payer
 		owner, limit, reserve = seller, k.econ.CreditLimit, dmax
-		// A call that can owe nothing has no draw to hold a nonce for and freezes no terms (P4).
+		// Every admitted call records what it answers and what it was sold under, so any path that
+		// later signs its receipt — settlement, crash recovery — can name the request the buyer
+		// sent (P4, P5). A call that can owe nothing has no draw, so it holds no nonce; it is an
+		// admitted call all the same.
+		var nonce string
 		if dmax > 0 {
-			nonce, nerr := newSecret()
-			if nerr != nil {
+			var nerr error
+			if nonce, nerr = newSecret(); nerr != nil {
 				return nil, nerr
 			}
-			servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment)
 		}
+		servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment,
+			buyer.IdempotencyKey, caller.KernelPublicKey)
 		if seller.Available < lockPrice {
 			// This kernel serves foreign work from the provider's own balance (D14), and this
 			// provider cannot cover this call. The buyer abroad is told only that we declined; the
@@ -2446,9 +2480,9 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	if eff != nil {
 		t.Value, t.ValueTo = value, valueTo
 	}
-	// Persist the inbound cross-kernel record on the trace, for every action kind: whichever
-	// settlement resolves this call — commit, retry, max-age, forced closure, crash recovery —
-	// then completes it, so a peer is never left waiting on a record nothing will finish (§13).
+	// Persist the inbound execution lock on the trace, for every action kind: whichever settlement
+	// resolves this call — commit, retry, crash recovery — then releases it, so a peer is never
+	// left meeting a lock nothing will lift (§13).
 	if idempotencyRecordID != "" {
 		t.IdempotencyRecordID = &idempotencyRecordID
 	}
@@ -2485,7 +2519,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	}
 	// A root call can fail while a remote child it dispatched is still awaiting its receipt: that
 	// child is not presumed dead (P7), so its allocation stays reserved and the process stays open
-	// until a receipt or the pending bound settles it. Report the failure with the same handle a
+	// until a receipt settles it. Report the failure with the same handle a
 	// parked call gives, dated from the pending child — the reserve is that call's, not this one's.
 	var ke *KernelError
 	if err != nil && errors.As(err, &ke) && ke.Meta["process_id"] == "" {
@@ -2519,15 +2553,14 @@ func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
 // Used by the federation handler to atomically settle the idempotency record. It stays a
 // separate entry point so federation-only authority is not representable in RunRequest.
-func (k *Kernel) RunFederated(ctx context.Context, callerID, targetUserID, actionName string, args map[string]any, idempotencyRecordID string, buyer BuyerTerms) (*CallReply, error) {
+func (k *Kernel) RunFederated(ctx context.Context, callerID string, action *Action, args map[string]any, idempotencyRecordID string, buyer BuyerTerms) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-	action, err := k.store.ReadActionByOwnerName(ctx, targetUserID, actionName)
-	if err != nil || action == nil {
-		return nil, ErrNotFound.Wrapf("action %s/%s not found", targetUserID, actionName)
-	}
+	// The row the handler checked is the row that runs. Reading it again here would open a window
+	// between the contract check and the execution in which the owner could put different terms,
+	// or a different action entirely, under the same name (§8).
 	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "", buyer) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
@@ -2576,6 +2609,19 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	unsettled, err := k.store.ListUnsettledTracesForProcess(sctx, processID)
 	if err != nil {
 		return err
+	}
+	// A call that may have executed on another kernel is not this kernel's to write off: closing
+	// it would take back money the seller may already have earned, and nothing here can tell work
+	// that never ran from work whose answer was lost. Judged on the same snapshot the settlement
+	// below uses, so a call that begins in between is seen by one or the other, never neither
+	// (U23, U35, G4).
+	for _, trace := range unsettled {
+		if trace.IdempotencyKey == nil {
+			continue
+		}
+		since := trace.CreatedAt.UTC().Format(time.RFC3339)
+		return ErrInvalidState.Wrapf("a call on this process has been awaiting the peer's receipt since %s; it settles when the peer answers", since).
+			WithMeta("pending_since", since)
 	}
 	for _, trace := range unsettled {
 		if err := k.recoverTrace(sctx, logger, trace, "process force-closed", stepByTrace[trace.ID]); err != nil {
@@ -2718,17 +2764,15 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 	// A cross-kernel call names the obligation that settles it — the call's own idempotency key,
 	// which both kernels know it by — so an operator can name the payment that closes it (P10). The
 	// buyer wrote that key on the trace it dispatched under; the seller was admitted under the
-	// peer's key, which lives on the record the trace points at, because the trace's own column
-	// means "what this kernel dispatched" and the retry loop and crash recovery both read it that
-	// way. One string either side: the obligation is the same name on both books.
+	// peer's key, which admission froze on the trace beside the rest of the call's terms, because
+	// the trace's own column means "what this kernel dispatched" and the retry loop and crash
+	// recovery both read it that way. One string either side: the obligation is the same name on
+	// both books.
 	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil {
-		switch {
-		case tr.IdempotencyKey != nil:
+		if tr.IdempotencyKey != nil {
 			v.TicketID = *tr.IdempotencyKey
-		case tr.IdempotencyRecordID != nil:
-			if rec, rerr := k.store.ReadIdempotencyRecordByID(ctx, *tr.IdempotencyRecordID); rerr == nil && rec != nil {
-				v.TicketID = rec.IdempotencyKey
-			}
+		} else if served, _ := ServingRequest(tr.DispatchJSON); served != "" {
+			v.TicketID = served
 		}
 	}
 	return v
@@ -2816,8 +2860,9 @@ func (k *Kernel) ListRatings(ctx context.Context, actionID string, limit, offset
 // ActionRatings is one action's public ratings projection (§11): the ratings its local payers gave
 // and the trade-backed ratings its remote payers gave on their own kernels (D16), newest first —
 // so a buyer who paid abroad is as much a part of the provider's track record as one who paid here.
-func (k *Kernel) ActionRatings(ctx context.Context, actionID string, limit, offset int) ([]PublicRating, error) {
-	return k.store.ListPublicRatings(ctx, actionID, k.ourKeyB64(), limit, offset)
+func (k *Kernel) ActionRatings(ctx context.Context, a *Action, limit, offset int) ([]PublicRating, error) {
+	subjectKernel, subjectAction := k.actionSubject(ctx, a)
+	return k.store.ListPublicRatings(ctx, a.ID, subjectKernel, subjectAction, k.ourKeyB64(), limit, offset)
 }
 
 // ---- Stats ----
@@ -3271,20 +3316,22 @@ func (k *Kernel) GetIdempotencyRecord(ctx context.Context, key, counterpartyUser
 	return k.store.ReadIdempotencyRecord(ctx, key, counterpartyUserID)
 }
 
-// InsertPendingIdempotencyRecord inserts a record with status="pending" before execution.
-func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error {
+// InsertPendingIdempotencyRecord takes the lock for one inbound request, or returns the record
+// already holding it.
+func (k *Kernel) InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) (*IdempotencyRecord, error) {
 	return k.store.InsertPendingIdempotencyRecord(ctx, r)
 }
 
-// DeleteIdempotencyRecord removes a record to allow retry after execution failure.
+// DeleteIdempotencyRecord releases the lock, for the paths where no commit will ever take it.
+// A lock a trace still depends on is left alone by the store.
 func (k *Kernel) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	return k.store.DeleteIdempotencyRecord(ctx, id)
 }
 
-// CompleteIdempotencyRecordIfPending transitions a pending idempotency record to complete.
-// If the record is already complete (CommitFailedCall already ran), this is a no-op.
-func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error {
-	return k.store.CompleteIdempotencyRecordIfPending(ctx, id, resultJSON, receiptJSON)
+// ReadFederatedOutcome is the answer to a repeated request: the receipt signed for it and the
+// reply recorded with it.
+func (k *Kernel) ReadFederatedOutcome(ctx context.Context, counterparty, key string) (*Receipt, json.RawMessage, error) {
+	return k.store.ReadFederatedOutcome(ctx, counterparty, key)
 }
 
 // ---- Receipt helpers ----
@@ -3294,7 +3341,7 @@ func (k *Kernel) CompleteIdempotencyRecordIfPending(ctx context.Context, id, res
 // ≤ gross on failure, 0 on rejection). It must be pre-computed by the caller so that
 // it is included in the JCS signature before the receipt is persisted.
 // Returns ErrInvalidState if the kernel has not been bootstrapped (no issuer configured).
-func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, valueTo, nonce string) (*Receipt, error) {
+func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, valueTo string, sale soldAs) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -3322,12 +3369,16 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, val
 		Fee:          tx.Fee,
 		Charge:       charge,
 		Premium:      premium,
-		Nonce:        nonce,
+		Nonce:        sale.Nonce,
 		Value:        value,
 		ValueTo:      valueTo,
-		Reason:       tx.Reason,
-		StartedAt:    tx.StartedAt,
-		CreatedAt:    time.Now().UTC().Truncate(time.Second),
+		// The request this receipt answers, for a call served to a peer; empty on a local receipt,
+		// which answers only its own caller (P5).
+		IdempotencyKey: sale.IdempotencyKey,
+		Counterparty:   sale.Counterparty,
+		Reason:         tx.Reason,
+		StartedAt:      tx.StartedAt,
+		CreatedAt:      time.Now().UTC().Truncate(time.Second),
 	}
 	sig, err := signReceipt(k.cfg.Network, k.cfg.SigningKey, r)
 	if err != nil {

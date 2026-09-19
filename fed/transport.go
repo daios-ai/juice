@@ -25,6 +25,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
+	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -133,6 +134,11 @@ type Transport struct {
 	namespace string
 	bootstrap []peer.AddrInfo
 
+	// ctx is cancelled by Close. Inbound handlers derive from it, so a read a peer abandoned — or
+	// one running at shutdown — is cancelled rather than left to finish against nobody.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -190,6 +196,17 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		libp2p.EnableHolePunching(),
 		libp2p.NATPortMap(),
 	}
+	// What one peer may have in flight here at once. A token bucket bounds how fast requests
+	// arrive; it does not bound how many are being served, and a handler may hold a frame, the
+	// object it decoded and the reply it is building at the same time. The two controls are
+	// orthogonal, so both are set: the bucket paces arrivals, these bound concurrent work. A
+	// boundary that cannot be built is not a boundary: the transport refuses to start rather than
+	// serve without it (D12, D20).
+	mgr, err := boundedResources()
+	if err != nil {
+		return nil, fmt.Errorf("fed: resource limits: %w", err)
+	}
+	baseOpts = append(baseOpts, libp2p.ResourceManager(mgr))
 	if len(bootstrap) > 0 {
 		baseOpts = append(baseOpts, libp2p.EnableAutoRelayWithStaticRelays(bootstrap))
 	}
@@ -251,13 +268,23 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return nil, fmt.Errorf("fed: bootstrap dht: %w", err)
 	}
 
-	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg, namespace: cfg.Namespace, bootstrap: bootstrap}
+	tctx, tcancel := context.WithCancel(context.Background())
+	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg,
+		namespace: cfg.Namespace, bootstrap: bootstrap, ctx: tctx, cancel: tcancel}
 
 	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
 	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
 	// NAT-bound peers be reached — so a public `juice serve` is the network's meeting point, with
 	// no separate seed process. Resource limits are libp2p defaults.
-	if r, rerr := relayv2.New(h); rerr == nil {
+	// A relayed circuit must carry what a direct one carries, or a kernel behind a home router
+	// federates worse than one on a public host, which U34 forbids. The default allowance is
+	// 128 KiB per direction — a fraction of one frame — so it is raised to two frames each way,
+	// enough for a request and its reply on one circuit (D12).
+	relayResources := relayv2.DefaultResources()
+	limit := *relayResources.Limit
+	limit.Data = 2 * maxFrameBytes
+	relayResources.Limit = &limit
+	if r, rerr := relayv2.New(h, relayv2.WithResources(relayResources)); rerr == nil {
 		t.relay = r
 	}
 
@@ -297,6 +324,7 @@ func (t *Transport) Close() error {
 		return nil
 	}
 	t.closed = true
+	t.cancel()
 	if t.relay != nil {
 		_ = t.relay.Close()
 	}
@@ -365,8 +393,9 @@ const discoveryLimit = 100
 // transport addresses to the DHT, and returns the TTL after which the record should be refreshed.
 // Called once per discovery pass (§13). Provide needs only query capability, so a DHT-client kernel
 // behind NAT advertises successfully and becomes findable through the public servers.
-func (t *Transport) Advertise(ctx context.Context) (time.Duration, error) {
-	return t.disc.Advertise(ctx, t.namespace)
+func (t *Transport) Advertise(ctx context.Context) error {
+	_, err := t.disc.Advertise(ctx, t.namespace)
+	return err
 }
 
 // DiscoverProviders enumerates the discovery namespace's providers, refreshes each provider's
@@ -489,52 +518,88 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
 }
 
-// serveReq reads one typed request frame, runs handle, and writes its response frame. Used by the
-// request/response protocols (call, step).
-func serveReq[Req any](s network.Stream, handle func(string, Req) any) {
+// streamsPerPeer and streamsSystemWide bound inbound concurrency, and connsInbound/connsTotal the
+// connections behind them [policy]. They are chosen, not derived: a bound follows from what this
+// kernel is willing to hold at once, and the frame size only says what one stream may cost. The
+// resource manager is libp2p's own — a standard bulkhead, not a semaphore of ours — and its
+// per-address limits are left as they come.
+const (
+	streamsPerPeer    = 8
+	streamsSystemWide = 64
+	connsInbound      = 64
+	connsTotal        = 256
+)
+
+// boundedResources is the default limit set with those four numbers written over it, so
+// everything else libp2p bounds stays bounded the way libp2p bounds it.
+var boundedResources = func() (network.ResourceManager, error) {
+	scaling := rcmgr.DefaultLimits
+	libp2p.SetDefaultServiceLimits(&scaling)
+	limits := rcmgr.PartialLimitConfig{
+		System: rcmgr.ResourceLimits{
+			StreamsInbound: streamsSystemWide,
+			ConnsInbound:   connsInbound,
+			Conns:          connsTotal,
+		},
+		PeerDefault: rcmgr.ResourceLimits{StreamsInbound: streamsPerPeer},
+	}.Build(scaling.AutoScale())
+	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits))
+}
+
+// serveReq reads one request, answers it, and closes. The handler's context carries the stream's
+// own deadline and dies with the transport, so an answer nobody is waiting for — an abandoned
+// read, a shutdown — stops instead of running on against a closed stream.
+func serveReq[Req any](ctx context.Context, s network.Stream, handle func(context.Context, string, Req) any) {
 	defer s.Close()
-	_ = s.SetDeadline(time.Now().Add(streamDeadline))
+	deadline := time.Now().Add(streamDeadline)
+	_ = s.SetDeadline(deadline)
+	hctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var req Req
 	if err := readFrame(s, &req); err != nil {
 		return
 	}
-	_ = writeFrame(s, handle(peerKeyOf(s), req))
+	// A handler with nothing to say says nothing: the stream closes with no frame, which the
+	// caller reads as a failed read rather than as an answer.
+	if reply := handle(hctx, peerKeyOf(s), req); reply != nil {
+		_ = writeFrame(s, reply)
+	}
 }
 
 func (t *Transport) handleCall(s network.Stream) {
-	serveReq(s, func(key string, req CallRequest) any { return t.cfg.Handlers.OnCall(context.Background(), key, req) })
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req CallRequest) any {
+		return t.cfg.Handlers.OnCall(ctx, key, req)
+	})
 }
 
 func (t *Transport) handleStep(s network.Stream) {
-	serveReq(s, func(key string, req StepRequest) any { return t.cfg.Handlers.OnStep(context.Background(), key, req) })
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req StepRequest) any {
+		return t.cfg.Handlers.OnStep(ctx, key, req)
+	})
 }
 
 func (t *Transport) handleResolve(s network.Stream) {
-	serveReq(s, func(key string, req ResolveRequest) any {
-		return t.cfg.Handlers.OnResolve(context.Background(), key, req)
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req ResolveRequest) any {
+		return t.cfg.Handlers.OnResolve(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleReveal(s network.Stream) {
-	serveReq(s, func(key string, req RevealRequest) any {
-		return t.cfg.Handlers.OnReveal(context.Background(), key, req)
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req RevealRequest) any {
+		return t.cfg.Handlers.OnReveal(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleGossip(s network.Stream) {
-	// Gossip is now a request/response protocol carrying the evidence cursor (§13). The reply frame is
-	// the JSON document; on handler error we close without a frame, which the client reads as empty.
-	defer s.Close()
-	_ = s.SetDeadline(time.Now().Add(streamDeadline))
-	var req GossipRequest
-	if err := readFrame(s, &req); err != nil {
-		return
-	}
-	body, err := t.cfg.Handlers.OnGossip(context.Background(), peerKeyOf(s), req)
-	if err != nil {
-		return
-	}
-	_ = writeFrame(s, body)
+	// Gossip carries the evidence cursor and the catalogue scan (§13). The reply frame is the JSON
+	// document; on handler error we close without a frame, which the client reads as empty.
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req GossipRequest) any {
+		body, err := t.cfg.Handlers.OnGossip(ctx, key, req)
+		if err != nil {
+			return nil
+		}
+		return body
+	})
 }
 
 // ---- Outbound client ----
@@ -551,7 +616,13 @@ func (t *Transport) openStream(ctx context.Context, peerKey, proto string) (netw
 	if err != nil {
 		return nil, fmt.Errorf("fed: open %s to %s: %w", proto, pid, err)
 	}
-	_ = s.SetDeadline(time.Now().Add(streamDeadline))
+	// The caller's own deadline wins when it is the shorter one: a pass that budgets ten seconds
+	// per peer must not wait a minute because the stream's default says it may.
+	deadline := time.Now().Add(streamDeadline)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = s.SetDeadline(deadline)
 	return s, nil
 }
 
@@ -564,13 +635,33 @@ func roundTrip[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto 
 		return resp, err
 	}
 	defer s.Close()
+	// A cancelled caller stops the read now rather than at the deadline: resetting the stream is
+	// what makes the blocked Read return.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = s.Reset()
+		case <-done:
+		}
+	}()
 	if err := writeFrame(s, req); err != nil {
-		return resp, fmt.Errorf("fed: write %s: %w", proto, err)
+		return resp, ourOwnCancel(ctx, fmt.Errorf("fed: write %s: %w", proto, err))
 	}
 	if err := readFrame(s, &resp); err != nil {
-		return resp, fmt.Errorf("fed: read %s: %w", proto, err)
+		return resp, ourOwnCancel(ctx, fmt.Errorf("fed: read %s: %w", proto, err))
 	}
 	return resp, nil
+}
+
+// ourOwnCancel names the caller's cancellation as the cause when there is one: the stream we reset
+// ourselves must not read to a caller as the peer breaking the connection.
+func ourOwnCancel(ctx context.Context, err error) error {
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("%w: %w", cerr, err)
+	}
+	return err
 }
 
 // Call sends a federation call to the peer and returns its settlement envelope.
@@ -595,8 +686,8 @@ func (t *Transport) Reveal(ctx context.Context, peerKey string, req RevealReques
 
 // Gossip fetches one page of the peer's gossip document, resuming from cursor (§13). An empty
 // cursor starts at the oldest retained evidence; the catalog snapshot rides every reply.
-func (t *Transport) Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error) {
-	return roundTrip[GossipRequest, json.RawMessage](ctx, t, peerKey, ProtocolGossip, GossipRequest{Cursor: cursor})
+func (t *Transport) Gossip(ctx context.Context, peerKey string, req GossipRequest) (json.RawMessage, error) {
+	return roundTrip[GossipRequest, json.RawMessage](ctx, t, peerKey, ProtocolGossip, req)
 }
 
 // ---- Reachability ----

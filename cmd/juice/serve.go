@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -27,7 +26,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"golang.org/x/time/rate"
 )
 
 // kernelServeCmd is built like every other command, so a test can exercise its argument rules
@@ -169,6 +167,9 @@ func runServer(name string) error {
 		return fmt.Errorf("startup: %w", err)
 	}
 
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	defer srvCancel()
+
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
@@ -180,8 +181,9 @@ func runServer(name string) error {
 		srv.oauth = newGrantBroker(httpExec.auth)
 	}
 
-	// Auth — rate limited: 5 requests/minute per IP, burst of 10.
-	authLimiter := ipRateLimiter(5.0/60, 10)
+	// Auth — rate limited: 5 requests/minute per IP, burst of 10. The limiter's sweeper lives as
+	// long as the server.
+	authLimiter := ipRateLimiter(srvCtx, 5.0/60, 10)
 	r.With(authLimiter).Post("/v1/auth/token", srv.postToken)
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
 	r.With(authLimiter).Post("/v1/auth/refresh", srv.postRefresh)
@@ -190,7 +192,7 @@ func runServer(name string) error {
 	r.With(authLimiter).Post("/v1/auth/recover/complete", srv.postRecoverComplete)
 
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
-	r.With(ipRateLimiter(3.0/60, 5)).Post("/v1/users", srv.postUser)
+	r.With(ipRateLimiter(srvCtx, 3.0/60, 5)).Post("/v1/users", srv.postUser)
 
 	registerRoutes(r, srv)
 
@@ -231,9 +233,8 @@ func runServer(name string) error {
 
 	// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
 	// shutdown first, then settles into the ordinary timer so a peer coming back online settles
-	// parked calls without a restart and the RemotePendingMaxAge refund fires from the running
-	// server. bootstrap's own pass runs before this transport exists, so it can only settle
-	// max-age expiries — this drain is the first attempt that can actually reach a peer.
+	// parked calls without a restart, from the running server. bootstrap's own pass runs before
+	// this transport exists, so this drain is the first attempt that can actually reach a peer.
 	// The snapshot is taken HERE, synchronously, before any HTTP request can create a new
 	// trace, so the drain is exactly the pre-existing work and never a moving target.
 	retryCtx, retryCancel := context.WithCancel(context.Background())
@@ -255,7 +256,13 @@ func runServer(name string) error {
 	go startDiscoveryLoop(discCtx, globalCfg.discoveryInterval(), func(c context.Context) {
 		pctx, cancel := context.WithTimeout(c, discoveryPassTimeout)
 		defer cancel()
-		discoverOnce(pctx, fedTransport, k.PeerKeys, k.AccumulateGossip, recordContact, k.GossipCursor, k.SetGossipCursor, logger)
+		discoverOnce(pctx, fedTransport, discoveryPull{
+			candidates: k.DiscoveryCandidates,
+			scan:       k.PeerScanState,
+			saveScan:   k.SavePeerScan,
+			accumulate: k.AccumulateGossip,
+			contact:    recordContact,
+		}, logger)
 	})
 
 	// Drive external money (D23): re-present everything still open, observe payments in, close any
@@ -263,7 +270,21 @@ func runServer(name string) error {
 	// a knob of its own, and does nothing until the rail is verified.
 	railCtx, railCancel := context.WithCancel(context.Background())
 	defer railCancel()
-	go startDiscoveryLoop(railCtx, globalCfg.remoteRetryInterval(), k.RailPass)
+	// A rail pass is what turns a won draw into a payment that can be announced, so it wakes the
+	// reveal worker when it finishes rather than leaving the news to wait out an interval.
+	revealNow := make(chan struct{}, 1)
+	go startDiscoveryLoop(railCtx, globalCfg.remoteRetryInterval(), func(ctx context.Context) {
+		k.RailPass(ctx)
+		select {
+		case revealNow <- struct{}{}:
+		default:
+		}
+	})
+
+	// Telling sellers how their draws came out is network work, so it runs on its own cadence and
+	// not inside the rail's lock: a peer that does not answer must not hold up the rail pass, or
+	// withdrawals behind it (P10).
+	go everyTickOrWhenWoken(railCtx, globalCfg.remoteRetryInterval(), revealNow, k.RevealPending)
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
 	// DB-only, so it runs regardless of the federation transport; started only when enabled.
@@ -329,6 +350,24 @@ func everyTick(ctx context.Context, interval time.Duration, work func(context.Co
 	}
 }
 
+// everyTickOrWhenWoken is everyTick with a second reason to run: a pass that has just created work
+// for this one wakes it, so the work is not left waiting out an interval that exists only to bound
+// idle polling. One run at a time either way.
+func everyTickOrWhenWoken(ctx context.Context, interval time.Duration, wake <-chan struct{}, work func(context.Context)) {
+	work(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-wake:
+		}
+		work(ctx)
+	}
+}
+
 // startRemoteRetryLoop is the durable worker §13 relies on to settle parked remote calls without a
 // restart. It runs the two phases every such worker runs, in order and in one goroutine: first it
 // drains `drain` — the work that was already pending when the transport came up — retrying each once
@@ -381,6 +420,10 @@ const (
 	discoveryPullTimeout      = 10 * time.Second // bounds a hung pull; a reachable peer returns in ms, so this only paces a cold relay resolve before the pass moves on
 	discoveryDirectoryTimeout = 10 * time.Second // bounds advertise+enumerate so a slow DHT can't consume the whole pass and starve counterparty sync
 	discoveryPassTimeout      = 30 * time.Second
+	// discoveryPagesPerPeer bounds one peer's turn in a pass. A peer with a backlog is read until
+	// it is caught up or this many pages are spent, so delivery is not capped at one page per
+	// interval however much it has to say — and no one peer can spend the whole pass (§13).
+	discoveryPagesPerPeer = 5
 )
 
 // contactRecorder journals one outbound contact observation (§13). Synchronous and best-effort: the
@@ -403,42 +446,35 @@ func newContactRecorder(record func(context.Context, string, bool) error) contac
 // fedDiscoverer is the transport capability the discovery pass needs; *fed.Transport satisfies it,
 // and tests supply a fake so the pass logic is exercised without libp2p.
 type fedDiscoverer interface {
-	Advertise(ctx context.Context) (time.Duration, error)
+	Advertise(ctx context.Context) error
 	DiscoverProviders(ctx context.Context) ([]string, error)
 	BootstrapKeys() []string
-	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
+	Gossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error)
 }
 
-// discoverOnce runs one discovery pass (§13). It advertises this kernel to the routing-discovery
-// namespace, then pulls gossip from the union of the namespace's providers, configured bootstrap
-// seeds, and known counterparties. On a VERIFIED pull — one authenticated as the key we dialed
-// (g.PublicKey == key) that accumulates cleanly — it refreshes the catalog, advances the evidence
-// cursor, and records that the peer was reached. A non-verified pull (transport error, bad
-// JSON, key mismatch, or accumulate rejection) is logged and retried a later pass; discovery holds no
-// per-candidate attempt state, since routing discovery re-surfaces live kernels every pass. One
-// structured discovery.pass summary ends the pass: Debug when nothing failed, Info otherwise.
-func discoverOnce(ctx context.Context, d fedDiscoverer,
-	peerKeys func(context.Context) []string,
-	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error),
-	recordContact contactRecorder,
-	getCursor func(context.Context, string) string,
-	setCursor func(context.Context, string, string) error,
-	logger *log.Logger) {
+// discoveryPull is the store side of one pass, in one place: who to read, where each read left
+// off, and what a read produced.
+type discoveryPull struct {
+	candidates func(context.Context, []string) []string
+	scan       func(context.Context, string) kernel.PeerScan
+	saveScan   func(context.Context, string, kernel.PeerScan) error
+	accumulate func(context.Context, *kernel.GossipResponse, string) (string, error)
+	contact    contactRecorder
+}
 
+// discoverOnce runs one discovery pass (§13). It advertises this kernel, enumerates the namespace,
+// and then reads peers in one order — what is unfinished first, then longest unheard — until the
+// pass budget runs out. Each peer is read until it has nothing further to say or its own budget is
+// spent, so a backlog drains instead of trickling one page per pass. A pass that cannot reach
+// everyone says how many it did not reach rather than counting them as failures.
+func discoverOnce(ctx context.Context, d fedDiscoverer, p discoveryPull, logger *log.Logger) {
 	start := time.Now()
-	keys := map[string]bool{}
-	for _, k := range peerKeys(ctx) {
-		keys[k] = true
-	}
-	// Directory discovery (advertise + enumerate providers) is time-boxed and skipped entirely with no
-	// bootstrap seeds, so a slow or unreachable DHT can never starve counterparty sync — the pull loop
-	// below always runs for known counterparties (§13). Bootstrap keys join the pull set as seeds.
+	var directory []string
+	// Advertising and enumerating are time-boxed and skipped with no seeds, so a slow DHT can
+	// never consume the budget the peers themselves need (§13).
 	if boot := d.BootstrapKeys(); len(boot) > 0 {
-		for _, k := range boot {
-			keys[k] = true
-		}
 		dctx, dcancel := context.WithTimeout(ctx, discoveryDirectoryTimeout)
-		if _, err := d.Advertise(dctx); err != nil {
+		if err := d.Advertise(dctx); err != nil {
 			logger.Debug("discovery.advertise.failed", "error", err.Error())
 		}
 		providers, derr := d.DiscoverProviders(dctx)
@@ -446,61 +482,92 @@ func discoverOnce(ctx context.Context, d fedDiscoverer,
 		if derr != nil {
 			logger.Debug("discovery.enumerate.failed", "error", derr.Error())
 		}
-		for _, k := range providers {
-			keys[k] = true
-		}
+		directory = append(providers, boot...)
 	}
 
-	var ok, failed int
-	for key := range keys {
-		pstart := time.Now()
-		fail := func(stage string, err error) {
+	keys := p.candidates(ctx, directory)
+	var ok, failed, pages, skipped int
+	for i, key := range keys {
+		if ctx.Err() != nil {
+			skipped = len(keys) - i
+			break
+		}
+		read, err := pullPeer(ctx, d, p, key, logger)
+		pages += read
+		switch {
+		case err != nil:
 			failed++
-			logger.Info("discovery.pull.failed",
-				"key", key, "stage", stage, "error", err.Error(),
-				"elapsed_ms", time.Since(pstart).Milliseconds())
+		case read > 0:
+			ok++
 		}
-		pctx, cancel := context.WithTimeout(ctx, discoveryPullTimeout)
-		cursor := getCursor(ctx, key)
-		raw, err := d.Gossip(pctx, key, cursor)
-		cancel()
-		if err != nil {
-			// The rotation retries a later pass. Only a dial that never connected proves the peer is
-			// unreachable (§13); a stream that broke mid-pull proves nothing and records nothing.
-			recordContact(ctx, key, contactFromErr(err))
-			fail("transport", err)
-			continue
-		}
-		var g kernel.GossipResponse
-		if uerr := json.Unmarshal(raw, &g); uerr != nil {
-			fail("decode", uerr) // malformed reply
-			continue
-		}
-		if g.PublicKey != key {
-			// a responder claiming an identity other than the key we dialed
-			fail("mismatch", fmt.Errorf("public_key mismatch: claimed %s", g.PublicKey))
-			continue
-		}
-		next, aerr := accumulate(ctx, &g, key) // introducer = the authenticated key, never the claimed one
-		if aerr != nil {
-			fail("accumulate", aerr) // an invalid handle or any other rejection is a failed pull, not a verified one
-			continue
-		}
-		ok++
-		if next != "" && next != cursor {
-			_ = setCursor(ctx, key, next)
-		}
-		// Recorded after accumulation, which is what upserts the kernel row: an earlier write would
-		// no-op on a first contact.
-		recordContact(ctx, key, contactReached)
 	}
 
-	fields := []any{"candidates", len(keys), "ok", ok, "failed", failed, "duration_ms", time.Since(start).Milliseconds()}
-	if failed == 0 {
+	fields := []any{"candidates", len(keys), "ok", ok, "failed", failed, "skipped", skipped,
+		"pages", pages, "duration_ms", time.Since(start).Milliseconds()}
+	if failed == 0 && skipped == 0 {
 		logger.Debug("discovery.pass", fields...)
 	} else {
 		logger.Info("discovery.pass", fields...)
 	}
+}
+
+// pullPeer reads one peer until it is caught up or its budget is spent, and returns how many pages
+// it took. Continuing here is what lets a backlog converge: one page per pass would cap delivery
+// at the interval however much the peer has to say (§13).
+func pullPeer(ctx context.Context, d fedDiscoverer, p discoveryPull, key string, logger *log.Logger) (int, error) {
+	var pages int
+	for ; pages < discoveryPagesPerPeer; pages++ {
+		if ctx.Err() != nil {
+			return pages, nil
+		}
+		pstart := time.Now()
+		scan := p.scan(ctx, key)
+		req := fed.GossipRequest{Cursor: scan.Evidence, CatalogCursor: scan.CatalogCursor}
+		pctx, cancel := context.WithTimeout(ctx, discoveryPullTimeout)
+		raw, err := d.Gossip(pctx, key, req)
+		cancel()
+		fail := func(stage string, cause error) (int, error) {
+			logger.Info("discovery.pull.failed", "key", key, "stage", stage, "error", cause.Error(),
+				"elapsed_ms", time.Since(pstart).Milliseconds())
+			return pages, cause
+		}
+		if err != nil {
+			// Only a dial that never connected proves the peer unreachable (§13); a stream that
+			// broke mid-pull proves nothing and records nothing.
+			p.contact(ctx, key, contactFromErr(err))
+			return fail("transport", err)
+		}
+		var g kernel.GossipResponse
+		if uerr := json.Unmarshal(raw, &g); uerr != nil {
+			return fail("decode", uerr)
+		}
+		if g.PublicKey != key {
+			return fail("mismatch", fmt.Errorf("public_key mismatch: claimed %s", g.PublicKey))
+		}
+		next, aerr := accumulateInto(ctx, p, &g, key, scan)
+		if aerr != nil {
+			// A verification failure is the peer's fault and the item is skipped; anything else —
+			// a store that would not write — leaves the cursor where it was, so nothing is lost by
+			// moving past an item that was never kept.
+			return fail("accumulate", aerr)
+		}
+		p.contact(ctx, key, contactReached)
+		// Caught up when the peer offers nothing further on either stream.
+		if next == scan.Evidence && g.NextCatalogCursor == "" {
+			return pages + 1, nil
+		}
+	}
+	return pages, nil
+}
+
+// accumulateInto commits one page and records where the next one resumes: the evidence
+// high-watermark beside the catalogue scan's own position, which the ingest has already moved.
+func accumulateInto(ctx context.Context, p discoveryPull, g *kernel.GossipResponse, key string, scan kernel.PeerScan) (string, error) {
+	next, err := p.accumulate(ctx, g, key)
+	if err != nil {
+		return "", err
+	}
+	return next, p.saveScan(ctx, key, kernel.PeerScan{Evidence: next, CatalogCursor: g.NextCatalogCursor})
 }
 
 // startDiscoveryLoop refreshes the known network (§13) once immediately, then every interval until
@@ -513,7 +580,7 @@ func startDiscoveryLoop(ctx context.Context, interval time.Duration, pass func(c
 
 // backoffScheduler decides which pending remote traces are due for a retry, spacing each trace's
 // attempts with exponential backoff so a peer that stays offline is retried ever-less-often (bounded
-// anyway by RemotePendingMaxAge, §13). State is in-memory and per-serve-process: a restart re-drives
+// §13). State is in-memory and per-serve-process: a restart re-drives
 // everything once via bootstrap, so nothing is lost. It is the only sweeper of pending traces during
 // live serving (Recover/bootstrap run only at startup), so a plain map needs no locking.
 type backoffScheduler struct {
@@ -576,7 +643,7 @@ type server struct {
 // satisfies it; keeping it an interface lets tests supply a fake to exercise online/offline paths
 // without a real network.
 type fedClient interface {
-	Gossip(ctx context.Context, peerKey, cursor string) (json.RawMessage, error)
+	Gossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error)
 	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
 	ListenAddrs() []string
@@ -671,9 +738,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/transactions/{id}/receipt-verification", srv.getReceiptVerification)
 
-		// Stats.
-		r.Get("/v1/stats/{id}", srv.getStats)
-
 		// Steps (reads are JWT-only; the POSTs accept a capability too — see below).
 		r.Get("/v1/steps", srv.listSteps)
 		r.Get("/v1/steps/{id}", srv.getStep)
@@ -760,30 +824,11 @@ func rateLimitKey(r *http.Request) (key string, exempt bool) {
 	return ip, false
 }
 
-// ipRateLimiter returns a middleware that limits requests per client using a token bucket, keyed by
-// rateLimitKey (genuine loopback is exempt). Entries not seen for 5 minutes are evicted by a
-// background goroutine.
-func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
-	type entry struct {
-		lim      *rate.Limiter
-		lastSeen time.Time
-	}
-	var mu sync.Mutex
-	entries := make(map[string]*entry)
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().Add(-5 * time.Minute)
-			mu.Lock()
-			for ip, e := range entries {
-				if e.lastSeen.Before(cutoff) {
-					delete(entries, ip)
-				}
-			}
-			mu.Unlock()
-		}
-	}()
+// ipRateLimiter returns a middleware that limits requests per client using a token bucket, keyed
+// by rateLimitKey (genuine loopback is exempt). It is the same limiter the federation streams use,
+// so eviction is implemented once (D12).
+func ipRateLimiter(ctx context.Context, ratePerSec, burst float64) func(http.Handler) http.Handler {
+	kl := newKeyLimiter(ctx, ratePerSec, int(burst))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key, exempt := rateLimitKey(r)
@@ -791,16 +836,7 @@ func ipRateLimiter(ratePerSec, burst float64) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			mu.Lock()
-			e, ok := entries[key]
-			if !ok {
-				e = &entry{lim: rate.NewLimiter(rate.Limit(ratePerSec), int(burst))}
-				entries[key] = e
-			}
-			e.lastSeen = time.Now()
-			allow := e.lim.Allow()
-			mu.Unlock()
-			if !allow {
+			if !kl.allow(key) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})
@@ -1102,12 +1138,13 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	// Gate on the action's own visibility (anonymous caller allowed for a public action); the read
 	// is independent of the action's active state so reputation survives deactivation (§8).
-	if _, err := s.kernel.ReadActionForSubject(r.Context(), s.optionalAuth(r), pathID(r)); err != nil {
+	action, err := s.kernel.ReadActionForSubject(r.Context(), s.optionalAuth(r), pathID(r))
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	limit, offset := listBounds(r)
-	ratings, err := s.kernel.ActionRatings(r.Context(), pathID(r), limit, offset)
+	ratings, err := s.kernel.ActionRatings(r.Context(), action, limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1207,11 +1244,6 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
 	v, err := s.kernel.VerifyReceipt(r.Context(), callerFrom(r), pathID(r))
 	writeOr(w, v, err)
-}
-
-func (s *server) getStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := s.kernel.ReadStats(r.Context(), pathID(r))
-	writeOr(w, stats, err)
 }
 
 // ---- PKCE / auth handlers ----
@@ -1661,7 +1693,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
 		return nil, kernel.ErrInvalidState.Wrap("signing key unavailable for federation transport")
 	}
-	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(50, 100)}
+	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(ctx, 50, 100)}
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
 		BootstrapPeers:    world.Seeds,

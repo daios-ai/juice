@@ -39,10 +39,12 @@ be renamed or reused.
 
 Use `--json` when the program needs to parse a successful response. It preserves
 the server's reply structure. Use `--quiet` when only the returned identifiers
-are needed, one per line:
+are needed, one per line. These unattended examples also show the price line
+written to stderr; it is separate from the result on stdout:
 
 ```
 $ juice --as bot@acme run sys/time --json
+sys/time costs 0.00 fUSDT.
 {
   "result": { "iso": "2026-09-14T12:06:52Z", "unix": 1789387612 },
   "tx_id": "98bb64e6-…",
@@ -52,6 +54,7 @@ $ juice --as bot@acme run sys/time --json
   "charge": 0
 }
 $ juice --as bot@acme run sys/time --quiet
+sys/time costs 0.00 fUSDT.
 821a9f33-…
 ```
 
@@ -91,8 +94,8 @@ and, where applicable, `meta`:
 
 The metadata supplies context for recovery. For example, `grant_required`
 identifies the action requiring consent, while peer errors identify the remote
-kernel. A pending call includes `process_id`, `pending_since`, and
-`refund_eligible_at`, allowing the program to follow its existing execution.
+kernel. A pending call includes `process_id` and `pending_since`, allowing the
+program to follow its existing execution.
 A settled failure carries `tx_id` and `charge` in the error's `meta`; the charge
 is a decimal string in base units, and can be zero.
 
@@ -137,7 +140,8 @@ keeps the decision to spend on the selected service under the program's control.
 
 ## Pin the terms between reading and running
 
-An action's terms can change while a program prepares work. Carry the
+By default, the CLI reads and pins the action's current terms. An action's terms
+can change while a program prepares work, so carry the
 `quote_hash` from the selected search result or action read into the execution
 request:
 
@@ -156,11 +160,10 @@ idempotency key, so a program must establish the outcome of an earlier request
 before deciding whether to submit it again. Remote transport retries within
 the kernel are different: they retain the original call's identity.
 
-- A cross-kernel call that parked returns `process_id`, `pending_since` and
-  `refund_eligible_at`. Poll `juice process show <id>` until it closes. A running
-  kernel settles it when the receipt arrives, or as a refunded failure once
-  `refund_eligible_at` has passed; a kernel that is stopped settles nothing until
-  it is started again.
+- A cross-kernel call that parked returns `process_id` and `pending_since`.
+  Poll `juice process show <id>` until it closes. Only the peer's signed receipt
+  or refusal settles it; there is no timeout refund, and `process end` is
+  refused while it waits. A stopped kernel resumes retries when it starts again.
 - A call that failed with exit code 9 provably never left your kernel and was
   fully refunded. It is safe to retry.
 
@@ -189,8 +192,11 @@ $ juice user transfer bob 1
 error: re-run with --yes to confirm (no terminal to ask on)
 ```
 
-Supply `--yes` when the program has authorized that movement. An action run
-does not prompt: issuing the request authorizes the selected price and any
+Supply `--yes` when the program has authorized that movement. By default,
+`run` prints the price to stderr and proceeds without a terminal, leaving
+stdout available for its result. At a terminal it asks first, even for a free
+action; use `--yes` to skip the question. An explicit `--quote-hash` uses the
+earlier terms without another prompt. Issuing the request also authorizes any
 value named in its arguments.
 
 ## Non-interactive equivalents

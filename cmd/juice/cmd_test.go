@@ -1555,7 +1555,6 @@ func TestRemoteImport(t *testing.T) {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef",
-		Stats:        &kernel.Stats{},
 		UpdatedAt:    time.Now(),
 	}
 	sig, err := testNet.SignManifest(priv, &m)
@@ -2052,7 +2051,7 @@ func TestTheAdviceOnAnErrorNamesCommandsThatExist(t *testing.T) {
 		{"a peer that will not serve on credit", kernel.ErrPeerUnfunded.Wrap("x").WithMeta("peer", "other"), "other declined"},
 		{"terms that changed under a pin", &kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2"}}, "--quote-hash h"},
 		{"money parked on a peer", parked, "process show"},
-		{"money parked with a refund date", parked.WithMeta("refund_eligible_at", "2026-01-01T00:00:00Z"), "process end"},
+		{"money parked, with how long it has waited", parked.WithMeta("pending_since", "2026-01-01T00:00:00Z"), "since 2026-01-01T00:00:00Z"},
 		{"a call that ran and failed", (&kernel.KernelError{Code: "execution_failed", Meta: map[string]string{"tx_id": "t-1", "charge": "0"}}), "tx show t-1"},
 		{"a fault in juice", kernel.ErrInternal.Wrap("x"), "--verbose"},
 	} {
@@ -2292,6 +2291,10 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	runs := 0
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob/echo"}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
 		case r.URL.Path == "/v1/run":
 			runs++
 			if runs == 1 {
@@ -2321,7 +2324,8 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.WriteString("y\n"); err != nil {
+	// Two answers: the price this run pins, then the authorization it turns out to need.
+	if _, err := w.WriteString("y\ny\n"); err != nil {
 		t.Fatal(err)
 	}
 	w.Close()
@@ -2675,4 +2679,86 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
+}
+
+// A run spends money, so at a terminal the person is asked before it does, at the price this run
+// pins — and says no by saying nothing. Off a terminal the price is stated and the run proceeds:
+// a script has nobody to ask, and the pin is what guarantees the price it was quoted (U8, D20).
+func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
+	runs := 0
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob/echo"}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
+		default:
+			runs++
+			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"ok": true}})
+		}
+	})
+	answer := func(t *testing.T, text string) {
+		t.Helper()
+		in, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.WriteString(text); err != nil {
+			t.Fatal(err)
+		}
+		w.Close()
+		old := os.Stdin
+		os.Stdin = in
+		t.Cleanup(func() { os.Stdin = old })
+	}
+	atTerminal := func(t *testing.T, yes bool) {
+		t.Helper()
+		old := interactiveTTY
+		interactiveTTY = func() bool { return yes }
+		t.Cleanup(func() { interactiveTTY = old })
+	}
+
+	t.Run("declined at a terminal spends nothing", func(t *testing.T) {
+		runs = 0
+		atTerminal(t, true)
+		answer(t, "n\n")
+		if _, err := execTestCmd(t, runCmd(), "bob/echo"); err == nil {
+			t.Error("a declined run reported success")
+		}
+		if runs != 0 {
+			t.Errorf("the call was made %d times after the person said no", runs)
+		}
+	})
+	t.Run("accepted at a terminal runs", func(t *testing.T) {
+		runs = 0
+		atTerminal(t, true)
+		answer(t, "y\n")
+		if _, err := execTestCmd(t, runCmd(), "bob/echo"); err != nil {
+			t.Fatalf("an accepted run failed: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("the call ran %d times, want once", runs)
+		}
+	})
+	t.Run("a script is told the price and proceeds", func(t *testing.T) {
+		runs = 0
+		atTerminal(t, false)
+		if _, err := execTestCmd(t, runCmd(), "bob/echo"); err != nil {
+			t.Fatalf("an unattended run failed: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("the call ran %d times, want once", runs)
+		}
+	})
+	t.Run("--yes skips the question", func(t *testing.T) {
+		runs = 0
+		atTerminal(t, true)
+		answer(t, "") // nothing to read: the flag is the answer
+		if _, err := execTestCmd(t, runCmd(), "bob/echo", "--yes"); err != nil {
+			t.Fatalf("--yes did not skip the prompt: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("the call ran %d times, want once", runs)
+		}
+	})
 }

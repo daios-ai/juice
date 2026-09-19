@@ -96,6 +96,7 @@ child call:
 
 ```
 $ juice run bob/stamp '{"note":"invoice 42"}'
+bob/stamp costs 1.00 fUSDT. Run it? [y/N] y
   result: {
     "note": "invoice 42",
     "stamped_at": "2026-09-14T12:06:04Z"

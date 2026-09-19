@@ -384,7 +384,7 @@ func peerInspectCmd() *cobra.Command {
 						Description string `json:"description"`
 						Price       int64  `json:"price"`
 					} `json:"actions"`
-					Evidence []kernel.SubjectEvidenceRow `json:"evidence"`
+					Evidence []*kernel.SubjectEvidenceRow `json:"evidence"`
 					Account  *struct {
 						Suspended bool `json:"suspended"`
 					} `json:"account"`
@@ -455,9 +455,6 @@ func peerInspectCmd() *cobra.Command {
 					}
 				}
 				if len(out.Evidence) > 0 {
-					// Two views, never folded together: the subject's own execution summary (issuer ==
-					// subject), then per-issuer counterparty experience (every other issuer's direct
-					// interactions with the subject). A rating counts only when trade-backed (§13).
 					subjectName := out.Petname
 					if subjectName == "" {
 						subjectName = out.Nickname
@@ -465,49 +462,7 @@ func peerInspectCmd() *cobra.Command {
 					if subjectName == "" {
 						subjectName = shortKey(out.PublicKey)
 					}
-					fmt.Printf("\nExecution reported by %s\n", subjectName)
-					own := false
-					for _, e := range out.Evidence {
-						if e.IssuerPublicKey != out.PublicKey {
-							continue
-						}
-						own = true
-						fmt.Printf("  action %s: %d executions, %d successful  ~%.0fms\n",
-							e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
-					}
-					if !own {
-						fmt.Println("  (none)")
-					}
-					header := false
-					for _, e := range out.Evidence {
-						if e.IssuerPublicKey == out.PublicKey {
-							continue
-						}
-						if !header {
-							fmt.Printf("\nCounterparty experience\n")
-							header = true
-						}
-						fmt.Printf("  From %s on %s: %d interactions, %d successful",
-							shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes)
-						// Corroboration tag on the interactions themselves (§13): [verified] when the
-						// two-kernel receipt link holds for all of them, a fraction when partial, else
-						// [unverified] — an issuer's self-attested claim is never shown as fact.
-						switch {
-						case e.Uses > 0 && e.CorroboratedUses == e.Uses:
-							fmt.Printf(" [verified]")
-						case e.CorroboratedUses > 0:
-							fmt.Printf(" [%d/%d verified]", e.CorroboratedUses, e.Uses)
-						default:
-							fmt.Printf(" [unverified]")
-						}
-						if e.RatingCount > 0 {
-							fmt.Printf("  rating %.2f", e.RatingMean)
-						}
-						if e.UnverifiedRatings > 0 {
-							fmt.Printf("  [+%d unverified rating]", e.UnverifiedRatings)
-						}
-						fmt.Println()
-					}
+					printEvidence(subjectName, out.PublicKey, out.Evidence)
 				}
 				if len(out.Steps) > 0 {
 					fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete ID --peer %s\n",

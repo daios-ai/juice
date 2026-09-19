@@ -19,6 +19,7 @@ another, or a raw action id. `JSON` is the argument object, `{}` if omitted.
 
 ```
 $ juice run bob/echo '{"msg":"hello"}'
+bob/echo costs 0.50 fUSDT. Run it? [y/N] y
   result: {
     "json": { "msg": "hello" },
     …
@@ -57,6 +58,7 @@ without charge:
 
 ```
 $ juice run bob/echo '{}'
+bob/echo costs 0.50 fUSDT. Run it? [y/N] y
 error: field msg: required field missing
 ```
 
@@ -71,15 +73,20 @@ identifies the action to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
+bob/mail costs 0.00 fUSDT. Run it? [y/N] y
 error: grant required for bob/mail
        Authorize it with: juice user connect bob/mail
 ```
 
 ## Pinning the terms you saw
 
-A provider may revise an action between the time you inspect it and the time you
-run it. To bind your purchase to the terms you read, pass the `quote_hash`
-returned by search or `action show`:
+`run` reads the action, shows its price, and pins those terms before calling it.
+At a terminal it asks for confirmation; `--yes` skips the question. Without a
+terminal it prints the price to stderr and proceeds. This applies to local and
+remote actions, including free ones.
+
+To use terms you read earlier, pass the `quote_hash` returned by search or
+`action show`. The client sends it unchanged, without another read or prompt:
 
 ```
 $ juice run bob/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
@@ -93,9 +100,8 @@ error: the action's terms changed; it now costs 0.50 fUSDT
        Nothing was charged. The price is now 500000; pass --quote-hash 4965342976414282… to accept it.
 ```
 
-Without a pin, `run` uses the terms current when the call is admitted. Pinning
-is therefore useful whenever selection and execution happen at different times,
-particularly in programs that prepare work in advance.
+An explicit hash is useful whenever selection and execution happen at different
+times, particularly in programs that prepare work in advance.
 
 ## Calling an action on another kernel
 
@@ -104,6 +110,7 @@ can be a petname known to your kernel or the remote kernel's public key:
 
 ```
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
+dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
 ```
 
 Your local balance funds the purchase. The two kernels handle the exchange,
@@ -125,6 +132,7 @@ example with the default `1.00` ticket:
 $ juice user me
   available: 7.00 fUSDT
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
+dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
   …
 $ juice user me
   available: 4.795 fUSDT
@@ -155,6 +163,7 @@ balance of `2.50` is insufficient:
 $ juice user me
   available: 2.50 fUSDT
 $ juice run 'dave@beta-kernel/summarize' '{"text":"x"}'
+dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
 error: insufficient user balance
 ```
 
@@ -190,18 +199,18 @@ error: peer beta-kernel is unreachable; the call was not sent and has been refun
 ```
 
 In the second case, the call remains pending because its outcome is unknown.
-Its funds stay locked, and the response identifies the process and the time at
-which a refund becomes eligible:
+Its funds stay locked, and the response identifies the process and when it
+began waiting:
 
 ```
-Your funds are reserved, not spent, on process 01d1da53-…. It retries by itself, is refundable from 2026-09-15T12:06:27Z, and `juice process end 01d1da53-…` refunds it sooner.
+Your funds are reserved, not spent, on process 01d1da53-…, waiting for the peer's answer since 2026-09-14T12:06:27Z. It retries by itself; follow it with: juice process show 01d1da53-…
 ```
 
 A pending call is retried under its original identity, including after a
 restart, so a retry can recover the outcome without buying the work again.
-A signed receipt settles the call. If none arrives within 24 hours, the running
-kernel's retry worker settles it as a failure with a full refund; a stopped
-kernel must restart before it can do so.
+Only the peer's signed receipt or refusal settles the call. There is no timeout
+refund, and `juice process end` is refused while the call awaits that answer.
+If the peer never answers, the funds remain reserved.
 
 {: .warning }
 > Do not re-run a parked call. `run` has no idempotency key, so running it again

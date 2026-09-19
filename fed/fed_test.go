@@ -131,7 +131,7 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 
 	// Gossip
-	g, err := b.Gossip(ctx, a.PublicKey(), "")
+	g, err := b.Gossip(ctx, a.PublicKey(), GossipRequest{})
 	if err != nil || string(g) != `{"public_key":"srv","handle":"@srv"}` {
 		t.Fatalf("Gossip: %v body=%s", err, g)
 	}

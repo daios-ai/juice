@@ -751,6 +751,23 @@ func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, o
 	return queryList(rows, "list visible actions", scanActionFn)
 }
 
+// ListExportableActionsAfter is one page of the catalogue, ordered by action id so a scan can be
+// resumed at a stable point: id order does not shift when an action is added, edited or removed,
+// which a created_at order would (P9). Exportability beyond visibility is the kernel's to judge —
+// a delegated-auth action is public and still not describable abroad — so this returns candidates
+// and the caller filters.
+func (s *DB) ListExportableActionsAfter(ctx context.Context, afterActionID string, limit int) ([]*kernel.Action, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN "accounts" u ON u.id=a.owner_user_id
+		 WHERE a.active=1 AND a.visibility='public' AND a.deleted_at IS NULL AND u.suspended_at IS NULL
+		   AND a.id > ?
+		 ORDER BY a.id ASC LIMIT ?`, afterActionID, limit)
+	if err != nil {
+		return nil, dbErr(err, "list exportable actions")
+	}
+	return queryList(rows, "list exportable actions", scanActionFn)
+}
+
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
@@ -1078,13 +1095,13 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
-		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,evidence_eligible,started_at,ended_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSignerKey),
-		timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
+		ktx.EvidenceEligible, timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
 	}
@@ -1098,13 +1115,15 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,value_to,reason,started_at,created_at,signature,hash)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		                       args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,value_to,reason,started_at,created_at,signature,hash,
+		                       idempotency_key,counterparty)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		receipt.ID, receipt.IssuerUserID, receipt.TxID, receipt.TraceID, receipt.ActionID,
 		receipt.CallerUserID, receipt.ProcessID,
 		receipt.ArgsHash, receipt.ReplyHash, string(receipt.Status),
 		receipt.Gross, receipt.Net, receipt.Fee, receipt.Charge, receipt.Premium, receipt.Nonce, receipt.Value, nullStr(receipt.ValueTo), receipt.Reason,
 		timeToStr(receipt.StartedAt), timeToStr(receipt.CreatedAt), receipt.Signature, hash,
+		receipt.IdempotencyKey, receipt.Counterparty,
 	); err != nil {
 		return dbErr(err, label+": insert receipt")
 	}
@@ -1162,20 +1181,19 @@ func (s *DB) completeStepTx(ctx context.Context, tx *sql.Tx, stepID, txID, label
 
 // finalizeTx executes the shared tail of both commit paths: audit rows, trace latency,
 // stats, optional idempotency completion, optional step completion, and commit.
-func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, idempotencyResultJSON, stepID, label string) error {
+func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, stepID, label string) error {
 	if err := s.insertAuditRows(ctx, tx, ktx, receipt, label); err != nil {
 		return err
 	}
 	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
 		return err
 	}
+	// The lock is released by the commit that writes the outcome, in the same transaction: from
+	// here on the receipt is the answer to a repeat of that request, so nothing else need be kept
+	// and nothing can be left half-finished (P4).
 	if idempotencyRecordID != "" {
-		receiptBytes, _ := json.Marshal(receipt)
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=?`,
-			idempotencyResultJSON, string(receiptBytes), idempotencyRecordID,
-		); err != nil {
-			return dbErr(err, label+": complete idempotency record")
+		if _, err := tx.ExecContext(ctx, `DELETE FROM idempotency_records WHERE id=?`, idempotencyRecordID); err != nil {
+			return dbErr(err, label+": release idempotency lock")
 		}
 	}
 	if stepID != "" {
@@ -1494,7 +1512,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, rawJSONStr(ktx.ReplyJSON), stepID, "commit call"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit call"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1506,7 +1524,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 //   - cancels all outstanding steps in the trace's subtree, summing their parked prices
 //   - total refund = trace.available + step prices
 //   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
 		var err error
@@ -1565,8 +1583,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
-		errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, string(errResult), stepID, "commit failed call"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit failed call"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1580,7 +1597,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 // land on a peer row — a peer row holds no money — it returns to the caller C, whose own stake then
 // carries the draw: a losing ticket leaves C exactly the obligation better off than the refund
 // alone, and a winning one reserves the face value from C for the rail to send.
-func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, stepID, errorCode string) error {
+func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
 		var err error
@@ -1642,16 +1659,7 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 				return err
 			}
 		}
-		// A remote FAILURE has no ReplyJSON (settleRemoteCall sets it only on success), so storing
-		// it verbatim would complete the record with "null" — and a replaying peer, finding no
-		// "error" key, would read a settled failure as a 200 success. Store the same error body a
-		// local failure stores, so both replay through one rule (§13).
-		idemResult := rawJSONStr(ktx.ReplyJSON)
-		if ktx.Status != kernel.TxSuccess {
-			errResult, _ := json.Marshal(map[string]string{"error": ktx.Reason, "code": errorCode})
-			idemResult = string(errResult)
-		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, idemResult, stepID, "commit remote settlement"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit remote settlement"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -3148,16 +3156,15 @@ func discoveryDocKey(kernelKey, actionID string) string {
 	return kernelKey + "/" + actionID
 }
 
-func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, docs []*kernel.DiscoveryDoc) error {
-	return s.withTx(ctx, "replace discovery docs", func(tx *sql.Tx) error {
-		// Prefix scope by range, not LIKE: '_' in a base64url key would be a single-char wildcard
-		// and could match another kernel's rows. '0' is the ASCII successor of '/'.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key >= ? || '/' AND doc_key < ? || '0'`, kernelPublicKey, kernelPublicKey); err != nil {
-			return dbErr(err, "clear discovery_fts")
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, kernelPublicKey); err != nil {
-			return dbErr(err, "clear discovery_docs")
-		}
+// ApplyCatalogPage is one catalogue transition, committed once: the page's documents, what a
+// completed scan leaves behind, and where the scan now stands. The peer and the generation are
+// this call's arguments and nothing else's: a document cannot name a different kernel or a
+// different scan than the one being applied, because it is not asked. One fact, one owner. A page is part of a catalogue, not
+// the whole of one, so nothing is removed until a scan reaches the end (an empty nextCursor) —
+// and because the three writes are one commit, the catalogue is never seen partway between them
+// (P9).
+func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs []*kernel.DiscoveryDoc, nextCursor string, generation int64) error {
+	return s.withTx(ctx, "apply catalog page", func(tx *sql.Tx) error {
 		for _, d := range docs {
 			inJSON, o0 := json.Marshal(d.InputSchema)
 			outJSON, o1 := json.Marshal(d.OutputSchema)
@@ -3173,20 +3180,97 @@ func (s *DB) ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, d
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at)
-				 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-				d.KernelPublicKey, d.Handle, d.Description, d.ActionID, d.Name,
-				string(inJSON), string(outJSON), d.ServingPrice, embed, timeToStr(d.ObservedAt)); err != nil {
+				`INSERT INTO discovery_docs (kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT (kernel_public_key, action_id) DO UPDATE SET
+				   handle=excluded.handle, description=excluded.description, name=excluded.name,
+				   input_schema=excluded.input_schema, output_schema=excluded.output_schema,
+				   serving_price=excluded.serving_price, embed_vec=excluded.embed_vec,
+				   generation=excluded.generation, observed_at=excluded.observed_at`,
+				kernelPublicKey, d.Handle, d.Description, d.ActionID, d.Name,
+				string(inJSON), string(outJSON), d.ServingPrice, embed, generation,
+				timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
 			}
+			key := discoveryDocKey(kernelPublicKey, d.ActionID)
+			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key = ?`, key); err != nil {
+				return dbErr(err, "clear discovery_fts row")
+			}
 			text := d.Handle + " " + d.Name + " " + d.Description
-			if _, err := tx.ExecContext(ctx, `INSERT INTO discovery_fts(doc_key, text) VALUES (?, ?)`,
-				discoveryDocKey(d.KernelPublicKey, d.ActionID), text); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO discovery_fts(doc_key, text) VALUES (?, ?)`, key, text); err != nil {
 				return dbErr(err, "insert discovery_fts")
 			}
 		}
+		if nextCursor == "" { // the page ended the catalogue: what this scan never mentioned is gone
+			rows, err := tx.QueryContext(ctx,
+				`SELECT action_id FROM discovery_docs WHERE kernel_public_key=? AND generation<>?`,
+				kernelPublicKey, generation)
+			if err != nil {
+				return dbErr(err, "list stale discovery docs")
+			}
+			var stale []string
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return dbErr(err, "scan stale discovery doc")
+				}
+				stale = append(stale, id)
+			}
+			rows.Close()
+			for _, id := range stale {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key=?`,
+					discoveryDocKey(kernelPublicKey, id)); err != nil {
+					return dbErr(err, "clear discovery_fts")
+				}
+			}
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM discovery_docs WHERE kernel_public_key=? AND generation<>?`,
+				kernelPublicKey, generation); err != nil {
+				return dbErr(err, "sweep discovery_docs")
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE kernels SET catalog_cursor=?, catalog_generation=? WHERE public_key=?`,
+			nextCursor, generation, kernelPublicKey); err != nil {
+			return dbErr(err, "set catalog scan")
+		}
 		return nil
 	})
+}
+
+// DiscoveryEmbedding returns the embedding already held for one discovered action when the text it
+// was computed from has not changed, so an unchanged description costs no model call.
+func (s *DB) DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, text string) ([]float32, bool) {
+	var name, description string
+	var embed *string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT name, description, embed_vec FROM discovery_docs WHERE kernel_public_key=? AND action_id=?`,
+		kernelPublicKey, actionID).Scan(&name, &description, &embed); err != nil || embed == nil {
+		return nil, false
+	}
+	if name+" "+description != text {
+		return nil, false
+	}
+	var vec []float32
+	if json.Unmarshal([]byte(*embed), &vec) != nil {
+		return nil, false
+	}
+	return vec, true
+}
+
+// CatalogScan is where a peer's catalogue scan stands: the cursor to resume at, and the generation
+// the pages so far were stamped with.
+func (s *DB) CatalogScan(ctx context.Context, kernelPublicKey string) (string, int64, error) {
+	var cursor string
+	var generation int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT catalog_cursor, catalog_generation FROM kernels WHERE public_key=?`,
+		kernelPublicKey).Scan(&cursor, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	return cursor, generation, dbErr(err, "read catalog scan")
 }
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
@@ -3231,35 +3315,43 @@ func (s *DB) SearchDiscoveryLexical(ctx context.Context, query string, limit int
 
 func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 	return s.withTx(ctx, "upsert evidence", func(tx *sql.Tx) error {
-		var existingRating string
+		var storedReceipt, storedRating string
 		var equivocated int
 		err := tx.QueryRowContext(ctx,
-			`SELECT rating_json, equivocated FROM evidence WHERE issuer_public_key=? AND receipt_hash=?`,
-			e.IssuerPublicKey, e.ReceiptHash).Scan(&existingRating, &equivocated)
+			`SELECT evidence_receipt_json, rating_json, equivocated FROM evidence WHERE issuer_public_key=? AND receipt_hash=?`,
+			e.IssuerPublicKey, e.ReceiptHash).Scan(&storedReceipt, &storedRating, &equivocated)
 		switch {
 		case err == sql.ErrNoRows:
 			// New row.
 		case err != nil:
 			return dbErr(err, "read existing evidence")
-		default:
-			// Late-rating transitions (§13). A row already exists for this (issuer, receipt).
-			newRating := e.RatingJSON
-			finalRating := existingRating
-			finalEquivocated := equivocated == 1
-			switch {
-			case existingRating == "" && newRating != "":
-				finalRating = newRating // attach a late rating
-			case newRating == "":
-				// keep existing rating (a receipt re-gossiped without its rating)
-			case existingRating != "" && newRating != "" && existingRating != newRating:
-				finalEquivocated = true // two different valid ratings → both excluded
-			}
+		case storedReceipt != e.EvidenceReceiptJSON:
+			// One issuer, one receipt, two statements: the subject, the counterparty, the outcome
+			// or the link differ from what it said before. Both cannot be true, and nothing here
+			// can tell which is, so the trade is marked and counts for nothing. The stored
+			// statement is left exactly as signed — overwriting half of it would leave a row no
+			// single signature covers (§13).
 			_, uerr := tx.ExecContext(ctx,
-				`UPDATE evidence SET rating_json=?, equivocated=?, observed_at=?,
-				   counterparty_kernel_public_key=?, remote_receipt_hash=?, effective_at=?
+				`UPDATE evidence SET equivocated=1, observed_at=? WHERE issuer_public_key=? AND receipt_hash=?`,
+				timeToStr(e.ObservedAt), e.IssuerPublicKey, e.ReceiptHash)
+			return dbErr(uerr, "mark evidence equivocated")
+		default:
+			// The same signed statement, arriving again — possibly now carrying its rating. Only
+			// the rating may move, and only in the transitions §13 allows.
+			finalRating, finalEquivocated := storedRating, equivocated == 1
+			switch {
+			case storedRating == "" && e.RatingJSON != "":
+				finalRating = e.RatingJSON // attach a late rating
+			case e.RatingJSON == "":
+				// keep the existing rating (a receipt re-gossiped without it)
+			case storedRating != e.RatingJSON:
+				finalEquivocated = true // two different ratings for one trade → both excluded
+			}
+			// effective_at moves only with the rating, since that is the only thing that changed.
+			_, uerr := tx.ExecContext(ctx,
+				`UPDATE evidence SET rating_json=?, equivocated=?, observed_at=?, effective_at=?
 				 WHERE issuer_public_key=? AND receipt_hash=?`,
-				finalRating, boolInt(finalEquivocated), timeToStr(e.ObservedAt),
-				e.CounterpartyKernelPublicKey, e.RemoteReceiptHash, timeToStr(e.EffectiveAt),
+				finalRating, boolInt(finalEquivocated), timeToStr(e.ObservedAt), timeToStr(e.EffectiveAt),
 				e.IssuerPublicKey, e.ReceiptHash)
 			return dbErr(uerr, "update evidence")
 		}
@@ -3273,14 +3365,15 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 			timeToStr(e.ReceiptCreatedAt), timeToStr(e.EffectiveAt), timeToStr(e.ObservedAt)); err != nil {
 			return dbErr(err, "insert evidence")
 		}
-		// Enforce the E cap per (issuer, subject_kernel, subject_action): keep the newest E rows.
+		// Keep the newest E rows per (issuer, subject_kernel, subject_action) — the same window the
+		// sender serves, so a consumer never stores what it is about to evict.
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM evidence
 			  WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
 			    AND receipt_hash NOT IN (
 			      SELECT receipt_hash FROM evidence
 			       WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
-			       ORDER BY receipt_created_at DESC LIMIT ?)`,
+			       ORDER BY receipt_created_at DESC, receipt_hash DESC LIMIT ?)`,
 			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID,
 			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID, kernelEvidenceCap); err != nil {
 			return dbErr(err, "evict evidence over cap")
@@ -3289,12 +3382,20 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 	})
 }
 
-func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey string) ([]*kernel.EvidenceRow, error) {
+// ListEvidenceBySubject returns the retained evidence about one subject: a whole kernel when
+// subjectActionID is empty, one of its actions otherwise. Both forms are served by
+// idx_evidence_subject, which leads on exactly that pair.
+func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*kernel.EvidenceRow, error) {
+	where, args := `subject_kernel_public_key=?`, []any{subjectKernelPublicKey}
+	if subjectActionID != "" {
+		where += ` AND subject_action_id=?`
+		args = append(args, subjectActionID)
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT issuer_public_key,receipt_hash,subject_kernel_public_key,subject_action_id,
 		        counterparty_kernel_public_key,evidence_receipt_json,rating_json,remote_receipt_hash,
 		        receipt_created_at,effective_at,observed_at,equivocated
-		 FROM evidence WHERE subject_kernel_public_key=? ORDER BY receipt_created_at DESC`, subjectKernelPublicKey)
+		 FROM evidence WHERE `+where+` ORDER BY receipt_created_at DESC`, args...)
 	if err != nil {
 		return nil, dbErr(err, "list evidence by subject")
 	}
@@ -3320,83 +3421,91 @@ func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey s
 // actions (execution evidence — SubjectKernelPublicKey left empty for the kernel to fill with its own
 // key; CounterpartyKernelPublicKey set when the caller was a peer); (b) receipt-backed remote_proxy
 // calls (subject is the peer owner's key + remote action id; RemoteReceiptJSON is the stored serving
-// receipt) — every admitted execution, rated or not. Leg (b) keys on a non-empty remote_receipt_json,
-// which only a receipt-settled call carries (a locally-manufactured settlement leaves it empty), and
-// carries IdempotencyKey so the kernel can drop signed rejections (tx_id == idempotency_key) and
-// quarantined receipts (§13 gossip-eligibility) without re-querying. Ordered ascending by effective
-// time (a rating's created_at when rated, else the receipt's), so a late rating re-surfaces its
-// bundle. cursor is "<effective_at>\x1f<receipt_id>".
+// receipt) — every admitted execution, rated or not. Which rows are evidence at all was decided when
+// each settled and is read off `evidence_eligible`, never re-derived here (P9). The receipt and the
+// rating that names it are columns of this one statement, so a page costs one query rather than one
+// per row. Ordered ascending by effective time (a rating's created_at when rated, else the
+// receipt's), so a late rating re-surfaces its bundle. cursor is "<effective_at>\x1f<receipt_id>".
 func (s *DB) ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*kernel.GossipReceiptRow, error) {
 	var curEff, curID string
 	if i := strings.IndexByte(cursor, '\x1f'); i >= 0 {
 		curEff, curID = cursor[:i], cursor[i+1:]
 	}
-	const q = `
-SELECT r.id, r.tx_id,
-       CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.kernel_public_key,'') ELSE '' END AS subj_kernel,
-       CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END AS subj_action,
-       CASE WHEN a.kind='remote_proxy' THEN '' ELSE COALESCE(ca.kernel_public_key,'') END AS cp_kernel,
-       COALESCE(t.remote_receipt_json,'') AS remote_receipt_json,
-       COALESCE(tr.idempotency_key,'') AS idem_key,
-       COALESCE(rt.created_at, r.created_at) AS eff
-FROM receipts r
-JOIN transactions t ON t.id = r.tx_id
-JOIN actions a ON a.id = r.action_id
-LEFT JOIN traces tr ON tr.id = r.trace_id
-LEFT JOIN accounts ow ON ow.id = a.owner_user_id
-LEFT JOIN accounts ca ON ca.id = t.caller_user_id
-LEFT JOIN ratings rt ON rt.rated_tx_id = r.tx_id
-WHERE r.value = 0 AND COALESCE(a.effect,'') != 'transfer'
-  AND (
-        (a.kind IN ('http','wasm','native') AND a.visibility='public' AND a.active=1 AND a.deleted_at IS NULL)
-     OR (a.kind='remote_proxy' AND COALESCE(t.remote_receipt_json,'') != '' AND ow.kernel_public_key IS NOT NULL AND ow.kernel_public_key != '')
-      )
-  AND ( ? = ''
-        OR julianday(COALESCE(rt.created_at, r.created_at)) > julianday(?)
-        OR (julianday(COALESCE(rt.created_at, r.created_at)) = julianday(?) AND r.id > ?) )
-ORDER BY julianday(COALESCE(rt.created_at, r.created_at)) ASC, r.id ASC
+	// Eligibility is the flag the settlement wrote, never the action's present state; the served
+	// window is the newest E per subject action, which is exactly what a receiver retains, so a
+	// consumer never streams history it is about to evict. Timestamps compare as strings: one
+	// fixed-width UTC layout writes every one of them, so an index can be used.
+	q := `
+WITH eligible AS (
+  SELECT r.id AS receipt_id, r.hash AS receipt_hash, r.status AS status,
+         r.started_at AS started_at, r.created_at AS created_at,
+         rt.note AS rating_note, rt.rating AS rating_value,
+         rt.rated_receipt_hash AS rated_receipt_hash, rt.created_at AS rating_created_at,
+         CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.kernel_public_key,'') ELSE '' END AS subj_kernel,
+         CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END AS subj_action,
+         CASE WHEN a.kind='remote_proxy' THEN '' ELSE COALESCE(ca.kernel_public_key,'') END AS cp_kernel,
+         COALESCE(t.remote_receipt_json,'') AS remote_receipt_json,
+         COALESCE(rt.created_at, r.created_at) AS eff,
+         ROW_NUMBER() OVER (
+           PARTITION BY CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.kernel_public_key,'') ELSE '' END,
+                        CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END
+           ORDER BY r.created_at DESC, r.id DESC) AS recency
+  FROM receipts r
+  JOIN transactions t ON t.id = r.tx_id
+  JOIN actions a ON a.id = r.action_id
+  LEFT JOIN "accounts" ow ON ow.id = a.owner_user_id
+  LEFT JOIN "accounts" ca ON ca.id = t.caller_user_id
+  LEFT JOIN ratings rt ON rt.rated_tx_id = r.tx_id
+  WHERE t.evidence_eligible = 1
+)
+SELECT receipt_hash, status, started_at, created_at, subj_kernel, subj_action, cp_kernel,
+       remote_receipt_json, eff, receipt_id,
+       rating_value, rating_note, rated_receipt_hash, rating_created_at
+FROM eligible
+WHERE recency <= ` + strconv.Itoa(kernelEvidenceCap) + `
+  AND ( ? = '' OR eff > ? OR (eff = ? AND receipt_id > ?) )
+ORDER BY eff ASC, receipt_id ASC
 LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, curEff, curEff, curEff, curID, limit)
 	if err != nil {
 		return nil, dbErr(err, "list receipts for gossip")
 	}
-	type raw struct {
-		receiptID, txID, subjKernel, subjAction, cpKernel, remoteReceiptJSON, idemKey, eff string
-	}
-	var raws []raw
+	defer rows.Close()
+	out := make([]*kernel.GossipReceiptRow, 0, limit)
 	for rows.Next() {
-		var rr raw
-		if err := rows.Scan(&rr.receiptID, &rr.txID, &rr.subjKernel, &rr.subjAction, &rr.cpKernel, &rr.remoteReceiptJSON, &rr.idemKey, &rr.eff); err != nil {
-			rows.Close()
+		var row kernel.GossipReceiptRow
+		var status, started, created, eff, receiptID string
+		var receiptHash *string
+		var ratingValue *float64
+		var ratingNote, ratedHash, ratingCreated *string
+		if err := rows.Scan(&receiptHash, &status, &started, &created,
+			&row.SubjectKernelPublicKey, &row.SubjectActionID, &row.CounterpartyKernelPublicKey,
+			&row.RemoteReceiptJSON, &eff, &receiptID,
+			&ratingValue, &ratingNote, &ratedHash, &ratingCreated); err != nil {
 			return nil, dbErr(err, "scan gossip receipt")
 		}
-		raws = append(raws, rr)
+		if receiptHash == nil || *receiptHash == "" {
+			continue // a receipt from before hashes were stored describes no trade a peer can join
+		}
+		row.ReceiptHash = *receiptHash
+		row.Status = kernel.TxStatus(status)
+		row.StartedAt, row.CreatedAt = strToTime(started), strToTime(created)
+		row.EffectiveAt = strToTime(eff)
+		row.Cursor = eff + "\x1f" + receiptID
+		if ratingValue != nil && ratedHash != nil {
+			row.Rating = &kernel.RatingEvidence{
+				Rating:           *ratingValue,
+				Note:             ratingNote,
+				RatedReceiptHash: *ratedHash,
+			}
+			if ratingCreated != nil {
+				row.Rating.CreatedAt = strToTime(*ratingCreated)
+			}
+		}
+		out = append(out, &row)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, dbErr(err, "gossip receipt rows")
-	}
-	out := make([]*kernel.GossipReceiptRow, 0, len(raws))
-	for _, rr := range raws {
-		rec, rerr := s.ReadReceipt(ctx, rr.receiptID)
-		if rerr != nil {
-			return nil, rerr
-		}
-		var rating *kernel.Rating
-		if rt, rterr := s.ReadRatingByTxID(ctx, rr.txID); rterr == nil {
-			rating = rt
-		}
-		out = append(out, &kernel.GossipReceiptRow{
-			Receipt:                     rec,
-			SubjectKernelPublicKey:      rr.subjKernel,
-			SubjectActionID:             rr.subjAction,
-			CounterpartyKernelPublicKey: rr.cpKernel,
-			RemoteReceiptJSON:           rr.remoteReceiptJSON,
-			IdempotencyKey:              rr.idemKey,
-			Rating:                      rating,
-			EffectiveAt:                 strToTime(rr.eff),
-			Cursor:                      rr.eff + "\x1f" + rr.receiptID,
-		})
 	}
 	return out, nil
 }
@@ -3495,7 +3604,8 @@ func (s *DB) withTx(ctx context.Context, label string, fn func(*sql.Tx) error) e
 // ---- Receipts ----
 
 const receiptSelectCols = `id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,process_id,
-		        args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,COALESCE(value_to,''),reason,started_at,created_at,signature`
+		        args_hash,reply_hash,status,gross,net,fee,charge,premium,nonce,value,COALESCE(value_to,''),reason,started_at,created_at,signature,
+		        idempotency_key,counterparty`
 
 func scanReceipt(row *sql.Row, op string) (*kernel.Receipt, error) {
 	r, err := scanReceiptFn(row.Scan)
@@ -3514,7 +3624,8 @@ func scanReceiptFn(scan func(...any) error) (*kernel.Receipt, error) {
 	if err := scan(&r.ID, &r.IssuerUserID, &r.TxID, &r.TraceID, &r.ActionID,
 		&r.CallerUserID, &r.ProcessID,
 		&r.ArgsHash, &r.ReplyHash, &status,
-		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Nonce, &r.Value, &r.ValueTo, &r.Reason, &startedAt, &createdAt, &r.Signature); err != nil {
+		&r.Gross, &r.Net, &r.Fee, &r.Charge, &r.Premium, &r.Nonce, &r.Value, &r.ValueTo, &r.Reason, &startedAt, &createdAt, &r.Signature,
+		&r.IdempotencyKey, &r.Counterparty); err != nil {
 		return nil, err
 	}
 	r.Status = kernel.TxStatus(status)
@@ -3547,16 +3658,42 @@ func (s *DB) backfillReceiptHashes(ctx context.Context) error {
 	return nil
 }
 
-// ListPublicRatings is one action's public ratings projection (§11), newest first, paged in the
-// query: the ratings its local payers gave, and the ratings its remote payers gave on their own
-// kernels, each admitted on D16's link and nothing weaker — the rater's kernel names one of THIS
-// kernel's receipts for the action, by the hash written with the receipt, and that receipt's call
-// was made by that very kernel. An issuer's several rows naming one trade are one rating when they
-// agree and none when they do not, since the issuer mints its own row keys; an equivocating row
-// contributes nothing.
-func (s *DB) ListPublicRatings(ctx context.Context, actionID, selfKey string, limit, offset int) ([]kernel.PublicRating, error) {
+// ListPublicRatings is one action's public ratings, newest first, paged in the query (§11). Two
+// provenances, and one rule behind both: this kernel's own payers, and the payers on other kernels
+// whose rating the subject's own record of the trade confirms — the rater's kernel names a receipt
+// the subject issued for this action, and that record names the rater's kernel as the party it
+// traded with (D16's link). What differs between an action this kernel serves and one it buys is
+// only where the subject's record is kept: its own receipts, or the evidence it holds about a
+// peer. An issuer's several rows naming one trade are one rating when they agree and none when
+// they do not; an equivocating row contributes nothing.
+func (s *DB) ListPublicRatings(ctx context.Context, actionID, subjectKernel, subjectAction, selfKey string, limit, offset int) ([]kernel.PublicRating, error) {
 	if limit <= 0 {
 		limit = 50
+	}
+	// The subject's own record of the receipt a rating names, the party it says it traded with,
+	// and the outcome it reports: the link is the same one the action's own read applies, agreement
+	// included, or the two surfaces would disagree about the same trade. A subject row that has
+	// equivocated says nothing, so nothing links through it (D11, D16).
+	subjectRecord := `
+		  JOIN evidence x ON x.receipt_hash = e.remote_receipt_hash
+		                 AND x.issuer_public_key = ?
+		                 AND x.subject_kernel_public_key = e.subject_kernel_public_key
+		                 AND x.subject_action_id = e.subject_action_id
+		                 AND x.counterparty_kernel_public_key = e.issuer_public_key
+		                 AND x.equivocated = 0`
+	// The outcomes the two sides report, compared in the group rather than in the join: a row
+	// dropped by the join is a row whose disagreement nobody would see.
+	subjectStatus := `MIN(json_extract(x.evidence_receipt_json,'$.status'))`
+	args := []any{actionID, subjectKernel, subjectKernel, subjectAction}
+	if subjectKernel == selfKey {
+		// This kernel is the subject, so its record is the receipt itself, and the trade is named
+		// by the account that called it.
+		subjectRecord = `
+		  JOIN receipts rc ON rc.hash = e.remote_receipt_hash AND rc.action_id = ?
+		  JOIN transactions t2 ON t2.id = rc.tx_id
+		  JOIN "accounts" a ON a.id = t2.caller_user_id AND a.kernel_public_key = e.issuer_public_key`
+		subjectStatus = `MIN(t2.status)`
+		args = []any{actionID, actionID, subjectKernel, subjectAction}
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT value, note, created_at, source FROM (
@@ -3565,21 +3702,18 @@ func (s *DB) ListPublicRatings(ctx context.Context, actionID, selfKey string, li
 		  UNION ALL
 		  SELECT MIN(json_extract(e.rating_json,'$.rating')), MIN(json_extract(e.rating_json,'$.note')),
 		         MIN(json_extract(e.rating_json,'$.created_at')), 'peer'
-		  FROM evidence e
-		  JOIN receipts rc ON rc.hash=e.remote_receipt_hash
-		  JOIN transactions t ON t.id=rc.tx_id
-		  JOIN accounts a ON a.id=t.caller_user_id
-		  WHERE e.subject_kernel_public_key=? AND e.subject_action_id=? AND t.action_id=?
-		    AND a.kernel_public_key=e.issuer_public_key
-		    AND e.rating_json<>''
+		  FROM evidence e`+subjectRecord+`
+		  WHERE e.subject_kernel_public_key=? AND e.subject_action_id=? AND e.rating_json<>''
 		  GROUP BY e.issuer_public_key, e.remote_receipt_hash
 		  HAVING COUNT(DISTINCT json_extract(e.rating_json,'$.rating') || '|' || COALESCE(json_extract(e.rating_json,'$.note'),'')) = 1
+		     AND COUNT(DISTINCT json_extract(e.evidence_receipt_json,'$.status')) = 1
+		     AND `+subjectStatus+` = MIN(json_extract(e.evidence_receipt_json,'$.status'))
 		     AND SUM(e.equivocated) = 0
 		     AND MIN(json_extract(e.rating_json,'$.rating')) IN (0,1)
 		     AND COALESCE(MAX(length(json_extract(e.rating_json,'$.note'))),0) <= 1024
 		)
 		ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		actionID, selfKey, actionID, actionID, limit, offset)
+		append(args, limit, offset)...)
 	if err != nil {
 		return nil, dbErr(err, "list public ratings")
 	}
@@ -3676,32 +3810,33 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 
 // ---- Idempotency ----
 
-func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,created_at,expires_at)
-		 VALUES (?,?,?,NULL,'pending',?,'',?,?)`,
-		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ArgsJSON,
-		timeToStr(r.CreatedAt), timeToStr(r.ExpiresAt),
+// InsertPendingIdempotencyRecord takes the lock for one inbound request, or reports who holds it.
+// Insert-or-read in one statement: two arrivals of one request race here and exactly one proceeds,
+// and the loser is told by the row rather than by the driver's error text (P4).
+func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) (*kernel.IdempotencyRecord, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,args_json,created_at)
+		 VALUES (?,?,?,?,?) ON CONFLICT (idempotency_key,counterparty_user_id) DO NOTHING`,
+		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ArgsJSON, timeToStr(r.CreatedAt),
 	)
-	return dbErr(err, "insert pending idempotency record")
+	if err != nil {
+		return nil, dbErr(err, "insert pending idempotency record")
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil, nil
+	}
+	return s.ReadIdempotencyRecord(ctx, r.IdempotencyKey, r.CounterpartyUserID)
 }
 
-// DeleteIdempotencyRecord removes a pending idempotency record.
-// Records that have already been completed (by CommitFailedCall or CommitCall)
-// are left intact so that replays can return the stored result.
+// DeleteIdempotencyRecord releases the lock, and only while nothing depends on it. A lock whose
+// trace exists is that trace's: recovery signs over the arguments it holds, and the commit that
+// settles it releases it. A lock with no trace protects a call that never began, and holding it
+// would lock the caller out of retrying for ever (P4, G4).
 func (s *DB) DeleteIdempotencyRecord(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM idempotency_records WHERE id=? AND status='pending'`, id,
-	)
+		`DELETE FROM idempotency_records WHERE id=?
+		   AND NOT EXISTS (SELECT 1 FROM traces WHERE idempotency_record_id = idempotency_records.id)`, id)
 	return dbErr(err, "delete idempotency record")
-}
-
-func (s *DB) CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE idempotency_records SET status='complete', result_json=?, receipt_json=? WHERE id=? AND status='pending'`,
-		resultJSON, receiptJSON, id,
-	)
-	return dbErr(err, "complete idempotency record if pending")
 }
 
 // ---- Recovery challenges ----
@@ -3734,34 +3869,51 @@ func (s *DB) ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string
 }
 
 func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
-	return s.readIdempotencyRecord(ctx,
-		`idempotency_key=? AND counterparty_user_id=? AND datetime(expires_at) > datetime('now')`, key, counterpartyUserID)
+	return s.readIdempotencyRecord(ctx, `idempotency_key=? AND counterparty_user_id=?`, key, counterpartyUserID)
 }
 
-// ReadIdempotencyRecordByID reads a record whatever its age: recovery settles what it finds, and a
-// record older than its expiry still names an inbound call whose caller may be waiting.
+// ReadIdempotencyRecordByID reads the lock a trace was admitted under: recovery signs over the
+// arguments it holds.
 func (s *DB) ReadIdempotencyRecordByID(ctx context.Context, id string) (*kernel.IdempotencyRecord, error) {
 	return s.readIdempotencyRecord(ctx, `id=?`, id)
 }
 
 func (s *DB) readIdempotencyRecord(ctx context.Context, where string, args ...any) (*kernel.IdempotencyRecord, error) {
 	var r kernel.IdempotencyRecord
-	var receiptID *string
-	var createdAt, expiresAt string
+	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,receipt_id,status,args_json,result_json,receipt_json,created_at,expires_at
+		`SELECT id,idempotency_key,counterparty_user_id,args_json,created_at
 		 FROM idempotency_records WHERE `+where, args...,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &receiptID, &r.Status, &r.ArgsJSON, &r.ResultJSON, &r.ReceiptJSON, &createdAt, &expiresAt)
+	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &r.ArgsJSON, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("idempotency record not found or expired")
+		return nil, kernel.ErrNotFound.Wrap("idempotency record not found")
 	}
 	if err != nil {
 		return nil, dbErr(err, "read idempotency record")
 	}
-	r.ReceiptID = receiptID
 	r.CreatedAt = strToTime(createdAt)
-	r.ExpiresAt = strToTime(expiresAt)
 	return &r, nil
+}
+
+// ReadFederatedOutcome is how a repeated request is answered: the receipt this kernel signed for
+// it, and the reply its transaction recorded. One indexed read on the binding the receipt carries,
+// so an outcome is replayable for as long as its receipt exists — which is forever (P4).
+func (s *DB) ReadFederatedOutcome(ctx context.Context, counterparty, key string) (*kernel.Receipt, json.RawMessage, error) {
+	if counterparty == "" || key == "" {
+		return nil, nil, kernel.ErrNotFound.Wrap("receipt not found")
+	}
+	r, err := scanReceipt(s.db.QueryRowContext(ctx,
+		`SELECT `+receiptSelectCols+` FROM receipts WHERE counterparty=? AND idempotency_key=?`,
+		counterparty, key), "read federated outcome")
+	if err != nil {
+		return nil, nil, err
+	}
+	var reply json.RawMessage
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT reply_json FROM transactions WHERE id=?`, r.TxID).Scan(&raw); err == nil && raw != "" {
+		reply = json.RawMessage(raw)
+	}
+	return r, reply, nil
 }
 
 // ExecForTest runs a raw statement. It exists so tests can construct states the kernel's own API

@@ -44,7 +44,6 @@ the exit status is still nonzero.
 | `charge` | a settled execution failure | the amount drawn, in base units, encoded as a string |
 | `process_id` | a parked run | the process to follow |
 | `pending_since` | a parked run | when the call was dispatched |
-| `refund_eligible_at` | a parked run | the time after which the retry worker may refund the call if no receipt has arrived |
 
 ## What is never in an error
 

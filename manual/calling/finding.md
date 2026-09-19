@@ -17,6 +17,7 @@ action candidates. For example, a search for an echo service might return:
 
 ```
 $ juice run sys/lookup '{"query":"echo a message"}'
+sys/lookup costs 0.00 fUSDT. Run it? [y/N] y
   result: {
     "results": [
       {
@@ -33,6 +34,7 @@ $ juice run sys/lookup '{"query":"echo a message"}'
         "output_schema": {},
         "price": 500000,
         "quote_hash": "4965342976414282…",
+        "evidence": { … },
         "score": 0.0333
       },
       …
@@ -50,6 +52,7 @@ call. The main fields are:
 | `input_schema`, `output_schema` | the contract: what it takes and returns |
 | `price` | the all-in price, in base units |
 | `quote_hash` | a fingerprint of the terms shown, for pinning |
+| `evidence` | this kernel's experience, the provider's reports, and other kernels' observations |
 | `score` | ranking score, comparable only within one result set |
 
 `limit` controls how many results are returned; the default is ten.
@@ -103,6 +106,9 @@ $ juice action show bob/echo
   output_schema: {}
   quote_hash: 4965342976414282…
   requires_grant: false
+
+This kernel's own calls
+  3 calls, 3 succeeded  ~399ms  rating 1.00 from 1
 ```
 
 The `requires_grant` field indicates that the action uses an upstream account
@@ -112,6 +118,19 @@ run; see [Consent and assigned work](consent-and-steps.html).
 A provider can give a group of actions a common entry point by publishing an
 `index` action. If `bob/greeter` names no action directly, for example,
 `action show` tries `bob/greeter/index`.
+
+The same command accepts remote references such as
+`dave@beta-kernel/summarize`. Below the contract it shows the evidence available
+here: **This kernel's own calls**, **Reported by the provider**, and **Reported
+by other kernels**. Sections without evidence are omitted. Search results carry
+the same information in `evidence`, under `local_experience`, `provider_reported`,
+and `observed_by_others`; these sources are kept separate.
+
+Other kernels' reports are marked `[verified]`, `[N/M verified]`, or
+`[unverified]` according to how many trades the provider's records confirm.
+`[N contradicted]` counts disagreements about outcomes; `[N told two ways]`
+counts trades an issuer described inconsistently. Dates give the period covered
+by each report. Verification confirms a matching record of trade, not quality.
 
 ## Listing
 
@@ -137,20 +156,12 @@ to include inactive actions within your permitted scope; it also adds an
 $ juice action ratings bob/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said
-$ juice action stats bob/echo
-  action_id: bb7fe1a8-…
-  uses: 3
-  successes: 3
-  failures: 0
-  rating_count: 1
-  latency_estimate: 0.399 seconds
-  rating_estimate: 1
-  last_used_at: 2026-09-14T12:05:24Z
 ```
 
 Ratings present the payer's assessment of a completed call, including an optional
-note and the date, without naming the payer. Statistics summarize the action's
-recorded use; `latency_estimate` is its mean execution time in seconds.
+note and the date, without naming the payer. `local` identifies ratings recorded
+here; `peer` identifies trade-backed ratings from other kernels, including for
+remote actions. The call counts and mean execution time appear on `action show`.
 
 Evidence shared between kernels contains less information than the private call
 record. Its interpretation is explained in

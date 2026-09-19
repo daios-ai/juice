@@ -515,7 +515,7 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 		t.Fatal("bootstrap registered no native actions")
 	}
 
-	g, err := k.GetGossip(ctx, "", "")
+	g, err := k.GetGossip(ctx, kernel.GossipRequest{})
 	if err != nil {
 		t.Fatalf("GetGossip: %v", err)
 	}

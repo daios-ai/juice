@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/go-chi/chi/v5"
 )
@@ -253,7 +254,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"reachability": reach, "online": reach.Path != "unreachable"}
 	// Retained evidence about this subject kernel, grouped by issuer (§13) — the reputation display
 	// that replaces the deleted introducer roster. Local; works online or offline.
-	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey); eerr == nil {
+	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey, ""); eerr == nil {
 		resp["evidence"] = ev
 	}
 	// Local account state when this peer has traded here (§14 inspect): whether it is suspended,
@@ -264,7 +265,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 
 	// Live view when the peer answers: a fresh gossip pull (identity + own signed manifests).
 	// The evidence page is ignored here; the persistent discovery loop ingests it.
-	if gRaw, err := s.fed.Gossip(octx, peerKey, ""); err == nil {
+	if gRaw, err := s.fed.Gossip(octx, peerKey, fed.GossipRequest{}); err == nil {
 		var g kernel.GossipResponse
 		if json.Unmarshal(gRaw, &g) == nil {
 			resp["nickname"], resp["public_key"] = g.Handle, g.PublicKey

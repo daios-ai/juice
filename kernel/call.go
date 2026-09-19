@@ -52,13 +52,22 @@ type callRequest struct {
 	IdempotencyRecordID string
 }
 
-// sold is what this call was sold to a foreign buyer for: the markup it was quoted at and this
-// kernel's half of its draw, both frozen on the trace at admission (D19). Zero and empty for a local
-// call, which owes nothing and draws for nothing — and for an outbound dispatch, whose own frozen
-// terms live in the disjoint half of the same record.
-func sold(t *Trace) (remoteBPS int64, nonce string) {
+// soldAs is what this call was sold to a foreign buyer for, read back from the terms frozen on its
+// trace at admission (D19): the markup it was quoted at, this kernel's half of its draw, and the
+// request it answers. Zero for a local call, which owes nothing, draws for nothing and answers no
+// request — and for an outbound dispatch, whose own frozen terms live in the disjoint half of the
+// same record.
+type soldAs struct {
+	RemoteBPS      int64
+	Nonce          string
+	IdempotencyKey string
+	Counterparty   string
+}
+
+func sold(t *Trace) soldAs {
 	rbps, _, n := ServingTerms(t.DispatchJSON)
-	return rbps, n
+	key, cp := ServingRequest(t.DispatchJSON)
+	return soldAs{RemoteBPS: rbps, Nonce: n, IdempotencyKey: key, Counterparty: cp}
 }
 
 // RunRequest is input to Run, the ordinary root-call entry point (§4): a struct so a new optional
@@ -775,7 +784,13 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		return fail(execErr, latency)
 	}
 
-	// 10. Validate output schema.
+	// 10. Validate the output: its size first, then its shape. A reply too large to carry cannot be
+	// delivered to a buyer abroad, and discovering that after the receipt is signed would leave the
+	// seller paid for work nobody can receive — so it fails here, before anything commits, and
+	// refunds like any other output failure (U12, D12).
+	if replyJSON, mErr := json.Marshal(reply); mErr != nil || len(replyJSON) > MaxReplyBytes {
+		return fail(ErrExecutionFailed.Wrapf("the reply exceeds the %d MiB an action may return", MaxReplyBytes>>20), latency)
+	}
 	if schemaErr := ValidateInput(action.OutputSchema, any(reply)); schemaErr != nil {
 		return fail(schemaErr, latency)
 	}
@@ -807,9 +822,10 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// Two independent channels (§13). A foreign call also owes this kernel's serving markup on the
 	// charge, which rides on the receipt and is settled by the ticket rather than by any local row.
 	// The VALUE channel is local and untaxed, so it carries no premium.
-	soldAt, nonce := sold(trace)
-	premium := k.econ.Premium(ktx.Gross, soldAt)
-	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo, nonce) // success: charge = gross, value delivered
+	sale := sold(trace)
+	k.markEvidenceEligible(ctx, action, ktx)
+	premium := k.econ.Premium(ktx.Gross, sale.RemoteBPS)
+	receipt, receiptErr := k.buildReceipt(ktx, ktx.Gross, premium, trace.Value, trace.ValueTo, sale) // success: charge = gross, value delivered
 	if receiptErr != nil {
 		// Same as the post-execution read failure above: the settlement committed, so its receipt is
 		// reported rather than discarded.
@@ -1164,17 +1180,18 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 	// one (P7). The charge is only known inside the commit, so the receipt and the obligation that
 	// names it are both built there, from the same number — and at the terms the trace froze, which
 	// is what lets a recovered settlement sign the receipt the buyer was promised.
-	soldAt, nonce := sold(trace)
+	sale := sold(trace)
+	k.markEvidenceEligible(ctx, action, tx)
 	var committed *Receipt
 	buildFn := func(refund int64) (*Receipt, error) {
 		charge := tx.Gross - refund
 		// value delivery is all-or-nothing (§13): a failed transfer delivers nothing, so value is 0
 		// and refundTransferEffect returns the whole value reserve to the caller C.
-		r, err := k.buildReceipt(tx, charge, k.econ.Premium(charge, soldAt), 0, "", nonce)
+		r, err := k.buildReceipt(tx, charge, k.econ.Premium(charge, sale.RemoteBPS), 0, "", sale)
 		committed = r
 		return r, err
 	}
-	settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, KernelErrorCode(callErr), req.StepID)
+	settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, req.StepID)
 	if errors.Is(settlErr, ErrSettlementDeferred) {
 		// A trace beneath this call is still in flight (D3): its outcome decides this call's
 		// charge — settled descendants stay paid, refunded ones do not — so the outcome is recorded

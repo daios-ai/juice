@@ -149,6 +149,7 @@ kernel's current time:
 
 ```
 $ juice run sys/time
+sys/time costs 0.00 fUSDT. Run it? [y/N] y
   result: {
     "iso": "2026-09-14T15:05:36Z",
     "unix": 1789398336
@@ -256,6 +257,7 @@ updated  bob/echo  0.50 fUSDT  yes     local
 $ juice auth use alice@acme
 alice@acme
 $ juice run sys/lookup '{"query":"echo a message"}'
+sys/lookup costs 0.00 fUSDT. Run it? [y/N] y
   result: {
     "results": [
       {
@@ -266,6 +268,7 @@ $ juice run sys/lookup '{"query":"echo a message"}'
         "output_schema": {},
         "price": 500000,
         "quote_hash": "1f8ec43b…",
+        "evidence": { … },
         "score": 0.0333
       },
       …
@@ -275,12 +278,14 @@ $ juice run sys/lookup '{"query":"echo a message"}'
 ```
 
 The search result contains the reference to call, its description and schemas,
-and its price. Because this is an action's JSON result, `price` uses integer
+its price, and the evidence this kernel holds about it. Because this is an
+action's JSON result, `price` uses integer
 base units: `500000` represents `0.50 fUSDT`. Use the returned reference to
 send Bob's action a message:
 
 ```
 $ juice run bob/echo '{"msg":"hello"}'
+bob/echo costs 0.50 fUSDT. Run it? [y/N] y
   result: {
     "json": {
       "msg": "hello"

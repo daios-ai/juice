@@ -42,6 +42,8 @@ const (
 // resume from. Empty starts at the oldest retained evidence. The catalog snapshot rides every reply.
 type GossipRequest struct {
 	Cursor string `json:"cursor,omitempty"`
+	// CatalogCursor resumes a catalogue scan, empty to open a new one (§13).
+	CatalogCursor string `json:"catalog_cursor,omitempty"`
 }
 
 // ResolveRequest is the wire form of a /juice/fed/resolve/1 request (§13): the open, read-only

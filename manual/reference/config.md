@@ -63,7 +63,7 @@ units.
 | `import_bps` | `500` | fee retained when a local user calls another kernel: 5% |
 | `lottery` | `1000000` | the face value this kernel's buyers stake per cross-kernel call. `0` pays every debt exactly |
 | `lottery_max` | `5000000` | the largest face value accepted from somebody else's buyer |
-| `credit_limit` | `500000000` | the ceiling on work delivered to other kernels and not yet paid for, across all peers together |
+| `credit_limit` | `50000000` | the ceiling on work delivered to other kernels and not yet paid for, across all peers together |
 
 See [The network economy](../operating/network-economy.html).
 
@@ -71,13 +71,9 @@ See [The network economy](../operating/network-economy.html).
 
 | Key | Default | |
 |---|---|---|
-| `remote_retry_interval_seconds` | `60` | how often parked cross-kernel calls are re-driven |
+| `remote_retry_interval_seconds` | `60` | how often parked cross-kernel calls are retried and sellers are told their draw outcomes |
 | `discovery_interval_seconds` | `300` | how often peers are enumerated and catalogues exchanged |
 | `peer_retention_days` | `90` | how long an idle peer's cached data is kept. Non-positive disables purging |
-
-The retry interval controls how often pending calls are revisited. Their
-24-hour maximum age is fixed by the protocol's idempotency-record lifetime
-and cannot be configured separately.
 
 ## Execution
 

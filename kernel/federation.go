@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -151,14 +152,20 @@ type dispatchPayload struct {
 	// what admission counted against the credit limit, corrected at commit to what was charged.
 	Commitment string `json:"commitment,omitempty"`
 	Reserve    int64  `json:"reserve,omitempty"`
+	// IdempotencyKey and Counterparty are the admitted call's own name and the buyer that sent it,
+	// frozen here for the reason the nonce is: every path that signs this kernel's receipt —
+	// settlement, crash recovery, forced closure — must bind the receipt to the request it answers,
+	// and only the trace survives to tell it which request that was (P4, P5).
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Counterparty   string `json:"counterparty,omitempty"`
 }
 
 // marshalServing freezes what an inbound foreign call was admitted under, on the same trace record
 // that freezes an outbound one's terms (D19). With the reveal fields the trace itself carries, this
 // is the whole of the seller's ticket: there is no second record to keep in step with it.
-func marshalServing(remoteBPS, lottery, reserve int64, nonce, commitment string) *string {
+func marshalServing(remoteBPS, lottery, reserve int64, nonce, commitment, idempotencyKey, counterparty string) *string {
 	b, _ := json.Marshal(dispatchPayload{ServingBPS: remoteBPS, Lottery: lottery, Reserve: reserve,
-		Nonce: nonce, Commitment: commitment})
+		Nonce: nonce, Commitment: commitment, IdempotencyKey: idempotencyKey, Counterparty: counterparty})
 	out := string(b)
 	return &out
 }
@@ -287,11 +294,22 @@ func ServingTerms(dispatchJSON *string) (remoteBPS, lottery int64, nonce string)
 	return d.ServingBPS, d.Lottery, d.Nonce
 }
 
+// ServingRequest reads back which request a foreign call answers: the buyer's own name for it and
+// the buyer kernel that sent it, frozen at admission. Every path that signs this kernel's receipt
+// binds them into it, so the receipt answers one request and no other (P4, P5).
+func ServingRequest(dispatchJSON *string) (idempotencyKey, counterparty string) {
+	d := dispatched(dispatchJSON)
+	return d.IdempotencyKey, d.Counterparty
+}
+
 // ServingReserve is what a foreign call's admission counted against the credit limit, and whether
-// the trace is a foreign call at all — a local one froze no nonce and reserved nothing.
+// the trace is a foreign call at all — which is told by the buyer it answers, since every admitted
+// call records one and no local call does. A free foreign call reserves nothing and is still
+// foreign: its exposure correction moves zero, which is the right answer rather than an omitted
+// one.
 func ServingReserve(dispatchJSON *string) (reserve int64, foreign bool) {
 	d := dispatched(dispatchJSON)
-	return d.Reserve, d.Nonce != ""
+	return d.Reserve, d.Counterparty != ""
 }
 
 // PeerStepView is what a remote peer may see of a step parked for it: the request, not the
@@ -522,9 +540,19 @@ func (k *Kernel) VerifyReceipt(ctx context.Context, subjectID, txID string) (*Re
 	if tx.Status == TxSuccess {
 		checks["reply_hash"] = receiptHashMatches(r.ReplyHash, tx.ReplyJSON)
 	}
+	// The request this receipt answers, and the buyer it was signed for: the audit re-checks the
+	// binding settlement enforced (P5). A receipt signed before the binding existed carries neither
+	// field; it is reported unbound rather than invalid, because a rule cannot be applied backwards
+	// to bytes that were signed under the previous one (G3).
+	unbound := r.IdempotencyKey == "" && r.Counterparty == ""
+	if !unbound {
+		checks["idempotency_key"] = r.IdempotencyKey == obligationID
+		checks["counterparty"] = r.Counterparty == k.ourKeyB64()
+	}
 
 	return &ReceiptVerification{
 		TransactionID:         txID,
+		Unbound:               unbound,
 		Valid:                 checks.allHeld(),
 		RemoteKernelHandle:    k.KernelName(ctx, tx.RemoteSignerKey),
 		RemoteKernelPublicKey: tx.RemoteSignerKey,
@@ -598,11 +626,12 @@ func (n Network) verifyReceiptSignature(r *Receipt, pubKeyB64 string) error {
 }
 
 // parseAndVerifyRemoteReceipt parses receiptJSON and enforces the settlement preconditions:
-// signature, action_id, and args_hash must all match what we requested. Returns ErrTimeout
+// signature, action_id, args_hash, and the request the receipt answers — its idempotency key and
+// the buyer it was signed for — must all match what we sent. Returns ErrTimeout
 // (keep-trace-open) on absent, unparseable, invalidly signed, or mismatched receipts so the
 // trace is never settled against a receipt that fails the invariants VerifyReceipt audits.
 // Settlement must only proceed when this function returns without error.
-func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash string) (*Receipt, error) {
+func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash, expectedKey, selfKey string) (*Receipt, error) {
 	if receiptJSON == "" {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
@@ -619,6 +648,16 @@ func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedAct
 	if expectedArgsHash != "" && r.ArgsHash != expectedArgsHash {
 		return nil, ErrTimeout.Wrap("remote receipt: args_hash mismatch")
 	}
+	// Action and arguments do not name a call: the same action called twice with the same arguments
+	// is two calls. The request's own name and the buyer it was addressed to do (P5). Without this
+	// the seller could hand back the receipt it signed for an earlier call, execute nothing and be
+	// paid again, and a receipt signed for another buyer would settle here (G1).
+	if r.IdempotencyKey != expectedKey {
+		return nil, ErrTimeout.Wrap("remote receipt: idempotency_key mismatch")
+	}
+	if r.Counterparty != selfKey {
+		return nil, ErrTimeout.Wrap("remote receipt: counterparty mismatch")
+	}
 	return &r, nil
 }
 
@@ -626,7 +665,7 @@ func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedAct
 // §13 settlement invariants (success ⇒ charge = mp and reply_hash matches; failure ⇒ 0 ≤ charge ≤ mp),
 // so settlement can quarantine it (charge 0, full refund, no retry) instead of clamp-committing a
 // record that would fail VerifyReceipt. An empty string means the receipt is settleable.
-func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte) string {
+func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byte, outputSchema map[string]any) string {
 	// refresh_proxy is only ever a valid zero-charge pre-execution rejection (§13 rule C). A receipt
 	// setting it on a success or any charged failure is malformed and quarantines, so a hostile peer
 	// cannot pair a paid receipt with a cache-invalidation signal.
@@ -646,6 +685,16 @@ func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byt
 		}
 		if h, err := jcsHashStr(string(replyJSON)); err != nil || r.ReplyHash != h {
 			return "reply_hash mismatch"
+		}
+		// The reply must be the shape the seller published, checked against the schema on the row
+		// this call was authorised against. The kernel refuses to pay for a malformed output of its
+		// own actions (U12, G6); a signature over a malformed one buys nothing either.
+		var reply any
+		if err := json.Unmarshal(replyJSON, &reply); err != nil {
+			return "reply is not JSON"
+		}
+		if err := ValidateInput(outputSchema, reply); err != nil {
+			return "reply violates output schema"
 		}
 	case TxFailure:
 		if r.Charge < 0 || r.Charge > mp {
@@ -667,24 +716,13 @@ func (k *Kernel) remoteReceiptInvalid(r Receipt, mp, rbps int64, replyJSON []byt
 	return ""
 }
 
-// remotePendingMaxAge is how long a dispatched call may stay unsettled before it settles locally as
-// a failure with a full refund (§13). One definition: the settle path quotes it to the caller as the
-// refund-eligibility time, and the retry loop enforces it.
 // pendingMeta attaches the durable handle for money reserved on a call still awaiting a remote
-// receipt (§13): the process to watch, when the reserve started, and when a refund becomes due.
+// receipt (§13): the process to watch, and when the reserve started.
 // `since` is the PENDING call's own start, never the start of whatever is reporting it — a parent
 // that failed early would otherwise date its child's reserve from the wrong call.
 func (k *Kernel) pendingMeta(err *KernelError, processID string, since time.Time) *KernelError {
 	return err.WithMeta("process_id", processID).
-		WithMeta("pending_since", since.UTC().Format(time.RFC3339)).
-		WithMeta("refund_eligible_at", since.Add(k.remotePendingMaxAge()).UTC().Format(time.RFC3339))
-}
-
-func (k *Kernel) remotePendingMaxAge() time.Duration {
-	if k.cfg.RemotePendingMaxAge == 0 {
-		return 24 * time.Hour
-	}
-	return k.cfg.RemotePendingMaxAge
+		WithMeta("pending_since", since.UTC().Format(time.RFC3339))
 }
 
 // settleRemoteCall settles a remote-proxy call after ExecuteFederation returns.
@@ -701,10 +739,14 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// A missing, unparseable, unsigned, or mismatched receipt keeps the trace open for retry.
 	// action_id and args_hash are enforced here so settlement is valid by construction.
 	expectedArgsHash, _ := jcsHashStr(string(ktx.ArgsJSON))
-	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash)
+	expectedKey := ""
+	if trace.IdempotencyKey != nil {
+		expectedKey = *trace.IdempotencyKey
+	}
+	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash, expectedKey, k.ourKeyB64())
 	if err != nil {
 		// The call is parked, not lost: no receipt has settled it, so the allocation stays locked and
-		// the process open until one arrives or the pending bound expires (§13). Hand back the durable
+		// the process open until one arrives (§13). Hand back the durable
 		// handle for it — the process to watch and when a refund becomes due — so the caller is not
 		// left with money reserved and no way to follow it. The original cause stays the message's
 		// head: absent, unparseable, badly signed, and mismatched receipts are different diagnoses.
@@ -729,7 +771,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	charge := r.Charge
 	var premium int64
 	quarantined := false
-	if invalid := k.remoteReceiptInvalid(r, mp, rbps, replyJSON); invalid != "" {
+	if invalid := k.remoteReceiptInvalid(r, mp, rbps, replyJSON, action.OutputSchema); invalid != "" {
 		logger.Warn("remote.receipt_invalid", "action", action.Name, "reason", invalid)
 		charge = 0
 		ktx.Status = TxFailure
@@ -754,16 +796,12 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	// A rejection is the peer's refusal to execute, at any price: an executed failure that consumed
 	// nothing also charges 0, and the inbound handler returns the execution error's HTTP status
-	// alongside the real receipt, so a propagated ErrInsufficientFunds arrives as 402 too. tx_id ==
-	// our dispatched key is the one marker that separates the two (§6 P4). A quarantined receipt is
-	// never a rejection: it also forces charge 0, and the explicit flag is its signal. Computed once
-	// here because two decisions read it: how the failure is classified, and whether the cached row
-	// survives it.
-	var dispatchedKey string
-	if trace.IdempotencyKey != nil {
-		dispatchedKey = *trace.IdempotencyKey
-	}
-	rejection := !quarantined && ktx.Status != TxSuccess && isRejectionReceipt(r.TxID, dispatchedKey)
+	// alongside the real receipt, so a propagated ErrInsufficientFunds arrives as 402 too. An empty
+	// tx_id separates the two, and it is a fact of the receipt rather than a marker the seller must
+	// write correctly: a refusal has no transaction to name (§6 P4). A quarantined receipt is never
+	// a rejection: it also forces charge 0, and the explicit flag is its signal.
+
+	rejection := !quarantined && ktx.Status != TxSuccess && isRejectionReceipt(r.TxID)
 
 	// Classify a failure BEFORE building the receipt: the commit stores the error body a replaying
 	// peer will be served, so it needs this call's code, and buildReceipt copies ktx.Reason — so the
@@ -798,7 +836,9 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			ktx.Reason = KernelErrorCode(failErr)
 		}
 	}
-	localReceipt, receiptErr := k.buildReceipt(ktx, obligation+importFee, 0, 0, "", "")
+	k.markEvidenceEligible(ctx, action, ktx)
+	// The buyer's own record of what it paid: a local receipt, answering no inbound request.
+	localReceipt, receiptErr := k.buildReceipt(ktx, obligation+importFee, 0, 0, "", soldAs{})
 	if receiptErr != nil {
 		return nil, ErrInternal.Wrap("could not build receipt")
 	}
@@ -813,7 +853,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.StepID, KernelErrorCode(failErr)); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.StepID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 	k.SettleReady(sctx)
@@ -877,7 +917,7 @@ func (k *Kernel) drawPayment(trace *Trace, d dispatchPayload, obligation int64, 
 // RetryPendingRemoteDispatches retries all in-flight remote proxy traces that have an
 // idempotency key but no settled transaction. Called once at startup (after Recover) and
 // periodically by the serve retry loop (startRemoteRetryLoop) — that loop is what lets a peer
-// returning online settle parked calls, and the RemotePendingMaxAge refund fire, without a
+// returning online settle parked calls without a
 // restart. Errors for individual traces are logged and skipped.
 func (k *Kernel) RetryPendingRemoteDispatches(ctx context.Context) {
 	logger := k.log.With(ctx)
@@ -901,7 +941,7 @@ func (k *Kernel) PendingRemoteTraces(ctx context.Context) ([]*Trace, error) {
 }
 
 // RetryRemoteTrace re-issues one pending remote dispatch and settles it if a receipt has arrived,
-// or settles it as a terminal failure once RemotePendingMaxAge has elapsed (§13). Idempotent: the
+// or leaves it parked for the next pass (§13). Idempotent: the
 // retry carries the same key, so the remote replays rather than re-executing. The serve loop calls
 // this per due trace; it derives its own logger so callers never handle one.
 func (k *Kernel) RetryRemoteTrace(ctx context.Context, trace *Trace) error {
@@ -949,33 +989,30 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
 	req := callRequest{StepID: dispatch.StepID}
-	// The inbound record rides on the trace, so it survives for every action kind and is found
-	// here whether this retry settles on a receipt or hits the max-age bound below.
+	// The inbound lock rides on the trace, so it survives for every action kind and is found here
+	// by whichever attempt finally settles this call and releases it.
 	if trace.IdempotencyRecordID != nil {
 		req.IdempotencyRecordID = *trace.IdempotencyRecordID
 	}
 
 	// fr.NotDispatched is deliberately ignored on the retry path: a parked trace's request may
-	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt or the
-	// max-pending-age bound below settles it. Never-dispatched fail-fast lives solely in Call (§6).
-	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, action.ArtifactHash, *trace.IdempotencyKey, commitmentOf(dispatch.Secret), dispatch.Lottery, dispatch.Args)
+	// already have executed remotely, so §13 forbids fail-fast here — only a signed receipt settles
+	// it. Never-dispatched fail-fast lives solely in Call (§6). The contract hash is the one the
+	// dispatch froze, not the row's current one: the proxy may have been re-resolved while this
+	// call was in doubt, and a retry must present the terms the buyer authorised (§8).
+	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, dispatch.ContractHash, *trace.IdempotencyKey, commitmentOf(dispatch.Secret), dispatch.Lottery, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
 			return err // settled, or a real settlement error
 		}
-		// ErrTimeout here = a received-but-invalid receipt; fall through to the age bound rather
-		// than failing on the first malformed response (could be transient transport junk).
+		// ErrTimeout here = a received-but-invalid receipt; keep the trace parked rather than
+		// failing on one malformed response (it could be transient transport junk).
 	}
-
-	// No settleable receipt yet. Past the bound the §13 idempotency key may be gone on the remote,
-	// so settle as a failure with full refund rather than retry forever; otherwise keep retrying.
-	if now.Sub(trace.CreatedAt) > k.remotePendingMaxAge() {
-		ktx.Status = TxFailure
-		logger.Warn("remote.retry.expired", "trace_id", trace.ID, "age_seconds", now.Sub(trace.CreatedAt).Seconds())
-		_, _, sErr := k.settleFailedCall(ctx, logger, ktx, trace, callerWalletID, callerWalletKind, req, action, 0, ErrTimeout.Wrap("remote call unsettled past max pending age"))
-		return sErr
-	}
+	// No settleable receipt yet, so nothing has happened that this kernel may act on. The work may
+	// have run on the peer, and no local clock can tell that apart from work that never ran, so the
+	// call stays parked and is asked again — visible with its age — until signed evidence says what
+	// became of it (U35, G4).
 	return nil
 }
 
@@ -1010,9 +1047,8 @@ func (k *Kernel) SignStepList(counterparty, recipient, forUserID string) (sig, t
 // minted per attempt: a retry after a network failure presents the same key and recovers the stored
 // outcome, since a step completion has no local trace to persist one on (unlike a remote-proxy call).
 // recipient is the serving kernel's key. Exported because the serving side recomputes it to verify
-// the requester's key. The trailing empty component is a reserved slot in the derivation: keeping it
-// makes every key byte-identical to those already in flight, so a completion retried across an
-// upgrade recovers its stored outcome instead of re-executing under a fresh key.
+// the requester's key. The trailing empty component is a reserved slot in the derivation, kept so a
+// later field can be added without moving what is already derived.
 func StepIdempotencyKey(recipient, stepID, inputHash string) string {
 	return sha256Hex("juice/fed/step/1|" + recipient + "|" + stepID + "|" + inputHash + "|")
 }
@@ -1377,6 +1413,75 @@ func (k *Kernel) PeerKeys(ctx context.Context) []string {
 	return keys
 }
 
+// DiscoveryCandidates orders everyone a discovery pass could read, most useful first, and folds in
+// whatever the directory turned up this pass. One order for every kernel — counterparty, stranger
+// met once, seed — because what makes a peer worth reading is what is unfinished with it and how
+// long since it was last heard, not which list it arrived on:
+//
+//  1. money waiting on that peer, in either direction: it owes us for work delivered, it has not
+//     heard how a draw came out, or it holds a call of ours whose answer decides a reserve;
+//  2. then longest unheard first, a kernel never read counting as never heard, so a stranger met
+//     once is refreshed and no peer can be starved by a busy directory;
+//  3. then by key, so the order is the same on every kernel and every pass, and a pass cut short
+//     resumes where the last one was cut rather than re-reading a random few (§13).
+//
+// peersMoneyIsWaitingOn is every peer some money is waiting on, in either direction: one that owes
+// us for work delivered, one that has not heard how a draw it is owed came out, and one holding a
+// call of ours whose answer decides money already reserved. All three are the same reason to talk
+// to that peer before any other, so the store answers them as one set of keys — every one of
+// them, since a scheduler that reads the first hundred obligations would miss the peer whose
+// obligation sorts after them (§13, P10).
+func (k *Kernel) peersMoneyIsWaitingOn(ctx context.Context) map[string]bool {
+	waiting := map[string]bool{}
+	keys, err := k.store.PeersWithUnresolvedMoney(ctx)
+	if err != nil {
+		return waiting
+	}
+	for _, key := range keys {
+		waiting[key] = true
+	}
+	return waiting
+}
+
+func (k *Kernel) DiscoveryCandidates(ctx context.Context, directory []string) []string {
+	kernels, err := k.ListKernels(ctx, false, 0, 0)
+	if err != nil {
+		return directory
+	}
+	lastSeen := make(map[string]time.Time, len(kernels))
+	for _, p := range kernels {
+		if p.LastSeen != nil {
+			lastSeen[p.PublicKey] = *p.LastSeen
+		} else {
+			lastSeen[p.PublicKey] = time.Time{}
+		}
+	}
+	owing := k.peersMoneyIsWaitingOn(ctx)
+	for _, key := range directory {
+		if _, known := lastSeen[key]; !known {
+			lastSeen[key] = time.Time{}
+		}
+	}
+	out := make([]string, 0, len(lastSeen))
+	self := k.ourKeyB64()
+	for key := range lastSeen {
+		if key != "" && key != self {
+			out = append(out, key)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if owing[a] != owing[b] {
+			return owing[a]
+		}
+		if !lastSeen[a].Equal(lastSeen[b]) {
+			return lastSeen[a].Before(lastSeen[b])
+		}
+		return a < b
+	})
+	return out
+}
+
 // tradeGroup is one issuer's rows about one trade, in first-seen order.
 type tradeGroup struct{ rows []*EvidenceRow }
 
@@ -1404,34 +1509,71 @@ func tradeGroups(rows []*EvidenceRow) []*tradeGroup {
 	return out
 }
 
-// rating is the one rating a trade carries: its rows must agree, or the issuer has rated one trade
-// two ways — equivocation by another route (D16) — and it carries none. A row outside the rating
-// contract is not a rating; an equivocated row contributes nothing.
-func (g *tradeGroup) rating() (RatingEvidence, bool) {
-	var first *RatingEvidence
+// equivocated reports that this issuer contradicted itself somewhere in this trade.
+func (g *tradeGroup) equivocated() bool {
 	for _, e := range g.rows {
 		if e.Equivocated {
-			return RatingEvidence{}, false // the issuer has told two stories about this trade
-		}
-		if e.RatingJSON == "" {
-			continue
-		}
-		var rt RatingEvidence
-		if json.Unmarshal([]byte(e.RatingJSON), &rt) != nil || validRating(rt.Rating, rt.Note) != nil {
-			return RatingEvidence{}, false // a row outside the contract voids the trade, as the projection does
-		}
-		if first == nil {
-			first = &rt
-			continue
-		}
-		if first.Rating != rt.Rating || !sameNote(first.Note, rt.Note) {
-			return RatingEvidence{}, false
+			return true
 		}
 	}
-	if first == nil {
+	return false
+}
+
+// tellsOneStory reports that every row this issuer wrote about this trade says the same thing: one
+// outcome, and at most one rating. An issuer can write several rows about one trade under several
+// receipt hashes of its own, so disagreement between them is equivocation by another route than a
+// single hash told twice — and counted the same way, because the reader's question is whether this
+// party can be believed, not which row it used to say so (D16, U39).
+func (g *tradeGroup) tellsOneStory() bool {
+	var status *TxStatus
+	var rated *RatingEvidence
+	for _, e := range g.rows {
+		var er EvidenceReceipt
+		if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) != nil {
+			continue
+		}
+		if status == nil {
+			outcome := er.Status
+			status = &outcome
+		} else if *status != er.Status {
+			return false
+		}
+		rt, ok := validRatingOf(e)
+		if !ok {
+			continue
+		}
+		if rated == nil {
+			first := rt
+			rated = &first
+		} else if rated.Rating != rt.Rating || !sameNote(rated.Note, rt.Note) {
+			return false
+		}
+	}
+	return true
+}
+
+// rating is the one rating a trade carries. The group has been shown to tell one story by the
+// time this is asked, so the first valid rating is the only one there is; a row outside the rating
+// contract is not a rating and carries none.
+func (g *tradeGroup) rating() (RatingEvidence, bool) {
+	for _, e := range g.rows {
+		if rt, ok := validRatingOf(e); ok {
+			return rt, true
+		}
+	}
+	return RatingEvidence{}, false
+}
+
+// validRatingOf reads the rating one row carries, if it carries one the contract admits.
+func validRatingOf(e *EvidenceRow) (RatingEvidence, bool) {
+	if e.RatingJSON == "" {
 		return RatingEvidence{}, false
 	}
-	return *first, true
+	var rt RatingEvidence
+	if json.Unmarshal([]byte(e.RatingJSON), &rt) != nil || validRating(rt.Rating, rt.Note) != nil {
+		return RatingEvidence{}, false
+	}
+	return rt, true
 }
 
 func sameNote(a, b *string) bool {
@@ -1452,8 +1594,8 @@ func sameNote(a, b *string) bool {
 // names the issuer as counterparty. Ratings that fail the link are surfaced as UnverifiedRatings;
 // equivocated rows contribute no rating. This replaces the deleted introducer roster as the
 // reputation display; local Stats are never touched by evidence.
-func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey string) ([]*SubjectEvidenceRow, error) {
-	rows, err := k.store.ListEvidenceBySubject(ctx, subjectKernelPublicKey)
+func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*SubjectEvidenceRow, error) {
+	rows, err := k.store.ListEvidenceBySubject(ctx, subjectKernelPublicKey, subjectActionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1461,15 +1603,23 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 	// rating is confirmed trade-backed only against the receipt of the very action it claims, and
 	// only when that receipt names the issuer as counterparty.
 	execKey := func(hash, action string) string { return hash + "\x1f" + action }
-	counterpartyOf := map[string]string{}
+	type ownClaim struct {
+		counterparty string
+		status       TxStatus
+	}
+	own := map[string]ownClaim{}
 	for _, e := range rows {
 		if e.IssuerPublicKey == subjectKernelPublicKey {
-			counterpartyOf[execKey(e.ReceiptHash, e.SubjectActionID)] = e.CounterpartyKernelPublicKey
+			var er EvidenceReceipt
+			_ = json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er)
+			own[execKey(e.ReceiptHash, e.SubjectActionID)] = ownClaim{e.CounterpartyKernelPublicKey, er.Status}
 		}
 	}
-	linked := func(e *EvidenceRow) bool {
-		cp, ok := counterpartyOf[execKey(e.RemoteReceiptHash, e.SubjectActionID)]
-		return ok && e.RemoteReceiptHash != "" && cp == e.IssuerPublicKey
+	// linked reports that this issuer's row and the subject's own row describe one trade: the same
+	// receipt, the same action, and the subject naming this issuer as the party it traded with.
+	linked := func(e *EvidenceRow) (ownClaim, bool) {
+		c, ok := own[execKey(e.RemoteReceiptHash, e.SubjectActionID)]
+		return c, ok && e.RemoteReceiptHash != "" && c.counterparty == e.IssuerPublicKey
 	}
 	agg := map[string]*SubjectEvidenceRow{}
 	get := func(issuer, action string) *SubjectEvidenceRow {
@@ -1488,6 +1638,16 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 	for _, g := range tradeGroups(rows) {
 		e := g.rows[0]
 		row := get(e.IssuerPublicKey, e.SubjectActionID)
+		// An issuer that has told two stories about one trade has said nothing usable about it:
+		// not the outcome, not the rating, not that the trade happened at all. It is counted and
+		// shown, because a reader who cannot see that an issuer contradicted itself has not been
+		// told the one thing this detection is for — and it counts whether the contradiction was
+		// one hash written twice or two rows that disagree (§13, U39).
+		if g.equivocated() || !g.tellsOneStory() {
+			row.Equivocations++
+			continue
+		}
+		claim, isLinked := linked(e)
 		var er EvidenceReceipt
 		if json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er) == nil {
 			row.Uses++
@@ -1499,12 +1659,20 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 			if lat := er.CreatedAt.Sub(er.StartedAt).Milliseconds(); lat >= 0 {
 				row.AvgLatencyMs += float64(lat)
 			}
-			if e.IssuerPublicKey != subjectKernelPublicKey && linked(e) {
-				row.CorroboratedUses++
+			// A linked pair that agrees is corroboration; one that disagrees is two signed
+			// statements that cannot both be true. Counting the second as the first would call a
+			// contradiction a confirmation, which is the opposite of what evidence is for (§13).
+			if e.IssuerPublicKey != subjectKernelPublicKey && isLinked {
+				if claim.status == er.Status {
+					row.CorroboratedUses++
+				} else {
+					row.Contradictions++
+				}
 			}
+			row.observe(er.CreatedAt)
 		}
 		if rt, ok := g.rating(); ok {
-			if linked(e) {
+			if isLinked {
 				row.RatingCount++
 				row.RatingMean += rt.Rating
 				if rt.Note != nil && *rt.Note != "" {
@@ -1526,6 +1694,71 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey str
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// actionSubject names an action the way evidence about it is keyed: the kernel that runs it and
+// the id it runs under. For an action of this kernel's own that is this kernel and the row's id;
+// for a proxy it is the peer and the id on the peer. One mapping, used by every reader, so no
+// surface can ask about a different action than another (§13).
+func (k *Kernel) actionSubject(ctx context.Context, a *Action) (subjectKernel, subjectAction string) {
+	if a.Kind == KindRemoteProxy {
+		return k.ownerKernelKey(ctx, a), a.RemoteActionID
+	}
+	return k.ourKeyB64(), a.ID
+}
+
+// ActionRecord is everything this kernel holds about one action's conduct, in three parts that are
+// never added together, because they are not the same kind of claim (U39):
+//   - what this kernel itself saw, from its own calls;
+//   - what the provider says about itself, gossiped and signed by it;
+//   - what every other kernel says about trading with it, each with how much of its account the
+//     provider's own record confirms and how much the two contradict.
+//
+// No score: the numbers are shown with their provenance and the reader decides. One derivation for
+// every reader — an action read, a search hit, an operator's peer view — so no two surfaces can
+// disagree about the same trades.
+type ActionRecord struct {
+	LocalExperience  *Stats                `json:"local_experience"`
+	ProviderReported *SubjectEvidenceRow   `json:"provider_reported"`
+	ObservedByOthers []*SubjectEvidenceRow `json:"observed_by_others"`
+	// RetainedCap is how many trades per reporter this kernel keeps. A row whose count reaches it
+	// describes a window, not a lifetime, and since/until say which window.
+	RetainedCap int `json:"retained_cap"`
+}
+
+// ActionRecord assembles that view for an action this kernel holds a row for, its own or a proxy.
+func (k *Kernel) ActionRecord(ctx context.Context, a *Action) *ActionRecord {
+	subjectKernel, subjectAction := k.actionSubject(ctx, a)
+	rec := k.subjectRecord(ctx, subjectKernel, subjectAction)
+	if stats, err := k.store.ReadStats(ctx, a.ID); err == nil {
+		rec.LocalExperience = stats
+	}
+	return rec
+}
+
+// DiscoveredRecord is the same view for an action this kernel has only heard of, which it has
+// therefore never called: the subject is the kernel that runs it and the id it runs under.
+func (k *Kernel) DiscoveredRecord(ctx context.Context, d *DiscoveryDoc) *ActionRecord {
+	return k.subjectRecord(ctx, d.KernelPublicKey, d.ActionID)
+}
+
+func (k *Kernel) subjectRecord(ctx context.Context, subjectKernel, subjectAction string) *ActionRecord {
+	rec := &ActionRecord{RetainedCap: EvidenceRetainedPerReporter, ObservedByOthers: []*SubjectEvidenceRow{}}
+	if subjectKernel == "" || subjectAction == "" {
+		return rec
+	}
+	rows, err := k.SubjectEvidence(ctx, subjectKernel, subjectAction)
+	if err != nil {
+		return rec
+	}
+	for _, row := range rows {
+		if row.IssuerPublicKey == subjectKernel {
+			rec.ProviderReported = row
+			continue
+		}
+		rec.ObservedByOthers = append(rec.ObservedByOthers, row)
+	}
+	return rec
 }
 
 // PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
@@ -1565,18 +1798,21 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	return purged, nil
 }
 
-// GetGossip returns this kernel's v0.13 gossip payload (§13): first-party identity, the kernel's
-// own signed action manifests, and one page of evidence bundles ordered by effective time after
-// cursor. When requesterKey names a known,
-// non-suspended peer, the response also carries that peer's credit here (CounterpartyBalance, §13
-// peer sync); nil for strangers, suspended keys, and anonymous pulls.
 // reasonRemoteReceiptInvalidPrefix marks a quarantined remote-proxy settlement: a validly-signed
 // receipt that breached the §13 settlement invariants (settled with charge 0, reserve kept locked,
-// reconciled out of band). settleRemoteCall writes it as the transaction reason; gossipRowIsExecuted
+// reconciled out of band). settleRemoteCall writes it as the transaction reason; markEvidenceEligible
 // reads it to keep a quarantined receipt out of gossip evidence (§13 gossip-eligibility).
 const reasonRemoteReceiptInvalidPrefix = "remote receipt invalid: "
 
-func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*GossipResponse, error) {
+// catalogPageSize bounds one page of the catalogue. A scan of C actions completes in ⌈C/page⌉
+// pulls whatever C is, so a large catalogue converges instead of being truncated (P9).
+const catalogPageSize = 100
+
+// GetGossip returns this kernel's gossip payload (§13): first-party identity, one page of its own
+// signed action manifests, and one page of evidence bundles ordered by effective time after the
+// requester's cursor. The catalogue is paged rather than capped, and skipped entirely when the
+// requester already holds it.
+func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipResponse, error) {
 	ourKey := k.ourKeyB64()
 	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
@@ -1586,50 +1822,62 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 		about = sys.Description
 	}
 
-	actions, err := k.store.ListVisibleActions(ctx, false, 100, 0)
-	if err != nil {
-		return nil, err
-	}
-	var manifests []*ActionManifest
-	owners := map[string]*Account{} // one read per owner across the manifest loop
-	for _, a := range actions {
-		if k.exportable(a) != nil {
-			continue
-		}
-		ow, cached := owners[a.OwnerUserID]
-		if !cached {
-			ow, _ = k.store.ReadUser(ctx, a.OwnerUserID)
-			owners[a.OwnerUserID] = ow
-		}
-		if ow == nil {
-			continue
-		}
-		m, merr := k.buildManifest(ctx, a, ow)
-		if merr != nil || m == nil {
-			continue
-		}
-		manifests = append(manifests, m)
-	}
-
-	bundles, nextCursor, err := k.gossipEvidencePage(ctx, ourKey, cursor)
-	if err != nil {
-		return nil, err
-	}
-
 	railAddr, railProof := k.RailIdentity(ctx)
 	resp := &GossipResponse{
-		PublicKey:       ourKey,
-		Handle:          handle,
-		About:           about,
-		Network:         k.cfg.Network.Name,
-		NetworkDigest:   k.cfg.Network.Digest,
-		RailAddress:     railAddr,
-		RailProof:       railProof,
-		ActionManifests: manifests,
-		Evidence:        bundles,
-		NextCursor:      nextCursor,
+		PublicKey:     ourKey,
+		Handle:        handle,
+		About:         about,
+		Network:       k.cfg.Network.Name,
+		NetworkDigest: k.cfg.Network.Digest,
+		RailAddress:   railAddr,
+		RailProof:     railProof,
+	}
+
+	manifests, next, err := k.catalogPage(ctx, req.CatalogCursor)
+	if err != nil {
+		return nil, err
+	}
+	resp.ActionManifests, resp.NextCatalogCursor = manifests, next
+
+	if resp.Evidence, resp.NextCursor, err = k.gossipEvidencePage(ctx, ourKey, req.Cursor); err != nil {
+		return nil, err
 	}
 	return resp, nil
+}
+
+// catalogPage signs one page of exportable actions in id order, and reports the cursor to resume
+// at — empty when the page ends the catalogue, which is what completes a requester's scan.
+func (k *Kernel) catalogPage(ctx context.Context, cursor string) ([]*ActionManifest, string, error) {
+	var manifests []*ActionManifest
+	owners := map[string]*Account{} // one read per owner across the page
+	last := cursor
+	for len(manifests) < catalogPageSize {
+		batch, err := k.store.ListExportableActionsAfter(ctx, last, catalogPageSize)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(batch) == 0 {
+			return manifests, "", nil // the catalogue ends here
+		}
+		for _, a := range batch {
+			last = a.ID
+			if k.exportable(a) != nil {
+				continue // public, and still not describable abroad (delegated auth, §8)
+			}
+			ow, cached := owners[a.OwnerUserID]
+			if !cached {
+				ow, _ = k.store.ReadUser(ctx, a.OwnerUserID)
+				owners[a.OwnerUserID] = ow
+			}
+			if ow == nil {
+				continue
+			}
+			if m, merr := k.buildManifest(ctx, a, ow); merr == nil && m != nil {
+				manifests = append(manifests, m)
+			}
+		}
+	}
+	return manifests, last, nil
 }
 
 // buildEvidenceReceipt builds the wire-only signed projection of one of this kernel's receipts (§13).
@@ -1638,22 +1886,18 @@ func (k *Kernel) GetGossip(ctx context.Context, requesterKey, cursor string) (*G
 // (canonical JSON — the one definition shared with the serving kernel's ReceiptHash), never the raw
 // tx.RemoteReceiptHash. Signed under the evidence_receipt domain.
 func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*EvidenceReceipt, error) {
-	rh, err := ReceiptHash(row.Receipt)
-	if err != nil {
-		return nil, err
-	}
 	subjectKernel := row.SubjectKernelPublicKey
 	if subjectKernel == "" {
 		subjectKernel = ourKey // own execution evidence
 	}
 	er := &EvidenceReceipt{
-		ReceiptHash:                 rh,
+		ReceiptHash:                 row.ReceiptHash,
 		SubjectKernelPublicKey:      subjectKernel,
 		SubjectActionID:             row.SubjectActionID,
 		CounterpartyKernelPublicKey: row.CounterpartyKernelPublicKey,
-		Status:                      row.Receipt.Status,
-		StartedAt:                   row.Receipt.StartedAt,
-		CreatedAt:                   row.Receipt.CreatedAt,
+		Status:                      row.Status,
+		StartedAt:                   row.StartedAt,
+		CreatedAt:                   row.CreatedAt,
 	}
 	if row.RemoteReceiptJSON != "" {
 		h, herr := receiptHashFromJSON(row.RemoteReceiptJSON)
@@ -1672,108 +1916,61 @@ func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*Ev
 	return er, nil
 }
 
-// gossipRowIsExecuted reports whether a gossip-candidate receipt records an admitted execution, so it
-// is gossip-eligible (§13 leg-(b) exclusions). Own-execution leg-(a) rows carry no remote receipt and
-// are always executed. For a receipt-backed leg-(b) proxy row (locally-manufactured settlements are
-// already dropped in SQL by their empty remote_receipt_json), two non-executions are excluded: a
-// quarantined invalid receipt (our transaction reason carries the quarantine prefix) and a signed
-// rejection — the serving kernel sets a rejection receipt's tx_id to the caller's idempotency_key, so
-// tx_id == our dispatched key distinguishes any rejection from a genuine execution at any price, 0
-// included.
 // isRejectionReceipt reports whether a remote receipt records a refusal rather than an execution.
-// The serving kernel sets a rejection receipt's tx_id to the caller's idempotency_key (§6 P4), and
-// that is the only marker that holds at any price: an executed failure consuming nothing charges 0
-// too, and may even carry transport status 402. One definition, used by gossip eligibility and by
-// settlement classification alike.
-func isRejectionReceipt(receiptTxID, dispatchedIdempotencyKey string) bool {
-	return dispatchedIdempotencyKey != "" && receiptTxID == dispatchedIdempotencyKey
-}
+// A refusal names no transaction, because it has none; an executed call always names one, at any
+// charge. One definition, used by gossip eligibility and by settlement classification alike.
+func isRejectionReceipt(receiptTxID string) bool { return receiptTxID == "" }
 
-func gossipRowIsExecuted(row *GossipReceiptRow) bool {
-	if row.RemoteReceiptJSON == "" {
-		return true // leg (a): own execution
-	}
+// remoteReceiptTxID is the transaction a peer's receipt names, or empty for a refusal.
+func remoteReceiptTxID(receiptJSON string) string {
 	var rr struct {
-		TxID   string   `json:"tx_id"`
-		Status TxStatus `json:"status"`
+		TxID string `json:"tx_id"`
 	}
-	_ = json.Unmarshal([]byte(row.RemoteReceiptJSON), &rr)
-	if isRejectionReceipt(rr.TxID, row.IdempotencyKey) {
-		return false
-	}
-	// Quarantined invalid receipt (§13): we settled it as a failure while keeping the reserve locked.
-	// The UNFORGEABLE signal is a status disagreement — the peer claimed success but we recorded a
-	// failure (a mispriced/inconsistent success receipt) — which a peer cannot fake to pass a bad
-	// receipt off as executed. The reason prefix additionally catches failure-receipt quarantines; a
-	// peer setting that exact reason could at most suppress one of its OWN failures, never inflate.
-	if row.Receipt != nil {
-		if rr.Status == TxSuccess && row.Receipt.Status == TxFailure {
-			return false
-		}
-		if strings.HasPrefix(row.Receipt.Reason, reasonRemoteReceiptInvalidPrefix) {
-			return false
-		}
-	}
-	return true
+	_ = json.Unmarshal([]byte(receiptJSON), &rr)
+	return rr.TxID
 }
 
-// gossipEvidencePage builds one ordered evidence page after cursor, plus the next cursor (§13). A
-// non-executed leg-(b) row (rejection or quarantine) is skipped but still advances the cursor past
-// it — sender-side gaps are expected and never an endless replay (§13 cursor).
+// gossipEvidencePage builds one ordered evidence page after cursor, plus the next cursor (§13).
 func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) ([]EvidenceBundle, string, error) {
 	rows, err := k.store.ListReceiptsForGossip(ctx, cursor, gossipEvidencePageSize)
 	if err != nil {
 		return nil, "", err
 	}
+	// Whether a row is evidence was decided when it settled and stored with it (P9): the sender
+	// asks nothing further. Re-deriving it here would make publication a function of the action's
+	// present state — an action that became delegated-auth after a trade would retract evidence of
+	// a trade that was open when it happened — and would cost a read per row to reach the wrong
+	// answer.
 	bundles := make([]EvidenceBundle, 0, len(rows))
 	next := cursor
 	for _, row := range rows {
 		next = row.Cursor
-		if !gossipRowIsExecuted(row) {
-			continue
-		}
-		// A delegated-auth action is never described abroad (§6 P6, §8 D10), so evidence must not
-		// name it either: the exclusion is one rule, and gossiping usage of a capability no peer can
-		// call or even see would disclose its existence and volume for no consumer. Own-execution
-		// rows only — a leg-(b) subject is the peer's action, governed by that peer.
-		if row.RemoteReceiptJSON == "" && row.SubjectActionID != "" {
-			if a, aerr := k.store.ReadAction(ctx, row.SubjectActionID); aerr == nil && k.isDelegatedAuth(a) {
-				continue
-			}
-		}
 		er, berr := k.buildEvidenceReceipt(ourKey, row)
 		if berr != nil {
 			return nil, "", berr
 		}
 		b := EvidenceBundle{EvidenceReceipt: er}
 		if row.Rating != nil && row.Rating.RatedReceiptHash != "" {
-			re, perr := k.projectRating(row.Rating)
-			if perr != nil {
+			if perr := k.signRating(row.Rating); perr != nil {
 				return nil, "", perr
 			}
-			b.Rating = re
+			b.Rating = row.Rating
 		}
 		bundles = append(bundles, b)
 	}
 	return bundles, next, nil
 }
 
-// projectRating drops the identity fields of a locally-created rating and re-signs the projection
-// with the platform key under sigDomainRating (§13): the gossiping kernel is always the rater, so
-// it holds the key. Signed per serve, never stored.
-func (k *Kernel) projectRating(r *Rating) (*RatingEvidence, error) {
-	re := &RatingEvidence{
-		Rating:           r.Rating,
-		Note:             r.Note,
-		RatedReceiptHash: r.RatedReceiptHash,
-		CreatedAt:        r.CreatedAt,
-	}
+// signRating signs the wire projection of one rating under its own domain (§12). The projection
+// itself is built where it is read — the four public fields and no identity — so signing is all
+// that is left to do here.
+func (k *Kernel) signRating(re *RatingEvidence) error {
 	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainRating, re)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	re.Signature = sig
-	return re, nil
+	return nil
 }
 
 // ReadKernel returns the kernel row for a public key, or nil if unknown.
@@ -1893,30 +2090,38 @@ func (k *Kernel) RecordKernelContact(ctx context.Context, publicKey string, ok b
 // records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
 // settled failure is legible rather than always reading "denied". refreshProxy marks a cache fault
 // (contract-hash mismatch, non-executable action) so the origin invalidates its cached proxy (§13).
-func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, actionParam, argsHash, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
+func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, counterpartyKey, actionParam string, rawArgs []byte, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
+	}
+	argsHash, err := jcsHashStr(string(rawArgs))
+	if err != nil {
+		return nil, ErrInvalidInput.Wrap("arguments are not JSON")
 	}
 	now := time.Now().UTC()
 	r := &Receipt{
 		ID:           uuid.New().String(),
 		IssuerUserID: k.cfg.IssuerUserID,
-		TxID:         idempotencyKey, // no real TxID; idempotency key identifies this rejection
-		ActionID:     actionParam,    // the refused action's id, matching the caller's remote_action_id
-		CallerUserID: counterpartyID,
-		ArgsHash:     argsHash,
-		Status:       TxFailure,
-		Gross:        0,
-		Net:          0,
-		Fee:          0,
-		RefreshProxy: refreshProxy,
-		Reason:       reason,
-		StartedAt:    now,
-		CreatedAt:    now,
+		// A rejection names no transaction, because it has none. That is what tells it apart from
+		// an executed failure, and it is a fact of the receipt rather than a marker the seller
+		// must remember to write correctly (P5).
+		ActionID:       actionParam, // the refused action's id, matching the caller's remote_action_id
+		CallerUserID:   counterpartyID,
+		ArgsHash:       argsHash,
+		IdempotencyKey: idempotencyKey,
+		Counterparty:   counterpartyKey,
+		Status:         TxFailure,
+		Gross:          0,
+		Net:            0,
+		Fee:            0,
+		RefreshProxy:   refreshProxy,
+		Reason:         reason,
+		StartedAt:      now,
+		CreatedAt:      now,
 	}
-	sig, err := signReceipt(k.cfg.Network, k.cfg.SigningKey, r)
-	if err != nil {
-		return nil, err
+	sig, serr := signReceipt(k.cfg.Network, k.cfg.SigningKey, r)
+	if serr != nil {
+		return nil, serr
 	}
 	r.Signature = sig
 	return r, nil
@@ -1944,7 +2149,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	}
 	// A reply from another world is not ours to accumulate: nothing it carries could verify here,
 	// and adopting its catalog would offer actions no call could ever pay for (D23).
-	if gossip.NetworkDigest != "" && gossip.NetworkDigest != k.cfg.Network.Digest {
+	if gossip.NetworkDigest != k.cfg.Network.Digest {
 		return "", ErrInvalidInput.Wrapf("peer serves network %q, not ours", gossip.Network)
 	}
 	// Where the rail has addresses, a kernel must prove it controls the one it advertises: an
@@ -1952,60 +2157,108 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	if _, err := k.verifyRailIdentity(gossip.PublicKey, gossip.RailAddress, gossip.RailProof); err != nil {
 		return "", ErrInvalidInput.Wrap("peer rail address is unproven")
 	}
+	// A page is the size this protocol serves, and a peer sending more is not offering more: it is
+	// asking this kernel to verify signatures and embed descriptions by the thousand off one
+	// frame. The cardinality is checked before any of that work, and a page over it is refused
+	// whole — truncating would silently drop items the cursor then moves past (P9).
+	if len(gossip.ActionManifests) > catalogPageSize || len(gossip.Evidence) > gossipEvidencePageSize {
+		return "", ErrInvalidInput.Wrapf("gossip page carries %d manifests and %d evidence bundles, over the %d and %d this protocol serves",
+			len(gossip.ActionManifests), len(gossip.Evidence), catalogPageSize, gossipEvidencePageSize)
+	}
 	now := time.Now().UTC()
 	if err := k.observeKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About, gossip.RailAddress, gossip.RailProof); err != nil {
 		return "", err
 	}
 
-	// Rebuild discovery docs from the verified catalog snapshot (replace-all per source kernel).
-	const maxGossipElements = 10000
+	// The catalogue arrives a page at a time and is marked into a scan generation, never replaced:
+	// a large one would otherwise lose its first page before its last arrived, and a page that
+	// happened to be empty would erase everything known about the peer. When the page ends the
+	// catalogue the scan is complete, and only then is what the scan did not mention swept (P9).
+	cursor, generation, _ := k.store.CatalogScan(ctx, gossip.PublicKey)
+	if cursor == "" {
+		generation++ // this page opens a new scan
+	}
 	docs := make([]*DiscoveryDoc, 0, len(gossip.ActionManifests))
-	for i, m := range gossip.ActionManifests {
-		if i >= maxGossipElements {
-			break
+	for _, m := range gossip.ActionManifests {
+		if m == nil {
+			continue
 		}
-		if m == nil || k.cfg.Network.VerifyManifestSignature(gossip.PublicKey, m) != nil {
-			continue // only verified first-party manifests are indexed
+		// A manifest that does not verify is the responder's fault, and the responder is
+		// authenticated: the whole pull fails rather than silently indexing part of a page.
+		if err := k.cfg.Network.VerifyManifestSignature(gossip.PublicKey, m); err != nil {
+			return "", ErrUnauthorized.Wrap("gossip manifest signature invalid")
 		}
-		// The catalog price a browser sees without resolving: the peer's signed serving markup now,
-		// the origin's import fee at read time (§13). An unrepresentable one skips the manifest.
+		// The catalog price a browser sees without resolving: the peer's signed serving markup
+		// now, the origin's import fee at read time (§13). An unrepresentable one is skipped.
 		sp, perr := k.econ.ServingPrice(m.Price, m.RemoteBPS)
 		if perr != nil {
 			continue
 		}
+		// The peer and the scan are the page's, not each document's: ApplyCatalogPage stamps them.
 		d := &DiscoveryDoc{
-			KernelPublicKey: gossip.PublicKey,
-			Handle:          m.OwnerHandle,
-			Description:     m.Description,
-			ActionID:        m.ActionID,
-			Name:            m.Name,
-			InputSchema:     m.InputSchema,
-			OutputSchema:    m.OutputSchema,
-			ServingPrice:    sp,
-			ObservedAt:      now,
+			Handle:       m.OwnerHandle,
+			Description:  m.Description,
+			ActionID:     m.ActionID,
+			Name:         m.Name,
+			InputSchema:  m.InputSchema,
+			OutputSchema: m.OutputSchema,
+			ServingPrice: sp,
+			ObservedAt:   now,
 		}
+		// Embedding a description costs a model call, so it is reused unless the words moved.
 		if k.llm != nil {
-			if vec, eerr := k.llm.Embed(ctx, m.Name+" "+m.Description); eerr == nil {
+			if vec, ok := k.store.DiscoveryEmbedding(ctx, gossip.PublicKey, m.ActionID, m.Name+" "+m.Description); ok {
+				d.Embedding = vec
+			} else if vec, eerr := k.llm.Embed(ctx, m.Name+" "+m.Description); eerr == nil {
 				d.Embedding = vec
 			}
 		}
 		docs = append(docs, d)
 	}
-	if err := k.store.ReplaceDiscoveryDocs(ctx, gossip.PublicKey, docs); err != nil {
+
+	// Each verified bundle is stored before the cursor moves past it. A bundle that cannot verify
+	// is the peer's fault and is skipped — no later pull would make it verify — but a bundle this
+	// kernel failed to store is not skipped: the page is failed, the cursor stays, and the peer
+	// offers it again.
+	for _, b := range gossip.Evidence {
+		if err := k.ingestEvidenceBundle(ctx, gossip.PublicKey, b, now); err != nil {
+			if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrInvalidInput) {
+				k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.PublicKey, "error", err)
+				continue
+			}
+			return "", err
+		}
+	}
+
+	// One transition: the page's documents, what a completed scan leaves behind, and where the
+	// scan now stands, in one commit. Partway through is not a state the catalogue has.
+	if err := k.store.ApplyCatalogPage(ctx, gossip.PublicKey, docs, gossip.NextCatalogCursor, generation); err != nil {
 		return "", err
 	}
-
-	// Store each verified evidence bundle.
-	for i, b := range gossip.Evidence {
-		if i >= maxGossipElements {
-			break
-		}
-		if err := k.ingestEvidenceBundle(ctx, gossip.PublicKey, b, now); err != nil {
-			k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.PublicKey, "error", err)
-		}
-	}
-
 	return gossip.NextCursor, nil
+}
+
+// PeerScan is where a discovery pass resumes reading one peer: its evidence high-watermark and
+// its catalogue scan position.
+type PeerScan struct {
+	Evidence      string
+	CatalogCursor string
+}
+
+// PeerScanState reads that position.
+func (k *Kernel) PeerScanState(ctx context.Context, key string) PeerScan {
+	cursor, _, _ := k.store.CatalogScan(ctx, key)
+	return PeerScan{Evidence: k.GossipCursor(ctx, key), CatalogCursor: cursor}
+}
+
+// SavePeerScan records the evidence high-watermark a verified page committed. The catalogue's own
+// position is written by the ingest that stored the page, so a scan can never advance past docs
+// that were not kept.
+func (k *Kernel) SavePeerScan(ctx context.Context, key string, scan PeerScan) error {
+	if scan.Evidence == "" {
+		return nil
+	}
+	return k.SetGossipCursor(ctx, key, scan.Evidence)
 }
 
 // ingestEvidenceBundle verifies and stores one evidence bundle from issuerKey (§13). It verifies the
@@ -2170,8 +2423,6 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		return nil, ErrInvalidInput.Wrap("manifest missing output_schema")
 	case string(m.Kind) == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing kind")
-	case m.Stats == nil:
-		return nil, ErrInvalidInput.Wrap("manifest missing stats")
 	case m.UpdatedAt.IsZero():
 		return nil, ErrInvalidInput.Wrap("manifest missing updated_at")
 	}
@@ -2285,6 +2536,12 @@ func (k *Kernel) exportable(a *Action) error {
 	return nil
 }
 
+// ServedAbroad reports whether a peer may call this action at all. It is the same rule that decides
+// whether the action is described in a manifest, so a refusal tells a stranger exactly what the
+// catalogue already tells them and nothing more: absent, inactive, private, delegated-auth and
+// imported all read alike [→U48].
+func (k *Kernel) ServedAbroad(a *Action) bool { return a != nil && k.exportable(a) == nil }
+
 func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
@@ -2300,13 +2557,35 @@ func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*Actio
 	return k.buildManifest(ctx, a, owner)
 }
 
+// implementationHash identifies what an action actually runs, so a buyer's pinned contract moves
+// when the implementation does. A wasm action is its artifact. An http action is the endpoint it
+// calls — method, URL and parameter bindings — and nothing else: its credentials are not the
+// buyer's business, and its provenance (which document it was imported from, under which key) is
+// bookkeeping that must not invalidate a cached proxy. A native action has no implementation to
+// name beyond its own identity (P6).
+func (k *Kernel) implementationHash(a *Action) string {
+	if a.Kind != KindHTTP || a.Source == "" {
+		return a.ArtifactHash
+	}
+	var src HTTPSource
+	if json.Unmarshal([]byte(a.Source), &src) != nil {
+		return a.ArtifactHash
+	}
+	canon, err := CanonicalJSON(struct {
+		BaseURL string      `json:"base_url"`
+		Method  string      `json:"method"`
+		Params  []HTTPParam `json:"params,omitempty"`
+		Path    string      `json:"path"`
+	}{src.BaseURL, src.Method, src.Params, src.Path})
+	if err != nil {
+		return a.ArtifactHash
+	}
+	return sha256Hex(string(canon))
+}
+
 // buildManifest projects an already-exportable action and its owner into a signed manifest, so
 // gossip can reuse one owner read across every manifest it serves.
 func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (*ActionManifest, error) {
-	stats, _ := k.store.ReadStats(ctx, a.ID)
-	if stats == nil {
-		stats = &Stats{ActionID: a.ID}
-	}
 	m := &ActionManifest{
 		ActionID:     a.ID,
 		OwnerID:      owner.ID,
@@ -2318,9 +2597,8 @@ func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (
 		OutputSchema: a.OutputSchema,
 		Price:        a.Price,
 		Kind:         a.Kind,
-		ArtifactHash: a.ArtifactHash,
+		ArtifactHash: k.implementationHash(a),
 		UpdatedAt:    a.UpdatedAt,
-		Stats:        stats,
 	}
 	sig, err := k.cfg.Network.SignManifest(k.cfg.SigningKey, m)
 	if err != nil {
@@ -2359,9 +2637,10 @@ func (n Network) VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) er
 	if err != nil {
 		return err
 	}
-	if m.Price < 0 || m.RemoteBPS < 0 || m.RemoteBPS > 10000 {
-		return ErrInvalidInput.Wrapf("manifest price %d / remote_bps %d out of range", m.Price, m.RemoteBPS)
-	}
+	// Only the signature, and nothing else: whether a peer signed what it sent is a different
+	// question from whether what it sent is a price this kernel can represent. Conflating them
+	// makes an unrepresentable offer look like fraud, and fraud look like an odd price. The range
+	// is checked where a price becomes a number (markUp).
 	cp := *m
 	cp.Signature = ""
 	if err := n.verify(pub, sigDomainManifest, cp, m.Signature); err != nil {

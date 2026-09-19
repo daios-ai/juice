@@ -267,7 +267,7 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	if err != nil {
 		// Provably-never-sent (resolve/connect failed) → NotDispatched, so a first dispatch may
 		// fail fast (§13). Any other transport error stays pending: the request may have executed
-		// remotely, so only a signed receipt (or the max-age bound) may settle it.
+		// remotely, so only a signed receipt may settle it.
 		return kernel.FederationResult{NotDispatched: errors.Is(err, fed.ErrNotDispatched)}, nil
 	}
 	var envelope struct {

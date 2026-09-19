@@ -100,6 +100,9 @@ type actionResp struct {
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
 	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
 	QuoteHash     string    `json:"quote_hash"`            // the terms a caller may pin on a run (§4 precondition 7)
+	// Evidence is what this kernel holds about the action's conduct, on the detail read. Present
+	// for every action, local or remote: the subject is whoever runs it (§13, U39).
+	Evidence *kernel.ActionRecord `json:"evidence,omitempty"`
 }
 
 // httpView is the read-side decomposition of an action's HTTPSource. It carries
@@ -668,12 +671,21 @@ func createAction(k *kernel.Kernel, ctx context.Context, callerID string, req ke
 	return enrichAction(k, full, newAccountCache(k, ctx)), nil
 }
 
+// detailRead is one action read in full: the row, its display fields, and the record this kernel
+// holds about how it has behaved. Every path that reads ONE action goes through here — by id or by
+// reference, local or remote — so no reader is shown a different action than another (U39).
+func detailRead(k *kernel.Kernel, ctx context.Context, a *kernel.Action) actionResp {
+	resp := enrichAction(k, a, newAccountCache(k, ctx))
+	resp.Evidence = k.ActionRecord(ctx, a)
+	return resp
+}
+
 func getAction(k *kernel.Kernel, ctx context.Context, callerID, id string) (actionResp, error) {
 	a, err := k.ReadActionForSubject(ctx, callerID, id)
 	if err != nil {
 		return actionResp{}, err
 	}
-	return enrichAction(k, a, newAccountCache(k, ctx)), nil
+	return detailRead(k, ctx, a), nil
 }
 
 // resolveActionRef answers the listing endpoint's reference mode: one reference resolved by the
@@ -695,7 +707,7 @@ func resolveActionRef(k *kernel.Kernel, ctx context.Context, callerID, ref strin
 		}
 		return nil, err
 	}
-	return summaries([]actionResp{enrichAction(k, a, newAccountCache(k, ctx))}), nil
+	return summaries([]actionResp{detailRead(k, ctx, a)}), nil
 }
 
 // enrichActions projects the rows one mutation touched, in the order they were written.

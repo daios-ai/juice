@@ -574,13 +574,21 @@ var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unre
 
 // owedSelect is the projection, from the peer's name for the call to the reveal on its trace. The
 // obligation is what the receipt charged plus the markup, so it is zero until the call commits.
-const owedSelect = `SELECT k.idempotency_key, k.counterparty_user_id, t.action_owner_id, t.id,
+// The obligation is named by the call it answers, which admission froze on the trace along with
+// the rest of what the call was sold under (D19). Reading it from there rather than from the
+// execution lock is what lets the lock be released the moment the call commits: an obligation
+// outlives the work, and a lock does not (P4, P10).
+const owedSelect = `SELECT json_extract(t.dispatch_json,'$.idempotency_key'), t.caller_user_id,
+       t.action_owner_id, t.id,
        t.dispatch_json, x.id IS NOT NULL, COALESCE(r.charge + r.premium, 0),
        t.owed_status, t.owed_amount, t.owed_tx_hash, t.owed_rail_address, t.created_at
-  FROM idempotency_records k
-  JOIN traces t ON t.idempotency_record_id = k.id
+  FROM traces t
   LEFT JOIN transactions x ON x.trace_id = t.id
   LEFT JOIN receipts r ON r.trace_id = t.id`
+
+// owedIsAdmitted selects the traces that are obligations at all: an inbound call this kernel
+// admitted, which is exactly a trace carrying a frozen request.
+const owedIsAdmitted = `COALESCE(json_extract(t.dispatch_json,'$.idempotency_key'),'') <> ''`
 
 func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 	var o kernel.Owed
@@ -597,7 +605,7 @@ func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 
 func (s *DB) ReadOwed(ctx context.Context, id, peerUserID string) (*kernel.Owed, error) {
 	o, err := scanOwed(s.db.QueryRowContext(ctx,
-		owedSelect+` WHERE k.idempotency_key=? AND k.counterparty_user_id=?`, id, peerUserID).Scan)
+		owedSelect+` WHERE `+owedIsAdmitted+` AND json_extract(t.dispatch_json,'$.idempotency_key')=? AND t.caller_user_id=?`, id, peerUserID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -769,11 +777,53 @@ func (s *DB) ListOwed(ctx context.Context, limit int) ([]*kernel.Owed, error) {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		owedSelect+` WHERE `+unresolved("t", "x", "r")+` ORDER BY t.created_at LIMIT ?`, limit)
+		owedSelect+` WHERE `+owedIsAdmitted+` AND `+unresolved("t", "x", "r")+` ORDER BY t.created_at LIMIT ?`, limit)
 	if err != nil {
 		return nil, dbErr(err, "list what is owed")
 	}
 	return queryList(rows, "list what is owed", scanOwed)
+}
+
+// PeersWithUnresolvedMoney is every peer some money is waiting on, in either direction, as keys
+// alone: one that owes this kernel for work delivered, one that has not heard how a draw it is
+// owed came out, and one holding a call of ours whose answer decides a reserve. The scheduler
+// needs identities, not the financial records behind them, so this is one distinct-key query
+// rather than three paged listings and a read per row — and being unpaged, it cannot silently
+// omit the peer whose obligation happens to sort hundred-and-first (§13, P10).
+func (s *DB) PeersWithUnresolvedMoney(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT key FROM (
+  -- a peer that owes us for work we delivered
+  SELECT COALESCE(a.kernel_public_key,'') AS key
+    FROM traces t
+    JOIN accounts a ON a.id = t.caller_user_id
+    LEFT JOIN transactions x ON x.trace_id = t.id
+    LEFT JOIN receipts r ON r.trace_id = t.id
+   WHERE `+owedIsAdmitted+` AND `+unresolved("t", "x", "r")+`
+  UNION
+  -- a peer that has not heard how a draw it is owed came out
+  SELECT COALESCE(a.kernel_public_key,'')
+    FROM traces t
+    JOIN transactions x ON x.trace_id = t.id
+    JOIN accounts a ON a.id = x.target_user_id
+   WHERE t.revealed = 0 AND t.idempotency_key IS NOT NULL AND x.net > 0
+  UNION
+  -- a peer holding a call of ours whose answer decides money already reserved
+  SELECT COALESCE(ow.kernel_public_key,'')
+    FROM traces t
+    JOIN actions act ON act.id = t.action_id
+    LEFT JOIN accounts ow ON ow.id = act.owner_user_id
+   WHERE t.idempotency_key IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM transactions x2 WHERE x2.trace_id = t.id)
+) WHERE key <> ''`)
+	if err != nil {
+		return nil, dbErr(err, "list peers money is waiting on")
+	}
+	return queryList(rows, "list peers money is waiting on", func(scan func(...any) error) (string, error) {
+		var key string
+		err := scan(&key)
+		return key, err
+	})
 }
 
 func (s *DB) Exposure(ctx context.Context) (int64, error) {
@@ -805,7 +855,7 @@ func (s *DB) ListPendingReveals(ctx context.Context, limit int) ([]*kernel.Pendi
 		  WHERE t.revealed = 0 AND t.idempotency_key IS NOT NULL
 		    AND a.kernel_public_key IS NOT NULL AND x.net > 0
 		    AND (p.id IS NULL OR p.status = 'confirmed')
-		  ORDER BY t.created_at LIMIT ?`, limit)
+		  ORDER BY COALESCE(t.reveal_failed_at,'') ASC, t.created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, dbErr(err, "list pending reveals")
 	}
@@ -820,6 +870,14 @@ func (s *DB) ListPendingReveals(ctx context.Context, limit int) ([]*kernel.Pendi
 		}
 		return &d, nil
 	})
+}
+
+// MarkRevealFailed records that this reveal could not be delivered, which moves it behind every
+// reveal not yet tried. Order alone rotates the queue: no attempt counter, no backoff state, and a
+// peer that comes back is reached on the next pass like any other (P10).
+func (s *DB) MarkRevealFailed(ctx context.Context, traceID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE traces SET reveal_failed_at=? WHERE id=?`, timeToStr(at), traceID)
+	return dbErr(err, "mark reveal failed")
 }
 
 // MarkRevealed records that the seller has acknowledged how the draw came out, so the worker stops

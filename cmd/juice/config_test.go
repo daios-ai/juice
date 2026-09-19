@@ -289,8 +289,8 @@ func TestEconomyDefaultsAndIndependence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if econ.Lottery != 1_000_000 || econ.LotteryMax != 5_000_000 || econ.CreditLimit != 500_000_000 {
-		t.Errorf("unset money keys gave %d/%d/%d, want 1000000/5000000/500000000",
+	if econ.Lottery != 1_000_000 || econ.LotteryMax != 5_000_000 || econ.CreditLimit != 50_000_000 {
+		t.Errorf("unset money keys gave %d/%d/%d, want 1000000/5000000/50000000",
 			econ.Lottery, econ.LotteryMax, econ.CreditLimit)
 	}
 	zero := int64(0)
@@ -305,7 +305,7 @@ func TestEconomyDefaultsAndIndependence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
-		if got.CreditLimit != 500_000_000 {
+		if got.CreditLimit != 50_000_000 {
 			t.Errorf("%s moved the credit limit to %d", c.name, got.CreditLimit)
 		}
 	}

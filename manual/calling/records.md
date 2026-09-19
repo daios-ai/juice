@@ -114,7 +114,9 @@ $ juice tx verify 6cd9f6b6-…
     "args_hash": true,
     "charge": true,
     "charge_ceiling": true,
+    "counterparty": true,
     "draw": true,
+    "idempotency_key": true,
     "premium": true,
     "receipt_hash": true,
     "refund_conservation": true,
@@ -126,10 +128,14 @@ $ juice tx verify 6cd9f6b6-…
 ```
 
 Remote verification checks the receipt against the dispatched terms, including
-the charge ceiling, markup, import fee, and refund. It also checks that the
+the buyer and request identity, charge ceiling, markup, import fee, and refund.
+It also checks that the
 ticket's payment agrees with the recorded draw. A signature that is invalid
 under your kernel's network remains invalid; verification does not replace it
 with a new signature.
+
+A receipt signed before buyer and request binding was introduced reports
+`unbound: true`; that alone does not make its signature invalid.
 
 ## Rating
 

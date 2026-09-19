@@ -519,9 +519,6 @@ func (k *Kernel) RailPass(ctx context.Context) {
 	}
 	k.scanRailDeposits(ctx)
 	k.reconcileDeposits(ctx)
-	// A reveal the peer never acknowledged is simply sent again from the row it is recorded on: a
-	// losing draw the seller never heard about would leave it owed forever (P10).
-	k.RevealPending(ctx)
 
 	rep, err := k.railReport(ctx)
 	if err != nil {

@@ -206,9 +206,15 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 		return nil, 0, kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	// One byte past the bound is enough to know the reply is over it. Truncating instead would
+	// hand the caller a mangled document and charge for it; the bound is the same one every reply
+	// is held to, wherever it came from (D12).
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, kernel.MaxReplyBytes+1))
 	if err != nil {
 		return nil, resp.StatusCode, kernel.ErrExecutionFailed.Wrap("could not read response body")
+	}
+	if len(respBody) > kernel.MaxReplyBytes {
+		return nil, resp.StatusCode, kernel.ErrExecutionFailed.Wrapf("the upstream reply exceeds the %d MiB an action may return", kernel.MaxReplyBytes>>20)
 	}
 	return respBody, resp.StatusCode, nil
 }
@@ -254,9 +260,12 @@ func (e *httpActionExecutor) fetchWeb(ctx context.Context, rawURL, userAgent str
 		return 0, nil, "", "", kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, kernel.MaxReplyBytes+1))
 	if err != nil {
 		return resp.StatusCode, nil, "", "", kernel.ErrExecutionFailed.Wrap("could not read response body")
+	}
+	if len(body) > kernel.MaxReplyBytes {
+		return resp.StatusCode, nil, "", "", kernel.ErrExecutionFailed.Wrapf("the upstream reply exceeds the %d MiB an action may return", kernel.MaxReplyBytes>>20)
 	}
 	finalURL := rawURL
 	if resp.Request != nil && resp.Request.URL != nil {

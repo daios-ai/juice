@@ -401,17 +401,11 @@ func (f *faultStore) CommitCall(ctx context.Context, tx *kernel.Transaction, rec
 func (f *faultStore) CommitFailedCall(ctx context.Context, tx *kernel.Transaction,
 	buildReceipt func(refund int64) (*kernel.Receipt, error),
 	traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64,
-	stats *kernel.Stats, idempotencyRecordID, errorCode, stepID string) error {
+	stats *kernel.Stats, idempotencyRecordID, stepID string) error {
 
 	return f.fault("CommitFailedCall", func() error {
 		return f.Store.CommitFailedCall(ctx, tx, buildReceipt, traceID, callerWalletID,
-			callerWalletKind, feeRecipientID, gross, stats, idempotencyRecordID, errorCode, stepID)
-	})
-}
-
-func (f *faultStore) CompleteIdempotencyRecordIfPending(ctx context.Context, id, result, receiptJSON string) error {
-	return f.fault("CompleteIdempotencyRecordIfPending", func() error {
-		return f.Store.CompleteIdempotencyRecordIfPending(ctx, id, result, receiptJSON)
+			callerWalletKind, feeRecipientID, gross, stats, idempotencyRecordID, stepID)
 	})
 }
 
@@ -429,7 +423,6 @@ type simConfig struct {
 	CreditLimit   int64
 	Lottery       int64
 	LotteryMax    int64
-	PendingMaxAge time.Duration
 	PeerRetention time.Duration
 }
 
@@ -455,9 +448,6 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	econ.FeeBPS, econ.RemoteBPS, econ.ImportBPS = sc.FeeBPS, sc.RemoteBPS, sc.ImportBPS
 	econ.CreditLimit = sc.CreditLimit
 	econ.Lottery, econ.LotteryMax = sc.Lottery, sc.LotteryMax
-	if sc.PendingMaxAge > 0 {
-		cfg.RemotePendingMaxAge = sc.PendingMaxAge
-	}
 	if sc.PeerRetention > 0 {
 		cfg.PeerRetention = sc.PeerRetention
 	}
@@ -495,7 +485,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 		k:        k,
 		db:       db,
 		faults:   base,
-		h:        &fedHandlers{kernel: k, log: log.Discard(), callLimiter: newKeyLimiter(10000, 10000)},
+		h:        &fedHandlers{kernel: k, log: log.Discard(), callLimiter: newKeyLimiter(context.Background(), 10000, 10000)},
 		adapter:  adapter,
 		sysID:    sys.ID,
 		issuerID: sys.ID,
@@ -532,7 +522,7 @@ func (s *simNode) restart(t *testing.T) {
 	k.SetFederation(adapter)
 
 	s.k, s.adapter = k, adapter
-	s.h = &fedHandlers{kernel: k, log: log.Discard(), callLimiter: newKeyLimiter(10000, 10000)}
+	s.h = &fedHandlers{kernel: k, log: log.Discard(), callLimiter: newKeyLimiter(context.Background(), 10000, 10000)}
 
 	if err := k.Recover(ctx); err != nil {
 		t.Fatalf("%s: recover: %v", s.name, err)
@@ -627,9 +617,13 @@ func (s *simNode) owedBy(t *testing.T, peerKey string) *kernel.Owed {
 	if err != nil || acct == nil {
 		return nil
 	}
+	// The obligation is named by the call the seller admitted, which lives on that call's trace —
+	// the execution lock is long gone by the time the money is owed (P4, P10).
 	var id string
 	if err := s.db.QueryRowForTest(ctx,
-		`SELECT idempotency_key FROM idempotency_records WHERE counterparty_user_id=? LIMIT 1`, acct.ID, &id); err != nil || id == "" {
+		`SELECT json_extract(dispatch_json,'$.idempotency_key') FROM traces
+		  WHERE caller_user_id=? AND COALESCE(json_extract(dispatch_json,'$.idempotency_key'),'') <> '' LIMIT 1`,
+		acct.ID, &id); err != nil || id == "" {
 		return nil
 	}
 	r, _ := s.db.ReadOwed(ctx, id, acct.ID)
@@ -1028,55 +1022,6 @@ func TestSimCommitLandsAcknowledgementLostSettlesOnRetry(t *testing.T) {
 // Scenario: a call cannot stay parked forever
 // ---------------------------------------------------------------------------
 
-// TestSimPendingCallExpiresIntoRefund is the bound that makes parking safe to promise. A call whose
-// receipt never arrives is not immortal: past RemotePendingMaxAge it settles locally as a failure
-// with the allocation returned. Reached here by configuring the bound to a nanosecond, the same way
-// kernel/federation_test.go:768 reaches it — no clock injection.
-func TestSimPendingCallExpiresIntoRefund(t *testing.T) {
-	net := newSimNet(t)
-	seller := net.addNode("seller", defaultSimConfig())
-	buyCfg := defaultSimConfig()
-	buyCfg.PendingMaxAge = time.Nanosecond
-	buyer := net.addNode("buyer", buyCfg)
-
-	cara := seller.user(t, "cara", sellerCapital)
-	seller.publish(t, cara, "quote", 25)
-	dan := buyer.user(t, "dan", 1000)
-	ref := remoteRef(seller, "cara", "quote")
-
-	if _, err := buyer.run(t, dan.ID, ref); err != nil {
-		net.dump()
-		t.Fatalf("warm-up run: %v", err)
-	}
-	before := buyer.balance(t, dan.ID)
-
-	// Park a call, then cut the link so no receipt can ever arrive.
-	net.arm(buyer.key, seller.key, verbCall, faultLoseResponse, 1)
-	if _, err := buyer.run(t, dan.ID, ref); err == nil {
-		net.dump()
-		t.Fatal("lost reply reported success")
-	}
-	net.cut(buyer.key, seller.key)
-	buyer.k.RetryPendingRemoteDispatches(context.Background())
-
-	if got := buyer.pendingRemote(t); got != 0 {
-		net.dump()
-		t.Errorf("%d calls still parked past the max age; the bound must settle them", got)
-	}
-	if got := buyer.balance(t, dan.ID); got != before {
-		net.dump()
-		t.Errorf("balance %d after the expiry refund, want %d returned in full", got, before)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Scenario: extra identities buy no extra credit
-// ---------------------------------------------------------------------------
-
-// TestSimSybilIdentitiesShareOneCap is U32 at the network level: the cap is global, so three
-// separate kernels calling the same provider on credit get, between them, exactly what one would
-// get. The atomicity of a single admission is asserted separately and at the right layer, beside
-// BeginRun in store/sqlite_test.go; this is the statement about identities.
 func TestSimSybilIdentitiesShareOneCap(t *testing.T) {
 	net := newSimNet(t)
 	sellCfg := defaultSimConfig()
@@ -1323,7 +1268,9 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 			// draw decided, and the exposure the delivery created discharged by that cash and by
 			// nothing else.
 			providerBefore, exposureBefore := seller.balance(t, cara.ID), seller.exposure(t)
+			// The rail drives the payment to final; telling the seller is its own pass (P10).
 			buyer.k.RailPass(context.Background())
+			buyer.k.RevealPending(context.Background())
 			closed := seller.owedBy(t, buyer.key)
 			if closed == nil {
 				net.dump()

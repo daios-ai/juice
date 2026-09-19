@@ -151,6 +151,14 @@ rows = json.loads(sys.argv[1] or '[]')
 print(sum(1 for p in rows if p.get('awaiting_receipt')))" "$(jj "$1" "$2" process list --limit 50)"
 }
 
+# awaiting_process db home — the id of a process whose call is waiting on a peer's answer, if any.
+awaiting_process() {
+    python3 -c "
+import sys, json
+rows = json.loads(sys.argv[1] or '[]')
+print(next((p['id'] for p in rows if p.get('awaiting_receipt')), ''))" "$(jj "$1" "$2" process list --limit 50)"
+}
+
 # ledger_in db home tx — what this login's account received, by the postings naming that
 # transaction. The ledger is where money between accounts is recorded, so this is what a party
 # reads rather than a balance difference (D4).
@@ -351,6 +359,15 @@ assert_fails() {
 # ---------------------------------------------------------------------------
 strfield() { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 numfield() { python3 -c "import sys,json; print(int(json.loads(sys.argv[1]).get(sys.argv[2],0)))" "$1" "$2" 2>/dev/null; }
+# dotfield json path — a nested field named by a dotted path (`evidence.local_experience.uses`).
+dotfield() { python3 -c "
+import sys,json
+v=json.loads(sys.argv[1])
+for k in sys.argv[2].split('.'):
+    v=(v or {}).get(k)
+print('' if v is None else v)" "$1" "$2" 2>/dev/null; }
+assert_jdot() { assert_eq "$1" "$4" "$(dotfield "$2" "$3")"; }
+
 # rowfield json list field — a field of the first row of a named list inside a JSON object.
 rowfield() { python3 -c "
 import sys,json

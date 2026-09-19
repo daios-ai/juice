@@ -1409,7 +1409,7 @@ type failingCommitFailedCallStore struct {
 	kernel.Store
 }
 
-func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ func(int64) (*kernel.Receipt, error), _, _, _, _ string, _ int64, _ *kernel.Stats, _, _, _ string) error {
+func (f *failingCommitFailedCallStore) CommitFailedCall(_ context.Context, _ *kernel.Transaction, _ func(int64) (*kernel.Receipt, error), _, _, _, _ string, _ int64, _ *kernel.Stats, _, _ string) error {
 	return kernel.ErrInternal.Wrap("injected CommitFailedCall failure")
 }
 
@@ -1837,7 +1837,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	exec := &subcallThenFailExec{targetUser: provider.ID, targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
-	reply, err := k.RunFederated(ctx, caller.ID, owner.ID, "outer", map[string]any{}, "", kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, caller.ID, mustResolve(t, k, ctx, owner.ID, "outer"), map[string]any{}, "", kernel.BuyerTerms{})
 	if err == nil {
 		t.Fatal("expected outer call to fail")
 	}
@@ -2529,4 +2529,49 @@ func TestSettlementPostsToLedger(t *testing.T) {
 
 	// The whole point of posting every movement: each account holds what its own postings say.
 	assertLedgerExplainsBalances(t, st, buyer.ID, seller.ID, testIssuerUserID)
+}
+
+// One bound on every path (D12): a reply too large to carry across a federation frame is refused
+// before anything commits, so the seller is never paid for work no buyer can receive, and the
+// caller is refunded like any other output failure. The check is on the size, before the shape:
+// a reply that cannot be delivered is not worth validating.
+func TestAnOversizedReplyIsRefusedBeforeAnythingCommits(t *testing.T) {
+	st := newTestStore(t)
+	// A reply just over the bound, and otherwise exactly what the contract asks for.
+	big := fmt.Sprintf(`{"result":%q}`, strings.Repeat("x", kernel.MaxReplyBytes))
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: big})
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "alice", 1000)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "verbose", Kind: kernel.KindWasm,
+		Active: true, Price: 50,
+		OutputSchema: map[string]any{
+			"type": "object", "required": []any{"result"},
+			"properties": map[string]any{"result": map[string]any{"type": "string"}},
+		},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	_, tr := beginTestRun(t, st, alice.ID, a)
+
+	_, err := k.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: alice.ID, ExistingTraceID: tr.ID,
+		TargetUserID: alice.ID, ActionName: "verbose", Args: map[string]any{},
+	})
+	if !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("an oversized reply = %v, want ErrExecutionFailed", err)
+	}
+	after, _ := st.ReadUser(ctx, alice.ID)
+	if after.Available != 1000 || after.Locked != 0 {
+		t.Errorf("after the refusal: available=%d locked=%d, want the caller whole", after.Available, after.Locked)
+	}
+	txs, _ := st.ListTransactions(ctx, kernel.TxFilter{PartyUserID: alice.ID})
+	for _, tx := range txs {
+		if tx.Status == kernel.TxSuccess {
+			t.Errorf("a reply nobody can receive settled as a success: %s", tx.ID)
+		}
+	}
 }

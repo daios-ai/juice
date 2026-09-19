@@ -553,12 +553,13 @@ func admitFrom(t *testing.T, db *DB, seller, peer *kernel.Account, id, payer str
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peer.ID,
-		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
-	if err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peer.ID, CreatedAt: now}
+	if _, err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	terms := fmt.Sprintf(`{"reserve":%d,"nonce":"0a0b","commitment":"cm","lottery":1000}`, dmax)
+	// Admission freezes the request the call answers alongside its terms, which is where the
+	// obligation takes its name from (D19, P10).
+	terms := fmt.Sprintf(`{"reserve":%d,"nonce":"0a0b","commitment":"cm","lottery":1000,"idempotency_key":%q,"counterparty":"peer-key"}`, dmax, id)
 	p := newProcess(seller.ID)
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: seller.ID, ActionID: "a",
 		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, DispatchJSON: &terms, OwedRailAddress: payer, CreatedAt: now}
@@ -981,7 +982,15 @@ func pendingIDs(t *testing.T, db *DB) map[string]bool {
 // old-world state a test wants to strand, and returns its path for Open to try to upgrade.
 func preTicketDB(t *testing.T, seed func(*sql.DB)) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "pre049.db")
+	return dbBeforeMigration(t, "049", seed)
+}
+
+// dbBeforeMigration builds a database with every migration below version applied, seeds the state
+// a test wants that migration to find, and returns its path for Open to upgrade. One account and
+// one kernel exist, because almost everything references them.
+func dbBeforeMigration(t *testing.T, version string, seed func(*sql.DB)) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pre"+version+".db")
 	raw := rawDB(t, path)
 	if _, err := raw.Exec(createSchemaMigrations); err != nil {
 		t.Fatal(err)
@@ -991,8 +1000,8 @@ func preTicketDB(t *testing.T, seed func(*sql.DB)) string {
 		t.Fatal(err)
 	}
 	for _, file := range files {
-		version := strings.TrimSuffix(pathpkg.Base(file), ".sql")
-		if version >= "049" {
+		v := strings.TrimSuffix(pathpkg.Base(file), ".sql")
+		if v >= version {
 			break
 		}
 		body, err := migrationFS.ReadFile(file)
@@ -1001,11 +1010,11 @@ func preTicketDB(t *testing.T, seed func(*sql.DB)) string {
 		}
 		for _, stmt := range splitSQLStatements(string(body)) {
 			if _, err := raw.Exec(stmt); err != nil {
-				t.Fatalf("%s: %v", version, err)
+				t.Fatalf("%s: %v", v, err)
 			}
 		}
 		if _, err := raw.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
-			version, timeToStr(time.Now().UTC())); err != nil {
+			v, timeToStr(time.Now().UTC())); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1263,5 +1272,80 @@ func TestOneObligationTakesOnePaymentAndReservedMoneyIsNotHandedOut(t *testing.T
 	}
 	if a, _ := balances(t, db, collider.ID); a != 40 {
 		t.Errorf("the local user has %d, want the unclaimed 40", a)
+	}
+}
+
+// Reveals rotate: one the seller keeps refusing must not sit at the head of the queue forever and
+// starve the ones behind it. Never-failed calls go first, then the least recently failed, so every
+// obligation gets its turn (P10, C8).
+func TestAFailedRevealGoesBehindTheOnesThatHaveNotBeenTried(t *testing.T) {
+	db, sys, buyer := railFixture(t)
+	ctx := context.Background()
+	peer := newPeer(t, db, "rot-peer", "krotAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 0, 0, time.Now().UTC())
+	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:in:rot", "0xbuyer", 500), buyer); err != nil {
+		t.Fatal(err)
+	}
+	// The oldest call is the one the seller keeps refusing.
+	stubborn := boughtCall(t, db, buyer, peer.ID, "rot-stubborn", 11)
+	fresh := boughtCall(t, db, buyer, peer.ID, "rot-fresh", 11)
+
+	order := func() []string {
+		rows, err := db.ListPendingReveals(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range rows {
+			out = append(out, r.TraceID)
+		}
+		return out
+	}
+	if got := order(); len(got) != 2 || got[0] != stubborn {
+		t.Fatalf("before anything failed the oldest goes first, got %v", got)
+	}
+	if err := db.MarkRevealFailed(ctx, stubborn, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if got := order(); len(got) != 2 || got[0] != fresh || got[1] != stubborn {
+		t.Errorf("after a failure the order is %v, want the untried call first", got)
+	}
+	// And between two that have both failed, the one waiting longest goes first.
+	if err := db.MarkRevealFailed(ctx, fresh, time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := order(); len(got) != 2 || got[0] != stubborn || got[1] != fresh {
+		t.Errorf("between two failed reveals the order is %v, want the least recently tried first", got)
+	}
+}
+
+// Every peer money waits on, not the first page of them. The scheduler asks for identities, so
+// the answer is keys and the question is unpaged: a kernel with a hundred unresolved obligations
+// to one peer must still name the peer behind the hundred-and-first (§13, P10).
+func TestEveryPeerMoneyWaitsOnIsNamed(t *testing.T) {
+	db, sys, seller, peer := owedFixture(t)
+	ctx := context.Background()
+	for i := 0; i < 101; i++ {
+		call := admit(t, db, seller, peer, fmt.Sprintf("crowd-%03d", i), 40, 100000)
+		settle(t, db, seller, call, 40)
+	}
+	// One more obligation, from a different peer, behind all of those.
+	late := newPeer(t, db, "late-peer", "klateAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 0, 0, time.Now().UTC())
+	tail := admit(t, db, seller, late, "crowd-late", 40, 100000)
+	settle(t, db, seller, tail, 40)
+	_ = sys
+
+	keys, err := db.PeersWithUnresolvedMoney(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := map[string]bool{}
+	for _, k := range keys {
+		named[k] = true
+	}
+	if !named[peer.KernelPublicKey] {
+		t.Errorf("the peer with the crowd of obligations was not named: %v", keys)
+	}
+	if !named[late.KernelPublicKey] {
+		t.Errorf("the peer behind the first hundred obligations was not named: %v", keys)
 	}
 }

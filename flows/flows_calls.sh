@@ -159,7 +159,7 @@ flow_terms_changed_refused() {
     make_admin "$db" "$hs" || { fail "terms.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
-    deposit "$db" "$hs" bob 1000
+    deposit "$db" "$hs" bob 3000
 
     local aid; aid=$(publish "$db" "$ha" svc --kind http --source "http://127.0.0.1:${bport}/x" --price "$(units 100)" --description "quoted")
     local quoted; quoted=$(strfield "$(jj "$db" "$hb" action show alice/svc)" quote_hash)
@@ -175,10 +175,14 @@ flow_terms_changed_refused() {
     assert_fails "terms.stale_pin_refused" "" -- j "$db" "$hb" run alice/svc '{}' --quote-hash "$quoted"
     assert_jnum "terms.no_charge" "$(jj "$db" "$hb" user me)" available "$bal"
 
-    # Re-read and accept the new terms; an unpinned run was never affected.
+    # Re-read and accept the new terms. An ordinary run reads the action itself and pins what it
+    # read, so it goes through at the price it just showed — there is no unpinned run.
     local fresh; fresh=$(strfield "$(jj "$db" "$hb" action show alice/svc)" quote_hash)
     assert_ne "terms.hash_moved" "$quoted" "$fresh"
     assert_nonempty "terms.retry_after_reread" "$(strfield "$(jj "$db" "$hb" run alice/svc '{}' --quote-hash "$fresh")" tx_id)"
+    assert_nonempty "terms.plain_run_pins_what_it_read" "$(strfield "$(jj "$db" "$hb" run alice/svc '{}')" tx_id)"
+    # The price a run shows goes to stderr, so stdout stays the result alone.
+    assert_eq "terms.price_not_on_stdout" "" "$(q "$db" "$hb" run alice/svc '{}' | grep -i 'price' || true)"
 }
 
 flow_input_schema_failure() {

@@ -29,31 +29,67 @@ type fedHandlers struct {
 	callLimiter *keyLimiter // per-peer inbound call rate limit (§13; known-peer-bounded)
 }
 
-// keyLimiter is a per-key token-bucket rate limiter. Keyed by peer public key on the federation
-// call path — inbound calls are permissionless, so any signed key can call (§13); the distinct-key
-// set is therefore bounded by the transport's Sybil caps (per-source/per-peer/global, §13), not by
-// peering. Complements those transport frame/deadline caps and the economic (prepaid-balance)
-// backstop with a per-key call-rate ceiling.
+// keyLimiter is a per-key token-bucket rate limiter, used by every surface that admits work from
+// a key it did not choose: inbound federation streams, keyed by peer public key, and the client
+// API, keyed by client address. Keys are free to mint, so the map is swept: an entry unused for
+// its idle window is dropped, and the set of live entries is bounded by traffic rather than by
+// everyone who has ever connected (D12).
 type keyLimiter struct {
 	mu      sync.Mutex
-	entries map[string]*rate.Limiter
+	entries map[string]*limiterEntry
 	rate    rate.Limit
 	burst   int
 }
 
-func newKeyLimiter(ratePerSec float64, burst int) *keyLimiter {
-	return &keyLimiter{entries: map[string]*rate.Limiter{}, rate: rate.Limit(ratePerSec), burst: burst}
+type limiterEntry struct {
+	lim      *rate.Limiter
+	lastSeen time.Time
+}
+
+const limiterIdleWindow = 5 * time.Minute
+
+// newKeyLimiter starts a limiter and its sweeper, which runs until ctx ends.
+func newKeyLimiter(ctx context.Context, ratePerSec float64, burst int) *keyLimiter {
+	kl := &keyLimiter{entries: map[string]*limiterEntry{}, rate: rate.Limit(ratePerSec), burst: burst}
+	go kl.sweep(ctx)
+	return kl
+}
+
+func (kl *keyLimiter) sweep(ctx context.Context) {
+	ticker := time.NewTicker(limiterIdleWindow)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			kl.evictIdle(now.Add(-limiterIdleWindow))
+		}
+	}
+}
+
+// evictIdle drops the buckets of keys unheard from since cutoff. Without it the map is a slow leak
+// a stranger can drive: one entry per key that ever dialed, kept for the life of the process.
+func (kl *keyLimiter) evictIdle(cutoff time.Time) {
+	kl.mu.Lock()
+	defer kl.mu.Unlock()
+	for key, e := range kl.entries {
+		if e.lastSeen.Before(cutoff) {
+			delete(kl.entries, key)
+		}
+	}
 }
 
 func (kl *keyLimiter) allow(key string) bool {
 	kl.mu.Lock()
 	defer kl.mu.Unlock()
-	l, ok := kl.entries[key]
+	e, ok := kl.entries[key]
 	if !ok {
-		l = rate.NewLimiter(kl.rate, kl.burst)
-		kl.entries[key] = l
+		e = &limiterEntry{lim: rate.NewLimiter(kl.rate, kl.burst)}
+		kl.entries[key] = e
 	}
-	return l.Allow()
+	e.lastSeen = time.Now()
+	return e.lim.Allow()
 }
 
 // wireError is the one boundary shaping an error for a peer (§14): the code and its concise
@@ -81,15 +117,11 @@ func fedOK(status int, body any) fed.Response {
 	return fed.Response{Status: status, Body: b}
 }
 
-// admit is the guard every signed inbound stream shares: the payload signature already
-// authenticates the counterparty, but the Noise-authenticated connection key must also match, so a
-// validly-signed request cannot be relayed or replayed over a connection authenticated as a
-// different peer (§13). It fails open only when the transport supplied no key — the signature
-// remains the authority, and the step/call payloads bind their `recipient`, so a captured request
-// still cannot be replayed across kernels. rateLimited requests additionally consume a per-key
-// token. A nil return means the request may proceed.
+// admit is the gate every inbound stream passes: a request that claims a counterparty must be the
+// connection that key authenticated, and every request is held to the per-key rate. A request that
+// claims nobody — a read anyone may make — is still rated, by the key its connection proved.
 func (h *fedHandlers) admit(counterparty, peerKey string, rateLimited bool) *fed.Response {
-	if peerKey != "" && peerKey != counterparty {
+	if counterparty != "" && peerKey != "" && peerKey != counterparty {
 		r := fedError(kernel.ErrUnauthenticated.Wrap("counterparty does not match the authenticated connection"))
 		return &r
 	}
@@ -161,7 +193,7 @@ func (h *fedHandlers) ownKey(ctx context.Context) string {
 // draw. The connection-key check and freshness window mirror OnCall/OnStep; the kernel verifies the
 // buyer's signature, recomputes the outcome from the revealed secret, and applies it idempotently.
 func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.RevealRequest) fed.RevealResponse {
-	if rej := h.admit(req.Counterparty, peerKey, false); rej != nil {
+	if rej := h.admit(req.Counterparty, peerKey, true); rej != nil {
 		return *rej
 	}
 	if err := checkFederationTimestamp(req.Timestamp); err != nil {
@@ -181,7 +213,12 @@ func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.Reve
 // OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
 // manifest, or one user reference to its stable id+handle — the primitive that lets a caller reach a
 // remote action without prior subscription.
-func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRequest) fed.ResolveResponse {
+func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.ResolveRequest) fed.ResolveResponse {
+	// Unauthenticated in the sense that anyone may ask, but not unbounded: each answer is a store
+	// read and a fresh signature, so the asker is held to the same rate as a caller (D12).
+	if rej := h.admit("", peerKey, true); rej != nil {
+		return *rej
+	}
 	switch req.Kind {
 	case "action":
 		// The owner must be one of ours: confirming the handle locally is what stops a supplied
@@ -222,9 +259,12 @@ func (h *fedHandlers) OnResolve(ctx context.Context, _ string, req fed.ResolveRe
 }
 
 // OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
-// public key. req.Cursor resumes the evidence stream.
+// public key, which the limiter bounds; req resumes the evidence stream and the catalogue scan.
 func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
-	g, err := h.kernel.GetGossip(ctx, peerKey, req.Cursor)
+	if refused := h.admit("", peerKey, true); refused != nil {
+		return refused.Body, nil
+	}
+	g, err := h.kernel.GetGossip(ctx, kernel.GossipRequest{Cursor: req.Cursor, CatalogCursor: req.CatalogCursor})
 	if err != nil {
 		return nil, err
 	}
@@ -256,33 +296,41 @@ func checkFederationTimestamp(tsStr string) error {
 // dropping the tail: an operator must never read a capped page as "nothing is parked for you".
 const maxPeerStepPage = 200
 
-// beginIdempotency inserts the pending cross-kernel record for an inbound request, or reports the
-// prior attempt (§13). It returns the new record, or (nil, existing) when this key was already seen —
-// the two callers build their own replies from `existing`, because a completed step replay and a
-// completed call replay carry different shapes. Only a uniqueness collision counts as "seen": any
-// other store failure is a fault, and answering it as a replay would silently mis-serve the peer.
-func beginIdempotency(k *kernel.Kernel, ctx context.Context, key, counterpartyID, argsJSON string) (rec, existing *kernel.IdempotencyRecord, err error) {
-	now := time.Now().UTC()
+// servedOutcome answers a request this kernel has already served. The answer is the receipt it
+// signed for that request and the reply its transaction recorded — both permanent — so a retry
+// after a lost reply returns what the first attempt produced, for as long as the receipt exists.
+// Nothing expires it: the seller's memory of a call must outlast the buyer's patience, or a retry
+// would execute the work a second time (P4, U35).
+func servedOutcome(k *kernel.Kernel, ctx context.Context, counterparty, key string) (*kernel.Receipt, map[string]any, bool) {
+	receipt, replyJSON, err := k.ReadFederatedOutcome(ctx, counterparty, key)
+	if err != nil || receipt == nil {
+		return nil, nil, false
+	}
+	var result map[string]any
+	_ = json.Unmarshal(replyJSON, &result)
+	return receipt, result, true
+}
+
+// takeExecutionLock claims the right to execute one request. The row exists only while execution
+// may be running: the commit that writes the receipt deletes it, and every replay afterwards is
+// answered by the receipt instead. Insert-or-report is one statement, so two arrivals of one
+// request race in the store and exactly one proceeds.
+func takeExecutionLock(k *kernel.Kernel, ctx context.Context, key, counterpartyID, argsJSON string) (rec *kernel.IdempotencyRecord, inFlight bool, err error) {
 	rec = &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     key,
 		CounterpartyUserID: counterpartyID,
 		ArgsJSON:           argsJSON,
-		CreatedAt:          now,
-		ExpiresAt:          now.Add(24 * time.Hour),
+		CreatedAt:          time.Now().UTC(),
 	}
-	insertErr := k.InsertPendingIdempotencyRecord(ctx, rec)
-	if insertErr == nil {
-		return rec, nil, nil
+	held, err := k.InsertPendingIdempotencyRecord(ctx, rec)
+	if err != nil {
+		return nil, false, err
 	}
-	if !errors.Is(insertErr, kernel.ErrInvalidInput) {
-		return nil, nil, insertErr
+	if held != nil {
+		return nil, true, nil
 	}
-	prior, readErr := k.GetIdempotencyRecord(ctx, key, counterpartyID)
-	if readErr != nil {
-		return nil, nil, kernel.ErrInvalidState.Wrap("idempotency check failed")
-	}
-	return nil, prior, nil
+	return rec, false, nil
 }
 
 // handleFederationStepList returns the waiting steps whose required caller is the requesting peer
@@ -400,22 +448,22 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the step and input")
 	}
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, peer.ID, string(rawInput))
+	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
+		return replayStepOutcome(receipt, result, stepID)
+	}
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, peer.ID, string(rawInput))
 	if err != nil {
 		return 0, nil, err
 	}
-	if existing != nil {
-		if existing.Status != "complete" {
-			return duplicateInFlight()
-		}
-		return replayStepRecord(existing, stepID)
+	if inFlight {
+		return duplicateInFlight()
 	}
 
-	// Federated: the record id rides into the kernel, so whichever commit finally settles this
-	// completion — here, or later via the remote-dispatch retry loop, the max-age bound, or a
-	// forced closure — completes the record atomically with the transaction (§5, §13). The service
-	// layer therefore disposes of the record only in the cases where NO commit will ever happen.
-	reply, err := k.CompleteStepFederated(ctx, peer.ID, stepID, rawInput, rec.ID)
+	// Federated: the lock id rides into the kernel, so whichever commit finally settles this
+	// completion — here, or later via the remote-dispatch retry loop — releases the lock atomically
+	// with the transaction and the receipt that replaces it (§5, §13). The service layer therefore
+	// disposes of the lock only in the cases where NO commit will ever happen.
+	reply, err := k.CompleteStepFederated(ctx, peer.ID, stepID, rawInput, rec.ID, idempotencyKey, cpPubKey)
 	if err != nil {
 		// Disposition follows CompleteStep's outcome contract (§10) — never a re-read of the step's
 		// status, which cannot distinguish these three cases:
@@ -443,22 +491,10 @@ func handleFederationStepComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	return http.StatusOK, body, nil
 }
 
-// replayStepRecord rebuilds a completion reply from a completed idempotency record. The kernel
-// stores the two halves the same way for every commit path — result_json is the bare action result
-// (or an {error,code} body), receipt_json the signed receipt — so success is discriminated on the
-// RECEIPT's status rather than by probing the result for an "error" key, which a legitimate result
-// carrying its own "error" field would trip.
-func replayStepRecord(rec *kernel.IdempotencyRecord, stepID string) (int, map[string]any, error) {
-	var result map[string]any
-	_ = json.Unmarshal([]byte(rec.ResultJSON), &result)
-	var receipt *kernel.Receipt
-	if rec.ReceiptJSON != "" {
-		_ = json.Unmarshal([]byte(rec.ReceiptJSON), &receipt)
-	}
-	if receipt == nil {
-		// No transaction committed (a pre-execution rejection): there is nothing to point at.
-		return replayStatus(result, nil), result, nil
-	}
+// replayStepOutcome rebuilds a completion reply from the permanent pair: the signed receipt and
+// the reply its transaction recorded. Success is read off the RECEIPT, never by probing the result
+// for an "error" key, which a legitimate result carrying that field would trip.
+func replayStepOutcome(receipt *kernel.Receipt, result map[string]any, stepID string) (int, map[string]any, error) {
 	body := map[string]any{
 		"result": result, "tx_id": receipt.TxID, "trace_id": receipt.TraceID,
 		"step_id": stepID, "receipt": receipt,
@@ -507,19 +543,27 @@ func duplicateInFlight() (int, map[string]any, error) {
 	}, nil
 }
 
-// settleIdempotencyWithReceipt marks a record complete, falling back to deleting it if that write
-// fails. A record stuck pending answers every retry with 409 "duplicate in flight" forever, with
-// the money already spent and the result unreachable; deleting it instead lets a retry through to
-// an honest typed error. Neither is good, but only one is a dead end.
-func settleIdempotencyWithReceipt(k *kernel.Kernel, ctx context.Context, recID, resultJSON, receiptJSON string) {
-	if err := k.CompleteIdempotencyRecordIfPending(ctx, recID, resultJSON, receiptJSON); err != nil {
-		_ = k.DeleteIdempotencyRecord(ctx, recID)
+// signedRejection is the one way this kernel refuses an inbound call: a signed, zero-charge
+// receipt naming the request it refuses, so the buyer settles at once instead of holding its money
+// against an answer that will never come. It commits nothing and holds no lock — a refusal is
+// deterministic, so a retry recomputes it — and every refusal reads the same to a stranger, which
+// is what keeps a catalogue it cannot see from being mapped by asking (U48, P4).
+func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, counterpartyID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
+	code, msg := wireError(cause)
+	receipt, err := k.CreateSignedRejectionReceipt(counterpartyID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy)
+	if err != nil {
+		return 0, nil, cause
 	}
+	return kernel.HTTPStatus(cause), map[string]any{"error": msg, "code": code, "receipt": receipt}, nil
 }
 
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
 func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, buyer kernel.BuyerTerms, rawBody []byte) (int, map[string]any, error) {
+	// The request's own hash is over the bytes as sent (P4); a receipt's is over their canonical
+	// form (P5). Two fields, two rules, and a receipt is never hashed from wire bytes — Go escapes
+	// `<`, `>` and `&` on the way out and canonical JSON does not, so an argument containing one
+	// would hash two ways and the buyer would reject its own answer.
 	argsHash := sha256HexBytes(rawBody)
 
 	if err := checkFederationTimestamp(tsStr); err != nil {
@@ -546,102 +590,76 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		}
 	}
 
-	// The inbound wire reference is this (the serving) kernel's stable action id (§13): a handle is
-	// mutable display metadata, so naming execution by it parks a caller forever the moment it drifts.
-	// An empty or unknown id is simply an unknown action.
-	action, err := k.ReadAction(ctx, actionParam)
-	if err != nil || action == nil {
-		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
-	}
-	// A proxy is never re-served: federation is non-transitive (§8), and resolving by id would
-	// otherwise reach the cache row that the old handle lookup could not name.
-	if action.Kind == kernel.KindRemoteProxy {
-		return 0, nil, kernel.ErrNotFound.Wrapf("action %s not found", actionParam)
+	buyer.IdempotencyKey = idempotencyKey
+
+	// An answer already given is given again, before anything else is read: the receipt this
+	// kernel signed for this request, with the reply it recorded. A retry after a lost reply must
+	// never execute the work twice, and must be answered even when the action has since been
+	// deleted — which is why the outcome is looked up before the action (P4).
+	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
+		return replayStatus(result, receipt), map[string]any{"result": result, "receipt": receipt}, nil
 	}
 
 	var args map[string]any
 	if err := json.Unmarshal(rawBody, &args); err != nil {
 		return 0, nil, kernel.ErrInvalidInput.Wrap("invalid JSON")
 	}
-	// A known-but-non-executable action (inactive, non-public, suspended owner) is NOT rejected
-	// here: letting the call flow into RunFederated makes CanCall fail before any transaction, and
-	// the pre-execution branch below signs a zero-charge rejection receipt carrying action.ID — so
-	// the caller settles immediately instead of pinning funds until the 24h pending bound (§13).
-	// Only a genuinely absent/unverifiable action stays a plain error (its ID can't match the
-	// caller's stored RemoteActionID, so a receipt there would just re-pin the caller).
 
-	rec, existing, err := beginIdempotency(k, ctx, idempotencyKey, counterparty.ID, string(rawBody))
+	// The inbound wire reference is this (the serving) kernel's stable action id (§13): a handle is
+	// mutable display metadata, so naming execution by it parks a caller forever the moment it drifts.
+	// Anything this kernel does not serve abroad — absent, inactive, private, delegated-auth, or an
+	// import, federation being non-transitive (§8) — is refused with a signed rejection like every
+	// other pre-execution refusal, and with one reason for all of them: telling a stranger which of
+	// those it was would describe a catalogue it cannot see (U48). A rejection commits nothing and
+	// takes no lock, so a flood of them leaves nothing behind.
+	action, err := k.ReadAction(ctx, actionParam)
+	if err != nil || !k.ServedAbroad(action) {
+		return signedRejection(k, ctx, cpPubKey, counterparty.ID, actionParam, rawBody, idempotencyKey,
+			kernel.ErrNotFound.Wrap("action not found"), false)
+	}
+
+	// If-Match precondition (§8): the caller pins the contract hash it cached. A mismatch is
+	// refused before execution with a signed refresh_proxy rejection so the caller re-resolves.
+	if expectedContractHash != "" {
+		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
+			return signedRejection(k, ctx, cpPubKey, counterparty.ID, action.ID, rawBody, idempotencyKey,
+				kernel.ErrInvalidState.Wrap("contract changed"), true)
+		}
+	}
+
+	// The lock is taken only now, when execution may actually begin, and released by the commit
+	// that writes the receipt. Whichever commit finally settles — here, the retry loop, crash
+	// recovery — carries the record id, so the release is atomic with the outcome (§5, §13).
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, counterparty.ID, string(rawBody))
 	if err != nil {
 		return 0, nil, err
 	}
-	if existing != nil {
-		if existing.Status != "complete" {
-			return duplicateInFlight()
-		}
-		var result map[string]any
-		_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
-		var receipt *kernel.Receipt
-		if existing.ReceiptJSON != "" {
-			_ = json.Unmarshal([]byte(existing.ReceiptJSON), &receipt)
-		}
-		return replayStatus(result, receipt), map[string]any{"result": result, "receipt": receipt}, nil
+	if inFlight {
+		return duplicateInFlight()
 	}
 
-	// If-Match precondition (§8): the caller pins the contract hash it cached. If the action is
-	// servable and its current contract differs, refuse before execution with a signed refresh_proxy
-	// rejection so the caller re-resolves. A non-servable action (inactive/non-public) yields an error
-	// here and falls through to RunFederated, which signs a plain (non-refresh) rejection — re-resolving
-	// a withdrawn action would not help. Placed after the idempotency insert so a replay is idempotent.
-	if expectedContractHash != "" {
-		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
-			code := kernel.KernelErrorCode(kernel.ErrInvalidState)
-			errJSON, _ := json.Marshal(map[string]string{"error": "contract changed", "code": code})
-			if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, "contract changed", true); signErr == nil {
-				receiptJSON, _ := json.Marshal(receipt)
-				settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-				return kernel.HTTPStatusFromCode(code), map[string]any{"error": "contract changed", "code": code, "receipt": receipt}, nil
-			}
-			_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
-			return 0, nil, kernel.ErrInvalidState.Wrap("contract changed")
-		}
-	}
-
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, action.OwnerUserID, action.Name, args, rec.ID, buyer)
+	reply, callErr := k.RunFederated(ctx, counterparty.ID, action, args, rec.ID, buyer)
 	if callErr != nil {
 		wireCode, wireMsg := wireError(callErr)
-		errJSON, _ := json.Marshal(map[string]string{"error": wireMsg, "code": wireCode})
 		// A committed transaction (reply carries a receipt) means the call settled — possibly
 		// with charge > 0 from settled descendants. Return THAT receipt so the caller settles
 		// the real charge, so the two kernels agree on what was charged rather than under-paying with 0.
 		if reply != nil && reply.ReceiptID != "" {
 			receipt, _ := k.GetReceiptByID(ctx, reply.ReceiptID)
-			receiptJSON, _ := json.Marshal(receipt)
-			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
 			return kernel.HTTPStatus(callErr), map[string]any{"error": wireMsg, "code": wireCode, "receipt": receipt}, nil
 		}
 		// A parked remote dispatch has committed nothing yet and may still settle with a real
-		// charge; its own settlement completes the record (§13). Signing a zero-charge rejection
-		// here would answer the peer with an outcome that has not happened. The same holds for an
-		// outcome deferred behind a call still running beneath it (D3): its charge is not final.
+		// charge; its own settlement writes the receipt and releases the lock (§13). Signing a
+		// zero-charge rejection here would answer the peer with an outcome that has not happened.
+		// The same holds for an outcome deferred behind a call still running beneath it (D3).
 		if errors.Is(callErr, kernel.ErrTimeout) || reply.Deferred() {
 			return 0, nil, callErr
 		}
-		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): sign a
-		// zero-charge rejection receipt so the caller can settle locally without leaving the
-		// trace pending. Status and code derive from the error — HTTPStatus maps both
-		// ErrInsufficientFunds and ErrPeerUnfunded to 402, so its settleRemoteCall attributes them
-		// to the operator (settle/deposit), never to the caller's own funds (§13).
-		msg, code := wireMsg, wireCode
-		// A pre-execution rejection here (non-executable action, suspended caller, bad input, or funding)
-		// is not a contract-hash fault — re-resolving would not change the outcome — so refresh_proxy is
-		// false. Only the If-Match mismatch above sets it (§13).
-		if receipt, signErr := k.CreateSignedRejectionReceipt(counterparty.ID, action.ID, argsHash, idempotencyKey, msg, false); signErr == nil {
-			receiptJSON, _ := json.Marshal(receipt)
-			settleIdempotencyWithReceipt(k, ctx, rec.ID, string(errJSON), string(receiptJSON))
-			return kernel.HTTPStatus(callErr), map[string]any{"error": msg, "code": code, "receipt": receipt}, nil
-		}
+		// Pre-execution rejection (no transaction committed, e.g. insufficient funds): release the
+		// lock and sign a zero-charge rejection so the caller settles at once. Not a contract-hash
+		// fault — re-resolving would not change the outcome — so refresh_proxy is false.
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
-		return 0, nil, callErr
+		return signedRejection(k, ctx, cpPubKey, counterparty.ID, action.ID, rawBody, idempotencyKey, callErr, false)
 	}
 
 	var receipt *kernel.Receipt

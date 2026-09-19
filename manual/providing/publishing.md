@@ -110,9 +110,9 @@ $ juice action enable bob/echo
 ```
 
 Changing only the description resets statistics but preserves activity and
-grants. Changing visibility preserves both activity and statistics. Callers
-who pinned a previous quote must read and accept changed terms before running
-again. See
+grants. Changing visibility preserves both activity and statistics. Every `run`
+pins the terms it reads, or an earlier quote supplied by the caller. Changed
+terms are refused before charging. See
 [Pinning the terms you saw](../calling/running.html#pinning-the-terms-you-saw).
 
 ## Retiring an action

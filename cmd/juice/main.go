@@ -482,8 +482,8 @@ func remedy(err error) string {
 	// A parked call: the money is reserved, not spent, and the process is the handle to follow it by.
 	case ke.Meta["process_id"] != "":
 		id := ke.Meta["process_id"]
-		if at := ke.Meta["refund_eligible_at"]; at != "" {
-			return fmt.Sprintf("Your funds are reserved, not spent, on process %s. It retries by itself, is refundable from %s, and `juice process end %s` refunds it sooner.", id, at, id)
+		if at := ke.Meta["pending_since"]; at != "" {
+			return fmt.Sprintf("Your funds are reserved, not spent, on process %s, waiting for the peer's answer since %s. It retries by itself; follow it with: juice process show %s", id, at, id)
 		}
 		return fmt.Sprintf("Your funds are reserved, not spent, on process %s. Follow it with: juice process show %s", id, id)
 	// It ran and failed: what it drew, and where the record of it is.

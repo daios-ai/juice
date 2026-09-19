@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
@@ -92,16 +93,6 @@ func directorySelector(ref string) string {
 	return ref
 }
 
-// peerMetaHandle returns the bare peer handle a peer_unreachable/peer_unfunded error names
-// (§13), or "peer" when absent.
-func peerMetaHandle(err error) string {
-	var ke *kernel.KernelError
-	if errors.As(err, &ke) && ke.Meta["peer"] != "" {
-		return ke.Meta["peer"]
-	}
-	return "peer"
-}
-
 // interactiveTTY reports whether a human is driving: stdin readable and stderr a terminal.
 // Prompts and progress go to stderr so stdout stays payload-only (§14).
 var interactiveTTY = func() bool {
@@ -131,11 +122,30 @@ func confirm(msg string, yes bool) error {
 // this after their own check that somebody is there.
 func askYesNo(msg string) error {
 	fmt.Fprintf(os.Stderr, "%s [y/N] ", msg)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := promptLine()
 	if l := strings.ToLower(strings.TrimSpace(line)); l == "y" || l == "yes" {
 		return nil
 	}
 	return errCancelled
+}
+
+// promptLine reads one answer from whoever is at the terminal, through ONE buffered reader per
+// input. A reader built per question reads ahead and swallows the answers behind it, so a command
+// that asks twice — a price, then the authorization that price turns out to need — would see the
+// second question answered by nobody.
+var (
+	promptMu     sync.Mutex
+	promptSource *os.File
+	promptReader *bufio.Reader
+)
+
+func promptLine() (string, error) {
+	promptMu.Lock()
+	defer promptMu.Unlock()
+	if promptReader == nil || promptSource != os.Stdin {
+		promptSource, promptReader = os.Stdin, bufio.NewReader(os.Stdin)
+	}
+	return promptReader.ReadString('\n')
 }
 
 // ---- output helpers ----
@@ -833,7 +843,6 @@ func init() {
 		actionShowCmd(),
 		actionDeleteCmd(),
 		actionImportCmd(),
-		actionStatsCmd(),
 		actionRatingsCmd(),
 	)
 	rootCmd.AddCommand(actionCmd)
@@ -1174,12 +1183,120 @@ func actionShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show ACTION",
 		Short: "Show action details",
-		Long:  "Show action details.\n\n" + actionRefHelp,
-		Args:  cobra.ExactArgs(1),
+		Long: "Show action details, and what this kernel knows about how the action has behaved:\n" +
+			"its own calls, what the provider reports, and what other kernels report.\n\n" + actionRefHelp,
+		Args: cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			return cli.emitCtx(ctx, "GET", "/v1/actions/"+id, nil, output{money: moneyAction})
+			net, err := humanUnits(ctx)
+			if err != nil {
+				return err
+			}
+			return cli.emitCtx(ctx, "GET", "/v1/actions/"+id, nil, output{money: moneyAction,
+				human: func(b []byte) error { return printActionWithEvidence(b, net) }})
 		}),
 	}
+}
+
+// printEvidence writes what one subject's reporters say, kept in the two groups they belong to:
+// the subject's own account of itself, then everyone else's account of trading with it. Used by
+// `action show` for one action and by `admin peer inspect` for a whole kernel, so an operator and
+// a buyer are never shown the same trades two different ways (§13).
+func printEvidence(subjectName, subjectKey string, rows []*kernel.SubjectEvidenceRow) {
+	fmt.Printf("\nExecution reported by %s\n", subjectName)
+	own := false
+	for _, e := range rows {
+		if e.IssuerPublicKey == subjectKey {
+			own = true
+			printEvidenceRow("  ", e, false)
+		}
+	}
+	if !own {
+		fmt.Println("  (none)")
+	}
+	header := false
+	for _, e := range rows {
+		if e.IssuerPublicKey == subjectKey {
+			continue
+		}
+		if !header {
+			fmt.Printf("\nCounterparty experience\n")
+			header = true
+		}
+		printEvidenceRow("  ", e, true)
+	}
+}
+
+// printEvidenceRow writes one reporter's account. A reporter other than the subject is marked with
+// how much of its account the subject's own record confirms, and with any trade the two describe
+// differently — a claim nobody else corroborates is shown, never taken as fact (§13).
+func printEvidenceRow(indent string, e *kernel.SubjectEvidenceRow, counterparty bool) {
+	fmt.Printf("%sFrom %s on %s: %d interactions, %d successful  ~%.0fms",
+		indent, shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
+	if counterparty {
+		switch {
+		case e.Uses > 0 && e.CorroboratedUses == e.Uses:
+			fmt.Printf(" [verified]")
+		case e.CorroboratedUses > 0:
+			fmt.Printf(" [%d/%d verified]", e.CorroboratedUses, e.Uses)
+		default:
+			fmt.Printf(" [unverified]")
+		}
+	}
+	if e.RatingCount > 0 {
+		fmt.Printf("  rating %.2f", e.RatingMean)
+	}
+	if e.UnverifiedRatings > 0 {
+		fmt.Printf("  [+%d unverified rating]", e.UnverifiedRatings)
+	}
+	if e.Contradictions > 0 {
+		fmt.Printf("  [%d contradicted]", e.Contradictions)
+	}
+	if e.Equivocations > 0 {
+		fmt.Printf("  [%d told two ways]", e.Equivocations)
+	}
+	if !e.Since.IsZero() {
+		fmt.Printf("  (%s to %s)", e.Since.Format("2006-01-02"), e.Until.Format("2006-01-02"))
+	}
+	fmt.Println()
+}
+
+// printActionWithEvidence prints an action and then its record. The record is separated from the
+// contract because it is a different kind of claim: the contract is what the provider promises,
+// the record is what happened.
+func printActionWithEvidence(b []byte, net kernel.Network) error {
+	var resp struct {
+		Evidence *struct {
+			LocalExperience  *kernel.Stats                `json:"local_experience"`
+			ProviderReported *kernel.SubjectEvidenceRow   `json:"provider_reported"`
+			ObservedByOthers []*kernel.SubjectEvidenceRow `json:"observed_by_others"`
+			RetainedCap      int                          `json:"retained_cap"`
+		} `json:"evidence"`
+	}
+	_ = json.Unmarshal(b, &resp)
+	if err := printFields(b, moneyAction, net); err != nil {
+		return err
+	}
+	if resp.Evidence == nil {
+		return nil
+	}
+	if s := resp.Evidence.LocalExperience; s != nil && s.Uses > 0 {
+		fmt.Printf("\nThis kernel's own calls\n  %d calls, %d succeeded  ~%.0fms", s.Uses, s.Successes, s.LatencyEstimate*1000)
+		if s.RatingCount > 0 {
+			fmt.Printf("  rating %.2f from %d", s.RatingEstimate, s.RatingCount)
+		}
+		fmt.Println()
+	}
+	if p := resp.Evidence.ProviderReported; p != nil {
+		fmt.Printf("\nReported by the provider\n")
+		printEvidenceRow("  ", p, false)
+	}
+	if len(resp.Evidence.ObservedByOthers) > 0 {
+		fmt.Printf("\nReported by other kernels\n")
+		for _, e := range resp.Evidence.ObservedByOthers {
+			printEvidenceRow("  ", e, true)
+		}
+	}
+	return nil
 }
 
 func actionDeleteCmd() *cobra.Command {
@@ -1256,24 +1373,6 @@ func actionImportCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&authStr, "auth", "", "Upstream auth config JSON (or @file.json), applied to every operation")
 	return cmd
-}
-
-func actionStatsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stats ACTION",
-		Short: "Show an action's statistics",
-		Long:  "Show an action's statistics.\n\n" + actionRefHelp,
-		Args:  cobra.ExactArgs(1),
-		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
-			return cli.emitCtx(ctx, "GET", "/v1/stats/"+id, nil, output{human: func(b []byte) error {
-				if len(b) == 0 || string(b) == "null" {
-					fmt.Println("No statistics yet.")
-					return nil
-				}
-				return printFields(b, nil, kernel.Network{})
-			}})
-		}),
-	}
 }
 
 func actionRatingsCmd() *cobra.Command {
@@ -1615,6 +1714,7 @@ func init() {
 
 func runCmd() *cobra.Command {
 	var quoteHash string
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "run ACTION [JSON]",
 		Short: "Run an action",
@@ -1634,6 +1734,30 @@ func runCmd() *cobra.Command {
 			net, err := humanUnits(context.Background())
 			if err != nil {
 				return err
+			}
+			// A run pays the price it was shown. When the caller names no pin, the client reads the
+			// action and pins what that read returned, so terms that moved between the read and
+			// the run are refused rather than charged — the same guarantee for an action here and
+			// one on another kernel (§4 precondition 7, U8). A pin the caller supplies is sent as
+			// given: it stands for terms a person actually saw, which this read cannot replace.
+			if quoteHash == "" {
+				quoted, price, qerr := quotedTerms(context.Background(), cmdArgs[0])
+				if qerr != nil {
+					return qerr
+				}
+				quoteHash = quoted
+				// The price goes to the person, not into the result: stdout carries what the
+				// command returned and nothing else. At a terminal the person is asked before
+				// their money moves, as every other spending command asks; off a terminal the
+				// price is stated and the run proceeds, because a script has nobody to ask and
+				// the pin already guarantees this is the price it read.
+				if interactiveTTY() && !yes {
+					if err := askYesNo(fmt.Sprintf("%s costs %s. Run it?", cmdArgs[0], net.Amount(price))); err != nil {
+						return err
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "%s costs %s.\n", cmdArgs[0], net.Amount(price))
+				}
 			}
 			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
 			var raw json.RawMessage
@@ -1658,8 +1782,26 @@ func runCmd() *cobra.Command {
 			return emit(raw, output{id: "tx_id", money: moneyCall, net: net})
 		},
 	}
-	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Fingerprint of the terms you saw (quote_hash on the action); the run is refused before any charge if the terms have changed since")
+	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Pin terms you read earlier (quote_hash on the action) instead of the ones this command reads")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
+}
+
+// quotedTerms reads an action and returns the terms to pin and the price to show. One read, made
+// by the same client that will run it, so what is pinned is what was quoted.
+func quotedTerms(ctx context.Context, ref string) (string, int64, error) {
+	var a struct {
+		QuoteHash string `json:"quote_hash"`
+		Price     int64  `json:"price"`
+	}
+	id, err := cli.resolveActionID(ctx, ref)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := cli.call(ctx, "GET", "/v1/actions/"+id, nil, &a); err != nil {
+		return "", 0, err
+	}
+	return a.QuoteHash, a.Price, nil
 }
 
 // numberField reads one whole-number field of a row; a field that is absent or is not a number

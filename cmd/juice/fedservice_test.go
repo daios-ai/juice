@@ -133,12 +133,11 @@ func fedStepListFor(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, for
 	return handleFederationStepList(k, context.Background(), cp, ts, sig, forUserID)
 }
 
-// derivedStepKey computes the payment-bound completion idempotency key (§13) the serving kernel now
-// requires: sha256("juice/fed/step/1|"+self+"|"+stepID+"|"+inputHash+"|"+paymentHash). paymentHash is
-// "" for a non-payment step.
-func derivedStepKey(t *testing.T, k *kernel.Kernel, stepID string, input []byte, paymentHash string) string {
+// derivedStepKey is the key a completion must carry, taken from the kernel's own derivation rather
+// than a copy of it: a test that restates the rule cannot catch the rule changing.
+func derivedStepKey(t *testing.T, k *kernel.Kernel, stepID string, input []byte) string {
 	t.Helper()
-	return sha256HexBytes([]byte("juice/fed/step/1|" + selfKey(t, k) + "|" + stepID + "|" + sha256HexBytes(input) + "|" + paymentHash))
+	return kernel.StepIdempotencyKey(selfKey(t, k), stepID, sha256HexBytes(input))
 }
 
 func fedStepComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, stepID, idempKey string, input []byte) (int, map[string]any, error) {
@@ -506,7 +505,7 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	keyA, privA := fedPeer(t, k, "peer-a")
 	stepID := parkStepForPeer(t, k, db, keyA)
 
-	status, body, err := fedStepComplete(t, k, privA, stepID, derivedStepKey(t, k, stepID, []byte("{}"), ""), []byte("{}"))
+	status, body, err := fedStepComplete(t, k, privA, stepID, derivedStepKey(t, k, stepID, []byte("{}")), []byte("{}"))
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -538,7 +537,7 @@ func TestFedStep_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	}
 
 	// A replay with the same idempotency key returns the stored result, re-executing nothing.
-	statusR, bodyR, err := fedStepComplete(t, k, privA, stepID, derivedStepKey(t, k, stepID, []byte("{}"), ""), []byte("{}"))
+	statusR, bodyR, err := fedStepComplete(t, k, privA, stepID, derivedStepKey(t, k, stepID, []byte("{}")), []byte("{}"))
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -577,7 +576,7 @@ func TestFedStep_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatalf("CreateStep parking a local action for a peer: %v", err)
 	}
 
-	status, body, err := fedStepComplete(t, k, privA, step.ID, derivedStepKey(t, k, step.ID, []byte("{}"), ""), []byte("{}"))
+	status, body, err := fedStepComplete(t, k, privA, step.ID, derivedStepKey(t, k, step.ID, []byte("{}")), []byte("{}"))
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("peer complete of a local-target step: status=%d err=%v", status, err)
 	}

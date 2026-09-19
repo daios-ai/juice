@@ -23,6 +23,7 @@ identifies what you need to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
+bob/mail costs 0.00 fUSDT. Run it? [y/N] y
 
 Authorize with:
   juice user connect bob/mail

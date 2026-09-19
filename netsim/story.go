@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -200,6 +201,10 @@ const (
 // attackers can borrow. A headroom the attack crosses in its first few calls is reached whatever the
 // drift, which is what makes the refusal it is looking for actually happen.
 const sybilVictimHeadroom = 60
+
+// sybilMaxRounds bounds the attack so a run always ends. It is a ceiling on patience, not a
+// measurement: the burst normally stops at the first refusal, long before it.
+const sybilMaxRounds = 200
 
 // StoryVersion changes whenever the economy does, so two reports are never compared as if they
 // measured the same thing.
@@ -915,13 +920,13 @@ func (s *story) actDelegated() error {
 	// call that follows, once consent exists, is what proves the number counts at all.
 	s.n.MustRefuse("auth.refused_without_consent", "grant|connect|consent|authoriz",
 		k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
-	used := k2.Num("cara", "uses", "action", "stats", "cara/vault/read")
+	used := k2.Uses("cara", "cara/vault/read")
 	s.n.Check("auth.nothing_charged_before_consent", used == 0,
 		fmt.Sprintf("a call refused for want of consent was recorded against the action (%d uses)", used))
 	s.n.MustWork("auth.connected", k2, "cara", "user", "connect", "cara/vault", "--token", "netsim-delegated-token")
 	s.n.MustWork("auth.works_with_consent", k2, "cara", "run", "cara/vault/read", `{"msg":"x"}`)
 	s.n.Check("auth.consented_call_is_counted",
-		k2.Num("cara", "uses", "action", "stats", "cara/vault/read") == 1,
+		k2.Uses("cara", "cara/vault/read") == 1,
 		"the call that consent allowed was not recorded, so the check above counted nothing")
 	host := strings.TrimPrefix(s.n.Backend, "http://")
 	s.n.MustWork("auth.disconnected", k2, "cara", "user", "disconnect", "--account", "bearer:"+host)
@@ -960,7 +965,11 @@ func (s *story) actEvidence() error {
 	rate("k3", "dan")
 
 	s.n.MustWork("evidence.ratings_readable", s.k("k1"), "ana", "action", "ratings", "ana/echo")
-	s.n.MustWork("evidence.stats_readable", s.k("k1"), "ana", "action", "stats", "ana/echo")
+	// What is known about an action is read where the action is read, and a buyer looking at a
+	// remote action sees the three provenances apart: its own calls, the provider's own report,
+	// and other kernels' accounts of the same trades (U39).
+	s.n.MustWork("evidence.record_readable", s.k("k1"), "ana", "action", "show", "ana/echo")
+	s.checkBuyerSeesEvidence("k1", "ana", "cara@shop/quote")
 	for _, pair := range [][2]string{{"k1", "k2"}, {"k2", "k1"}, {"k3", "k1"}} {
 		s.n.MustWork("evidence.peer_inspectable", s.k(pair[0]), "sysop-"+pair[0],
 			"admin", "peer", "inspect", "--", s.k(pair[1]).Key)
@@ -971,6 +980,33 @@ func (s *story) actEvidence() error {
 	s.write("ratings-projection.json", s.k("k1").Get("ana", "/v1/actions/ana%2Fecho/ratings"))
 	s.write("catalogue-anonymous.json", s.k("k1").Get("", "/v1/actions"))
 	return nil
+}
+
+// checkBuyerSeesEvidence reads a remote action the way a buyer does and asserts the three
+// provenances are there and kept apart. The provider's own report reaches this kernel by gossip,
+// so it is polled rather than demanded at once.
+func (s *story) checkBuyerSeesEvidence(kernelName, user, ref string) {
+	k := s.k(kernelName)
+	var last string
+	seen := poll(60*time.Second, 3*time.Second, func() bool {
+		last = k.Get(user, "/v1/actions?ref="+url.QueryEscape(ref))
+		var rows []struct {
+			Evidence *struct {
+				LocalExperience  map[string]any   `json:"local_experience"`
+				ProviderReported map[string]any   `json:"provider_reported"`
+				ObservedByOthers []map[string]any `json:"observed_by_others"`
+				RetainedCap      int              `json:"retained_cap"`
+			} `json:"evidence"`
+		}
+		if json.Unmarshal([]byte(last), &rows) != nil || len(rows) == 0 || rows[0].Evidence == nil {
+			return false
+		}
+		e := rows[0].Evidence
+		return e.RetainedCap > 0 && e.LocalExperience != nil && e.ProviderReported != nil
+	})
+	s.n.Check("evidence.reaches_the_buyer", seen,
+		"a buyer reading "+ref+" never saw the provider's own report beside its own experience: "+firstLine(last))
+	s.write("buyer-evidence.json", last)
 }
 
 func (s *story) write(name, body string) {
@@ -1050,6 +1086,13 @@ func (s *story) actChurn() error {
 	if parked > 0 {
 		fmt.Printf("    %d parked on an unreachable peer, oldest %s\n", parked, age)
 	}
+	// And the owner cannot close a process out from under a call that may have executed abroad:
+	// closing it would cancel a debt the seller may already have earned (U23, G4).
+	if pid := s.parkedProcess(k3, "eve"); pid != "" {
+		out, err := k3.Run("eve", "process", "end", pid)
+		s.n.Check("churn.a_parked_process_cannot_be_force_closed", err != nil,
+			"a process awaiting a peer's receipt was closed anyway: "+firstLine(out))
+	}
 	s.n.Check("churn.parked_funds_are_visible_to_the_operator",
 		parked == 0 || age != "",
 		"funds are parked but the supervision view does not say since when")
@@ -1095,6 +1138,19 @@ func (s *story) parkedFunds(k *Kernel) (int64, string) {
 	procs, _ := pages(k, "sysop-"+k.Name, "/v1/processes")
 	_, funds, oldest := parkedIn(procs)
 	return funds, oldest
+}
+
+// parkedProcess names one of that user's own processes whose call is waiting on a peer's answer.
+// The owner is what matters: only they can end it, so a refusal must be the one this asks about
+// and not an authority failure.
+func (s *story) parkedProcess(k *Kernel, owner string) string {
+	procs, _ := pages(k, owner, "/v1/processes")
+	for _, p := range procs {
+		if b, _ := p["awaiting_receipt"].(bool); b {
+			return str(p, "id")
+		}
+	}
+	return ""
 }
 
 // ---- attacks ----------------------------------------------------------------
@@ -1165,9 +1221,26 @@ func (s *story) attackSybil() {
 	// appear; a delta cannot express it, because a draw that wins pays the whole face value, so cash
 	// received can exceed what was owed and leave the counter below zero — against which any
 	// increase reads as larger than the limit while the limit itself was never breached.
+	//
+	// How far the attack has to climb is not a fixed number of calls: a winning draw pays the whole
+	// face value, so honest trading can leave the shop far in credit, and a cap can never be
+	// negative. The burst is therefore counted from the gap it must close — the shop's own price
+	// plus its markup is what one call adds — so the refusal happens wherever the books started.
+	buyers := []struct{ kernel, user string }{{"k6", "sybil-k6"}, {"k7", "sybil-k7"}, {"k3", "dan"}}
+	perCall := s.k("k2").Num("sysop-k2", "price", "action", "show", "cara/quote")
+	perCall += (perCall*int64(victim.RemoteBps) + 9999) / 10000
+	rounds := 12
+	if perCall > 0 {
+		if need := int((cap-before)/(int64(len(buyers))*perCall)) + 4; need > rounds {
+			rounds = need
+		}
+	}
+	if rounds > sybilMaxRounds {
+		rounds = sybilMaxRounds
+	}
 	refused := false
-	for i := 0; i < 12; i++ {
-		for _, b := range []struct{ kernel, user string }{{"k6", "sybil-k6"}, {"k7", "sybil-k7"}, {"k3", "dan"}} {
+	for i := 0; i < rounds && !refused; i++ {
+		for _, b := range buyers {
 			out, err := s.k(b.kernel).Run(b.user, "--json", "run", "cara@shop/quote", `{"msg":"sybil"}`)
 			refused = refused || (err != nil && (strings.Contains(out, "credit with peer") || strings.Contains(out, "exhausted")))
 		}

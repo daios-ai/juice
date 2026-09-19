@@ -215,7 +215,13 @@ For a consistent backup, stop the server and copy the complete home directory.
 Copying individual files while the server is running is not a supported backup
 procedure.
 
-To upgrade, stop the server, replace the executable, and start it again.
+Coordinate this upgrade with the other operators on your network. Stop new
+cross-kernel calls and let all existing calls settle on every kernel before
+stopping the servers, replacing the executables, and restarting them together.
+Startup refuses the migration while a call is still in doubt here, but cannot
+check another kernel's records. Skipping this procedure can execute an old call
+again when its buyer retries.
+
 Startup applies forward database migrations. An older binary refuses a
 database whose migration version it does not recognize.
 

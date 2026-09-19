@@ -28,6 +28,7 @@ performing a further service:
 
 ```
 $ juice run sys/message '{"to":"bob","message":"approve the order?"}'
+sys/message costs 0.00 fUSDT. Run it? [y/N] y
   result: {
     "step_id": "b75366d1-…"
   }
@@ -133,9 +134,9 @@ Process e3539f75-… ended.
 Ending cancels waiting steps and returns their reserved funds. It is useful for
 abandoned approvals or messages whose recipients will not respond.
 
-Forced closure also settles pending remote calls locally as refunded failures.
-It cannot undo execution already performed on the other kernel. Prefer to let
-the retry mechanism obtain the signed outcome or apply its 24-hour limit.
+Closure is refused while a call awaits a peer's signed receipt or refusal;
+the message says how long it has waited. Such calls have no timeout refund,
+because the work may already have executed on the other kernel.
 Closure is refused while other execution remains in flight; the owner can try
 again after that work settles.
 

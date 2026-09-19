@@ -210,21 +210,33 @@ func TestAPICallRefreshOn401(t *testing.T) {
 	}
 }
 
-// TestRunCommandPostsToServer proves the converted `run` command marshals {action, args}
-// and posts to /v1/run.
+// TestRunCommandPostsToServer proves `run` reads the action, pins the terms that read returned,
+// and posts {action, args, quote_hash} to /v1/run — so the price a caller was shown is the price
+// the call is authorised at (U8).
 func TestRunCommandPostsToServer(t *testing.T) {
-	var gotAction string
+	var gotAction, gotPin string
 	var gotArgs map[string]any
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions") {
+			// The read the client makes before it commits money: the reference resolves to a
+			// row, and the row states the terms.
+			if r.URL.Query().Get("ref") != "" {
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "a/b"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h-1", "price": 5})
+			return
+		}
 		if r.Method != "POST" || r.URL.Path != "/v1/run" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 		var req struct {
-			Action string         `json:"action"`
-			Args   map[string]any `json:"args"`
+			Action    string         `json:"action"`
+			Args      map[string]any `json:"args"`
+			QuoteHash string         `json:"quote_hash"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		gotAction, gotArgs = req.Action, req.Args
+		gotAction, gotArgs, gotPin = req.Action, req.Args, req.QuoteHash
 		_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "tx-1", "result": map[string]any{"ok": true}})
 	})
 	if _, err := execTestCmd(t, runCmd(), "a/b", `{"x":1}`); err != nil {
@@ -232,6 +244,9 @@ func TestRunCommandPostsToServer(t *testing.T) {
 	}
 	if gotAction != "a/b" {
 		t.Fatalf("action = %q", gotAction)
+	}
+	if gotPin != "h-1" {
+		t.Errorf("quote_hash = %q, want the hash the client read (h-1)", gotPin)
 	}
 	if gotArgs["x"].(float64) != 1 {
 		t.Fatalf("args = %v", gotArgs)

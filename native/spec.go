@@ -41,6 +41,8 @@ type Host interface {
 	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)
 	ReadCallableAction(ctx context.Context, ref, callerID string) (*kernel.Action, error)
 	ResolveRequiredCaller(ctx context.Context, ref string) (kernel.RequiredCaller, error)
+	ActionRecord(ctx context.Context, a *kernel.Action) *kernel.ActionRecord
+	DiscoveredRecord(ctx context.Context, d *kernel.DiscoveryDoc) *kernel.ActionRecord
 	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.RequiredCaller) (*kernel.Step, error)
 }
 

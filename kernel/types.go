@@ -325,8 +325,12 @@ type Transaction struct {
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
 	RemoteSignerKey   string          `json:"remote_signer_key,omitempty"`   // the key the receipt verified under at settlement, stored with it so verification outlives the peer (G7, U36)
-	StartedAt         time.Time       `json:"started_at"`
-	EndedAt           time.Time       `json:"ended_at"`
+	// EvidenceEligible records, once, whether this call's receipt is public evidence: decided when
+	// the call settles, from what was true then. An action made public later does not publish what
+	// it did in private, and one made private later does not erase what it did in public (P9).
+	EvidenceEligible bool      `json:"-"`
+	StartedAt        time.Time `json:"started_at"`
+	EndedAt          time.Time `json:"ended_at"`
 }
 
 // Stats tracks fixed performance and usage statistics for an action.
@@ -439,11 +443,20 @@ type Receipt struct {
 	// on a zero-charge pre-execution rejection whose fault is the cache's (contract-hash mismatch, a
 	// non-executable action). omitempty keeps it out of the JCS signature for every other receipt, so
 	// those verify unchanged; a receipt setting it must be a valid zero-charge rejection or it quarantines.
-	RefreshProxy bool      `json:"refresh_proxy,omitempty"`
-	Reason       string    `json:"reason"`
-	StartedAt    time.Time `json:"started_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	Signature    string    `json:"signature"`
+	RefreshProxy bool `json:"refresh_proxy,omitempty"`
+	// IdempotencyKey and Counterparty bind this receipt to the one request it answers: the call's
+	// own name and the buyer kernel that sent it (P4). The request signs (counterparty, recipient,
+	// key); the receipt signs the same triple from the other side — the seller by its signature,
+	// the buyer and the call by these two — so a receipt cannot answer a call it was not issued for
+	// and two identical calls cannot share one. Set on every receipt a kernel signs for an inbound
+	// federated call, executed or rejected; omitempty keeps both out of the JCS signature of every
+	// local receipt, which answers no request but its caller's own.
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	Counterparty   string    `json:"counterparty,omitempty"`
+	Reason         string    `json:"reason"`
+	StartedAt      time.Time `json:"started_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	Signature      string    `json:"signature"`
 }
 
 // Rating is an immutable human-submitted rating for a transaction.
@@ -482,18 +495,12 @@ type TransactionView struct {
 }
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.
-// Status transitions: "pending" (inserted before execution) → "complete" (set after success or failure).
 type IdempotencyRecord struct {
 	ID                 string
 	IdempotencyKey     string
 	CounterpartyUserID string
-	ReceiptID          *string
-	Status             string // "pending" | "complete"
 	ArgsJSON           string // the request's exact argument bytes, so recovery can sign over them
-	ResultJSON         string // JSON-encoded result, set on completion
-	ReceiptJSON        string // JSON of the receipt, stored for idempotent replay
 	CreatedAt          time.Time
-	ExpiresAt          time.Time
 }
 
 // ImportResult summarises the outcome of an import operation.
@@ -551,7 +558,6 @@ type ActionManifest struct {
 	Kind         ActionKind     `json:"kind"`
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
-	Stats        *Stats         `json:"stats"`
 	Signature    string         `json:"signature"` // base64url Ed25519 signature
 }
 
@@ -596,6 +602,9 @@ type ReceiptVerification struct {
 	RemoteKernelPublicKey string        `json:"remote_kernel_public_key,omitempty"`
 	Checks                ReceiptChecks `json:"checks"`
 	Receipt               *Receipt      `json:"receipt"`
+	// Unbound marks a receipt signed before receipts named the request they answer: its binding
+	// cannot be audited, which is a fact about its age, not a failed check (P5, G3).
+	Unbound bool `json:"unbound,omitempty"`
 }
 
 // ReceiptChecks names each audit a receipt verification ran and whether it held (§11). A local and
@@ -677,6 +686,9 @@ type EvidenceReceipt struct {
 // starts the evidence stream at the oldest retained item.
 type GossipRequest struct {
 	Cursor string `json:"cursor,omitempty"`
+	// CatalogCursor is the last action id of the catalogue page this requester received; empty
+	// opens a new scan (P9).
+	CatalogCursor string `json:"catalog_cursor,omitempty"`
 }
 
 // RatingEvidence is the wire projection of a Rating (§13): the public reputation signal only —
@@ -714,25 +726,40 @@ type GossipResponse struct {
 	ActionManifests []*ActionManifest `json:"action_manifests,omitempty"`
 	Evidence        []EvidenceBundle  `json:"evidence,omitempty"`
 	NextCursor      string            `json:"next_cursor,omitempty"`
+	// NextCatalogCursor is the last action id of this page, empty when the page ends the catalogue
+	// — which is what completes the requester's scan (P9).
+	NextCatalogCursor string `json:"next_catalog_cursor,omitempty"`
 }
 
-// GossipReceiptRow is one gossip-eligible receipt row assembled by the evidence sender (§13): the
-// stored receipt, its transaction facts needed to build the projection (subject, counterparty,
-// timestamps), the joined rating (if any), and the stored remote receipt JSON (for a proxy call).
-// Ordered by EffectiveAt so a late rating re-surfaces its bundle.
+// GossipReceiptRow is one gossip-eligible trade as the evidence sender needs it (§13) — the
+// projection's own fields and nothing else: the receipt's stored canonical hash, what it says
+// happened and when, whom it was with, the remote receipt a proxy call settled on, and the rating
+// that names it. It is deliberately not a receipt: everything a receipt holds besides this is
+// private to the two parties (P9), and reading it to hash what the row already stores would
+// compute one fact twice. Ordered by EffectiveAt, so a late rating re-surfaces its bundle.
 type GossipReceiptRow struct {
-	Receipt                     *Receipt
+	ReceiptHash                 string
+	Status                      TxStatus
+	StartedAt                   time.Time
+	CreatedAt                   time.Time
 	SubjectKernelPublicKey      string
 	SubjectActionID             string
 	CounterpartyKernelPublicKey string
 	RemoteReceiptJSON           string
-	// IdempotencyKey is the outbound proxy trace's key (empty for own-execution leg-(a) rows). A
-	// signed rejection receipt sets its tx_id to this key, so leg (b) distinguishes a genuine
-	// admitted execution from a rejection at any price, including 0 (§13 gossip-eligibility).
-	IdempotencyKey string
-	Rating         *Rating
-	EffectiveAt    time.Time
-	Cursor         string // the (effective_at, receipt_hash) high-watermark AFTER this row
+	// Rating is the wire projection the kernel will sign, unsigned as it comes from the store.
+	Rating      *RatingEvidence
+	EffectiveAt time.Time
+	Cursor      string // the (effective_at, receipt id) high-watermark AFTER this row
+}
+
+// observe widens the row's retained window to include one more receipt.
+func (r *SubjectEvidenceRow) observe(at time.Time) {
+	if r.Since.IsZero() || at.Before(r.Since) {
+		r.Since = at
+	}
+	if at.After(r.Until) {
+		r.Until = at
+	}
 }
 
 // EvidenceRow is one persisted, verified evidence record in the regenerable evidence cache (§13).
@@ -771,7 +798,11 @@ type DiscoveryDoc struct {
 	// these docs directly and its shape is not part of this record.
 	ServingPrice int64     `json:"-"`
 	Embedding    []float32 `json:"-"`
-	ObservedAt   time.Time `json:"observed_at"`
+	// Generation is the catalogue scan that last mentioned this doc. A completed scan sweeps
+	// everything it did not mention, which is how a withdrawn action leaves the index without a
+	// replace-all that an empty page could turn into an erasure.
+	Generation int64     `json:"-"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 // SubjectEvidenceRow is one issuer's derived retained-evidence metrics about a subject action (§13),
@@ -785,17 +816,32 @@ type DiscoveryDoc struct {
 // counterparty and the receipt hashes join — so an issuer's claim is shown verified vs unverified,
 // not taken on faith. It is 0 for the self-reported execution summary.
 type SubjectEvidenceRow struct {
-	IssuerPublicKey   string   `json:"issuer_public_key"`
-	SubjectActionID   string   `json:"subject_action_id"`
-	Uses              int64    `json:"uses"`
-	Successes         int64    `json:"successes"`
-	Failures          int64    `json:"failures"`
-	CorroboratedUses  int64    `json:"corroborated_uses"`
-	AvgLatencyMs      float64  `json:"avg_latency_ms"`
-	RatingCount       int64    `json:"rating_count"`
-	RatingMean        float64  `json:"rating_mean"`
-	UnverifiedRatings int64    `json:"unverified_ratings"`
-	Notes             []string `json:"notes,omitempty"`
+	IssuerPublicKey   string  `json:"issuer_public_key"`
+	SubjectActionID   string  `json:"subject_action_id"`
+	Uses              int64   `json:"uses"`
+	Successes         int64   `json:"successes"`
+	Failures          int64   `json:"failures"`
+	CorroboratedUses  int64   `json:"corroborated_uses"`
+	AvgLatencyMs      float64 `json:"avg_latency_ms"`
+	RatingCount       int64   `json:"rating_count"`
+	RatingMean        float64 `json:"rating_mean"`
+	UnverifiedRatings int64   `json:"unverified_ratings"`
+	// Contradictions counts trades where this issuer's row links to the subject's own row — same
+	// receipt, same action, this issuer named as counterparty — and the two report different
+	// outcomes. A linked pair that disagrees is not corroboration: it is two signed statements that
+	// cannot both be true, so it is counted here and never in CorroboratedUses (§13).
+	Contradictions int64 `json:"contradictions"`
+	// Equivocations counts trades this issuer told two stories about: two different signed
+	// statements under one receipt. Such a trade counts for nothing else — not a use, not an
+	// outcome, not a rating — so without this number a reader could not tell a party that
+	// contradicts itself from one that never traded [→U39].
+	Equivocations int64 `json:"equivocations"`
+	// Since and Until bound the retained sample: the oldest and newest receipt counted here. The
+	// retention cap means a row may describe a window rather than a lifetime, so a reader is given
+	// the window rather than left to assume there is none.
+	Since time.Time `json:"since"`
+	Until time.Time `json:"until"`
+	Notes []string  `json:"notes,omitempty"`
 }
 
 // FederationResult is the return value of ExecuteFederation.

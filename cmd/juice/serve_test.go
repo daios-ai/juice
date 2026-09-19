@@ -1163,7 +1163,7 @@ func TestServeRateTransactionNotFound(t *testing.T) {
 	}
 }
 
-func TestServeGetStats(t *testing.T) {
+func TestServeActionReadCarriesItsOwnExperience(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -1190,15 +1190,46 @@ func TestServeGetStats(t *testing.T) {
 		"action": "stats-owner/stats-action", "args": map[string]any{},
 	}, callerTok).Body.Close()
 
-	get := httpDo(t, srv, "GET", "/v1/stats/"+action.ID, nil, ownerTok)
+	// What this kernel itself saw is part of the action's record, read where the action is read
+	// rather than from a surface of its own (§14, U39).
+	get := httpDo(t, srv, "GET", "/v1/actions/"+action.ID, nil, ownerTok)
 	if get.StatusCode != http.StatusOK {
 		get.Body.Close()
-		t.Fatalf("get stats: expected 200, got %d", get.StatusCode)
+		t.Fatalf("read action: expected 200, got %d", get.StatusCode)
 	}
-	var stats kernel.Stats
-	decodeResponse(t, get, &stats)
-	if stats.Uses == 0 {
-		t.Error("expected uses > 0 in stats after a call")
+	var read struct {
+		Evidence *struct {
+			LocalExperience *kernel.Stats `json:"local_experience"`
+			RetainedCap     int           `json:"retained_cap"`
+		} `json:"evidence"`
+	}
+	decodeResponse(t, get, &read)
+	if read.Evidence == nil || read.Evidence.LocalExperience == nil {
+		t.Fatal("an action's read must carry what this kernel itself recorded about it")
+	}
+	if read.Evidence.LocalExperience.Uses == 0 {
+		t.Error("expected uses > 0 after a call")
+	}
+	if read.Evidence.RetainedCap != kernel.EvidenceRetainedPerReporter {
+		t.Errorf("retained_cap = %d, want the window a reader must read the counts against (%d)",
+			read.Evidence.RetainedCap, kernel.EvidenceRetainedPerReporter)
+	}
+
+	// Reading the same action by reference is the same read: one detail path, or two callers would
+	// be shown different things about one action (U39).
+	byRef := httpDo(t, srv, "GET", "/v1/actions?ref="+url.QueryEscape("stats-owner/stats-action"), nil, ownerTok)
+	var rows []struct {
+		Evidence *struct {
+			LocalExperience *kernel.Stats `json:"local_experience"`
+			RetainedCap     int           `json:"retained_cap"`
+		} `json:"evidence"`
+	}
+	decodeResponse(t, byRef, &rows)
+	if len(rows) != 1 || rows[0].Evidence == nil || rows[0].Evidence.LocalExperience == nil {
+		t.Fatalf("a read by reference must carry the same record as a read by id, got %+v", rows)
+	}
+	if rows[0].Evidence.LocalExperience.Uses != read.Evidence.LocalExperience.Uses {
+		t.Errorf("by reference: %d uses, by id: %d", rows[0].Evidence.LocalExperience.Uses, read.Evidence.LocalExperience.Uses)
 	}
 }
 
@@ -1336,7 +1367,7 @@ func TestRateLimitLogin(t *testing.T) {
 	r := chi.NewRouter()
 	r.Use(requestIDMiddleware)
 	// Burst of 3 with zero refill rate so tokens don't recover during the test.
-	r.With(ipRateLimiter(0, 3)).Post("/v1/auth/token", srv.postToken)
+	r.With(ipRateLimiter(context.Background(), 0, 3)).Post("/v1/auth/token", srv.postToken)
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
@@ -1666,7 +1697,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 		ActionID: "remote-act", OwnerHandle: "far", Name: "far-act", Kind: kernel.KindHTTP,
 		Price: 0, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "far",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
-		ArtifactHash: "sha256-far", Stats: &kernel.Stats{}, UpdatedAt: time.Now(),
+		ArtifactHash: "sha256-far", UpdatedAt: time.Now(),
 	}
 	m.Signature, _ = testNet.SignManifest(priv, &m)
 	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
@@ -2369,12 +2400,11 @@ func TestFederationReplay(t *testing.T) {
 	}
 	ikey2 := uuid.New().String()
 	now := time.Now().UTC()
-	_ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
+	_, _ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
 		ID:                 uuid.New().String(),
 		IdempotencyKey:     ikey2,
 		CounterpartyUserID: caller.ID,
 		CreatedAt:          now,
-		ExpiresAt:          now.Add(time.Hour),
 	})
 	r3 := fedCall(t, k, priv, a.ID, ikey2, map[string]any{})
 	defer r3.Body.Close()
@@ -2532,8 +2562,9 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	argsHash := sha256HexBytes(body)
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
-	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", "idem-chash-1", ts, argsHash, "", 0)
-	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, "idem-chash-1", a.ID, sig, kernel.BuyerTerms{}, body)
+	chashKey := uuid.New().String()
+	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", chashKey, ts, argsHash, "", 0)
+	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, chashKey, a.ID, sig, kernel.BuyerTerms{}, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
 	}
@@ -2815,15 +2846,15 @@ type fakeDiscoverer struct {
 	advertised int
 }
 
-func (f *fakeDiscoverer) Advertise(context.Context) (time.Duration, error) {
+func (f *fakeDiscoverer) Advertise(context.Context) error {
 	f.advertised++
-	return time.Minute, nil
+	return nil
 }
 func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) {
 	return f.providers, nil
 }
 func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
-func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.RawMessage, error) {
+func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ fed.GossipRequest) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if f.broken[key] {
 		return nil, fmt.Errorf("fed: read gossip: stream reset")
@@ -2836,9 +2867,28 @@ func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ string) (json.R
 	return nil, fmt.Errorf("%w: cannot resolve peer", fed.ErrNotDispatched)
 }
 
-// noCursor / discardCursor are the getCursor / setCursor stubs for discoverOnce tests.
-func noCursor(context.Context, string) string             { return "" }
-func discardCursor(context.Context, string, string) error { return nil }
+// pullWith is the store side of a discovery pass for a test: the candidates to read, what to do
+// with a page, and where contacts are recorded. Scan state is not persisted — a test that cares
+// about resumption asserts on the requests the fake saw.
+func pullWith(candidates func(context.Context) []string, acc func(context.Context, *kernel.GossipResponse, string) (string, error), contact contactRecorder) discoveryPull {
+	return discoveryPull{
+		candidates: func(ctx context.Context, directory []string) []string {
+			seen, out := map[string]bool{}, []string{}
+			for _, k := range append(candidates(ctx), directory...) {
+				if k != "" && !seen[k] {
+					seen[k] = true
+					out = append(out, k)
+				}
+			}
+			sort.Strings(out)
+			return out
+		},
+		scan:       func(context.Context, string) kernel.PeerScan { return kernel.PeerScan{} },
+		saveScan:   func(context.Context, string, kernel.PeerScan) error { return nil },
+		accumulate: acc,
+		contact:    contact,
+	}
+}
 
 // discoverOnce (§13): advertise this kernel, then dedup peers ∪ bootstrap ∪ routing-discovery
 // providers, pull each, and accumulate only a VERIFIED reply (introducer = the authenticated key we
@@ -2864,7 +2914,7 @@ func TestDiscoverOnce(t *testing.T) {
 		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
-	discoverOnce(context.Background(), f, noFriends, acc, noContact, noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, pullWith(noFriends, acc, noContact), log.Discard())
 
 	sort.Strings(got)
 	if strings.Join(got, ",") != "A,B" {
@@ -2884,7 +2934,7 @@ func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
 	peers := func(context.Context) []string { return []string{"F"} }
 	var contacts []contactCall
 	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
-	discoverOnce(context.Background(), f, peers, acc, recordInto(&contacts), noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, pullWith(peers, acc, recordInto(&contacts)), log.Discard())
 
 	if len(contacts) != 1 {
 		t.Fatalf("recorded %d contacts, want 1", len(contacts))
@@ -2927,8 +2977,7 @@ func TestDiscoverOnceRecordsContactOutcomes(t *testing.T) {
 	}
 	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
 	var contacts []contactCall
-	discoverOnce(context.Background(), f, func(context.Context) []string { return nil },
-		acc, recordInto(&contacts), noCursor, discardCursor, log.Discard())
+	discoverOnce(context.Background(), f, pullWith(func(context.Context) []string { return nil }, acc, recordInto(&contacts)), log.Discard())
 
 	byKey := map[string]contactCall{}
 	for _, c := range contacts {
@@ -3047,7 +3096,7 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	discoverOnce(context.Background(), f, noFriends, acc, noContact, noCursor, discardCursor, logger)
+	discoverOnce(context.Background(), f, pullWith(noFriends, acc, noContact), logger)
 
 	stageByKey := map[string]string{}
 	for _, e := range readJSONLogEvents(t, logPath, "discovery.pull.failed") {
@@ -3152,7 +3201,7 @@ func TestGrantRoutesRequireAuth(t *testing.T) {
 
 // TestKeyLimiter: the per-peer federation limiter allows a burst then throttles, per key (F4).
 func TestKeyLimiter(t *testing.T) {
-	kl := newKeyLimiter(1, 2) // 1/s, burst 2
+	kl := newKeyLimiter(context.Background(), 1, 2) // 1/s, burst 2
 	if !kl.allow("a") || !kl.allow("a") {
 		t.Fatal("a burst of 2 should pass")
 	}
@@ -3168,7 +3217,7 @@ func TestKeyLimiter(t *testing.T) {
 // Noise-authenticated connection key is rejected before execution (F4 defense-in-depth). The
 // mismatch check precedes any kernel work, so a nil-kernel handler is sufficient.
 func TestOnCallRejectsPeerKeyMismatch(t *testing.T) {
-	h := &fedHandlers{callLimiter: newKeyLimiter(50, 100)}
+	h := &fedHandlers{callLimiter: newKeyLimiter(context.Background(), 50, 100)}
 	resp := h.OnCall(context.Background(), "peerA", fed.CallRequest{
 		Counterparty: "peerB", Timestamp: "t", IdempotencyKey: "k", Action: "x/y", Signature: "s", Args: json.RawMessage("{}"),
 	})
@@ -3439,3 +3488,297 @@ func TestHealthPublishesTheFederationAddresses(t *testing.T) {
 		t.Fatalf("health with no transport: %s", rec.Body.String())
 	}
 }
+
+// A pass has a deadline, and a candidate reached after it is not a failure: the pass stops reading
+// and reports how many it did not get to. Without the check every remaining candidate would be
+// dialed on a dead context, fail instantly, and be counted as unreachable — the peer's reachability
+// record would then say it was down when it was never called (§13).
+func TestDiscoverOnceStopsWhenThePassBudgetIsSpent(t *testing.T) {
+	page := func(pk string) json.RawMessage {
+		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
+		return b
+	}
+	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"A": page("A"), "B": page("B"), "C": page("C")}}
+	peers := func(context.Context) []string { return []string{"A", "B", "C"} }
+	ctx, cancel := context.WithCancel(context.Background())
+	// The budget runs out during the first peer's page.
+	acc := func(context.Context, *kernel.GossipResponse, string) (string, error) {
+		cancel()
+		return "", nil
+	}
+	var contacts []contactCall
+	logPath := filepath.Join(t.TempDir(), "pass.log")
+	logger, err := log.New(log.Config{Level: "debug", FilePath: logPath, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoverOnce(ctx, f, pullWith(peers, acc, recordInto(&contacts)), logger)
+	cancel()
+
+	if len(f.gossiped) != 1 {
+		t.Errorf("dialed %v, want only the first candidate before the budget ran out", f.gossiped)
+	}
+	for _, c := range contacts {
+		if c.outcome == contactUndispatched {
+			t.Errorf("%s was never dialed; the pass must not record anything about reaching it", c.key)
+		}
+	}
+	// The pass says how many it did not get to, and counts none of them as failures: routing
+	// discovery re-surfaces them and the next pass reads them.
+	events := readJSONLogEvents(t, logPath, "discovery.pass")
+	if len(events) != 1 {
+		t.Fatalf("a pass must report itself once, got %d lines", len(events))
+	}
+	if skipped, _ := events[0]["skipped"].(float64); int(skipped) != 2 {
+		t.Errorf("skipped = %v, want the 2 candidates the budget did not reach", events[0]["skipped"])
+	}
+	if failed, _ := events[0]["failed"].(float64); int(failed) != 0 {
+		t.Errorf("failed = %v, want 0: a candidate never dialed did not fail", events[0]["failed"])
+	}
+}
+
+// One peer's turn lasts until it has nothing further to say or its page budget is spent, so a
+// backlog drains instead of trickling one page per interval — and no single peer can spend the
+// whole pass (§13).
+func TestPullPeerReadsUntilCaughtUpOrOutOfBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		next      string
+		wantPages int
+	}{
+		{"caught up in one page", "", 1},
+		{"a backlog is read to the budget", "next-page", discoveryPagesPerPeer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "P", Handle: "P", NextCatalogCursor: tc.next})
+			f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"P": b}}
+			acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
+			p := pullWith(func(context.Context) []string { return []string{"P"} }, acc, noContact)
+			pages, err := pullPeer(context.Background(), f, p, "P", log.Discard())
+			if err != nil {
+				t.Fatalf("pullPeer: %v", err)
+			}
+			if pages != tc.wantPages || len(f.gossiped) != tc.wantPages {
+				t.Errorf("read %d pages in %d requests, want %d of each", pages, len(f.gossiped), tc.wantPages)
+			}
+		})
+	}
+}
+
+// A record exists iff execution may have begun (P4). A refusal is deterministic — the same request
+// gets the same signed answer — so it writes nothing; otherwise a stranger could fill this kernel's
+// disk with rows for calls it never asked to have run. An executed call takes the lock, and the
+// commit that writes the receipt releases it: the outcome is then the receipt, and a replay is
+// answered from it for as long as it exists.
+func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"greeting": "hello"})
+	}))
+	defer backend.Close()
+
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+
+	mk := func(name string, public bool) *kernel.Action {
+		a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+			OwnerUserID: sys.ID, Name: name, Kind: kernel.KindHTTP, Price: 0, Description: "d",
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+			Source: backend.URL,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if public {
+			_ = k.SetActive(ctx, sys.ID, a.ID, true)
+			v := kernel.VisibilityPublic
+			_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &v})
+		}
+		return a
+	}
+	served, refused := mk("lock-served", true), mk("lock-refused", false)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.EnsureKernelAccount(ctx, pubB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := func(key string) bool {
+		rec, rerr := db.ReadIdempotencyRecord(ctx, key, peer.ID)
+		return rerr == nil && rec != nil
+	}
+
+	// Two refusals — an action that is not exportable, and one that does not exist at all. Each is
+	// answered with a signed receipt and stores nothing, so the same request can be asked again
+	// and answered the same way.
+	reasons := map[string]string{}
+	for _, tc := range []struct{ name, action string }{
+		{"not exportable", refused.ID},
+		{"absent", uuid.New().String()},
+	} {
+		key := uuid.New().String()
+		resp := fedCall(t, k, priv, tc.action, key, map[string]any{})
+		var env struct {
+			Receipt *kernel.Receipt `json:"receipt"`
+		}
+		decodeResponse(t, resp, &env)
+		if env.Receipt == nil || env.Receipt.TxID != "" {
+			t.Fatalf("%s: want a signed refusal naming no transaction, got %+v", tc.name, env.Receipt)
+		}
+		reasons[tc.name] = env.Receipt.Reason
+		if locked(key) {
+			t.Errorf("%s: a refused call wrote a lock; a refusal is deterministic and needs none", tc.name)
+		}
+	}
+	// One reason for both: whether an action is absent or merely not served abroad is a fact about
+	// a catalogue the caller cannot see (U48).
+	if reasons["absent"] != reasons["not exportable"] {
+		t.Errorf("the refusals differ: %q vs %q", reasons["absent"], reasons["not exportable"])
+	}
+
+	// An executed call: the lock is taken while it runs and released by the commit that writes the
+	// receipt, and the replay is that receipt, byte for byte.
+	key := uuid.New().String()
+	var first struct {
+		Result  map[string]any  `json:"result"`
+		Receipt *kernel.Receipt `json:"receipt"`
+	}
+	decodeResponse(t, fedCall(t, k, priv, served.ID, key, map[string]any{}), &first)
+	if first.Receipt == nil {
+		t.Fatal("an executed call must answer with its receipt")
+	}
+	if locked(key) {
+		t.Error("the commit that wrote the receipt must release the lock")
+	}
+	var replay struct {
+		Result  map[string]any  `json:"result"`
+		Receipt *kernel.Receipt `json:"receipt"`
+	}
+	decodeResponse(t, fedCall(t, k, priv, served.ID, key, map[string]any{}), &replay)
+	if replay.Receipt == nil || replay.Receipt.ID != first.Receipt.ID || replay.Receipt.Signature != first.Receipt.Signature {
+		t.Errorf("the replay must be answered from the stored receipt, got %+v", replay.Receipt)
+	}
+	if replay.Result["greeting"] != first.Result["greeting"] {
+		t.Errorf("the replay must return the reply that was committed: %v vs %v", replay.Result, first.Result)
+	}
+	if replay.Receipt.IdempotencyKey != key || replay.Receipt.Counterparty != pubB64 {
+		t.Errorf("a receipt for an inbound call names the request it answers: key=%q counterparty=%q",
+			replay.Receipt.IdempotencyKey, replay.Receipt.Counterparty)
+	}
+}
+
+// The cursor never advances past a page this kernel failed to store (P9). A verification failure is
+// the peer's fault and the item is skipped, but a store that would not write is ours: the page is
+// failed and the peer offers it again next pass. Advancing anyway would drop the evidence for good,
+// because cursors only move forward.
+func TestAPageThatCouldNotBeStoredLeavesTheCursorWhereItWas(t *testing.T) {
+	b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "P", Handle: "P", NextCursor: "cursor-2"})
+	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"P": b}}
+	saved := 0
+	p := discoveryPull{
+		candidates: func(context.Context, []string) []string { return []string{"P"} },
+		scan:       func(context.Context, string) kernel.PeerScan { return kernel.PeerScan{Evidence: "cursor-1"} },
+		saveScan:   func(context.Context, string, kernel.PeerScan) error { saved++; return nil },
+		accumulate: func(context.Context, *kernel.GossipResponse, string) (string, error) {
+			return "", fmt.Errorf("disk full")
+		},
+		contact: noContact,
+	}
+	if _, err := pullPeer(context.Background(), f, p, "P", log.Discard()); err == nil {
+		t.Fatal("a page that could not be stored must fail the pull")
+	}
+	if saved != 0 {
+		t.Errorf("the scan position was written %d times; a failed page must leave it alone", saved)
+	}
+}
+
+// The per-key buckets are swept, or the map is a slow leak a stranger can drive: one entry for
+// every key that ever dialed, held for the life of the process. A key still being heard from keeps
+// its bucket; one that has gone quiet loses it and starts fresh when it returns.
+func TestIdleRateLimitBucketsAreSwept(t *testing.T) {
+	kl := newKeyLimiter(context.Background(), 1, 1) // 1/s, burst 1
+	if !kl.allow("quiet") || !kl.allow("busy") {
+		t.Fatal("the first call for a key must pass")
+	}
+	if kl.allow("busy") {
+		t.Fatal("the second immediate call must be throttled")
+	}
+	kl.entries["quiet"].lastSeen = time.Now().Add(-2 * limiterIdleWindow)
+
+	kl.evictIdle(time.Now().Add(-limiterIdleWindow))
+
+	if _, held := kl.entries["quiet"]; held {
+		t.Error("a key unheard from for the idle window must lose its bucket")
+	}
+	if _, held := kl.entries["busy"]; !held {
+		t.Error("a key still being heard from must keep its bucket, and its budget with it")
+	}
+	if !kl.allow("quiet") {
+		t.Error("a returning key starts with a fresh bucket")
+	}
+	if kl.allow("busy") {
+		t.Error("sweeping must not refill a live key's bucket")
+	}
+}
+
+// The worker that tells sellers how their draws came out runs on its own cadence, outside the rail
+// lock — but a rail pass is what makes a won draw announceable, so it wakes this one instead of
+// leaving the news to wait out an interval that exists only to bound idle polling (P10).
+func TestTheRevealWorkerRunsWhenItIsWokenNotOnlyOnItsTick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wake := make(chan struct{}, 1)
+	runs := make(chan struct{}, 8)
+	go everyTickOrWhenWoken(ctx, time.Hour, wake, func(context.Context) { runs <- struct{}{} })
+
+	// One run at once, without waiting for anything: work left by the last shutdown is due now.
+	select {
+	case <-runs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker did not run at startup")
+	}
+	wake <- struct{}{}
+	select {
+	case <-runs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a wake-up did not run the worker; it would have waited out the whole interval")
+	}
+}
+
+// An action's upstream is held to the same bound as the action's own reply: a document too large
+// to be carried is refused where it is read, rather than truncated into a mangled reply the caller
+// would be charged for (D12, U12).
+func TestAnUpstreamReplyOverTheBoundIsRefusedNotTruncated(t *testing.T) {
+	big := strings.Repeat("x", kernel.MaxReplyBytes)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"answer":%q}`, big)
+	}))
+	defer backend.Close()
+
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	ctx := context.Background()
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
+		OwnerUserID: sys.ID, Name: "verbose-upstream", Kind: kernel.KindHTTP, Price: 0,
+		Description: "returns more than can be carried", Source: backend.URL,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = k.SetActive(ctx, sys.ID, a.ID, true)
+
+	_, runErr := k.Run(ctx, kernel.RunRequest{CallerID: sys.ID, ActionRef: a.ID, Args: map[string]any{}})
+	if runErr == nil {
+		t.Fatal("a reply over the bound was returned as if it fitted")
+	}
+	if !strings.Contains(runErr.Error(), "exceeds") {
+		t.Errorf("the failure must say what was wrong with it, got %v", runErr)
+	}
+}
+

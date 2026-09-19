@@ -210,7 +210,7 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 		KernelPublicKey: peerKey, Handle: "prov", ActionID: "act-remote", Name: "weather",
 		Description: "forecast the weather for a city", ServingPrice: 10, ObservedAt: observed,
 	}
-	if err := st.ReplaceDiscoveryDocs(ctx, peerKey, []*kernel.DiscoveryDoc{doc}); err != nil {
+	if err := st.ApplyCatalogPage(ctx, peerKey, []*kernel.DiscoveryDoc{doc}, "", 0); err != nil {
 		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
 	}
 	caller := seedUserWithBalance(t, st, "buyer", 0)
@@ -284,5 +284,38 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	// A local action has no hosting kernel to be out of reach.
 	if _, ok := local["last_seen"]; ok {
 		t.Error("a local action must carry no reachability fields")
+	}
+}
+
+// A hit carries the same record a person reads on the action, so an agent choosing between
+// candidates has the evidence a person would (U10, U46). It is the record, not a rank: the
+// ordering is relevance alone.
+func TestExecuteLookupHitsCarryTheirEvidence(t *testing.T) {
+	k, st := newLookupTestKernel(t)
+	ctx := context.Background()
+	owner := seedOwner(t, st, "alice")
+	seedAction(t, st, owner.ID, "weather", "weather forecast temperature rain", 7)
+
+	result, err := executeLookup(ctx, map[string]any{"query": "weather forecast"}, "", k)
+	if err != nil {
+		t.Fatalf("executeLookup: %v", err)
+	}
+	items, _ := result["results"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("expected a hit, got %v", result)
+	}
+	hit, _ := items[0].(map[string]any)
+	// The hit carries the record as the reply will: JSON values, because the kernel checks a
+	// native's result against its own output schema before paying for it.
+	record, ok := hit["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("a hit must carry the action's record, got %T", hit["evidence"])
+	}
+	if cap, _ := record["retained_cap"].(float64); int(cap) != kernel.EvidenceRetainedPerReporter {
+		t.Errorf("retained_cap = %v, want the window the counts must be read against (%d)",
+			record["retained_cap"], kernel.EvidenceRetainedPerReporter)
+	}
+	if record["observed_by_others"] == nil {
+		t.Error("an action nobody else has reported on must say so with an empty list, not a null")
 	}
 }

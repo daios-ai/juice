@@ -83,12 +83,14 @@ had failed many times could have its quality number driven so close to zero that
 was pushed *below* barely-relevant actions — so an exact, obviously-correct match
 could end up buried far down the list purely because its past calls had failed. That
 behaviour is being redesigned. When the replacement lands, it will be reintroduced
-at this same point in the procedure (the code keeps the helper that computed the
-cold-start prior for that purpose).
+at this same point in the procedure.
 
 **Until then:** an action's final score is simply its combined relevance points from
 Step 2. Two actions with the same relevance rank the same regardless of their success
-history.
+history. What is known about each hit travels with it instead: every result carries
+the same evidence the action's own page shows — this kernel's own calls, the
+provider's own report, and other kernels' accounts of trading with it — so a caller
+weighs the record itself rather than a number somebody else computed from it.
 
 ## Step 4 — Sort, then keep only what the caller may actually use
 

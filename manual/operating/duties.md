@@ -25,7 +25,7 @@ Public key: fdlMi64P…
 Network:    play
 Operator:   earned=0.710005 fUSDT paying-out=4.20 fUSDT unclaimed=0.00 fUSDT held-for-gas=0.00 fUSDT
 Solvency:   user-balances=10.00 fUSDT money-in=10.00 fUSDT difference=0.00 fUSDT
-Credit:     owed-to-us=0.00 fUSDT limit=500.00 fUSDT
+Credit:     owed-to-us=0.00 fUSDT limit=50.00 fUSDT
 Fees:       20% of each layer's margin here, 5% on work served to another kernel, 5% on work imported from one
 Tickets:    this kernel draws for 1.00 fUSDT, and accepts tickets up to 5.00 fUSDT
 Listen addresses:

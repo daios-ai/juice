@@ -447,6 +447,12 @@ func TestGossipRefusesForeignNetworkAndUnprovenAddress(t *testing.T) {
 	if _, err := k.AccumulateGossip(ctx, foreign, ""); err == nil {
 		t.Error("a reply from another network must not be accumulated")
 	}
+	// A reply that names no network is not ours either: an omitted digest is not a passport
+	// (P9). Before this rule a peer could be indexed simply by leaving the field out.
+	silent := &kernel.GossipResponse{PublicKey: "k", Handle: "peer"}
+	if _, err := k.AccumulateGossip(ctx, silent, ""); err == nil {
+		t.Error("a reply naming no network must not be accumulated")
+	}
 
 	fr.verifyErr = kernel.ErrUnauthorized.Wrap("signature was not made by that address")
 	unproven := &kernel.GossipResponse{PublicKey: "k", Handle: "peer",
@@ -509,15 +515,14 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peerID,
-		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
-	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peerID, CreatedAt: now}
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
 	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: sellerID, Status: kernel.ProcessOpen, CreatedAt: now}
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: sellerID, ActionID: "a",
 		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedRailAddress: from, CreatedAt: now,
-		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm")}
+		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm", id, "peer-key")}
 	// The execution itself is free here so the seller's balance stays what each test set it to; the
 	// obligation is read off the receipt's charge, which is what the buyer owes.
 	if err := st.BeginRun(ctx, p, tr, sellerID, 0, amount, amount*100); err != nil {
@@ -838,6 +843,7 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-lost", "aa")
 
 	k.RailPass(ctx)
+	k.RevealPending(ctx)
 	if fed.reveals == 0 {
 		t.Fatal("the worker never tried to tell the seller")
 	}
@@ -846,14 +852,14 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 	}
 
 	fed.down = false
-	k.RailPass(ctx)
+	k.RevealPending(ctx)
 	if !revealedFlag(t, st, trace) {
 		t.Fatal("once the seller has heard, the draw is finished")
 	}
 
 	// And it stops: a finished obligation is not announced forever.
 	before := fed.reveals
-	k.RailPass(ctx)
+	k.RevealPending(ctx)
 	if fed.reveals != before {
 		t.Errorf("a closed obligation was announced again (%d → %d)", before, fed.reveals)
 	}
@@ -925,6 +931,7 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	}
 
 	k.RailPass(ctx)
+	k.RevealPending(ctx)
 	if fed.reveals != 0 {
 		t.Fatalf("a payment still in flight was announced %d times", fed.reveals)
 	}
@@ -933,6 +940,7 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	fr.status["tk-won"] = kernel.RailConfirmed
 	fr.mu.Unlock()
 	k.RailPass(ctx)
+	k.RevealPending(ctx)
 	if fed.reveals != 1 {
 		t.Fatalf("a final payment must be announced exactly once, got %d", fed.reveals)
 	}
@@ -1006,7 +1014,7 @@ func TestTheCreditLimitCountsTheWholeObligation(t *testing.T) {
 	if err := st.UpdateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RunFederated(ctx, peer.ID, seller.ID, "quote", map[string]any{}, "", kernel.BuyerTerms{Commitment: "cm"}); err != nil {
+	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", kernel.BuyerTerms{Commitment: "cm"}); err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
 	// The call charged 100 and the seller's own markup adds 5, so the buyer owes 105 and that is
@@ -1090,7 +1098,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := func(terms kernel.BuyerTerms) error {
-		_, err := k.RunFederated(ctx, peer.ID, seller.ID, "quote", map[string]any{}, "", terms)
+		_, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", terms)
 		return err
 	}
 
@@ -1109,16 +1117,29 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	}
 	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
 	// that would reject an empty address if asked.
-	if _, err := k.RunFederated(ctx, peer.ID, seller.ID, "free", map[string]any{}, "", kernel.BuyerTerms{}); err != nil {
+	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "free"), map[string]any{}, "", kernel.BuyerTerms{}); err != nil {
 		t.Fatalf("a free call must not need a payer: %v", err)
 	}
-	var frozen int64
+	// It records which request it answers, as every admitted call does, and no ticket: there is
+	// no draw to hold a nonce for and no payer to name (P4, P10).
+	var withTicket int64
 	if err := st.(*store.DB).QueryRowForTest(ctx,
-		`SELECT COUNT(*) FROM traces WHERE action_id=? AND (dispatch_json IS NOT NULL OR owed_rail_address <> '')`, free.ID, &frozen); err != nil {
+		`SELECT COUNT(*) FROM traces WHERE action_id=?
+		   AND (COALESCE(json_extract(dispatch_json,'$.nonce'),'') <> '' OR owed_rail_address <> '')`,
+		free.ID, &withTicket); err != nil {
 		t.Fatal(err)
 	}
-	if frozen != 0 {
+	if withTicket != 0 {
 		t.Error("a call that owes nothing froze ticket terms")
+	}
+	var named int64
+	if err := st.(*store.DB).QueryRowForTest(ctx,
+		`SELECT COUNT(*) FROM traces WHERE action_id=?
+		   AND COALESCE(json_extract(dispatch_json,'$.counterparty'),'') <> ''`, free.ID, &named); err != nil {
+		t.Fatal(err)
+	}
+	if named != 1 {
+		t.Error("an admitted call must record the buyer it answers, priced or not")
 	}
 	fr.verifyErr = nil
 	if err := run(kernel.BuyerTerms{Commitment: "cm"}); !errors.Is(err, kernel.ErrInvalidInput) {
@@ -1136,4 +1157,49 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 		t.Errorf("frozen payer = %q, want the canonical form the rail verified", id)
 	}
 	_ = sys
+}
+
+// A seller that answers "I have no such obligation" has repudiated it. No message can make it
+// accept one, so the reveal is retired instead of being retried forever ahead of reveals that can
+// still succeed (P10). Repudiation is the seller's act and is logged as such; the buyer keeps the
+// money it did not have to pay.
+func TestARepudiatedRevealIsRetired(t *testing.T) {
+	st := newTestStore(t)
+	sys := setupSys(t, nil, st)
+	cfg := testConfig()
+	cfg.FeeRecipientID = sys.ID
+	fed := &repudiatingRevealer{fakeFederationHTTP: &fakeFederationHTTP{}}
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
+	k.SetRail(newFakeRail())
+	ctx := context.Background()
+	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
+		t.Fatal(err)
+	}
+	peer := peerWithAddress(t, k, st, "kpeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "0xcreditor")
+	buyer := setupUser(t, st, "repudiated-buyer", 0)
+	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-repudiated", "aa")
+
+	k.RailPass(ctx)
+	k.RevealPending(ctx)
+	if fed.reveals != 1 {
+		t.Fatalf("the seller was told %d times, want once", fed.reveals)
+	}
+	if !revealedFlag(t, st, trace) {
+		t.Fatal("a repudiated obligation must be retired, not retried forever")
+	}
+	k.RevealPending(ctx)
+	if fed.reveals != 1 {
+		t.Errorf("a retired obligation was announced again (%d attempts)", fed.reveals)
+	}
+}
+
+// repudiatingRevealer is a seller that denies the obligation exists.
+type repudiatingRevealer struct {
+	*fakeFederationHTTP
+	reveals int
+}
+
+func (f *repudiatingRevealer) Reveal(_ context.Context, _ string, _ kernel.RevealPayload, _ string) error {
+	f.reveals++
+	return kernel.ErrNotFound.Wrap("no such obligation")
 }

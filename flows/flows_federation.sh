@@ -73,14 +73,15 @@ flow_fed_rename() {
 }
 
 # _all_receipt_checks vr_json — "OK" iff valid=true, every check that ran held, and the audits a
-# cross-kernel receipt must always answer are among them. A check that does not apply is absent
-# rather than reported as passing, so reply_hash is required only where there is a reply to hash.
+# cross-kernel receipt must always answer are among them, the request it answers and the buyer it
+# names included. A check that does not apply is absent rather than reported as passing, so
+# reply_hash is required only where there is a reply to hash.
 _all_receipt_checks() {
     python3 -c "
 import sys,json
 vr=json.loads(sys.argv[1]); c=vr.get('checks',{}); bad=[]
 if vr.get('valid') is not True: bad.append('valid')
-required=['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','charge_ceiling','refund_conservation','args_hash','draw']
+required=['receipt_hash','signature','action_id','status','charge','premium','settlement_arith','charge_ceiling','refund_conservation','args_hash','draw','idempotency_key','counterparty']
 if c.get('status') is True and vr.get('receipt',{}).get('status')=='success': required.append('reply_hash')
 for k in required:
     if c.get(k) is not True: bad.append(k)
@@ -99,8 +100,9 @@ flow_federation_import_execute() {
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_nonempty "fed_import.remote_receipt_hash" "$(strfield "$tx" remote_receipt_hash)"
     assert_nonempty "fed_import.remote_receipt_json" "$(strfield "$tx" remote_receipt_json)"
-    # Two uses: the setup's resolve-on-first-use call (§8) plus this one — local stats accumulate per call.
-    assert_jnum "fed_import.local_stats_uses" "$(jj "$FED_DBL" "$FED_HL" action stats "$FED_PROXY")" uses 2
+    # Two uses: the setup's resolve-on-first-use call (§8) plus this one — what this kernel itself
+    # recorded, read where the action is read.
+    assert_jdot "fed_import.local_experience_uses" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" evidence.local_experience.uses 2
 }
 
 flow_federation_changed_reimport() {
@@ -156,7 +158,7 @@ flow_fed_all_receipt_checks() {
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)
     [ -n "$tx_id" ] || { fail "fed_all_receipt.call" "no tx_id"; return; }
-    assert_eq "fed_all_receipt.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+    assert_eq "fed_all_receipt.every_check_holds" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
 flow_fed_suspend_blocks() {
@@ -173,7 +175,7 @@ flow_fed_suspend_blocks() {
     local tx_id; tx_id=$(python3 -c "import sys,json;t=json.loads(sys.argv[1]);print(t[0]['id'] if t else '')" "$(jj "$FED_DBL" "$FED_HL" tx list)" 2>/dev/null)
     assert_nonempty "fed_suspend_blocks.tx_recorded" "$tx_id"
     assert_json "fed_suspend_blocks.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
-    assert_eq "fed_suspend_blocks.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+    assert_eq "fed_suspend_blocks.every_check_holds" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
 # A foreign call is served on the seller's own money: the seller funds the work and is repaid when
@@ -195,7 +197,7 @@ flow_fed_denial_underfunded() {
     local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/paid-svc)
     assert_nonempty "fed_denial_underfunded.tx_recorded" "$tx_id"
     assert_json "fed_denial_underfunded.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
-    assert_eq "fed_denial_underfunded.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+    assert_eq "fed_denial_underfunded.every_check_holds" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
 flow_fed_disabled_action_rejection() {
@@ -211,7 +213,7 @@ flow_fed_disabled_action_rejection() {
     local tx_id; tx_id=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/greet)
     assert_nonempty "fed_disabled.tx_settled_not_pending" "$tx_id"
     assert_json "fed_disabled.tx_status_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status failure
-    assert_eq "fed_disabled.all_9_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
+    assert_eq "fed_disabled.every_check_holds" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$tx_id")")"
 }
 
 flow_fed_import_duty() {
@@ -354,8 +356,8 @@ flow_fed_gossip_discovery() {
     assert_json "fed_gossip.t_proxy_owner_handle" "$shown" owner_handle kernel-r
     # Searching again finds the proxy that now shadows the discovery row it replaced.
     assert_contains "fed_gossip.t_still_findable" "sys@kernel-r/greet" "$(jj "$dbt" "$ht" run sys/lookup '{"query":"greet"}')"
-    # Exactly one use — T's OWN call — proving local stats are NOT inherited from R's gossiped manifest.
-    assert_jnum "fed_gossip.t_stats_own_only" "$(jj "$dbt" "$ht" action stats "$tp")" uses 1
+    # Exactly one use — T's OWN call — proving local experience is NOT inherited from R's manifest.
+    assert_jdot "fed_gossip.t_stats_own_only" "$(jj "$dbt" "$ht" action show "$tp")" evidence.local_experience.uses 1
     # Re-running by the rendered reference needs no second resolve (asserted after the stats check,
     # which counts T's own calls).
     assert_nonempty "fed_gossip.t_reruns_by_ref" "$(strfield "$(jj "$dbt" "$ht" run sys@kernel-r/greet '{}')" tx_id)"
@@ -374,6 +376,122 @@ flow_fed_gossip_discovery() {
         sleep 1
     done
     assert_eq "fed_gossip.unrated_call_propagates_as_verified_evidence" yes "$tevi"
+
+    # Whether a trade is public evidence is settled when the trade happens, not when someone asks
+    # (U7, U9). R serves a second action to its own users only, uses it, and publishes it
+    # afterwards: those calls were private business and stay private, however the action is
+    # advertised later.
+    local late; late=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create late --kind http \
+        --source "http://127.0.0.1:$FED_BPORT" --description "served at home first" --price "$(units 0)")" id)
+    j "$FED_DBR" "$FED_HR" action enable "$late" >/dev/null 2>&1
+    assert_nonempty "fed_gossip.private_call_runs" "$(strfield "$(jj "$FED_DBR" "$FED_HR" run sys/late '{}')" tx_id)"
+    j "$FED_DBR" "$FED_HR" action update "$late" --visibility public >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action enable "$late" >/dev/null 2>&1
+
+    # Give the loop several passes, then check L was never told about the private call. greet's own
+    # evidence, gossiped throughout, is what proves the pulls happened at all.
+    sleep 6
+    local leaked
+    leaked=$(python3 -c "
+import sys, json
+rows = json.loads(sys.argv[1]).get('evidence') or []
+print(sum(1 for r in rows if r.get('subject_action_id') == sys.argv[2]))" \
+        "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$rkey")" "$late")
+    assert_eq "fed_gossip.private_history_is_not_published_later" 0 "$leaked"
+}
+
+# What the evidence is collected FOR: a buyer deciding whether to trust a provider on another
+# kernel. L buys from R and rates it, a third kernel M buys from R too, and L — which never spoke
+# to M about anything but gossip — reads all of it where it reads the action: its own calls, R's
+# own report, and M's account of the same trades, marked verified where R's record confirms them
+# (U39, D16).
+flow_fed_evidence_reaches_buyer() {
+    echo "=== FLOW fed_evidence_reaches_buyer ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_evidence.setup" "setup failed"; return; }
+
+    # L's own trade with R, rated.
+    local ltx; ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)
+    assert_nonempty "fed_evidence.l_buys" "$ltx"
+    j "$FED_DBL" "$FED_HL" tx rate "$ltx" 1 --note "did what it said" >/dev/null 2>&1
+
+    # A third kernel M, which buys from R and rates it too. L learns of M only through discovery.
+    local dbm hm; dbm="$(kdb "$dir/m")"; hm="$dir/msys"; mkdir -p "$dir/m" "$hm/.juice"
+    make_admin "$dbm" "$hm" kernel_handle=kernel-m seed="$FED_BOOT" discovery_interval_seconds=2 \
+        || { fail "fed_evidence.bootstrap_m" "M did not start"; return; }
+    local mtx; mtx=$(strfield "$(jj "$dbm" "$hm" run "sys@$FED_RKEY/greet" '{}')" tx_id)
+    assert_nonempty "fed_evidence.m_buys" "$mtx"
+    j "$dbm" "$hm" tx rate "$mtx" 1 --note "worked for me" >/dev/null 2>&1
+
+    # L's own experience is on the action at once; the other two arrive with gossip.
+    assert_jdot "fed_evidence.own_calls" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" evidence.local_experience.uses 2
+    assert_jdot "fed_evidence.own_rating" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" evidence.local_experience.rating_count 1
+
+    local mkey; mkey=$(kernel_key "$dbm" "$hm")
+    local seen=no
+    for _ in $(seq 1 60); do
+        if python3 -c "
+import sys, json
+e = json.loads(sys.argv[1]).get('evidence') or {}
+prov = e.get('provider_reported') or {}
+others = {o.get('issuer_public_key'): o for o in (e.get('observed_by_others') or [])}
+m = others.get(sys.argv[2]) or {}
+sys.exit(0 if prov.get('uses', 0) >= 1 and m.get('corroborated_uses', 0) >= 1 else 1)" \
+            "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" "$mkey" 2>/dev/null; then seen=yes; break; fi
+        sleep 1
+    done
+    assert_eq "fed_evidence.provider_and_others_reach_the_buyer" yes "$seen"
+
+    # And the rating M gave on its own kernel is part of the provider's track record here, marked
+    # as another kernel's (D11).
+    local peer_rating=no
+    for _ in $(seq 1 30); do
+        if jj "$FED_DBL" "$FED_HL" action ratings "$FED_PROXY" | grep -q '"source": *"peer"'; then peer_rating=yes; break; fi
+        sleep 1
+    done
+    assert_eq "fed_evidence.peer_rating_admitted" yes "$peer_rating"
+}
+
+# A call a kernel will not serve is refused with a signed receipt, so the buyer settles at once
+# instead of waiting on an answer that is never coming — and the refusal is the same whether the
+# action was deleted or merely never offered abroad, since which it was is a fact about a catalogue
+# the caller cannot see (U47, U48).
+flow_fed_absent_action_rejection() {
+    echo "=== FLOW fed_absent_action_rejection ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "fed_absent.setup" "setup failed"; return; }
+
+    # A second action of R's, imported by L the same way as greet.
+    local gone; gone=$(publish "$FED_DBR" "$FED_HR" vanish --kind http --source "http://127.0.0.1:$FED_BPORT" \
+        --description "an action about to be retired" --price "$(units 0)")
+    assert_nonempty "fed_absent.second_action" "$gone"
+    assert_nonempty "fed_absent.imported" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run "sys@$FED_RKEY/vanish" '{}')" tx_id)"
+
+    # R retires one and withdraws the other from the network. L still holds both proxies.
+    j "$FED_DBR" "$FED_HR" action delete "$gone" >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility local >/dev/null 2>&1
+
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/vanish '{}' >/dev/null 2>&1 || true
+    j "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}' >/dev/null 2>&1 || true
+
+    local gone_tx greet_tx
+    gone_tx=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/vanish)
+    greet_tx=$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/greet)
+    assert_nonempty "fed_absent.retired_settled_at_once" "$gone_tx"
+    assert_nonempty "fed_absent.withdrawn_settled_at_once" "$greet_tx"
+    assert_json "fed_absent.retired_is_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$gone_tx")" status failure
+    assert_json "fed_absent.withdrawn_is_failure" "$(jj "$FED_DBL" "$FED_HL" tx show "$greet_tx")" status failure
+    assert_eq "fed_absent.retired_receipt_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$gone_tx")")"
+    assert_eq "fed_absent.withdrawn_receipt_checks" OK "$(_all_receipt_checks "$(jj "$FED_DBL" "$FED_HL" tx verify "$greet_tx")")"
+
+    # Nothing is parked, the caller is whole, and the two refusals are indistinguishable.
+    assert_eq "fed_absent.nothing_parked" 0 "$(awaiting "$FED_DBL" "$FED_HL")"
+    local r1 r2
+    r1=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$gone_tx")" reason)
+    r2=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$greet_tx")" reason)
+    assert_nonempty "fed_absent.refusal_states_a_reason" "$r1"
+    assert_eq "fed_absent.one_reason_for_both" "$r1" "$r2"
+    assert_eq "fed_absent.reason_discloses_no_terms" "" "$(printf '%s' "$r1" | grep -i 'price\|visib\|inactive\|private' || true)"
 }
 
 # flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
@@ -846,6 +964,13 @@ flow_fed_provider_crash_recovery() {
     # The outcome is unknown, so the allocation stays reserved: not refunded, not spent.
     local parked; parked=$(awaiting "$FED_DBL" "$ha")
     assert_eq "fed_crash.call_is_parked" yes "$([ "$parked" -ge 1 ] && echo yes || echo no)"
+
+    # And the owner cannot close it. The provider may have executed and be owed for it, so there is
+    # no answer to give the caller yet; the refusal says how long the call has waited (U23, G4).
+    local pid; pid=$(awaiting_process "$FED_DBL" "$ha")
+    assert_nonempty "fed_crash.parked_process_named" "$pid"
+    assert_fails "fed_crash.end_refused_while_waiting" "wait\|receipt\|invalid_state" -- j "$FED_DBL" "$ha" process end "$pid"
+    assert_eq "fed_crash.still_parked_after_refusal" 1 "$(awaiting "$FED_DBL" "$ha")"
 
     # The provider returns at the address its peer knows it by — a restart keeps the configured
     # listen address, as a deployed kernel's does — and recovers its own interrupted work.

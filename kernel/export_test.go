@@ -28,6 +28,10 @@ func (k *Kernel) PublicKeyB64() string { return k.ourKeyB64() }
 
 // ServingRecordForTest is the seller's half of the same record: what a foreign call was admitted
 // under, for a test that stages one by hand.
-func ServingRecordForTest(remoteBPS, lottery, reserve int64, nonce, commitment string) *string {
-	return marshalServing(remoteBPS, lottery, reserve, nonce, commitment)
+func ServingRecordForTest(remoteBPS, lottery, reserve int64, nonce, commitment, idempotencyKey, counterparty string) *string {
+	return marshalServing(remoteBPS, lottery, reserve, nonce, commitment, idempotencyKey, counterparty)
 }
+
+// CatalogPageSizeForTest is the page size this protocol serves, so a test about the bound reads it
+// from the bound itself rather than restating the number.
+const CatalogPageSizeForTest = catalogPageSize

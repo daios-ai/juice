@@ -118,6 +118,21 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	return k
 }
 
+// mustResolve reads the action a federated call names, the way the inbound handler does before it
+// hands the row to the kernel.
+func mustResolve(t *testing.T, k *kernel.Kernel, ctx context.Context, ownerID, name string) *kernel.Action {
+	t.Helper()
+	owner, err := k.ReadUser(ctx, ownerID)
+	if err != nil {
+		t.Fatalf("read owner: %v", err)
+	}
+	a, err := k.ResolveAction(ctx, owner.Handle+"/"+name)
+	if err != nil {
+		t.Fatalf("resolve %s/%s: %v", owner.Handle, name, err)
+	}
+	return a
+}
+
 func newTestKernel(st kernel.Store) *kernel.Kernel {
 	return newKernel(testConfig(), kernel.Dependencies{Store: st})
 }
@@ -126,7 +141,15 @@ func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kern
 	return newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec})
 }
 
-func testSigningKey() ed25519.PrivateKey {
+// testSigningKey is the identity every test kernel signs as. It is one key for the whole package,
+// not a fresh one per config: a kernel rebuilt in a test — after a restart, a config change, a
+// repricing — is the same kernel, and a peer's receipt naming it as the buyer must still verify
+// there (P5). A test that needs a SECOND identity generates its own key, as a peer is anyway.
+var theTestSigningKey = mustGenerateKey()
+
+func testSigningKey() ed25519.PrivateKey { return theTestSigningKey }
+
+func mustGenerateKey() ed25519.PrivateKey {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		panic(err)
@@ -2374,12 +2397,18 @@ type fakeFederationHTTP struct {
 	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
 	resolveRailAddress string
 	resolveRailProof   string
-	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt whose
-	// tx_id is the caller's idempotency_key — exactly how a real serving kernel refuses a call (§13), so
-	// a test can drive an ACTUAL rejection settlement.
+	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt —
+	// naming no transaction and naming the request it refuses, exactly how a real serving kernel
+	// refuses a call (§13, P5) — so a test can drive an ACTUAL rejection settlement.
 	rejectSignKey  ed25519.PrivateKey
 	rejectActionID string
 	rejectArgsHash string
+	// signKey and buyerKey make the fake sign as the peer does: every receipt it returns names the
+	// request it answers — the key the kernel minted at dispatch, and the buying kernel — and is
+	// signed over those fields. A test cannot write them itself, because the key does not exist
+	// until the call is dispatched (P5). Set them with signsAs.
+	signKey  ed25519.PrivateKey
+	buyerKey string
 	// rejectRefreshProxy makes that rejection the contract-mismatch kind (§8 If-Match): the peer's
 	// terms moved under our cached row, so it tells us to re-resolve rather than refusing outright.
 	rejectRefreshProxy bool
@@ -2404,6 +2433,12 @@ type fakeFederationHTTP struct {
 	stepNotDispatched bool
 	stepInput         string
 	stepForUserID     string
+}
+
+// signsAs makes the fake answer as the peer whose key priv is, for calls bought by k: the receipts
+// it returns are signed by priv and bound to k as the counterparty.
+func (f *fakeFederationHTTP) signsAs(k *kernel.Kernel, priv ed25519.PrivateKey) {
+	f.signKey, f.buyerKey = priv, k.PublicKeyB64()
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ResolvedAction, error) {
@@ -2474,8 +2509,10 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 	}
 	if f.rejectSignKey != nil {
 		now := time.Now().UTC()
+		// A refusal names no transaction and names the request it refuses (P5).
 		r := &kernel.Receipt{
-			ID: uuid.New().String(), TxID: idempotencyKey, ActionID: f.rejectActionID,
+			ID: uuid.New().String(), ActionID: f.rejectActionID,
+			IdempotencyKey: idempotencyKey, Counterparty: f.buyerKey,
 			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
 			RefreshProxy: f.rejectRefreshProxy, StartedAt: now, CreatedAt: now,
 		}
@@ -2495,6 +2532,17 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _
 	status := f.httpStatus
 	if status == 0 {
 		status = 200
+	}
+	if f.signKey != nil && f.receiptJSON != "" {
+		var r kernel.Receipt
+		if err := json.Unmarshal([]byte(f.receiptJSON), &r); err == nil {
+			r.IdempotencyKey, r.Counterparty = idempotencyKey, f.buyerKey
+			r.Signature = ""
+			payload, _ := testNet.ReceiptSigningBytes(&r)
+			r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.signKey, payload))
+			b, _ := json.Marshal(&r)
+			f.receiptJSON = string(b)
+		}
 	}
 	return kernel.FederationResult{Result: result, ReceiptJSON: f.receiptJSON, HTTPStatus: status}, nil
 }
@@ -2760,7 +2808,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, caller.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
+	_, err := k.RunFederated(ctx, caller.ID, a, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}
@@ -2807,7 +2855,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, peer.ID, target.ID, a.Name, map[string]any{}, "", kernel.BuyerTerms{})
+	_, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
 	}
@@ -2851,12 +2899,12 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 	// Exactly as the federation handler admits a call: the inbound record exists before it runs.
 	rec := &kernel.IdempotencyRecord{
 		ID: uuid.New().String(), IdempotencyKey: "rate-fed-key", CounterpartyUserID: peer.ID,
-		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+		CreatedAt: time.Now().UTC(),
 	}
-	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -2919,11 +2967,11 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	}
 	// The peer's call, served here: its receipt is what a remote rating must name.
 	rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key", CounterpartyUserID: peer.ID,
-		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
-	if err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		CreatedAt: time.Now().UTC()}
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := k.RunFederated(ctx, peer.ID, provider.ID, a.Name, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -2956,14 +3004,14 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := k.ActionRatings(ctx, a.ID, 50, 0)
+	got, err := k.ActionRatings(ctx, a, 50, 0)
 	if err != nil {
 		t.Fatalf("ActionRatings: %v", err)
 	}
 	if len(got) != 2 || got[0].Source != "local" || got[1].Source != "peer" || got[1].Value != 1 {
 		t.Fatalf("want [local, peer(1)] newest first, got %+v", got)
 	}
-	if page, _ := k.ActionRatings(ctx, a.ID, 1, 1); len(page) != 1 || page[0].Source != "peer" {
+	if page, _ := k.ActionRatings(ctx, a, 1, 1); len(page) != 1 || page[0].Source != "peer" {
 		t.Errorf("paging over the merged projection: got %+v", page)
 	}
 	// A peer mints its own row keys, so it can gossip any number of rows naming our one receipt:
@@ -2972,7 +3020,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	peerRatings := func() int {
-		got, _ := k.ActionRatings(ctx, a.ID, 50, 0)
+		got, _ := k.ActionRatings(ctx, a, 50, 0)
 		n := 0
 		for _, r := range got {
 			if r.Source == "peer" {
@@ -3007,11 +3055,11 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec2 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-2", CounterpartyUserID: peer.ID,
-		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
-	if err := st.InsertPendingIdempotencyRecord(ctx, rec2); err != nil {
+		CreatedAt: time.Now().UTC()}
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec2); err != nil {
 		t.Fatal(err)
 	}
-	reply2, err := k.RunFederated(ctx, peer.ID, provider.ID, fresh.Name, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
+	reply2, err := k.RunFederated(ctx, peer.ID, fresh, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -3023,7 +3071,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	if err := st.UpsertEvidence(ctx, tooLong); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := k.ActionRatings(ctx, fresh.ID, 50, 0); len(got) != 0 {
+	if got, _ := k.ActionRatings(ctx, fresh, 50, 0); len(got) != 0 {
 		t.Fatalf("a stored overlong note, alone on its trade: want not admitted, got %+v", got)
 	}
 	// Equivocation as the store detects it — two ratings under one row key — voids a trade even
@@ -3038,11 +3086,11 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec3 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-3", CounterpartyUserID: peer.ID,
-		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
-	if err := st.InsertPendingIdempotencyRecord(ctx, rec3); err != nil {
+		CreatedAt: time.Now().UTC()}
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec3); err != nil {
 		t.Fatal(err)
 	}
-	reply3, err := k.RunFederated(ctx, peer.ID, provider.ID, third.Name, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
+	reply3, err := k.RunFederated(ctx, peer.ID, third, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -3051,7 +3099,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	if err := st.UpsertEvidence(ctx, ratingEvidence(t, peerKey, self, third.ID, "peer-own-9", hash3, 1, now)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 1 || got[0].Source != "peer" {
+	if got, _ := k.ActionRatings(ctx, third, 50, 0); len(got) != 1 || got[0].Source != "peer" {
 		t.Fatalf("third trade: want its one peer rating, got %+v", got)
 	}
 	for _, val := range []float64{1, 0} {
@@ -3059,7 +3107,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, _ := k.ActionRatings(ctx, third.ID, 50, 0); len(got) != 0 {
+	if got, _ := k.ActionRatings(ctx, third, 50, 0); len(got) != 0 {
 		t.Errorf("an equivocated row on the trade voids it even beside an honest one, got %+v", got)
 	}
 

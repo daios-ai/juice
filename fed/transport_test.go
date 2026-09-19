@@ -250,7 +250,7 @@ func TestGossipReadFailureTagged(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := b.Gossip(ctx, a.PublicKey(), "")
+	_, err := b.Gossip(ctx, a.PublicKey(), GossipRequest{})
 	if err == nil {
 		t.Fatal("expected the gossip pull to fail when the handler errors")
 	}
@@ -297,7 +297,7 @@ func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 	var lastErr error
 	for time.Now().Before(deadline) {
 		actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = a.Advertise(actx)
+		_ = a.Advertise(actx)
 		keys, err := b.DiscoverProviders(actx)
 		cancel()
 		if err != nil {
@@ -324,7 +324,7 @@ func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 			continue
 		}
 		gctx, gcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		g, gerr := b.Gossip(gctx, a.PublicKey(), "")
+		g, gerr := b.Gossip(gctx, a.PublicKey(), GossipRequest{})
 		gcancel()
 		if gerr == nil && string(g) == `{"public_key":"a"}` {
 			return // discovered A by routing discovery through the server and gossiped it by key
@@ -562,5 +562,97 @@ func TestConfiguredAddressesAreBoundVerbatim(t *testing.T) {
 	t.Cleanup(func() { _ = tr.Close() })
 	if !strings.Contains(strings.Join(tr.ListenAddrs(), " "), fmt.Sprintf("/tcp/%d/", port)) {
 		t.Fatalf("bound something other than the configured address: %v", tr.ListenAddrs())
+	}
+}
+
+// A caller that gives up is not made to wait for the stream deadline: cancelling the context
+// resets the stream and returns at once. Without this a call whose caller has walked away holds a
+// stream and a goroutine for a full minute, and a kernel shutting down waits for every one of them.
+func TestACancelledCallReturnsAtOnce(t *testing.T) {
+	served := make(chan struct{})
+	srv := &slowHandlers{fakeHandlers: &fakeHandlers{}, entered: served, hold: 30 * time.Second}
+	a := newTestTransport(t, srv, nil)
+	b := newTestTransport(t, &fakeHandlers{}, []string{a.ListenAddrs()[0]})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-served // the request is in the handler's hands
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := b.Call(ctx, a.PublicKey(), CallRequest{Action: "a", Counterparty: b.PublicKey()})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("a cancelled call must not report success")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want the cancellation", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("the call took %s to notice it was cancelled; the stream deadline is not the answer", elapsed)
+	}
+}
+
+// slowHandlers holds a request until the test is done with it, so a caller can walk away mid-call.
+type slowHandlers struct {
+	*fakeHandlers
+	entered chan struct{}
+	hold    time.Duration
+}
+
+func (s *slowHandlers) OnCall(ctx context.Context, _ string, _ CallRequest) CallResponse {
+	close(s.entered)
+	select {
+	case <-ctx.Done():
+	case <-time.After(s.hold):
+	}
+	return CallResponse{Status: 200, Body: json.RawMessage(`{}`)}
+}
+
+// The limits the contract names are the limits the transport runs under: a peer may have only so
+// many inbound streams open here at once, whatever rate it opens them at. A token bucket cannot
+// say this — it bounds arrivals, not work in flight — so the two controls are separate and both
+// are checked (D12).
+func TestInboundConcurrencyIsBoundedPerPeer(t *testing.T) {
+	a := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{"result":{},"receipt":null}`)}, nil)
+	mgr := a.host.Network().ResourceManager()
+
+	peerID := a.host.ID()
+	var opened []network.StreamManagementScope
+	t.Cleanup(func() {
+		for _, s := range opened {
+			s.Done()
+		}
+	})
+	for i := 0; i < streamsPerPeer; i++ {
+		scope, err := mgr.OpenStream(peerID, network.DirInbound)
+		if err != nil {
+			t.Fatalf("stream %d of the allowance was refused: %v", i, err)
+		}
+		opened = append(opened, scope)
+	}
+	if scope, err := mgr.OpenStream(peerID, network.DirInbound); err == nil {
+		scope.Done()
+		t.Fatalf("a peer opened %d concurrent inbound streams; the bound is %d", streamsPerPeer+1, streamsPerPeer)
+	}
+}
+
+// A boundary that cannot be built is not a boundary. If the limits fail to construct, the
+// transport refuses to start rather than serving without them — the same rule the kernel applies
+// to every other startup condition it cannot serve degraded (D12, D20).
+func TestATransportWithoutItsLimitsDoesNotStart(t *testing.T) {
+	old := boundedResources
+	boundedResources = func() (network.ResourceManager, error) { return nil, errors.New("no limits here") }
+	t.Cleanup(func() { boundedResources = old })
+
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	tr, err := New(context.Background(), Config{SigningKey: priv, Namespace: "juice/test", ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
+	if err == nil {
+		tr.Close()
+		t.Fatal("the transport started without the limits it promises")
+	}
+	if !strings.Contains(err.Error(), "resource limits") {
+		t.Errorf("the refusal must name what could not be built, got %v", err)
 	}
 }

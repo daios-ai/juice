@@ -4,6 +4,7 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -25,6 +26,7 @@ func Lookup() Spec {
 				"input_schema":           object("JSON Schema for the action's input"),
 				"output_schema":          object("JSON Schema for the action's output"),
 				"quote_hash":             str("Fingerprint of the quoted terms; a run carries it back as consent to them"),
+				"evidence":               object("What this kernel holds about the action's conduct: its own calls, the provider's own signed report, and other kernels' accounts of trading with it — each labelled, never summed, never scored"),
 				"observed_at":            str("When this kernel last verified the authority's own description of a remote action (RFC 3339); absent for local actions, which this kernel is itself the authority for"),
 				"last_seen":              str("When this kernel last reached the hosting kernel (RFC 3339); absent for local actions and until a first contact"),
 				"last_contact_failed_at": str("When contact with the hosting kernel last failed (RFC 3339); later than last_seen means recent attempts are failing. Absent for local actions and until a first failure"),
@@ -36,6 +38,21 @@ func Lookup() Spec {
 			}
 		},
 	}
+}
+
+// asJSONObject renders a value the way the reply will carry it. A native's result is checked
+// against its own output schema before it is paid for (U12), and that check is made on JSON
+// values, not on Go types, so a struct is rendered here rather than at the boundary.
+func asJSONObject(v any) map[string]any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if json.Unmarshal(b, &out) != nil {
+		return nil
+	}
+	return out
 }
 
 func executeLookup(ctx context.Context, args map[string]any, subjectID string, k Host) (map[string]any, error) {
@@ -60,17 +77,23 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		// observed_at dates what this kernel last verified against the authority: the gossip
 		// observation for a discovered action, the last reconcile for a resolved proxy. A local
 		// action has none — this kernel IS its authority, so its row is never an observation.
+		// Each hit also carries the record a person reads on the action itself, so an agent
+		// choosing between candidates weighs what a person would (U10, U46). Ranking stays
+		// relevance only: a rank by evidence would be the opaque score U39 excludes.
 		var actionID, ref, description, observedAt string
 		var in, out map[string]any
+		var record *kernel.ActionRecord
 		if d := r.Discovered; d != nil {
 			actionID, description, in, out = d.ActionID, d.Description, d.InputSchema, d.OutputSchema
 			ref = d.Handle + "@" + k.KernelName(ctx, d.KernelPublicKey) + "/" + d.Name
 			observedAt = d.ObservedAt.UTC().Format(time.RFC3339)
+			record = k.DiscoveredRecord(ctx, d)
 		} else {
 			actionID, ref, description, in, out = r.Action.ID, kernel.FormatActionRef(r.Action), r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
 			if r.Action.Kind == kernel.KindRemoteProxy {
 				observedAt = r.Action.UpdatedAt.UTC().Format(time.RFC3339)
 			}
+			record = k.ActionRecord(ctx, r.Action)
 		}
 		item := map[string]any{
 			"action_id":     actionID,
@@ -81,6 +104,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 			"input_schema":  in,
 			"output_schema": out,
 			"quote_hash":    r.QuoteHash,
+			"evidence":      asJSONObject(record),
 		}
 		if observedAt != "" {
 			item["observed_at"] = observedAt

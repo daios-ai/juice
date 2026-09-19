@@ -105,6 +105,17 @@ flow_lookup() {
     assert_nonempty "lookup.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     assert_contains "lookup.lexical_hit" "alice/zqxwvprobe" "$(jj "$db" "$ha" run sys/lookup '{"query":"zqxwvprobe"}')"
+
+    # A hit carries the same evidence a person reads on the action, so an agent choosing between
+    # candidates weighs what a person would (U10, U46).
+    local hit; hit=$(jj "$db" "$ha" run sys/lookup '{"query":"zqxwvprobe"}')
+    assert_eq "lookup.hit_carries_evidence" ok "$(python3 -c "
+import sys, json
+rows = (json.loads(sys.argv[1]).get('result') or {}).get('results') or []
+hit = next((r for r in rows if r.get('action') == 'alice/zqxwvprobe'), None)
+assert hit is not None, rows
+assert 'evidence' in hit, sorted(hit)
+print('ok')" "$hit" 2>/dev/null)"
 }
 
 flow_chat() {

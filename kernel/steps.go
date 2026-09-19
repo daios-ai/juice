@@ -161,8 +161,9 @@ func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) 
 	net, fee := k.econ.Fee(fresh.Available)
 	ktx.Net, ktx.Fee = net, fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	soldAt, nonce := sold(trace)
-	receipt, err := k.buildReceipt(ktx, ktx.Gross, k.econ.Premium(ktx.Gross, soldAt), trace.Value, trace.ValueTo, nonce)
+	sale := sold(trace)
+	k.markEvidenceEligible(ctx, action, ktx)
+	receipt, err := k.buildReceipt(ktx, ktx.Gross, k.econ.Premium(ktx.Gross, sale.RemoteBPS), trace.Value, trace.ValueTo, sale)
 	if err != nil {
 		return err
 	}
@@ -322,7 +323,7 @@ func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID, remoteUs
 //	                                      the step stays running for RetryPendingRemoteDispatches
 //	otherwise (reply == nil)              rejected before anything settled; the step is waiting again
 func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, "", "")
+	return k.completeStep(ctx, callerID, stepID, input, "", "", servedRequest{})
 }
 
 // CompleteStepInTrace resumes a step from inside a running execution — a WASM juice.step_complete or
@@ -334,15 +335,23 @@ func (k *Kernel) CompleteStepInTrace(ctx context.Context, callerID, traceID, ste
 	if traceID == "" {
 		return nil, ErrUnauthorized.Wrap("in-execution completion requires an authorizing trace")
 	}
-	return k.completeStep(ctx, callerID, stepID, input, "", traceID)
+	return k.completeStep(ctx, callerID, stepID, input, "", traceID, servedRequest{})
 }
 
 // CompleteStepFederated resumes a step on behalf of a peer, threading the inbound cross-kernel
 // idempotency record (§13) so the commit that settles the call completes that record atomically —
 // including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
 // RunFederated, which does the same for an inbound call.
-func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID string) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID, "")
+func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, idempotencyKey, counterparty string) (*StepReply, error) {
+	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID, "", servedRequest{idempotencyKey, counterparty})
+}
+
+// servedRequest is the inbound request a completion answers, carried to the trace so the receipt
+// it produces names it — the same binding an admitted call records (P4, P5). Empty for a local
+// completion, which answers no peer.
+type servedRequest struct {
+	IdempotencyKey string
+	Counterparty   string
 }
 
 // StepRemoteRequiredCaller returns a step's required remote-caller id (nil = a local/kernel-level
@@ -355,7 +364,7 @@ func (k *Kernel) StepRemoteRequiredCaller(ctx context.Context, stepID string) (*
 	return step.RequiredCallerRemoteID, nil
 }
 
-func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string) (*StepReply, error) {
+func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, served servedRequest) (*StepReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -464,9 +473,13 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		stepTrace.Value, stepTrace.ValueTo = eff.Amount, eff.Dest
 	}
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
-	// completes it, for every action kind rather than only remote proxies.
+	// releases it, for every action kind rather than only remote proxies, and the request it
+	// answers rides with it so the receipt can name it.
 	if idempotencyRecordID != "" {
 		stepTrace.IdempotencyRecordID = &idempotencyRecordID
+	}
+	if served.IdempotencyKey != "" {
+		stepTrace.DispatchJSON = marshalServing(0, 0, 0, "", "", served.IdempotencyKey, served.Counterparty)
 	}
 	// For remote-proxy actions, generate and persist the idempotency key and dispatch
 	// payload atomically with the trace creation. BeginStepCall passes these through

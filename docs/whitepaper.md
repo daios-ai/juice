@@ -326,8 +326,9 @@ nothing by failing-with-charge over succeeding. Inbound calls sign
 `JCS({action, counterparty, idempotency_key, timestamp, args_hash})`; the receiver verifies
 the signature, the raw-body hash, friendship, and a timestamp age `≤ 5 minutes`, then runs
 the call as the proxy user, paid from its prepaid balance. Idempotency is enforced by a
-unique `(idempotency_key, counterparty)` record (24-hour expiry): a completed replay returns
-the stored receipt; a pending replay returns 409. The whole remote receipt — JSON plus its
+record keyed `(counterparty, idempotency_key)` that exists only while execution may be running:
+a replay is answered from the stored receipt, which names the same pair; a replay while the call
+is still running returns 409. The whole remote receipt — JSON plus its
 SHA-256 — is stored atomically with the local transaction, and `tx verify` re-checks it
 entirely locally.
 

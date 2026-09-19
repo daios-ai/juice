@@ -22,7 +22,8 @@ base units.
 **`sys/lookup`** — `{query, limit=10}` → `{results: [...]}`
 
 Returns ranked candidates with `action`, `action_id`, `description`,
-`input_schema`, `output_schema`, `price`, `quote_hash`, and `score`. Remote
+`input_schema`, `output_schema`, `price`, `quote_hash`, `evidence`, and `score`.
+Evidence is the same view returned by `action show`. Remote
 results may include observation and contact timestamps. Ranking combines
 keywords with semantic matching when an embedding model is available, and
 uses keywords alone otherwise. Access filtering precedes the result limit.

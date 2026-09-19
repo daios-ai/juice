@@ -35,7 +35,9 @@ and `--quiet` cannot be used together.
 |---|---|
 | `juice run ACTION [JSON]` | run an action ([Running an action](../calling/running.html)) |
 
-Use `--quote-hash H` to bind the request to previously inspected terms.
+`run` reads and pins the terms, shows the price, and asks at a terminal;
+`--yes` skips the question. Without a terminal it prints the price to stderr
+and proceeds. Use `--quote-hash H` to send previously inspected terms instead.
 The JSON input can be supplied inline or read from a file with `@file.json`.
 
 ## kernel
@@ -98,14 +100,13 @@ non-interactive confirmation.
 | Command | |
 |---|---|
 | `juice action create NAME` | create an action, inactive and private ([Publishing](../providing/publishing.html)) |
-| `juice action show ACTION` | full detail, including `quote_hash` |
+| `juice action show ACTION` | full detail, including `quote_hash` and evidence of the action's conduct |
 | `juice action update ACTION\|PATH` | change price, schemas, source, visibility, credentials |
 | `juice action enable ACTION\|PATH` | make callable |
 | `juice action disable ACTION\|PATH` | make uncallable, reversibly |
 | `juice action delete ACTION\|PATH` | retire; history survives |
 | `juice action list` | active actions within your access; `--all` includes inactive actions in your scope |
 | `juice action import NAME [SPEC_URL]` | install an OpenAPI document ([Wrapping a web API](../providing/web-apis.html)) |
-| `juice action stats ACTION` | uses, successes, failures, latency, rating |
 | `juice action ratings ACTION` | the public ratings |
 
 `create` and `update` take `--kind`, `--source`, `--artifact`, `--method`,
@@ -127,7 +128,7 @@ non-interactive confirmation.
 |---|---|
 | `juice process list` | your processes and what they hold |
 | `juice process show ID` | one process |
-| `juice process end ID` | close it, cancelling waiting steps and returning their money |
+| `juice process end ID` | close it, cancelling waiting steps and returning their money; refused while awaiting a peer's receipt |
 
 ## step
 

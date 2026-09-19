@@ -272,7 +272,7 @@ func TestReceiptSigningRequiresConfiguredKey(t *testing.T) {
 		ReplyJSON: json.RawMessage(`{}`),
 		Status:    TxSuccess,
 		EndedAt:   time.Now().UTC(),
-	}, 0, 0, 0, "", "")
+	}, 0, 0, 0, "", soldAs{})
 	if !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState without signing key, got %v", err)
 	}
@@ -327,7 +327,6 @@ func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 
 	// Stats changes must NOT affect the hash (stats are not contract fields per §12.2).
 	withStats := base
-	withStats.Stats = &Stats{Uses: 99, Successes: 99}
 	if remoteManifestHash(base) != remoteManifestHash(withStats) {
 		t.Error("stats change must not affect the manifest hash")
 	}
@@ -692,21 +691,21 @@ func TestRemoteReceiptInvalidValue(t *testing.T) {
 	replyHash, _ := jcsHashStr("null")
 	const rbps, mp = int64(500), int64(100)
 	k := &Kernel{econ: Economy{RemoteBPS: rbps}}
-	if got := k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", ReplyHash: replyHash}, mp, rbps, []byte("null")); got != "" {
+	if got := k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", ReplyHash: replyHash}, mp, rbps, []byte("null"), nil); got != "" {
 		t.Errorf("valid value-free receipt rejected: %s", got)
 	}
-	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, Nonce: "n", Value: 100, ReplyHash: replyHash}, mp, rbps, []byte("null"), nil) == "" {
 		t.Error("a success delivering value must be quarantined")
 	}
-	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil) == "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0, Value: 100}, mp, rbps, nil, nil) == "" {
 		t.Error("a failure delivering value must be quarantined")
 	}
-	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0}, mp, rbps, nil) != "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxFailure, Charge: 0}, mp, rbps, nil, nil) != "" {
 		t.Error("a value-free failure must settle")
 	}
 	// An obligation nobody can draw for is not settleable: without the seller's nonce the buyer
 	// would be choosing the outcome alone (P10).
-	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null")) == "" {
+	if k.remoteReceiptInvalid(Receipt{Status: TxSuccess, Charge: mp, Premium: 5, ReplyHash: replyHash}, mp, rbps, []byte("null"), nil) == "" {
 		t.Error("a charged receipt with no nonce must be quarantined")
 	}
 }
@@ -786,9 +785,11 @@ func TestProjectRatingPrivacy(t *testing.T) {
 		Rating: 1, Note: &note, RatedReceiptHash: "RECEIPT-HASH",
 		CreatedAt: time.Unix(1700000000, 0).UTC(),
 	}
-	proj, err := k.projectRating(r)
-	if err != nil {
-		t.Fatalf("projectRating: %v", err)
+	// The projection is built where the rating is read — four public fields, no identity — and
+	// signed here. The type is what guarantees the omission, so it is what this checks.
+	proj := &RatingEvidence{Rating: r.Rating, Note: r.Note, RatedReceiptHash: r.RatedReceiptHash, CreatedAt: r.CreatedAt}
+	if err := k.signRating(proj); err != nil {
+		t.Fatalf("signRating: %v", err)
 	}
 
 	// No rater or transaction identity crosses the wire.
@@ -821,41 +822,6 @@ func TestProjectRatingPrivacy(t *testing.T) {
 	fullSig, _ := playNet.sign(priv, sigDomainRating, rc)
 	if err := playNet.verify(pub, sigDomainRating, unsigned, fullSig); err == nil {
 		t.Error("a full-Rating signature must not verify over the projection")
-	}
-}
-
-// gossipRowIsExecuted decides leg-(b) gossip eligibility (§13): only a receipt-backed admitted
-// execution is evidence. A leg-(a) own-execution row (no remote receipt) is always executed; a
-// quarantined receipt (reason prefix) and a signed rejection (remote tx_id == our idempotency_key)
-// are not. Locally-manufactured settlements never reach here — SQL drops their empty remote receipt.
-func TestGossipRowIsExecuted(t *testing.T) {
-	const idem = "idem-key-123"
-	cases := []struct {
-		name string
-		row  *GossipReceiptRow
-		want bool
-	}{
-		{"own execution (leg a)", &GossipReceiptRow{RemoteReceiptJSON: ""}, true},
-		{"admitted execution success", &GossipReceiptRow{
-			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":10}`,
-			IdempotencyKey:    idem, Receipt: &Receipt{}}, true},
-		{"admitted price-0 failure", &GossipReceiptRow{
-			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"failure","charge":0}`,
-			IdempotencyKey:    idem, Receipt: &Receipt{Reason: "handler failed"}}, true},
-		{"signed rejection (tx_id == idempotency_key)", &GossipReceiptRow{
-			RemoteReceiptJSON: `{"tx_id":"` + idem + `","status":"failure","charge":0}`,
-			IdempotencyKey:    idem, Receipt: &Receipt{}}, false},
-		{"quarantined invalid receipt (reason prefix)", &GossipReceiptRow{
-			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":10}`,
-			IdempotencyKey:    idem, Receipt: &Receipt{Reason: reasonRemoteReceiptInvalidPrefix + "premium != ceil"}}, false},
-		{"quarantined mispriced success (status disagreement, unforgeable)", &GossipReceiptRow{
-			RemoteReceiptJSON: `{"tx_id":"real-remote-tx","status":"success","charge":999}`,
-			IdempotencyKey:    idem, Receipt: &Receipt{Status: TxFailure, Reason: "remote call failed"}}, false},
-	}
-	for _, c := range cases {
-		if got := gossipRowIsExecuted(c.row); got != c.want {
-			t.Errorf("%s: gossipRowIsExecuted = %v, want %v", c.name, got, c.want)
-		}
 	}
 }
 

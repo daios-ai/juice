@@ -84,6 +84,6 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
 	sig, err = net.SignManifest(key, m)
-	check("manifest", "WOYz6ZZKYV4jhDweoekj5wGyTWPbtY-e-Jgpb5RAVJ-cUOUiglPttUo2YrjZK51RhJaKYpknvMIZhUggOBEpDw", sig, err)
+	check("manifest", "7k-HbWrpAUquGLUS0WxsXObXe_KfFuxSSwXHaXlma83pN4bROkK4n0SvDfLnUnmdRjuU_UNdDKcUXPj4Hs5iBw", sig, err)
 
 }

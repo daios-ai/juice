@@ -55,12 +55,12 @@ The kernel returns a signed rejection if admitting the call would exceed its
 limit or if the provider cannot fund the execution.
 
 ```
-Credit:     owed-to-us=4.20 fUSDT limit=500.00 fUSDT
+Credit:     owed-to-us=4.20 fUSDT limit=50.00 fUSDT
 ```
 
 ### Bounding what strangers can cost you
 
-The `credit_limit` applies across all peers together. Its default is 500
+The `credit_limit` applies across all peers together. Its default is fifty
 display units. Because admission uses a shared limit, an attacker cannot obtain
 another allowance simply by creating a new kernel identity.
 
@@ -157,9 +157,11 @@ learned from other kernels, so consumers obtain each statement from its issuer.
 
 A rating is **trade-backed** when its linked receipt matches an execution
 receipt issued by the subject kernel for that action, with the rating issuer
-named as counterparty. Unlinked claims remain separately counted as unverified.
-Two conflicting valid ratings for the same evidence record constitute
-equivocation and are excluded from derived figures. Inspect these views with:
+named as counterparty and both sides reporting the same outcome. A linked pair
+that disagrees counts as a contradiction; unlinked claims remain unverified.
+An issuer that gives conflicting signed accounts of a trade or its rating is
+marked as telling it two ways, and that trade contributes nothing to the derived
+figures. Inspect these views with:
 
 ```
 $ juice admin peer inspect beta-kernel
@@ -168,6 +170,9 @@ $ juice admin peer inspect beta-kernel
 The execution summary counts the subject kernel's own evidence. Counterparty
 experience separately groups the reports of other issuers, avoiding a combined
 score that would obscure their sources.
+
+Buyers see the same evidence on `action show` and in search results, alongside
+this kernel's own experience. Each report shows the period its records cover.
 
 Signature and receipt checks establish who issued a record, whether it has
 changed, and whether a claimed trade links to the counterparty's evidence.

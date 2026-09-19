@@ -180,7 +180,7 @@ flow_rating() {
     assert_eq "rating.unrated_null" None "$(strfield "$(jj "$db" "$hb" tx show "$tx_id")" rating)"
 
     assert_contains "rating.rate_succeeds" "rated" "$(j "$db" "$hb" tx rate "$tx_id" 1 --note 'great service')"
-    assert_jnum "rating.stats_updated" "$(jj "$db" "$hb" action stats "$aid")" rating_count 1
+    assert_jdot "rating.stats_updated" "$(jj "$db" "$ha" action show "$aid")" evidence.local_experience.rating_count 1
 
     # Buyer and seller both see the embedded {value, note}; it also appears in the list.
     local chk="import sys,json; r=json.loads(sys.argv[1]).get('rating') or {}; assert r.get('value')==1 and r.get('note')=='great service', r; print('ok')"

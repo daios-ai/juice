@@ -119,18 +119,15 @@ transaction history.
 ## Your track record
 
 ```
-$ juice action stats bob/echo
-  uses: 3
-  successes: 3
-  failures: 0
-  rating_count: 1
-  latency_estimate: 0.399 seconds
-  rating_estimate: 1
-  last_used_at: 2026-09-14T12:05:24Z
+$ juice action show bob/echo
+  …
+
+This kernel's own calls
+  3 calls, 3 succeeded  ~399ms  rating 1.00 from 1
 ```
 
-The `latency_estimate` is the mean duration recorded for the action's own calls,
-in seconds, and `rating_estimate` is the mean of its ratings. Current statistics
+The duration is the mean execution time, and the rating is the mean of the
+recorded assessments. Current statistics
 reset when the description, price, schemas, or source changes. Historical
 transactions and ratings remain available.
 

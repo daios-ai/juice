@@ -470,7 +470,7 @@ func TestLookupDiscoveredActionPrice(t *testing.T) {
 		Description:  "translate icelandic contracts",
 		ServingPrice: servingPrice, ObservedAt: time.Now().UTC(),
 	}
-	if err := st.ReplaceDiscoveryDocs(ctx, "peer-key-1", []*kernel.DiscoveryDoc{doc}); err != nil {
+	if err := st.ApplyCatalogPage(ctx, "peer-key-1", []*kernel.DiscoveryDoc{doc}, "", 0); err != nil {
 		t.Fatalf("ReplaceDiscoveryDocs: %v", err)
 	}
 

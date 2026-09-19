@@ -4,6 +4,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -231,6 +232,8 @@ type Store interface {
 	// ListVisibleActions returns active non-deleted actions with a non-suspended owner, network-wide
 	// (visibility=public) and, when includeLocal is set, also kernel-local ones (§4/§14).
 	ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error)
+	// ListExportableActionsAfter returns one page of public actions in id order, for a catalogue scan.
+	ListExportableActionsAfter(ctx context.Context, afterActionID string, limit int) ([]*Action, error)
 	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including
 	// inactive and private ones. Used to give an owner their full private view.
 	ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error)
@@ -263,7 +266,7 @@ type Store interface {
 	// decremented at process closure, never here, or the two double-count; and buildReceipt runs
 	// INSIDE the transaction, with the computed refund, so the signed charge cannot disagree with
 	// what is committed.
-	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, errorCode, stepID string) error
+	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// EndProcess is D3's closure write set.
 	EndProcess(ctx context.Context, processID string) error
@@ -292,7 +295,7 @@ type Store interface {
 
 	// ListPublicRatings is the action's public projection, local and trade-backed peer ratings
 	// together, paged in the query (D11, D16).
-	ListPublicRatings(ctx context.Context, actionID, selfKey string, limit, offset int) ([]PublicRating, error)
+	ListPublicRatings(ctx context.Context, actionID, subjectKernel, subjectAction, selfKey string, limit, offset int) ([]PublicRating, error)
 	ReadRatingByTxID(ctx context.Context, txID string) (*Rating, error)
 	// CreateRatingAndUpdateStats atomically inserts a rating and updates rating_count/rating_estimate.
 	CreateRatingAndUpdateStats(ctx context.Context, r *Rating, actionID string, rating float64) error
@@ -301,19 +304,18 @@ type Store interface {
 
 	// ---- Idempotency ----
 
-	// ReadIdempotencyRecord returns an unexpired record matching key + counterparty, or ErrNotFound.
+	// ReadIdempotencyRecord returns the lock held for key + counterparty, or ErrNotFound.
 	ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error)
-	// ReadIdempotencyRecordByID reads a record by id regardless of expiry, for recovery.
+	// ReadIdempotencyRecordByID reads the lock a trace was admitted under, for recovery.
 	ReadIdempotencyRecordByID(ctx context.Context, id string) (*IdempotencyRecord, error)
-	// InsertPendingIdempotencyRecord inserts a record with status="pending". Returns a unique-constraint
-	// error (not ErrNotFound) if a record for the same key+counterparty already exists.
-	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) error
-	// DeleteIdempotencyRecord removes a record (used to allow retry after execution failure).
+	// InsertPendingIdempotencyRecord takes the lock for one request, or returns the record already
+	// holding it — the caller's signal that this request is in flight.
+	InsertPendingIdempotencyRecord(ctx context.Context, r *IdempotencyRecord) (*IdempotencyRecord, error)
+	// DeleteIdempotencyRecord releases the lock, unless a trace still depends on it.
 	DeleteIdempotencyRecord(ctx context.Context, id string) error
-	// CompleteIdempotencyRecordIfPending atomically transitions a record from pending to
-	// complete, storing resultJSON and receiptJSON. If the record is already complete
-	// (e.g. CommitFailedCall already ran), this is a no-op.
-	CompleteIdempotencyRecordIfPending(ctx context.Context, id, resultJSON, receiptJSON string) error
+	// ReadFederatedOutcome returns the receipt this kernel signed for one request and the reply its
+	// transaction recorded, or ErrNotFound. The permanent answer to a repeated request (P4).
+	ReadFederatedOutcome(ctx context.Context, counterparty, key string) (*Receipt, json.RawMessage, error)
 
 	// ---- Recovery challenges (§12) ----
 
@@ -381,7 +383,7 @@ type Store interface {
 	//
 	// The stake and the caller are read from the trace, so every settlement path releases exactly
 	// what was locked whether or not anything was owed.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *RailTransfer, stats *Stats, idempotencyRecordID, stepID, errorCode string) error
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *RailTransfer, stats *Stats, idempotencyRecordID, stepID string) error
 
 	// ---- Auth codes (PKCE flow) ----
 
@@ -553,6 +555,9 @@ type Store interface {
 	// ListOwed is every obligation this kernel is still waiting to be paid for, oldest first —
 	// including one whose buyer has not yet said how the draw came out.
 	ListOwed(ctx context.Context, limit int) ([]*Owed, error)
+	// PeersWithUnresolvedMoney is every peer some money is waiting on, in either direction, as keys
+	// alone — what the discovery order reads to know whom to talk to first.
+	PeersWithUnresolvedMoney(ctx context.Context) ([]string, error)
 	// Exposure returns what this kernel has delivered to foreign buyers and not been paid for. It may
 	// be negative: premium income accumulates there.
 	Exposure(ctx context.Context) (int64, error)
@@ -562,6 +567,8 @@ type Store interface {
 	ListPendingReveals(ctx context.Context, limit int) ([]*PendingReveal, error)
 	// MarkRevealed records that the seller has acknowledged one, closing the payment's row with it.
 	MarkRevealed(ctx context.Context, traceID string) error
+	// MarkRevealFailed moves an undeliverable reveal behind those not yet tried.
+	MarkRevealFailed(ctx context.Context, traceID string, at time.Time) error
 
 	// ---- Kernels (identity, naming, discovery) ----
 
@@ -589,9 +596,14 @@ type Store interface {
 
 	// ---- Discovery docs (regenerable lookup cache, §13) ----
 
-	// ReplaceDiscoveryDocs replaces ALL discovery docs (and their FTS mirror rows) for one source
-	// kernel with the supplied set, in one transaction. An empty set clears that kernel's docs.
-	ReplaceDiscoveryDocs(ctx context.Context, kernelPublicKey string, docs []*DiscoveryDoc) error
+	// ApplyCatalogPage commits one page of a peer's catalogue: its documents stamped with the scan
+	// that carried them, the sweep of what a completed scan never mentioned, and where the scan now
+	// stands — one transition, one commit.
+	ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs []*DiscoveryDoc, nextCursor string, generation int64) error
+	// DiscoveryEmbedding returns a stored embedding when the text behind it has not changed.
+	DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, text string) ([]float32, bool)
+	// CatalogScan reads where a peer's catalogue scan stands.
+	CatalogScan(ctx context.Context, kernelPublicKey string) (string, int64, error)
 	// ListDiscoveryDocs returns all discovery docs (with embeddings) for the lookup dense leg.
 	ListDiscoveryDocs(ctx context.Context) ([]*DiscoveryDoc, error)
 	// SearchDiscoveryLexical returns doc_keys ranked by BM25 for query, most relevant first.
@@ -603,7 +615,7 @@ type Store interface {
 	// transitions and the E-per-(issuer,subject_kernel,subject_action) cap (§13).
 	UpsertEvidence(ctx context.Context, e *EvidenceRow) error
 	// ListEvidenceBySubject returns evidence rows about a subject kernel, for inspect display.
-	ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey string) ([]*EvidenceRow, error)
+	ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*EvidenceRow, error)
 	// ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts
 	// (with any joined rating and remote receipt) after the cursor, for the evidence sender (§13).
 	ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*GossipReceiptRow, error)

@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -203,7 +204,13 @@ func (k *Kernel) Run(actor string, args ...string) (string, error) {
 	full := append([]string{"--server", k.URL}, args...)
 	cmd := exec.Command(n.Binary, full...)
 	cmd.Env = append(os.Environ(), "HOME="+n.home(actor))
-	out, err := cmd.CombinedOutput()
+	// The two streams are kept apart, because the CLI keeps them apart: stdout is the result and
+	// stderr is what it says to the person running it (a price, a prompt, an error). A caller
+	// parsing a reply must see the reply alone, so only a failure — where the message IS the
+	// answer — returns both. The transcript records everything either way.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
 	code := 0
 	if err != nil {
 		code = 1
@@ -211,10 +218,13 @@ func (k *Kernel) Run(actor string, args ...string) (string, error) {
 			code = ee.ExitCode()
 		}
 	}
-	text := n.redact(string(out))
+	text := n.redact(stderr.String() + stdout.String())
 	n.record(record{Kernel: k.Name, Actor: actor, Cmd: "juice " + n.redact(strings.Join(args, " ")),
 		Exit: code, Out: text, Ms: time.Since(t0).Milliseconds()})
-	return strings.TrimSpace(text), err
+	if err != nil {
+		return strings.TrimSpace(text), err
+	}
+	return strings.TrimSpace(n.redact(stdout.String())), nil
 }
 
 // read runs a command in machine-readable mode and decodes it into T.
@@ -239,6 +249,16 @@ func (k *Kernel) Field(actor, field string, args ...string) string {
 func (k *Kernel) Num(actor, field string, args ...string) int64 {
 	m, _ := read[map[string]any](k, actor, args...)
 	return num(m, field)
+}
+
+// Uses is how many calls this kernel itself has recorded against an action, read where the action
+// is read: what a kernel knows about an action travels with the action, not on a surface of its
+// own (U39).
+func (k *Kernel) Uses(actor, ref string) int64 {
+	m, _ := read[map[string]any](k, actor, "action", "show", ref)
+	ev, _ := m["evidence"].(map[string]any)
+	local, _ := ev["local_experience"].(map[string]any)
+	return num(local, "uses")
 }
 
 // Balance is what an account can spend right now.
