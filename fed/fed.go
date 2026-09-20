@@ -169,4 +169,8 @@ type Config struct {
 	// network digest, so kernels of different worlds never find each other (D23). Empty is a
 	// configuration error, not a default: an unnamespaced kernel would meet every world at once.
 	Namespace string
+	// MaxInboundPeers is how many inbound connections this host accepts, RelaySlots how many
+	// kernels behind NAT it relays for, each holding one of them. Zero takes the default (D12).
+	MaxInboundPeers int
+	RelaySlots      int
 }

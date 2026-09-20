@@ -1787,7 +1787,9 @@ func TestCLIActionRatings(t *testing.T) {
 		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner/svc")
 		return err
 	})
-	if !strings.Contains(out, "1") || !strings.Contains(out, note) {
+	// The rating reads as the word the CLI prints, never the stored number: asserting on "1"
+	// passed only when the clock happened to put that digit in the timestamp beside it.
+	if !strings.Contains(out, "good") || !strings.Contains(out, note) {
 		t.Errorf("action ratings output missing value/note: %q", out)
 	}
 

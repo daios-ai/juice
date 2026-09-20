@@ -25,6 +25,10 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/fed"
+	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -3782,3 +3786,48 @@ func TestAnUpstreamReplyOverTheBoundIsRefusedNotTruncated(t *testing.T) {
 	}
 }
 
+
+// The numbers in the file are the numbers the transport runs under. Built the way `serve` builds
+// it, from the configuration: a relay with one slot grants one reservation and refuses the next,
+// and a kernel accepting two inbound peers refuses the third connection. Nothing between the file
+// and libp2p may drop either value (D12).
+func TestServeBuildsTheTransportWithTheConfiguredLimits(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	saved := globalCfg
+	t.Cleanup(func() { globalCfg = saved })
+	globalCfg.RelaySlots, globalCfg.MaxInboundPeers = 1, 2
+	globalCfg.AllowLocalSources = true
+	globalCfg.FedListenAddrs = []string{"/ip4/127.0.0.1/tcp/0"}
+	tr, err := startFedTransport(context.Background(), k, log.Discard(), rail.World{})
+	if err != nil {
+		t.Fatalf("startFedTransport: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	at, err := peer.AddrInfoFromString(tr.ListenAddrs()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dial := func() host.Host {
+		h, err := libp2p.New(libp2p.NoListenAddrs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+		return h
+	}
+	if _, err := relayclient.Reserve(ctx, dial(), *at); err != nil {
+		t.Fatalf("the one relay slot was refused: %v", err)
+	}
+	second := dial()
+	if _, err := relayclient.Reserve(ctx, second, *at); err == nil {
+		t.Fatal("relay_slots 1 granted a second reservation")
+	}
+	if len(second.Network().ConnsToPeer(at.ID)) == 0 {
+		t.Fatal("the slot was refused, not the connection: the second peer should still be connected")
+	}
+	if err := dial().Connect(ctx, *at); err == nil {
+		t.Fatal("max_inbound_peers 2 accepted a third connection")
+	}
+}

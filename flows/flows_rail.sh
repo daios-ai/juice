@@ -422,12 +422,16 @@ flow_first_boot() {
     JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
         "$JUICE" kernel serve mine --kernel-handle cli --listen-addr 127.0.0.1:0 \
         --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
-        --log-format json >"$log4" 2>&1 &
+        --log-format json --relay-slots 7 >"$log4" 2>&1 &
     pid=$!; track_pid "$pid"
     for i in $(seq 60); do grep -q '"msg":"server.ready"' "$log4" 2>/dev/null && break; sleep 0.1; done
     assert_contains "first_boot.created_from_the_command_line" '"handle":"cli"' "$(cat "$log4")"
     assert_contains "first_boot.command_line_network" '"network":"mine"' "$(cat "$log4")"
     assert_contains "first_boot.command_line_written_down" '"kernel_handle": "cli"' "$(cat "$root/kernels/mine/config.json")"
+    # The connection limits are in the file with the rest: the one it was given, and the default
+    # beside it, so a kernel run to carry the network is configured by editing what it can read.
+    assert_contains "first_boot.relay_slots_written_down" '"relay_slots": 7' "$(cat "$root/kernels/mine/config.json")"
+    assert_contains "first_boot.inbound_peers_default_written_down" '"max_inbound_peers": 64' "$(cat "$root/kernels/mine/config.json")"
     kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
     # A world this installation does not know is told what it does hold.

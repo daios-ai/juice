@@ -1701,6 +1701,8 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		Handlers:          handlers,
 		AllowPrivateAddrs: globalCfg.AllowLocalSources,
 		Namespace:         kernel.DiscoveryNamespace(k.Network()),
+		MaxInboundPeers:   int(globalCfg.MaxInboundPeers),
+		RelaySlots:        int(globalCfg.RelaySlots),
 	})
 	if err != nil {
 		return nil, err

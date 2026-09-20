@@ -85,6 +85,11 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.Native.TinyGo.Price != 5 {
 		t.Errorf("Native.TinyGo.Price default = %d, want 5", cfg.Native.TinyGo.Price)
 	}
+	// The written-out file shows the operator the connection limits an ordinary kernel runs under,
+	// so raising them for a kernel that carries the network is an edit, not a discovery.
+	if cfg.MaxInboundPeers != 64 || cfg.RelaySlots != 128 {
+		t.Errorf("connection limits default = %d inbound peers, %d relay slots; want 64, 128", cfg.MaxInboundPeers, cfg.RelaySlots)
+	}
 }
 
 // LoadConfig never creates: first boot is the only writer of config.json, so an absent file is a
@@ -428,7 +433,7 @@ func TestEveryConfigKeyHasAFlag(t *testing.T) {
 		t.Fatalf("settings with no flag: %s", strings.Join(missing, ", "))
 	}
 	// A spot check that the spelling is the key's, so the operator reads one vocabulary.
-	for _, name := range []string{"listen-addr", "fed-listen-addrs", "fee-bps", "native.llm.url", "native.lookup.default-limit"} {
+	for _, name := range []string{"listen-addr", "fed-listen-addrs", "fee-bps", "native.llm.url", "native.lookup.default-limit", "max-inbound-peers", "relay-slots"} {
 		if fs.Lookup(name) == nil {
 			t.Errorf("no flag named %s", name)
 		}

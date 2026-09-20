@@ -22,6 +22,8 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/multiformats/go-multiaddr"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/record"
 )
@@ -643,7 +645,7 @@ func TestInboundConcurrencyIsBoundedPerPeer(t *testing.T) {
 // to every other startup condition it cannot serve degraded (D12, D20).
 func TestATransportWithoutItsLimitsDoesNotStart(t *testing.T) {
 	old := boundedResources
-	boundedResources = func() (network.ResourceManager, error) { return nil, errors.New("no limits here") }
+	boundedResources = func(int) (network.ResourceManager, error) { return nil, errors.New("no limits here") }
 	t.Cleanup(func() { boundedResources = old })
 
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -654,5 +656,77 @@ func TestATransportWithoutItsLimitsDoesNotStart(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resource limits") {
 		t.Errorf("the refusal must name what could not be built, got %v", err)
+	}
+}
+
+// inboundConnectionsAdmitted opens inbound connection scopes from distinct addresses until the
+// resource manager refuses one, and returns how many it admitted.
+func inboundConnectionsAdmitted(t *testing.T, tr *Transport, atMost int) int {
+	t.Helper()
+	mgr := tr.host.Network().ResourceManager()
+	var opened []network.ConnManagementScope
+	t.Cleanup(func() {
+		for _, s := range opened {
+			s.Done()
+		}
+	})
+	for i := 0; i < atMost; i++ {
+		addr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%d.%d.0.1/tcp/4", 11+i/200, 1+i%200))
+		scope, err := mgr.OpenConnection(network.DirInbound, false, addr)
+		if err != nil {
+			return i
+		}
+		opened = append(opened, scope)
+	}
+	return atMost
+}
+
+// How many peers may hold a connection here is the operator's number, not the transport's: a
+// kernel run to carry the network sets it to its machine, and one that says nothing runs under
+// the default an ordinary kernel does (D12).
+func TestInboundConnectionsAreBoundedAsConfigured(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	small, err := New(context.Background(), Config{SigningKey: priv, Namespace: testNamespace,
+		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, AllowPrivateAddrs: true, MaxInboundPeers: 3})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = small.Close() })
+	if got := inboundConnectionsAdmitted(t, small, 10); got != 3 {
+		t.Errorf("configured for 3 inbound peers, admitted %d", got)
+	}
+	if got := inboundConnectionsAdmitted(t, newTestTransport(t, &fakeHandlers{}, nil), DefaultMaxInboundPeers+10); got != DefaultMaxInboundPeers {
+		t.Errorf("unconfigured, admitted %d inbound peers; the default is %d", got, DefaultMaxInboundPeers)
+	}
+}
+
+// The relay holds the slots it was configured for and no more: with one slot, the second kernel
+// asking to be relayed is refused. Zero slots configured means libp2p's default, which is what
+// every kernel ran under before the number was the operator's (D12).
+func TestRelaySlotsAreBoundedAsConfigured(t *testing.T) {
+	if orDefault(0, DefaultRelaySlots) != DefaultRelaySlots || relayResources(DefaultRelaySlots).MaxReservations != DefaultRelaySlots {
+		t.Fatalf("an unconfigured kernel must relay for %d", DefaultRelaySlots)
+	}
+	if relayResources(5).Limit.Data != 2*maxFrameBytes {
+		t.Fatal("a relayed circuit must carry two frames per direction")
+	}
+
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	relay, err := New(context.Background(), Config{SigningKey: priv, Namespace: testNamespace,
+		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, AllowPrivateAddrs: true, RelaySlots: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+	at := peer.AddrInfo{ID: relay.host.ID(), Addrs: relay.host.Addrs()}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first := newTestTransport(t, &fakeHandlers{}, nil)
+	if _, err := relayclient.Reserve(ctx, first.host, at); err != nil {
+		t.Fatalf("the one slot was refused: %v", err)
+	}
+	second := newTestTransport(t, &fakeHandlers{}, nil)
+	if _, err := relayclient.Reserve(ctx, second.host, at); err == nil {
+		t.Fatal("a relay configured for one slot granted a second")
 	}
 }

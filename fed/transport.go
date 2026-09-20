@@ -202,7 +202,7 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	// orthogonal, so both are set: the bucket paces arrivals, these bound concurrent work. A
 	// boundary that cannot be built is not a boundary: the transport refuses to start rather than
 	// serve without it (D12, D20).
-	mgr, err := boundedResources()
+	mgr, err := boundedResources(orDefault(cfg.MaxInboundPeers, DefaultMaxInboundPeers))
 	if err != nil {
 		return nil, fmt.Errorf("fed: resource limits: %w", err)
 	}
@@ -275,16 +275,8 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
 	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
 	// NAT-bound peers be reached — so a public `juice serve` is the network's meeting point, with
-	// no separate seed process. Resource limits are libp2p defaults.
-	// A relayed circuit must carry what a direct one carries, or a kernel behind a home router
-	// federates worse than one on a public host, which U34 forbids. The default allowance is
-	// 128 KiB per direction — a fraction of one frame — so it is raised to two frames each way,
-	// enough for a request and its reply on one circuit (D12).
-	relayResources := relayv2.DefaultResources()
-	limit := *relayResources.Limit
-	limit.Data = 2 * maxFrameBytes
-	relayResources.Limit = &limit
-	if r, rerr := relayv2.New(h, relayv2.WithResources(relayResources)); rerr == nil {
+	// no separate seed process.
+	if r, rerr := relayv2.New(h, relayv2.WithResources(relayResources(orDefault(cfg.RelaySlots, DefaultRelaySlots)))); rerr == nil {
 		t.relay = r
 	}
 
@@ -518,32 +510,54 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
 }
 
-// streamsPerPeer and streamsSystemWide bound inbound concurrency, and connsInbound/connsTotal the
-// connections behind them [policy]. They are chosen, not derived: a bound follows from what this
-// kernel is willing to hold at once, and the frame size only says what one stream may cost. The
-// resource manager is libp2p's own — a standard bulkhead, not a semaphore of ours — and its
-// per-address limits are left as they come.
+// streamsPerPeer and streamsSystemWide bound inbound concurrency [policy]; the connections behind
+// them are the operator's number (Config.MaxInboundPeers), plus connsOutboundHeadroom for this
+// kernel's own dialling. They are chosen, not derived: a bound follows from what this kernel is
+// willing to hold at once, and the frame size only says what one stream may cost. The resource
+// manager is libp2p's own — a standard bulkhead, not a semaphore of ours — and its per-address
+// limits are left as they come. The two defaults are what an ordinary kernel runs under.
 const (
-	streamsPerPeer    = 8
-	streamsSystemWide = 64
-	connsInbound      = 64
-	connsTotal        = 256
+	streamsPerPeer         = 8
+	streamsSystemWide      = 64
+	connsOutboundHeadroom  = 192
+	DefaultMaxInboundPeers = 64
+	DefaultRelaySlots      = 128
 )
 
-// boundedResources is the default limit set with those four numbers written over it, so
-// everything else libp2p bounds stays bounded the way libp2p bounds it.
-var boundedResources = func() (network.ResourceManager, error) {
+// orDefault is what "unset takes the default" means for every configured limit.
+func orDefault(v, d int) int {
+	if v <= 0 {
+		return d
+	}
+	return v
+}
+
+// boundedResources is the default limit set with those numbers written over it, so everything
+// else libp2p bounds stays bounded the way libp2p bounds it.
+var boundedResources = func(inbound int) (network.ResourceManager, error) {
 	scaling := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&scaling)
 	limits := rcmgr.PartialLimitConfig{
 		System: rcmgr.ResourceLimits{
 			StreamsInbound: streamsSystemWide,
-			ConnsInbound:   connsInbound,
-			Conns:          connsTotal,
+			ConnsInbound:   rcmgr.LimitVal(inbound),
+			Conns:          rcmgr.LimitVal(inbound + connsOutboundHeadroom),
 		},
 		PeerDefault: rcmgr.ResourceLimits{StreamsInbound: streamsPerPeer},
 	}.Build(scaling.AutoScale())
 	return rcmgr.NewResourceManager(rcmgr.NewFixedLimiter(limits))
+}
+
+// relayResources is libp2p's relay default with the slot count written over it and the data
+// allowance raised to two frames, since a relayed circuit must carry what a direct one carries
+// (U34) and the default 128 KiB per direction is a fraction of one frame (D12).
+func relayResources(slots int) relayv2.Resources {
+	r := relayv2.DefaultResources()
+	r.MaxReservations = slots
+	limit := *r.Limit
+	limit.Data = 2 * maxFrameBytes
+	r.Limit = &limit
+	return r
 }
 
 // serveReq reads one request, answers it, and closes. The handler's context carries the stream's
