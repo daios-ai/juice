@@ -119,7 +119,7 @@ the address recorded when it was requested.
 
 ```
 $ juice user deposit
-Send real to this kernel at:
+Send arbitrum-one to this kernel at:
   0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 
 Send only this token, and nothing else:

@@ -166,8 +166,6 @@ services uses these facilities as an account holder. Keeping that agent outside
 the kernel allows different approaches to orchestration to use the same
 execution and payment system.
 
-This manual explains how to use that system.
-[`requirements.md`](https://github.com/daios-ai/juice/blob/master/requirements.md)
-is the governing product contract, and
-[`API.md`](https://github.com/daios-ai/juice/blob/master/API.md) documents the
-HTTP interface.
+This manual explains how to use that system. Every command in it is one request
+to the kernel over HTTP, and a program can make those requests itself; that is
+covered in [Using Juice from a program](programs.html).

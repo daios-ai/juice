@@ -187,8 +187,11 @@ cannot stand in for each remote user's upstream consent. Locally, each
 credential applies only to the action granted access and when its grantor is
 the payer. A child action must have its own grant.
 
-For the OAuth details, see
-[`docs/oauth.md`](https://github.com/daios-ai/juice/blob/master/docs/oauth.md).
+The upstream provider must know the application before any caller can consent:
+register it in the provider's console and add the redirect address the consent
+flow will use to the application's allowed list. A provider that does not
+recognize the client id or the redirect address refuses the consent, and the
+caller sees that refusal from the provider, not from the kernel.
 
 ## Webhooks
 

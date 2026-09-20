@@ -93,11 +93,35 @@ external payments, with individual payments larger than the services they
 settle. Actual totals over a finite set of calls can differ from their expected
 value.
 
+### Who funds a ticket
+
 When a paid call is dispatched with a nonzero `L`, the origin reserves the full
 stake from the immediate caller's account. On receipt settlement it returns
 the obligation amount from the execution budget to that account, releases the
 stake, and reserves any payment due from the draw in the same operation. The
 serving kernel refuses a face value above its own `lottery_max` before execution.
+
+For a root call, the immediate caller is the buying user. For a composed call,
+it is the composing action's owner. A small obligation's winning payment is
+covered by this caller's reserved stake; an obligation at or above the face
+value, or with lottery disabled, is paid from the funds returned from the
+execution budget. Admission requires the execution budget and any required
+stake before dispatch.
+
+The lottery therefore requires no separate USDT reserve or minimum balance in
+`sys`. The caller funds the payment, and the serving provider advances execution
+from its own balance. If `sys` is itself the caller or provider, it meets the
+same funding requirements in that role. An outgoing payment is temporarily
+held on `sys` while in transit, but this reservation is not operator earnings
+and cannot be spent on fuel.
+
+On a chain network, sending the payment also consumes ETH. Available `sys`
+USDT funds automatic ETH purchases, so a shortage of operator funds can prevent
+a refill even though the ticket's USDT payment is fully reserved. Initial
+funding and the conditions for refilling are described in
+[Funding the kernel](running-a-kernel.html#funding-the-kernel).
+
+### Revealing the result
 
 The buyer reveals its secret immediately for a loss, or after the payment is
 final for a win. The seller checks the reveal against the recorded commitment

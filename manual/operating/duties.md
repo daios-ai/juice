@@ -39,8 +39,9 @@ payments awaiting attribution, and `held-for-gas` covers fuel purchases. Only
 
 **Solvency** compares the kernel's account liabilities with net external
 receipts. The display calls these `user-balances` and `money-in`: the former
-counts all positive balances, and the latter counts crossings in less crossings
-out. Their difference should be zero. Receivables from other kernels do not
+counts all positive balances, including `sys` and reserved funds, and the latter
+counts crossings in less crossings out. Their difference should be zero.
+Receivables from other kernels do not
 count as backing, because the payment has not yet been received.
 
 The **Credit** line reports exposure against the configured admission limit.
@@ -174,12 +175,13 @@ between custody and the account books.
 
 ### How the kernel keeps itself in fuel
 
-The operator supplies initial ETH for transaction fees. The kernel can then
-replenish it by swapping its own USDT earnings for ETH through the venue
-configured in the world file. The shipped chain worlds use Uniswap V3.
+The funding model and initial deposits are explained in
+[Setting up on a chain](running-a-kernel.html#setting-up-on-a-chain).
+Refills spend available `sys` USDT through the venue configured in the world
+file. The shipped chain worlds use Uniswap V3.
 
 The refill policy has a lower threshold, `gas.min`, and a target, `gas.max`.
-When the balance is below the threshold, the rail attempts to buy enough ETH
+When an outgoing payment requires a refill, the rail attempts to buy enough ETH
 to reach the target. On Arbitrum One the shipped values are 0.001 and 0.003 ETH.
 Buying above the threshold reduces the need to refill on every payment.
 
@@ -218,9 +220,10 @@ A **fee-bound failure** means the refill would exceed the configured transaction
 fee limit. The kernel retries without exceeding that limit, so the payment can
 proceed when the required fee falls within it.
 
-An **operator-funds shortage** means the available earnings cannot support the
-fuel purchase while preserving the reserve. Further earnings can clear that
-condition; inspect the reported amounts before deciding whether to add funds.
+An **operator-funds shortage** means available `sys` USDT cannot support the
+fuel purchase while preserving the reserve. Further fees or a deposit to `sys`
+can supply those funds; inspect the reported amounts before deciding how much
+to add. This shortage does not mean that user balances lack USDT backing.
 
 Blocked payments remain reserved and are retried in place. The halt clears
 when no blocked payments remain. Deposits, execution, and reads continue while

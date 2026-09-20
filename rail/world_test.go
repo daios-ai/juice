@@ -37,8 +37,7 @@ func installed(t *testing.T) string {
 
 // The shipped worlds are pinned whole: name, adaptor, digest, decimals, token and symbol together.
 // The symbol is what a depositor is shown and the token is what they must send; a file that names
-// one while holding the other tells them to send the wrong money, which is how two of these worlds
-// came to say USDC while holding Tether. Changing either alone fails here.
+// one while holding the other tells them to send the wrong money. Changing either alone fails here.
 func TestShippedWorldsLoad(t *testing.T) {
 	dir := installed(t)
 	for _, tc := range []struct {

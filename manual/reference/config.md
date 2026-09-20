@@ -146,6 +146,8 @@ lock during refresh. Programs using the same saved login share that session;
 separate logins allow an agent and a person to authenticate independently.
 Credentials are sent only to the recorded address for their kernel.
 
-The rest of the installation's layout — where agents, services and interfaces keep
-their state — is described in
-[`ecosystem-standard.md`](https://github.com/daios-ai/juice/blob/master/ecosystem-standard.md).
+The rest of the installation shares the same root. `bin/` holds the executables,
+`worlds/` the network files, and `kernels/<world>/` each kernel. Agents, services
+and the interface keep their own state under `agents/<name>/`, `services/<name>/`
+and `ui/`, so removing one of them never touches a kernel or another program's
+records.

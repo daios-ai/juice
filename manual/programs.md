@@ -257,9 +257,10 @@ This check distinguishes the expected kernel from any other server occupying
 the same address. Save the expected identity when establishing trust and compare
 subsequent responses against it.
 
-The full HTTP interface is documented in
-[`API.md`](https://github.com/daios-ai/juice/blob/master/API.md).
-Kernel-to-kernel federation uses a separate transport managed by the kernel.
+Every command of the command line is one such request. To see what a request
+returns, run the command with `--json`: the output is the kernel's reply exactly
+as it was sent. Kernel-to-kernel federation uses a separate transport managed
+by the kernel.
 
 ## Implementing a service
 

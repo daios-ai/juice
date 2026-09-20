@@ -80,8 +80,29 @@ identifying the kernel, network, and public key.
 
 ## Setting up on a chain
 
-A kernel on `arbitrum-sepolia` or `arbitrum-one` needs access to the chain and
-funds for transaction fees. It generates its own rail key during setup. The sequence is:
+A kernel on `arbitrum-sepolia` or `arbitrum-one` has one address on that chain.
+Both USDT deposits and ETH funding go to this address, but the two currencies
+serve different purposes.
+
+USDT backs the balances inside the kernel. Each deposit is credited to the
+account that registered the sending address, including `sys` when the operator
+is depositing. The `sys` account has administrative authority, receives kernel
+fees, and holds the operator's own balance. There is no additional kernel USDT
+balance outside these accounts. All balances must remain backed, including
+funds reserved for work or payments; money held for an outgoing payment or
+awaiting attribution is unavailable for operator spending.
+
+ETH pays the blockchain's transaction fees, also called gas. Arbitrum charges
+these fees in ETH even when the transaction transfers USDT. The kernel therefore
+needs ETH to send withdrawals and settlement payments. Receiving a deposit does
+not consume the kernel's ETH: the sender pays that transaction's fee. ETH sent
+to the kernel supplies gas and credits no internal account.
+
+The kernel can replenish its ETH by buying more with available `sys` USDT.
+Other accounts' backing cannot fund that purchase. The purchase itself is a
+blockchain transaction and also requires ETH, so the operator must supply the
+initial ETH and replenish it directly if too little remains to make a purchase.
+The setup sequence is:
 
 **1. Decide which node to use.** Both shipped chain worlds name a public one, so
 there is nothing to do here. The kernel reads payments and submits transactions
@@ -90,8 +111,9 @@ file in `~/.juice/worlds/`, which is where the node belongs and may be changed
 at any time.
 
 The first boot must reach that node, and everything it checks there must answer:
-the chain is the one named, the token at that address is the one named, and the
-kernel can buy the gas that sends a payment. Creating a kernel fixes its network
+the chain is the one named, the token and its decimals match, and the configured
+venue supports the fuel purchase. These checks validate the configuration;
+funding follows below. Creating a kernel fixes its network
 for life and publishes the address people pay to, and it records the block from
 which payments are watched for, which cannot be guessed afterwards. So a first
 boot that cannot reach the chain, or finds any of that wrong, creates no kernel:
@@ -103,8 +125,14 @@ Once the kernel exists, that is behind it. An unreachable node or a broken
 venue only delays money: the kernel serves, and the payment commands wait and
 say what is unready.
 
-**2. Start the kernel.** First boot generates `rail.key` in the kernel's home.
-This key controls its account on the chain.
+**2. Start the kernel.** For Arbitrum One:
+
+```
+$ juice kernel serve arbitrum-one
+```
+
+Use `arbitrum-sepolia` for the test network. First boot generates `rail.key` in
+the kernel's home. This key controls its account on the chain.
 
 {: .warning }
 > `rail.key` controls the kernel's money on the chain. It is created once and
@@ -123,24 +151,55 @@ Holdings:   0.00 USDT (gas 0.00) as of block 13
 …
 ```
 
-**4. Fund transaction fees.** Send ETH to that address, following the procedure
-below.
+`juice user deposit` reports the same destination, together with the accepted
+USDT contract and the current account's registered sender address.
+
+**4. Supply initial ETH.** From an external wallet, send ETH to the `Paid at:`
+address on the kernel's chain. ETH on another chain cannot pay this kernel's
+transaction fees. The amount must cover outgoing transactions and leave enough
+to submit a refill; the configured thresholds are explained below.
+
+**5. Fund the operator's USDT balance.** To provide funds for automatic refills
+before fees have accumulated, remain logged in as `sys` and register the external
+wallet address from which you will send USDT:
+
+```
+$ juice user address <your-wallet-address>
+$ juice user deposit
+```
+
+The first command asks for a signature proving control of your wallet. Follow
+the second command's instructions to send the specified USDT from that wallet
+to the kernel's address, the same destination used for ETH. Once the payment
+is final and processed, it credits `sys`. The full signing and deposit procedure
+is covered in [Deposits and withdrawals](../money/deposits-and-withdrawals.html#step-1-register-the-address-you-will-pay-from).
+
+**6. Verify funding.** Run `juice user me` to check the available `sys` balance
+and `juice admin kernel show` to inspect finalized USDT and ETH holdings,
+accounting checks, and any payment halt. Wait for the kernel to process the
+payments before expecting the figures to reflect them. The solvency difference
+should be zero; custody is compared when the scan and payments allow a settled
+comparison, as explained in [Operator duties](duties.html#the-one-view-to-read-first).
 
 ## Funding the kernel
 
-The kernel needs ETH to submit withdrawals and paying settlement tickets.
-A new kernel has none, so fund its address before expecting outgoing payments
-to complete. The address appears as `Paid at:` in `admin kernel show`.
+Continued operation requires enough ETH to send payments and, when a refill is
+needed, enough available `sys` USDT to buy it. There is no fixed minimum `sys`
+balance or separate solvency requirement for that account. A zero balance is
+valid, but cannot fund a refill. The required USDT depends on the purchase quote
+and its allowed slippage, while the transaction fee must fit the configured
+fee limit. Solvency concerns the backing of all internal balances; it does not
+establish that the kernel has enough ETH to transact.
 
 The shipped Arbitrum One settings trigger a refill below 0.001 ETH and target
 0.003 ETH; Arbitrum Sepolia uses 0.0002 and 0.0004 ETH respectively. These
 thresholds describe the configured refill policy, rather than a guarantee of
 how much a particular transaction will cost.
 
-Once funded, the kernel can buy more ETH using its own USDT earnings. User
-backing is excluded from that spending. A refill itself needs ETH, however,
-so a kernel that falls below the cost of submitting one may need another
-operator top-up. See
+Fees replenish `sys`, but whether they cover fuel depends on activity and costs.
+The operator can add USDT through the deposit procedure above or supply ETH
+directly. Automatic refilling still requires a reachable chain node, a working
+swap venue, and a purchase within the configured limits. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 {: .warning }
@@ -148,15 +207,9 @@ operator top-up. See
 > can continue, but a blocked withdrawal or settlement payment requires the
 > shortage to be resolved. Buying ETH also requires a transaction fee.
 
-ETH sent to the rail address supplies the kernel's transaction fees and is not
-credited to a user's balance. Users deposit USDT at the same address, so explain
-the distinction when giving funding instructions; the deposit chapter covers it
-in [Step 3](../money/deposits-and-withdrawals.html#step-3-send-the-usdt).
-
-The kernel's own USDT ordinarily accumulates as fees in the `sys` account.
-You may add to that balance through an ordinary deposit: register a sender
-address for `sys` and send the token from it. These account funds are separate
-from the ETH supplied for blockchain fees.
+Ticket settlement has its own funding rules and imposes no minimum operator
+balance. See [Who funds a ticket](network-economy.html#who-funds-a-ticket) for
+the distinction between funding the payment and paying its blockchain fee.
 
 ## Starting without a terminal
 
