@@ -27,7 +27,7 @@ _chain_world() {
   "rail": "evm", "chainId": 31337, "rpc": "$ANVIL_RPC", "token": "$CHAIN_TOKEN", "decimals": 6,
   "symbol": "USDT", "description": "the local chain this flow deployed",
   "finality": "finalized", "seeds": [],
-  "venue": {"router": "$router", "quoter": "$router", "weth": "$weth", "feeTier": 500},
+  "venue": {"router": "$router", "quoter": "$router", "wrappedNative": "$weth", "feeTier": 500},
   "gas": {"min": "20000000000000000", "max": "50000000000000000", "feeBound": "10000000000000000",
           "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000}
 }
@@ -209,6 +209,9 @@ flow_rail_chain_settlement() {
     # The price is what the seller will serve on credit: admission raises R's exposure by the whole
     # advertised maximum and refuses if that passes credit_limit, which this suite sets to 100000.
     # mp 10000 → sr 10500, the obligation; q 11025 is what L locks, keeping the 525 import fee.
+    # The seller's holdings are read before the call: the buyer pays by itself at settlement, and
+    # on a fast chain the payment can land before a read taken after the call.
+    local before; before=$(anvil_uint "$CHAIN_TOKEN" "balanceOf(address)(uint256)" "$rvault")
     publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description paid --price "$(units 10000)" >/dev/null
     local tx; tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)
     assert_nonempty "rail_chain_settlement.call" "$tx"
@@ -219,7 +222,6 @@ flow_rail_chain_settlement() {
 
     # The buyer pays on the chain by itself: the money is committed at settlement and the worker
     # sends it, then tells the seller which payment settles the obligation.
-    local before; before=$(anvil_uint "$CHAIN_TOKEN" "balanceOf(address)(uint256)" "$rvault")
     assert_eq "rail_chain_settlement.money_reached_seller" $((before + d)) \
         "$(await_token_balance "$CHAIN_TOKEN" "$rvault" $((before + d)))"
 
@@ -247,6 +249,7 @@ flow_rail_chain_refill_and_halt() {
 
     # The kernel is made first, against a chain that answers for everything: creating one binds its
     # network for life and publishes the address people pay to, so that much must be true once.
+    install_world "$db" "$CHAIN_WORLD"
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot" "server did not start"; return; }
 
     # Then the venue breaks under it, which is how a venue actually fails: while a kernel is
@@ -288,8 +291,9 @@ PYEOF
     # domain check and nothing else. This is the control that makes the assertions above mean
     # something rather than just observing a broken kernel.
     local dir2 db2 hs2 ha2 vault2
-    dir2=$(new_dir); db2="$(kdb "$dir2")"; hs2=$(home "$dir2" sys2); ha2=$(home "$dir2" alice2)
+    dir2=$(new_dir); db2="$(kdb "$dir2" anvil)"; hs2=$(home "$dir2" sys2); ha2=$(home "$dir2" alice2)
     _chain_world "$dir2" rail_refill_ok || return
+    install_world "$db2" "$CHAIN_WORLD"
     make_admin "$db2" "$hs2" "${CHAIN_CFG[@]}" || { fail "rail_refill.boot_ok" "server did not start"; return; }
     make_user "$db2" "$hs2" "$ha2" alice2
     vault2=$(vault_of "$db2")

@@ -255,7 +255,7 @@ func (a *anvilRail) Prepare(n *Net, s Shape) error {
 	a.worldDoc = map[string]any{
 		"rail": "evm", "chainId": 31337, "rpc": a.rpc, "token": token, "decimals": 6,
 		"symbol": "USDT", "description": "the netsim local chain", "finality": "finalized",
-		"venue": map[string]any{"router": router, "quoter": router, "weth": weth, "feeTier": 500},
+		"venue": map[string]any{"router": router, "quoter": router, "wrappedNative": weth, "feeTier": 500},
 		"gas": map[string]any{"min": "20000000000000000", "max": "50000000000000000",
 			"feeBound": "10000000000000000", "slippageBps": 50, "paymentGas": 300000, "swapGas": 1500000},
 	}

@@ -13,7 +13,7 @@
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
     "quoter": "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-    "weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "wrappedNative": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     "feeTier": 500,
     "router02": false
   },

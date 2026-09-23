@@ -285,6 +285,9 @@ func TestLoadRejectsBadWorlds(t *testing.T) {
 		"a name of its own": {evm(map[string]any{"name": "other"}), "name"},
 		// a setting this build does not know would silently have no effect at all
 		"unknown key": {evm(map[string]any{"somethingElse": float64(1)}), "somethingElse"},
+		// the venue names the wrapped native currency the router unwraps, which is not ETH on
+		// every chain; a file still spelling the old key is refused by that key, never read as empty
+		"the old venue key": {evm(map[string]any{"venue": map[string]any{"weth": "0x0000000000000000000000000000000000000002"}}), "weth"},
 		// the scan cursor is each kernel's own, never the network's
 		"where the scan begins": {evm(map[string]any{"fromBlock": float64(493710567)}), "fromBlock"},
 		// the ticket ceiling moved to the kernel's own lottery_max; a file still naming it here

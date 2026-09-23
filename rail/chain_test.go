@@ -49,10 +49,17 @@ type fakeLib struct {
 	sent      int
 	refilled  int
 	reserveIn *big.Int
+
+	// What the venue's router says it unwraps, and whether it could be asked.
+	unwraps    common.Address
+	unwrapsErr error
 }
 
 func (f *fakeLib) Account() common.Address           { return common.Address{} }
 func (f *fakeLib) CheckDomain(context.Context) error { return nil }
+func (f *fakeLib) WrappedNative(context.Context) (common.Address, error) {
+	return f.unwraps, f.unwrapsErr
+}
 
 func (f *fakeLib) Prepare(_ context.Context, _ jrail.ID, _ jrail.Kind, _ common.Address, _ *big.Int) error {
 	f.prepared++
@@ -137,6 +144,36 @@ func testChain(t *testing.T) (*Chain, *fakeLib) {
 	c := newChain(l, key)
 	c.checked = true
 	return c, l
+}
+
+// The domain check includes what the router unwraps. A world naming another token than the router's
+// own WETH9() would have every refill buy a token the router never releases, so it is a wrong domain
+// — refused even on an existing kernel — while a router that cannot be asked only makes the check
+// wait, as an unreachable chain does.
+func TestChainReadyRefusesAVenueThatUnwrapsAnotherToken(t *testing.T) {
+	c, l := testChain(t)
+	c.checked = false
+	c.venue = jrail.Venue{Router: common.HexToAddress("0x1"), WETH: common.HexToAddress("0x2")}
+
+	l.unwraps = common.HexToAddress("0x3")
+	err := c.Ready(context.Background())
+	if !errors.Is(err, jrail.ErrWrongDomain) || !strings.Contains(err.Error(), "0x0000000000000000000000000000000000000003") {
+		t.Fatalf("another token must be a wrong domain naming it: %v", err)
+	}
+	if c.checked {
+		t.Fatal("a failed check was remembered as passed")
+	}
+
+	l.unwrapsErr = errors.New("connection refused")
+	err = c.Ready(context.Background())
+	if err == nil || errors.Is(err, jrail.ErrWrongDomain) || !strings.Contains(err.Error(), "0x0000000000000000000000000000000000000001") {
+		t.Fatalf("a router that cannot be asked is an outage naming the router, not a wrong domain: %v", err)
+	}
+
+	l.unwrapsErr, l.unwraps = nil, c.venue.WETH
+	if err := c.Ready(context.Background()); err != nil || !c.checked {
+		t.Fatalf("the router's own answer must pass: %v", err)
+	}
 }
 
 // An ordinary payment is prepared and sent, in that order — the adaptor sequences the rail's own

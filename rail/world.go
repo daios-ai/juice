@@ -81,11 +81,11 @@ type World struct {
 }
 
 type venueCfg struct {
-	Router   string `json:"router"`
-	Quoter   string `json:"quoter"`
-	WETH     string `json:"weth"`
-	FeeTier  uint32 `json:"feeTier"`
-	Router02 bool   `json:"router02"`
+	Router        string `json:"router"`
+	Quoter        string `json:"quoter"`
+	WrappedNative string `json:"wrappedNative"`
+	FeeTier       uint32 `json:"feeTier"`
+	Router02      bool   `json:"router02"`
 }
 
 type gasCfg struct {
@@ -263,7 +263,7 @@ func (w World) Domain() (jrail.Domain, error) {
 	if err != nil {
 		return jrail.Domain{}, err
 	}
-	weth, err := jrail.ParseAddress(w.Venue.WETH, "venue weth")
+	weth, err := jrail.ParseAddress(w.Venue.WrappedNative, "venue wrappedNative")
 	if err != nil {
 		return jrail.Domain{}, err
 	}

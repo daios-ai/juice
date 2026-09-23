@@ -293,7 +293,7 @@ func (f *chainFixture) world() World {
 	return World{
 		Name: "anvil", Rail: RailEVM, ChainID: anvilChainID, Token: f.token.Hex(), Decimals: 6,
 		RPC: f.rpcURL, Finality: "finalized",
-		Venue: venueCfg{Router: f.router.Hex(), Quoter: f.router.Hex(), WETH: wethPlaceholder.Hex(), FeeTier: feeTier},
+		Venue: venueCfg{Router: f.router.Hex(), Quoter: f.router.Hex(), WrappedNative: wethPlaceholder.Hex(), FeeTier: feeTier},
 		Gas: gasCfg{Min: "20000000000000000", Max: "50000000000000000", FeeBound: "10000000000000000",
 			SlippageBps: 50, PaymentGas: 300000, SwapGas: 1500000},
 	}

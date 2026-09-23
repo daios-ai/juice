@@ -17,6 +17,7 @@ import (
 
 	jrail "github.com/daios-ai/juice-rail/go/rail"
 	jsqlite "github.com/daios-ai/juice-rail/go/sqlite"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -26,10 +27,13 @@ import (
 
 // lib is the part of juice-rail this adaptor drives. Naming it here keeps the adaptor testable
 // without a chain, and keeps the dependency visible: everything the kernel's money rules need from
-// the outside world is these fifteen calls.
+// the outside world is these sixteen calls.
 type lib interface {
 	Account() common.Address
 	CheckDomain(ctx context.Context) error
+	// WrappedNative is what the venue's router says it unwraps into fuel — its own WETH9() — which
+	// the world must name as the token the refill buys.
+	WrappedNative(ctx context.Context) (common.Address, error)
 	Prepare(ctx context.Context, id jrail.ID, kind jrail.Kind, to common.Address, amount *big.Int) error
 	Send(ctx context.Context, id jrail.ID) (common.Hash, error)
 	Refill(ctx context.Context, reserve *big.Int) (jrail.ID, common.Hash, error)
@@ -68,6 +72,18 @@ func (l railLib) IntentByNonce(nonce uint64) (jrail.Intent, bool, error) {
 	return l.store.IntentByNonce(l.Account(), nonce)
 }
 
+func (l railLib) WrappedNative(ctx context.Context) (common.Address, error) {
+	router := l.Domain().Venue.Router
+	out, err := l.client.CallContract(ctx, ethereum.CallMsg{To: &router, Data: crypto.Keccak256([]byte("WETH9()"))[:4]}, nil)
+	if err != nil {
+		return common.Address{}, err
+	}
+	if len(out) != common.HashLength {
+		return common.Address{}, fmt.Errorf("router %s does not answer WETH9()", router)
+	}
+	return common.BytesToAddress(out), nil
+}
+
 // SeedScan records the settled head as this account's scan cursor, unless it already has one. The
 // cursor is the rail's own durable record and only ever advances, so a repeat is a read.
 func (l railLib) SeedScan(ctx context.Context) (uint64, error) {
@@ -95,9 +111,10 @@ func (l railLib) SeedScan(ctx context.Context) (uint64, error) {
 // Chain is the adaptor over juice-rail. It translates the rail's outcomes and adds none of its own:
 // every fact it reports came from a finalized chain read.
 type Chain struct {
-	rail lib
-	key  *ecdsa.PrivateKey
-	addr common.Address
+	rail  lib
+	venue jrail.Venue
+	key   *ecdsa.PrivateKey
+	addr  common.Address
 
 	mu      sync.Mutex
 	checked bool
@@ -139,7 +156,7 @@ func OpenChain(ctx context.Context, w World, home string, firstBoot bool) (*Chai
 	if err != nil {
 		return nil, err
 	}
-	c := &Chain{rail: railLib{Rail: r, store: store, client: client}, key: key, addr: crypto.PubkeyToAddress(key.PublicKey)}
+	c := &Chain{rail: railLib{Rail: r, store: store, client: client}, venue: domain.Venue, key: key, addr: crypto.PubkeyToAddress(key.PublicKey)}
 	// Creating a kernel is when the network is bound for life and the address anyone pays becomes
 	// public, so the chain answers for all of it or there is no kernel: the chain it claims to be,
 	// the token at the address named, and the fuel that sends a payment. A kernel that already
@@ -257,7 +274,8 @@ func writeSynced(path, body string) error {
 
 // Ready runs the full domain check — chain, token, decimals, venue — and remembers that it passed.
 // Until it does, the kernel does no rail work at all: an unverified token misstates every amount by
-// whatever its decimals turn out to be.
+// whatever its decimals turn out to be. The venue check includes what the router unwraps: a refill
+// buys the token the world names, and if the router unwraps another, the purchase stays inside it.
 func (c *Chain) Ready(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -266,6 +284,13 @@ func (c *Chain) Ready(ctx context.Context) error {
 	}
 	if err := c.rail.CheckDomain(ctx); err != nil {
 		return err
+	}
+	unwraps, err := c.rail.WrappedNative(ctx)
+	if err != nil {
+		return fmt.Errorf("swap venue %s: %w", c.venue.Router, err)
+	}
+	if unwraps != c.venue.WETH {
+		return fmt.Errorf("%w: swap venue %s unwraps %s, the world names %s", jrail.ErrWrongDomain, c.venue.Router, unwraps, c.venue.WETH)
 	}
 	c.checked = true
 	return nil

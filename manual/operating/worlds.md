@@ -95,7 +95,7 @@ In addition to the display fields and seeds, an `evm` world contains:
 | `decimals` | the token's decimal precision, checked against the chain |
 | `rpc` | the chain node's URL |
 | `finality` | the block status used for settlement: `latest`, `safe`, or `finalized`; omitted means `finalized` |
-| `venue` | the Uniswap V3 `router`, `quoter`, and `weth` addresses, pool `feeTier`, and `router02` selector |
+| `venue` | the Uniswap V3 `router` and `quoter` addresses, the `wrappedNative` currency the router unwraps into fuel, pool `feeTier`, and `router02` selector |
 | `gas` | the fuel purchase settings described below |
 
 The venue must belong to the chosen chain. Within `gas`, `min`, `max`, and
