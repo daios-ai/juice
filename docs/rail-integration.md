@@ -23,7 +23,7 @@ discovery namespace, identity, settlement records, config, migrations, and the t
 change together. The revisions section enumerates them.
 
 Shipped files: **play** (manual rail: same money rules, the operator's records are the finalized
-facts, no chain), **arbitrum-sepolia** (mock USDT0), **arbitrum-one** (USDT0).
+facts, no chain), **arbitrum-sepolia** (mock USDT0), **arbitrum-one** (USDT0), **polygon** (USDT0).
 Anyone can write a world file and gets an isolated economy — isolated, not private: anyone
 holding the file can join.
 
@@ -84,7 +84,7 @@ type Rail interface {
   `sys` plus crossing-out at proof; attribution, assignment, and payout compensation are
   transfers from `sys`; unattributed money is `sys`-held balance, marked. The ledger operation
   refuses a crossing without its finalized fact. `sys` is otherwise an ordinary funded account.
-- 1 credit = 1 USDT0 base unit. Humans see USDT; APIs keep integers; operators retune defaults.
+- 1 credit = 1 USDT0 base unit. Humans see USDT0; APIs keep integers; operators retune defaults.
 - Backing, stated honestly: credits are backed by the vault **plus peer IOUs bounded by X**. In
   the worst case users jointly hold up to X more credits than the vault can pay. Deliberate,
   Sybil-proof, priced by `remote_bps`; the operator's accepted, bounded risk.

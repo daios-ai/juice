@@ -108,7 +108,7 @@ value, or with lottery disabled, is paid from the funds returned from the
 execution budget. Admission requires the execution budget and any required
 stake before dispatch.
 
-The lottery therefore requires no separate USDT reserve or minimum balance in
+The lottery therefore requires no separate USDT0 reserve or minimum balance in
 `sys`. The caller funds the payment, and the serving provider advances execution
 from its own balance. If `sys` is itself the caller or provider, it meets the
 same funding requirements in that role. An outgoing payment is temporarily
@@ -116,8 +116,8 @@ held on `sys` while in transit, but this reservation is not operator earnings
 and cannot be spent on fuel.
 
 On a chain network, sending the payment also consumes ETH. Available `sys`
-USDT funds automatic ETH purchases, so a shortage of operator funds can prevent
-a refill even though the ticket's USDT payment is fully reserved. Initial
+USDT0 funds automatic ETH purchases, so a shortage of operator funds can prevent
+a refill even though the ticket's USDT0 payment is fully reserved. Initial
 funding and the conditions for refilling are described in
 [Funding the kernel](running-a-kernel.html#funding-the-kernel).
 

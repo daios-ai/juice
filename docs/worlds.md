@@ -7,7 +7,7 @@ an operator can do with a file of their own.
 ## The file
 
 Every world file lives in `$JUICE_HOME/worlds/`. The worlds this build ships — `play`,
-`arbitrum-sepolia`, `arbitrum-one` — are written there the first time `kernel serve` runs and
+`arbitrum-sepolia`, `arbitrum-one`, `polygon` — are written there the first time `kernel serve` runs and
 never overwritten, so an operator's edit outlives an upgrade and a network juice does not ship is
 a file they add. The kernel reads worlds from that directory alone; the copies inside the binary
 exist only to seed it.
@@ -18,8 +18,8 @@ exist only to seed it.
   "chainId": 421614,
   "rpc": "https://sepolia-rollup.arbitrum.io/rpc",
   "token": "0x8e87deee3BF1eFE27E8e96ABf205BEDF802ed568",
-  "decimals": 6, "symbol": "USDT",
-  "description": "fake USDT on the Arbitrum Sepolia test chain",
+  "decimals": 6, "symbol": "USDT0",
+  "description": "fake USDT0 on the Arbitrum Sepolia test chain",
   "seeds": [], "finality": "latest",
   "venue": { … }, "gas": { … }
 }

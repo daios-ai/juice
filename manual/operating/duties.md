@@ -177,15 +177,16 @@ between custody and the account books.
 
 The funding model and initial deposits are explained in
 [Setting up on a chain](running-a-kernel.html#setting-up-on-a-chain).
-Refills spend available `sys` USDT through the venue configured in the world
+Refills spend available `sys` USDT0 through the venue configured in the world
 file. The shipped chain worlds use Uniswap V3.
 
 The refill policy has a lower threshold, `gas.min`, and a target, `gas.max`.
 When an outgoing payment requires a refill, the rail attempts to buy enough ETH
-to reach the target. On Arbitrum One the shipped values are 0.001 and 0.003 ETH.
+to reach the target. On Arbitrum One the shipped values are 0.001 and 0.003 ETH;
+on Polygon, where fuel is POL, they are 5 and 15 POL.
 Buying above the threshold reduces the need to refill on every payment.
 
-Fuel is an operator expense. The reservation excludes USDT backing other
+Fuel is an operator expense. The reservation excludes USDT0 backing other
 accounts, so a shortage of operator earnings can block a refill without using
 those balances. The `gas.feeBound` setting limits the purchase's transaction
 fee, while `slippageBps` limits the swap's deviation from its quote.
@@ -220,10 +221,10 @@ A **fee-bound failure** means the refill would exceed the configured transaction
 fee limit. The kernel retries without exceeding that limit, so the payment can
 proceed when the required fee falls within it.
 
-An **operator-funds shortage** means available `sys` USDT cannot support the
+An **operator-funds shortage** means available `sys` USDT0 cannot support the
 fuel purchase while preserving the reserve. Further fees or a deposit to `sys`
 can supply those funds; inspect the reported amounts before deciding how much
-to add. This shortage does not mean that user balances lack USDT backing.
+to add. This shortage does not mean that user balances lack USDT0 backing.
 
 Blocked payments remain reserved and are retried in place. The halt clears
 when no blocked payments remain. Deposits, execution, and reads continue while
@@ -239,7 +240,7 @@ $ juice admin kernel deposits
 Payments received whose sender nobody has registered:
   id: rail:0xccb0975d…:0
   kind: deposit
-  amount: 40.00 USDT
+  amount: 40.00 USDT0
   status: held
   tx_hash: 0xccb0975d…
   party_handle: 0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc
@@ -260,9 +261,9 @@ at the address supplies fuel and does not appear as a user deposit.
 ### Holdings and custody
 
 ```
-Holdings:   240.00 USDT (gas 0.04994…) as of block 28
-Operator:   earned=0.00 USDT paying-out=0.00 USDT unclaimed=40.00 USDT held-for-gas=0.00 USDT
-Solvency:   user-balances=240.00 USDT money-in=240.00 USDT difference=0.00 USDT
+Holdings:   240.00 USDT0 (gas 0.04994…) as of block 28
+Operator:   earned=0.00 USDT0 paying-out=0.00 USDT0 unclaimed=40.00 USDT0 held-for-gas=0.00 USDT0
+Solvency:   user-balances=240.00 USDT0 money-in=240.00 USDT0 difference=0.00 USDT0
 Custody:    the money the rail holds matches the books
 ```
 

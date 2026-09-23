@@ -80,25 +80,26 @@ identifying the kernel, network, and public key.
 
 ## Setting up on a chain
 
-A kernel on `arbitrum-sepolia` or `arbitrum-one` has one address on that chain.
-Both USDT deposits and ETH funding go to this address, but the two currencies
-serve different purposes.
+A kernel on `arbitrum-sepolia`, `arbitrum-one` or `polygon` has one address on that chain.
+Both USDT0 deposits and fuel go to this address, but the two currencies
+serve different purposes. The fuel is ETH on the Arbitrum networks and POL on
+Polygon. The rest of this chapter says ETH; on Polygon, read POL.
 
-USDT backs the balances inside the kernel. Each deposit is credited to the
+USDT0 backs the balances inside the kernel. Each deposit is credited to the
 account that registered the sending address, including `sys` when the operator
 is depositing. The `sys` account has administrative authority, receives kernel
-fees, and holds the operator's own balance. There is no additional kernel USDT
+fees, and holds the operator's own balance. There is no additional kernel USDT0
 balance outside these accounts. All balances must remain backed, including
 funds reserved for work or payments; money held for an outgoing payment or
 awaiting attribution is unavailable for operator spending.
 
 ETH pays the blockchain's transaction fees, also called gas. Arbitrum charges
-these fees in ETH even when the transaction transfers USDT. The kernel therefore
+these fees in ETH even when the transaction transfers USDT0. The kernel therefore
 needs ETH to send withdrawals and settlement payments. Receiving a deposit does
 not consume the kernel's ETH: the sender pays that transaction's fee. ETH sent
 to the kernel supplies gas and credits no internal account.
 
-The kernel can replenish its ETH by buying more with available `sys` USDT.
+The kernel can replenish its ETH by buying more with available `sys` USDT0.
 Other accounts' backing cannot fund that purchase. The purchase itself is a
 blockchain transaction and also requires ETH, so the operator must supply the
 initial ETH and replenish it directly if too little remains to make a purchase.
@@ -147,21 +148,21 @@ $ juice admin kernel show
 Handle:     bank
 Network:    arbitrum-one
 Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
-Holdings:   0.00 USDT (gas 0.00) as of block 13
+Holdings:   0.00 USDT0 (gas 0.00) as of block 13
 …
 ```
 
 `juice user deposit` reports the same destination, together with the accepted
-USDT contract and the current account's registered sender address.
+USDT0 contract and the current account's registered sender address.
 
 **4. Supply initial ETH.** From an external wallet, send ETH to the `Paid at:`
 address on the kernel's chain. ETH on another chain cannot pay this kernel's
 transaction fees. The amount must cover outgoing transactions and leave enough
 to submit a refill; the configured thresholds are explained below.
 
-**5. Fund the operator's USDT balance.** To provide funds for automatic refills
+**5. Fund the operator's USDT0 balance.** To provide funds for automatic refills
 before fees have accumulated, remain logged in as `sys` and register the external
-wallet address from which you will send USDT:
+wallet address from which you will send USDT0:
 
 ```
 $ juice user address <your-wallet-address>
@@ -169,13 +170,13 @@ $ juice user deposit
 ```
 
 The first command asks for a signature proving control of your wallet. Follow
-the second command's instructions to send the specified USDT from that wallet
+the second command's instructions to send the specified USDT0 from that wallet
 to the kernel's address, the same destination used for ETH. Once the payment
 is final and processed, it credits `sys`. The full signing and deposit procedure
 is covered in [Deposits and withdrawals](../money/deposits-and-withdrawals.html#step-1-register-the-address-you-will-pay-from).
 
 **6. Verify funding.** Run `juice user me` to check the available `sys` balance
-and `juice admin kernel show` to inspect finalized USDT and ETH holdings,
+and `juice admin kernel show` to inspect finalized USDT0 and ETH holdings,
 accounting checks, and any payment halt. Wait for the kernel to process the
 payments before expecting the figures to reflect them. The solvency difference
 should be zero; custody is compared when the scan and payments allow a settled
@@ -184,9 +185,9 @@ comparison, as explained in [Operator duties](duties.html#the-one-view-to-read-f
 ## Funding the kernel
 
 Continued operation requires enough ETH to send payments and, when a refill is
-needed, enough available `sys` USDT to buy it. There is no fixed minimum `sys`
+needed, enough available `sys` USDT0 to buy it. There is no fixed minimum `sys`
 balance or separate solvency requirement for that account. A zero balance is
-valid, but cannot fund a refill. The required USDT depends on the purchase quote
+valid, but cannot fund a refill. The required USDT0 depends on the purchase quote
 and its allowed slippage, while the transaction fee must fit the configured
 fee limit. Solvency concerns the backing of all internal balances; it does not
 establish that the kernel has enough ETH to transact.
@@ -197,7 +198,7 @@ thresholds describe the configured refill policy, rather than a guarantee of
 how much a particular transaction will cost.
 
 Fees replenish `sys`, but whether they cover fuel depends on activity and costs.
-The operator can add USDT through the deposit procedure above or supply ETH
+The operator can add USDT0 through the deposit procedure above or supply ETH
 directly. Automatic refilling still requires a reachable chain node, a working
 swap venue, and a purchase within the configured limits. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).

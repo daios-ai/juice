@@ -4,8 +4,8 @@
   "rpc": "https://arb1.arbitrum.io/rpc",
   "token": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
   "decimals": 6,
-  "symbol": "USDT",
-  "description": "USDT on Arbitrum One",
+  "symbol": "USDT0",
+  "description": "USDT0 on Arbitrum One",
   "seeds": [
     "/dns4/daios.ai/tcp/31313/p2p/12D3KooWGi5252vn6HJU4Wrkq6ovHKgPHS1vWCgfkfpMjsDFhjJQ"
   ],

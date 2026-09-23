@@ -110,10 +110,12 @@ different stages of use:
   Juice and developing services.
 - **`arbitrum-sepolia`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
   withdrawals, and settlement on a blockchain without using real money.
-- **`arbitrum-one`** uses USDT on Arbitrum One. Accounts and prices are denominated in
-  USDT, and external payments settle on that chain.
+- **`arbitrum-one`** uses USDT0 on Arbitrum One. Accounts and prices are denominated in
+  USDT0, and external payments settle on that chain.
+- **`polygon`** uses USDT0 on Polygon. Accounts and prices are denominated in USDT0,
+  external payments settle on that chain, and the kernel pays its transaction fees in POL.
 
-Kernels federate within their own network. All three use six decimal places, but
+Kernels federate within their own network. All four use six decimal places, but
 their balances remain separate and have different monetary value. [Money](money/) explains funding and withdrawals for each.
 
 ## Where to start

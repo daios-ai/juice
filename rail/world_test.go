@@ -22,6 +22,7 @@ const (
 	playDigest     = "baed18ae3f0c2b63f04f593d113a8af947eea60410d2748771d4ad38df9ecf96"
 	sepoliaDigest  = "42f84b8255e166d4c7b419e34d031bb7f6aed83afa5bde4d0f2a1c8a39313e08"
 	arbitrumDigest = "04a8e2ce745261cc9cc92214d5ba3ce4b327c8949eb57c7e25b44695608dfef0"
+	polygonDigest  = "745bdb1ebcadda5d669bdac5638ba13f1102674f2decf89f137b5ba08b1b8666"
 )
 
 // installed is an installation's worlds directory: what `kernel serve` writes before it looks a
@@ -49,8 +50,9 @@ func TestShippedWorldsLoad(t *testing.T) {
 		symbol   string
 	}{
 		{"play", rail.RailManual, 6, playDigest, "", "fUSD"},
-		{"arbitrum-sepolia", rail.RailEVM, 6, sepoliaDigest, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT"},
-		{"arbitrum-one", rail.RailEVM, 6, arbitrumDigest, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT"},
+		{"arbitrum-sepolia", rail.RailEVM, 6, sepoliaDigest, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT0"},
+		{"arbitrum-one", rail.RailEVM, 6, arbitrumDigest, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT0"},
+		{"polygon", rail.RailEVM, 6, polygonDigest, "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", "USDT0"},
 	} {
 		w, err := rail.Load(dir, tc.name)
 		if err != nil {
@@ -100,7 +102,7 @@ func TestConcurrentInstallsConverge(t *testing.T) {
 		t.Fatalf("concurrent install: %v", err)
 	}
 	// Every world is there, whole, and nothing is left behind.
-	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one"} {
+	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one", "polygon"} {
 		if _, err := rail.Load(dir, n); err != nil {
 			t.Errorf("after concurrent installs, %s: %v", n, err)
 		}
@@ -109,8 +111,8 @@ func TestConcurrentInstallsConverge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 {
-		t.Errorf("the worlds directory holds %d files, want the three shipped worlds", len(entries))
+	if len(entries) != 4 {
+		t.Errorf("the worlds directory holds %d files, want the four shipped worlds", len(entries))
 	}
 }
 
@@ -119,7 +121,7 @@ func TestConcurrentInstallsConverge(t *testing.T) {
 // operator adds is served by its own name like any other.
 func TestInstallWritesOnceAndKeepsEdits(t *testing.T) {
 	dir := installed(t)
-	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one"} {
+	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one", "polygon"} {
 		if _, err := os.Stat(filepath.Join(dir, n+".json")); err != nil {
 			t.Fatalf("install left no %s: %v", n, err)
 		}
@@ -176,7 +178,7 @@ func TestLabelsDoNotMoveTheDigest(t *testing.T) {
 func TestShippedWorldsAreDistinct(t *testing.T) {
 	dir := installed(t)
 	seen := map[string]string{}
-	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one"} {
+	for _, n := range []string{"play", "arbitrum-sepolia", "arbitrum-one", "polygon"} {
 		w, err := rail.Load(dir, n)
 		if err != nil {
 			t.Fatal(err)

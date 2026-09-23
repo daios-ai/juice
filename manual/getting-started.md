@@ -43,7 +43,7 @@ it afresh.
 This walkthrough uses `play` and requires no blockchain funding. To operate on
 Arbitrum, follow [Setting up on a chain](operating/running-a-kernel.html#setting-up-on-a-chain),
 which explains the kernel's address, initial ETH funding, and the operator's
-USDT balance.
+USDT0 balance.
 
 A kernel serves one network, named when it is started. A network is a **world**:
 a file in `~/.juice/worlds/` describing the money it uses and the servers to meet

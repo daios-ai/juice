@@ -103,7 +103,7 @@ code says so where it declines to add a `scope` field, at `kernel/federation.go:
 ### The same eleven, as one purchase
 
 Alice has an account on the kernel `acme`. Bob sells a translation action on the kernel `brick`,
-priced at 0.002 USDT. Both kernels are on `arbitrum-one`.
+priced at 0.002 USDT0. Both kernels are on `arbitrum-one`.
 
 1. Before anything happens, `brick` signs a card for `bob/translate` — its name, what it takes,
    what it returns, the price — and hands that card to any kernel that asks. `acme` stores it when
@@ -115,9 +115,9 @@ priced at 0.002 USDT. Both kernels are on `arbitrum-one`.
 3. `brick` runs the work, returns the text, and signs a record of it: this call, this argument
    hash, this reply hash, success, charged 0.002. That is `receipt`. Alice's kernel keeps it. If
    `brick` later denies the call, or Alice disputes the charge, this is the evidence.
-4. Now the money. 0.002 USDT costs more to send on a chain than it is worth, so the two settle by
+4. Now the money. 0.002 USDT0 costs more to send on a chain than it is worth, so the two settle by
    draw: `acme` committed to a secret in step 2, `brick` signed a number into the receipt, and the
-   two together decide whether this call pays 1.00 USDT or nothing — here a 1-in-500 chance, so the
+   two together decide whether this call pays 1.00 USDT0 or nothing — here a 1-in-500 chance, so the
    payment is 0.002 on average. `acme` signs the secret and sends it: `reveal`. The signature stops
    anyone but Alice's kernel producing a losing secret on her behalf.
 5. Alice rates the call good. `acme` signs `{rating, note, which receipt}` and gossips it: `rating`.
@@ -144,7 +144,7 @@ The last two are not federation at all:
 
 And the fingerprint from part 1 is what stops step 3 being reusable: the same code runs `play` and
 `arbitrum-one`, so without the network inside the signed bytes, a receipt for 0.002 in play money
-would read as a receipt for 0.002 USDT.
+would read as a receipt for 0.002 USDT0.
 
 ### Not endpoints: purposes and channels are different things
 

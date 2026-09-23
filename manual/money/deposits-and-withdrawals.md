@@ -34,10 +34,10 @@ records without making an external payment. These funds have no real monetary
 value, allowing you to learn and test the system without handling funds on a
 blockchain.
 
-## On `arbitrum-sepolia` and `arbitrum-one`
+## On `arbitrum-sepolia`, `arbitrum-one` and `polygon`
 
-On `arbitrum-sepolia` and `arbitrum-one`, deposits and withdrawals use the token specified by the
-network: a test token on Arbitrum Sepolia, or USDT on Arbitrum One.
+On `arbitrum-sepolia`, `arbitrum-one` and `polygon`, deposits and withdrawals use the token specified by the
+network: a test token on Arbitrum Sepolia, or USDT0 on Arbitrum One and on Polygon.
 
 The following examples use a local chain to demonstrate the commands and their
 output. Substitute the addresses returned by your kernel and wallet. The
@@ -49,8 +49,8 @@ than the local demonstration chain.
 Your wallet needs the network's token for the deposit and ETH for the
 transaction fee. They serve different purposes.
 
-**USDT** is the unit used for account balances on `arbitrum-one`. A deposit of
-`250.00 USDT` credits that amount to the account, and a withdrawal pays USDT
+**USDT0** is the unit used for account balances on `arbitrum-one` and `polygon`. A deposit of
+`250.00 USDT0` credits that amount to the account, and a withdrawal pays USDT0
 back to the registered address. The `arbitrum-sepolia` network uses a test token with no
 real monetary value.
 
@@ -64,11 +64,11 @@ Use a wallet configured for the kernel's chain that can sign a message and
 send the required token. Message signing proves ownership of your address;
 the token transfer supplies the deposit.
 
-| | `arbitrum-sepolia` | `arbitrum-one` |
-|---|---|---|
-| Chain | Arbitrum Sepolia | Arbitrum One |
-| The money | a test token, worth nothing | USDT, real dollars |
-| Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDT |
+| | `arbitrum-sepolia` | `arbitrum-one` | `polygon` |
+|---|---|---|---|
+| Chain | Arbitrum Sepolia | Arbitrum One | Polygon |
+| The money | a test token, worth nothing | USDT0, real dollars | USDT0, real dollars |
+| Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDT0 | bought or transferred like any other USDT0 |
 
 If you need test funds, the operator may be able to supply them. Even on `arbitrum-sepolia`,
 an account credit must be supported by a witnessed payment. The operator can
@@ -76,8 +76,8 @@ send you tokens or arrange and attribute a payment on your behalf.
 
 {: .warning }
 > Check the token's contract address before sending a deposit. A token symbol
-> such as USDT does not uniquely identify it: one chain carries several tokens of
-> that name. `juice user deposit` prints the contract this kernel takes; send that
+> does not uniquely identify it: one chain carries several tokens calling
+> themselves USDT. `juice user deposit` prints the contract this kernel takes; send that
 > one. Payments in another token are not credited through this deposit procedure.
 
 ### Step 1: register the address you will pay from
@@ -123,7 +123,7 @@ Send arbitrum-one to this kernel at:
   0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 
 Send only this token, and nothing else:
-  0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9  (USDT)
+  0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9  (USDT0)
 
 Pay from your registered address:
   0x70997970c51812dc3a010c7d01b50e0d17dc79c8
@@ -136,9 +136,9 @@ for the operator to assign by hand: withdraw to your own wallet first, then pay 
 You can also run this command before registration. It will report that a sender
 address still needs to be registered.
 
-### Step 3: send the USDT
+### Step 3: send the USDT0
 
-From your own wallet, on that chain, send USDT to the kernel's address. You pay
+From your own wallet, on that chain, send USDT0 to the kernel's address. You pay
 the transaction fee in ETH, as you would for any transfer.
 
 {: .warning }
@@ -167,7 +167,7 @@ waiting times depend on the chain and the kernel's progress reading it.
 
 ```
 $ juice user me
-  available: 250.00 USDT
+  available: 250.00 USDT0
   …
 ```
 
@@ -179,11 +179,11 @@ payments and the kernel's view of chain progress.
 
 ```
 $ juice user withdraw 50
-Withdraw 50.00 USDT on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
+Withdraw 50.00 USDT0 on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
   id: 58e1e97f-…
   kind: payout
-  amount: 50.00 USDT
-  credit: 50.00 USDT
+  amount: 50.00 USDT0
+  credit: 50.00 USDT0
   destination: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
   status: submitted
   created_at: 2026-09-15T00:12:42Z
@@ -199,8 +199,8 @@ manual payment records. Use `user withdrawals` to follow the outcome:
 $ juice user withdrawals
   id: 58e1e97f-…
   kind: payout
-  amount: 50.00 USDT
-  credit: 50.00 USDT
+  amount: 50.00 USDT0
+  credit: 50.00 USDT0
   …
 ```
 

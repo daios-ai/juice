@@ -51,14 +51,15 @@ juice kernel serve play --listen-addr :4040
 ```
 
 A **world** is a network: the money it uses and the servers to meet it through, written in
-a file. Three are shipped and written into `~/.juice/worlds/` the first time you serve, to
+a file. Four are shipped and written into `~/.juice/worlds/` the first time you serve, to
 read and to edit:
 
 | World | Money |
 |---|---|
 | `play` | no real money: you credit accounts yourself and keep the records |
-| `arbitrum-sepolia` | fake USDT on the Arbitrum Sepolia test chain |
-| `arbitrum-one` | USDT on Arbitrum One |
+| `arbitrum-sepolia` | fake USDT0 on the Arbitrum Sepolia test chain |
+| `arbitrum-one` | USDT0 on Arbitrum One |
+| `polygon` | USDT0 on Polygon |
 
 One installation runs one kernel per world, in `~/.juice/kernels/<world>/`. There is no
 kernel on `play` yet, so `serve` says what is here, asks whether to create one, and asks

@@ -41,7 +41,7 @@ system a kernel uses. It is a file in `~/.juice/worlds/`, named by that file, an
 a kernel serves the world it is started with. The shipped worlds are `play`,
 which counts in fUSD (fake dollars), with six decimal places and no real monetary
 value; `arbitrum-sepolia`, which uses a test token on Arbitrum Sepolia; and
-`arbitrum-one`, which uses USDT on Arbitrum One. A world you write yourself is a
+`arbitrum-one` and `polygon`, which use USDT0 on Arbitrum One and on Polygon. A world you write yourself is a
 network of its own. The choice is fixed when the kernel is created, and kernels
 federate only within the same network.
 
