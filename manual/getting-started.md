@@ -8,7 +8,7 @@ nav_order: 2
 This chapter follows a purchase from both sides: a provider publishes an action,
 and a buyer finds it, runs it, and checks the resulting payment. You will run a
 kernel on the `play` network and create accounts for both participants. Since
-`play` uses fUSDT (fake USDT) with no real monetary value, the walkthrough
+`play` uses fUSD (fake dollars) with no real monetary value, the walkthrough
 requires no blockchain wallet or payment.
 
 The examples include the commands, their output, and the answers to interactive
@@ -116,11 +116,11 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
-  available: 0.00 fUSDT
+  available: 0.00 fUSD
   description:
   handle: alice
   id: 5b984930-…
-  locked: 0.00 fUSDT
+  locked: 0.00 fUSD
 ```
 
 Save Alice's recovery phrase as you did the superuser's. Juice has no email
@@ -139,13 +139,13 @@ confirm its identity and initial balance:
 
 ```
 $ juice user me
-  available: 0.00 fUSDT
+  available: 0.00 fUSD
   connections: []
   connectors: []
   description:
   handle: alice
   id: 5b984930-…
-  locked: 0.00 fUSDT
+  locked: 0.00 fUSD
 ```
 
 You can check execution before adding funds by calling `sys/time`, one of the
@@ -154,7 +154,7 @@ kernel's current time:
 
 ```
 $ juice run sys/time
-sys/time costs 0.00 fUSDT. Run it? [y/N] y
+sys/time costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "iso": "2026-09-14T15:05:36Z",
     "unix": 1789398336
@@ -163,7 +163,7 @@ sys/time costs 0.00 fUSDT. Run it? [y/N] y
   trace_id: 7f5bd164-…
   receipt_id: 13382701-…
   process_id: 8816e98e-…
-  charge: 0.00 fUSDT
+  charge: 0.00 fUSD
 ```
 
 ## Put money in the account
@@ -174,7 +174,7 @@ same network.
 
 On `play`, the operator records deposits directly, using a reference from their
 own records. Here, `demo-payment-1` identifies the demonstration deposit. Log
-in as `sys` to credit Alice with 10 fUSDT. On a chain network, funding
+in as `sys` to credit Alice with 10 fUSD. On a chain network, funding
 instead requires a token payment, as described in
 [Deposits and withdrawals](money/deposits-and-withdrawals.html).
 
@@ -183,8 +183,8 @@ $ juice auth login sys@acme
 Password:
 sys@acme
 $ juice admin user deposit alice 10 --ref demo-payment-1
-Credit 10.00 fUSDT to alice, acting as sys@acme? This cannot be undone. [y/N] y
-  amount: 10.00 fUSDT
+Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
+  amount: 10.00 fUSD
   reason:
   created_at: 2026-09-14T15:05:37Z
   operator_handle: sys
@@ -224,7 +224,7 @@ Password:
 bob@acme
 ```
 
-As Bob, register the endpoint with a description, a price of 0.50 fUSDT, and
+As Bob, register the endpoint with a description, a price of 0.50 fUSD, and
 an input schema requiring a text field named `msg`:
 
 ```
@@ -237,7 +237,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
   kind: http
   active: false
   visibility: private
-  price: 0.50 fUSDT
+  price: 0.50 fUSD
   description: Echo a message back to the caller
   …
   quote_hash: 1f8ec43b…
@@ -250,10 +250,10 @@ it:
 ```
 $ juice action enable bob/echo
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-enabled  bob/echo  0.50 fUSDT  yes     private
+enabled  bob/echo  0.50 fUSD  yes     private
 $ juice action update bob/echo --visibility local
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-updated  bob/echo  0.50 fUSDT  yes     local
+updated  bob/echo  0.50 fUSD  yes     local
 ```
 
 ### Alice finds it and buys it
@@ -262,7 +262,7 @@ updated  bob/echo  0.50 fUSDT  yes     local
 $ juice auth use alice@acme
 alice@acme
 $ juice run sys/lookup '{"query":"echo a message"}'
-sys/lookup costs 0.00 fUSDT. Run it? [y/N] y
+sys/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
@@ -285,12 +285,12 @@ sys/lookup costs 0.00 fUSDT. Run it? [y/N] y
 The search result contains the reference to call, its description and schemas,
 its price, and the evidence this kernel holds about it. Because this is an
 action's JSON result, `price` uses integer
-base units: `500000` represents `0.50 fUSDT`. Use the returned reference to
+base units: `500000` represents `0.50 fUSD`. Use the returned reference to
 send Bob's action a message:
 
 ```
 $ juice run bob/echo '{"msg":"hello"}'
-bob/echo costs 0.50 fUSDT. Run it? [y/N] y
+bob/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": {
       "msg": "hello"
@@ -301,15 +301,15 @@ bob/echo costs 0.50 fUSDT. Run it? [y/N] y
   trace_id: 709b18e0-…
   receipt_id: d2b67088-…
   process_id: 5027b6df-…
-  charge: 0.50 fUSDT
+  charge: 0.50 fUSD
 ```
 
 After the successful call, Alice's available balance has decreased by the
-advertised 0.50 fUSDT:
+advertised 0.50 fUSD:
 
 ```
 $ juice user me
-  available: 9.50 fUSDT
+  available: 9.50 fUSD
   …
 ```
 
@@ -322,10 +322,10 @@ $ juice tx show e989c5e1-…
   args: { "msg": "hello" }
   result: { … }
   status: success
-  gross: 0.50 fUSDT
-  net: 0.40 fUSDT
-  fee: 0.10 fUSDT
-  refund: 0.00 fUSDT
+  gross: 0.50 fUSD
+  net: 0.40 fUSD
+  fee: 0.10 fUSD
+  refund: 0.00 fUSD
   started_at: 2026-09-14T15:05:54Z
   ended_at: 2026-09-14T15:05:54Z
   rating: null
@@ -334,7 +334,7 @@ $ juice tx show e989c5e1-…
   target_handle: bob
 ```
 
-The transaction accounts for the 0.50 fUSDT Alice paid: Bob receives `0.40`,
+The transaction accounts for the 0.50 fUSD Alice paid: Bob receives `0.40`,
 and the kernel receives `0.10`. Since the action bought no further work, its
 whole price is margin, on which the default fee is 20%.
 [Earnings](providing/earnings.html) extends this calculation to composed actions.

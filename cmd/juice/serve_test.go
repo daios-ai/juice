@@ -3438,7 +3438,7 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok", "handle": "acme", "public_key": "KEY-SELF",
-			"network": "play", "network_digest": "D", "decimals": 6, "symbol": "fUSDT",
+			"network": "play", "network_digest": "D", "decimals": 6, "symbol": "fUSD",
 		})
 	})
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}

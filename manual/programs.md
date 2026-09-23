@@ -44,7 +44,7 @@ written to stderr; it is separate from the result on stdout:
 
 ```
 $ juice --as bot@acme run sys/time --json
-sys/time costs 0.00 fUSDT.
+sys/time costs 0.00 fUSD.
 {
   "result": { "iso": "2026-09-14T12:06:52Z", "unix": 1789387612 },
   "tx_id": "98bb64e6-…",
@@ -54,7 +54,7 @@ sys/time costs 0.00 fUSDT.
   "charge": 0
 }
 $ juice --as bot@acme run sys/time --quiet
-sys/time costs 0.00 fUSDT.
+sys/time costs 0.00 fUSD.
 821a9f33-…
 ```
 
@@ -114,7 +114,7 @@ POST /v1/run {"action":"sys/transfer","args":{"target":"bob","amount":1500000}}
 
 Both examples deliver the same amount, although `sys/transfer` may also have
 an execution price. Similarly, `GET /v1/me` returns `"available": 4795000`
-where the command line displays `4.795 fUSDT`. Read `decimals` from
+where the command line displays `4.795 fUSD`. Read `decimals` from
 `GET /health` when calculating conversions instead of hard-coding six.
 
 ## Separate planning from spending
@@ -250,7 +250,7 @@ the key and network you expect:
 $ curl -s localhost:4040/health
 {"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
  "handle":"acme","network":"play","network_digest":"baed18ae…",
- "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"fUSDT","token":""}
+ "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"fUSD","token":""}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

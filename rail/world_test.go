@@ -48,7 +48,7 @@ func TestShippedWorldsLoad(t *testing.T) {
 		token    string
 		symbol   string
 	}{
-		{"play", rail.RailManual, 6, playDigest, "", "fUSDT"},
+		{"play", rail.RailManual, 6, playDigest, "", "fUSD"},
 		{"arbitrum-sepolia", rail.RailEVM, 6, sepoliaDigest, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT"},
 		{"arbitrum-one", rail.RailEVM, 6, arbitrumDigest, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT"},
 	} {

@@ -13,7 +13,7 @@ are separate, so you can prepare that interface before allowing calls.
 ## Creating an action
 
 The following example registers an HTTP endpoint that echoes a message. Its
-input schema describes the `msg` field, and its price is 0.50 fUSDT on
+input schema describes the `msg` field, and its price is 0.50 fUSD on
 `play`:
 
 ```
@@ -26,7 +26,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
   kind: http
   active: false
   visibility: private
-  price: 0.50 fUSDT
+  price: 0.50 fUSD
   …
   quote_hash: 4965342976414282…
 ```
@@ -72,10 +72,10 @@ who may call it by setting its visibility:
 ```
 $ juice action enable bob/echo
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-enabled  bob/echo  0.50 fUSDT  yes     private
+enabled  bob/echo  0.50 fUSD  yes     private
 $ juice action update bob/echo --visibility local
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-updated  bob/echo  0.50 fUSDT  yes     local
+updated  bob/echo  0.50 fUSD  yes     local
 ```
 
 | Visibility | Who can call it |
@@ -136,8 +136,8 @@ enabling `bob/greeter` can enable both operations in an application:
 ```
 $ juice action enable bob/greeter
 CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
-enabled  bob/greeter/greet  0.50 fUSDT  yes     private
-enabled  bob/greeter/index  0.00 fUSDT  yes     private
+enabled  bob/greeter/greet  0.50 fUSD  yes     private
+enabled  bob/greeter/index  0.00 fUSD  yes     private
 ```
 
 Price, visibility, and credentials can be updated across the selected path.

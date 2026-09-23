@@ -37,9 +37,9 @@ you receive = margin − fee
 A call to `bob/echo` at `0.50` that calls nothing:
 
 ```
-  gross: 0.50 fUSDT
-  net: 0.40 fUSDT
-  fee: 0.10 fUSDT
+  gross: 0.50 fUSD
+  net: 0.40 fUSD
+  fee: 0.10 fUSD
 ```
 
 Because this action buys no downstream work, its whole price is margin.

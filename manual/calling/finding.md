@@ -17,7 +17,7 @@ action candidates. For example, a search for an echo service might return:
 
 ```
 $ juice run sys/lookup '{"query":"echo a message"}'
-sys/lookup costs 0.00 fUSDT. Run it? [y/N] y
+sys/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
@@ -100,7 +100,7 @@ $ juice action show bob/echo
   kind: http
   active: true
   visibility: local
-  price: 0.50 fUSDT
+  price: 0.50 fUSD
   description: Echo a message back to the caller
   input_schema: { … }
   output_schema: {}
@@ -137,10 +137,10 @@ by each report. Verification confirms a matching record of trade, not quality.
 ```
 $ juice action list
 ACTION                      PRICE        AUTHORIZE
-bob/mail                    0.00 fUSDT   your own login
-dave@beta-kernel/summarize   2.205 fUSDT
-bob/stamp                   1.00 fUSDT
-bob/echo                    0.50 fUSDT
+bob/mail                    0.00 fUSD   your own login
+dave@beta-kernel/summarize   2.205 fUSD
+bob/stamp                   1.00 fUSD
+bob/echo                    0.50 fUSD
   …
 ```
 

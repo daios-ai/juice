@@ -105,7 +105,7 @@ money it uses and cannot be changed later. A network is a **world**: a file in
 network this build does not ship is a file you add. The three shipped ones serve
 different stages of use:
 
-- **`play`** counts in fUSDT (fake USDT), with six decimal places and no real
+- **`play`** counts in fUSD (fake dollars), with six decimal places and no real
   monetary value. The operator records deposits, and no blockchain payment is required. It is suitable for learning
   Juice and developing services.
 - **`arbitrum-sepolia`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
@@ -148,10 +148,10 @@ kernel, as in `alice@acme`. An action on the current kernel is written as
 owner's handle: `bob@weather/forecast`. The [identity chapter](calling/identity.html)
 explains how these names are assigned and resolved.
 
-Most examples use the `play` network, whose display unit is fUSDT. The
+Most examples use the `play` network, whose display unit is fUSD. The
 command line accepts amounts such as `0.50`, while the HTTP API and action JSON
 use integer base units: `500000` represents the same amount. With six decimal
-places, the smallest unit is `0.000001` fUSDT.
+places, the smallest unit is `0.000001` fUSD.
 
 ## Background and related documents
 

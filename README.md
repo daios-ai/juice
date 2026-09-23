@@ -168,7 +168,7 @@ by the fact that witnesses it, and then move freely between local users:
 The ledger also shows provider payouts, operator fees, and import fees, each linked
 to the transaction that settled it.
 
-On `play` amounts are shown in fUSDT (fake USDT), with six decimal places like
+On `play` amounts are shown in fUSD (fake dollars), with six decimal places like
 the other shipped worlds. No crypto is involved. The operator records the payments they
 receive from people; `--ref` is whatever names one in their own books. What
 another kernel owes needs no such record: its own signed message saying it paid

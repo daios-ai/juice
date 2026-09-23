@@ -139,7 +139,7 @@ kernel_fed_addr() {
 
 # SYMBOL is what this world calls its money when a person reads it — the one place the flows name
 # it, so renaming a world's symbol is one line here and not a hunt through assertions.
-SYMBOL=fUSDT
+SYMBOL=fUSD
 
 # awaiting db home — how many of this login's processes are waiting on a remote receipt. Read from
 # the reply's own field rather than from a rendering, so a change of wording never silently turns a

@@ -8,7 +8,7 @@ nav_order: 2
 
 A deposit credits your account against an external payment; a withdrawal sends
 funds out of that account. Their external form depends on the kernel's network.
-On `play`, they are records of fUSDT (fake USDT). On a chain network, they correspond
+On `play`, they are records of fUSD (fake dollars). On a chain network, they correspond
 to token payments confirmed by the blockchain.
 
 This chapter first covers `play`, then follows a chain deposit from address

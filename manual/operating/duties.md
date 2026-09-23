@@ -23,11 +23,11 @@ $ juice admin kernel show
 Handle:     acme
 Public key: fdlMi64P…
 Network:    play
-Operator:   earned=0.710005 fUSDT paying-out=4.20 fUSDT unclaimed=0.00 fUSDT held-for-gas=0.00 fUSDT
-Solvency:   user-balances=10.00 fUSDT money-in=10.00 fUSDT difference=0.00 fUSDT
-Credit:     owed-to-us=0.00 fUSDT limit=50.00 fUSDT
+Operator:   earned=0.710005 fUSD paying-out=4.20 fUSD unclaimed=0.00 fUSD held-for-gas=0.00 fUSD
+Solvency:   user-balances=10.00 fUSD money-in=10.00 fUSD difference=0.00 fUSD
+Credit:     owed-to-us=0.00 fUSD limit=50.00 fUSD
 Fees:       20% of each layer's margin here, 5% on work served to another kernel, 5% on work imported from one
-Tickets:    this kernel draws for 1.00 fUSDT, and accepts tickets up to 5.00 fUSDT
+Tickets:    this kernel draws for 1.00 fUSD, and accepts tickets up to 5.00 fUSD
 Listen addresses:
   /ip4/127.0.0.1/tcp/31401/p2p/12D3KooWJHdK…
 ```
@@ -56,8 +56,8 @@ external reference:
 
 ```
 $ juice admin user deposit alice 10 --ref demo-payment-1
-Credit 10.00 fUSDT to alice, acting as sys@acme? This cannot be undone. [y/N] y
-  amount: 10.00 fUSDT
+Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
+  amount: 10.00 fUSD
   operator_handle: sys
   from_handle: sys
   to_handle: alice
@@ -158,7 +158,7 @@ Reachability: direct (0ms)
 Traded here:  yes
 
 Public actions (1):
-  summarize                       2.205 fUSDT
+  summarize                       2.205 fUSD
       Summarize a piece of text
 ```
 

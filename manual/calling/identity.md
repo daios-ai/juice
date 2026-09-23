@@ -25,7 +25,7 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
-  available: 0.00 fUSDT
+  available: 0.00 fUSD
   handle: alice
   …
 ```

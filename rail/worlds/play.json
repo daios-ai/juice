@@ -1,7 +1,9 @@
 {
   "rail": "manual",
   "decimals": 6,
-  "symbol": "fUSDT",
+  "symbol": "fUSD",
   "description": "no real money: you credit accounts yourself and keep the records",
-  "seeds": []
+  "seeds": [
+    "/dns4/arfante.juiceos.org/tcp/31313/p2p/12D3KooWJuZ8eygdw6eQNW5hf6KtiQkPRyMsDaMPZJP1YkuPaU2d"
+  ]
 }

@@ -16,9 +16,9 @@ between your account and the outside world.
 
 ```
 $ juice user me
-  available: 9.50 fUSDT
+  available: 9.50 fUSD
   …
-  locked: 0.00 fUSDT
+  locked: 0.00 fUSD
 ```
 
 The **available** balance is the amount you can spend. The **locked** balance
@@ -38,9 +38,9 @@ See [Steps and processes](../providing/steps.html) before forcing closure.
 ## Amounts
 
 The command line accepts amounts in the network's display unit, such as
-`0.50 fUSDT` on `play`. The HTTP API and action JSON use integer base units.
+`0.50 fUSD` on `play`. The HTTP API and action JSON use integer base units.
 All three shipped networks use six decimal places, so `500000` base units
-represent 0.50 fUSDT on `play`. Equal numeric amounts on different networks do
+represent 0.50 fUSD on `play`. Equal numeric amounts on different networks do
 not imply equal monetary value.
 
 ## Sending money to another user
@@ -51,8 +51,8 @@ transaction:
 
 ```
 $ juice user transfer bob 1 --reason "thanks"
-Send 1.00 fUSDT to bob, acting as alice@acme? This cannot be undone. [y/N] y
-  amount: 1.00 fUSDT
+Send 1.00 fUSD to bob, acting as alice@acme? This cannot be undone. [y/N] y
+  amount: 1.00 fUSD
   reason: thanks
   created_at: 2026-09-14T12:05:34Z
   operator_handle: alice
@@ -81,10 +81,10 @@ Use `user ledger` to read entries involving your account:
 ```
 $ juice user ledger
 WHEN                  AMOUNT       FROM   TO     WHY
-2026-09-14T12:05:54Z  0.40 fUSDT   alice  bob    e989c5e1-…
-2026-09-14T12:05:54Z  0.10 fUSDT   alice  sys    e989c5e1-…
-2026-09-14T12:05:34Z  1.00 fUSDT   alice  bob    thanks
-2026-09-14T12:04:54Z  10.00 fUSDT  sys    alice
+2026-09-14T12:05:54Z  0.40 fUSD   alice  bob    e989c5e1-…
+2026-09-14T12:05:54Z  0.10 fUSD   alice  sys    e989c5e1-…
+2026-09-14T12:05:34Z  1.00 fUSD   alice  bob    thanks
+2026-09-14T12:04:54Z  10.00 fUSD  sys    alice
 ```
 
 Deposits, withdrawals, transfers, and value delivered by an action appear in

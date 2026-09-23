@@ -23,7 +23,7 @@ identifies what you need to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
-bob/mail costs 0.00 fUSDT. Run it? [y/N] y
+bob/mail costs 0.00 fUSD. Run it? [y/N] y
 
 Authorize with:
   juice user connect bob/mail
@@ -122,7 +122,7 @@ $ juice step show b75366d1-…
   partial_args: {
     "message": "approve the order?"
   }
-  price: 0.00 fUSDT
+  price: 0.00 fUSD
   status: waiting
   created_at: 2026-09-14T12:05:35Z
   action: sys/sink

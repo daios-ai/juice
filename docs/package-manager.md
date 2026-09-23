@@ -243,7 +243,7 @@ unit, and the edges in both directions.
 $ jpm install https://weather.example.org/package.json
 weather 1.5.0 needs: world-map (package), news (news@k7Qm2v…/weather-news, petname daios)
   world-map   not installed → installing 1.0.1 ... 3 actions under pedro/world-map
-  news        remote, resolved: 12 fUSDT per call, reachable
+  news        remote, resolved: 12 fUSD per call, reachable
 weather/api needs an API key (https://example.com/keys): ****
   api         imported, 4 actions
   index       compiled with bindings, price 20

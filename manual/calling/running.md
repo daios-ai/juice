@@ -19,7 +19,7 @@ another, or a raw action id. `JSON` is the argument object, `{}` if omitted.
 
 ```
 $ juice run bob/echo '{"msg":"hello"}'
-bob/echo costs 0.50 fUSDT. Run it? [y/N] y
+bob/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": { "msg": "hello" },
     …
@@ -28,7 +28,7 @@ bob/echo costs 0.50 fUSDT. Run it? [y/N] y
   trace_id: 009b8dc1-…
   receipt_id: b69abbd8-…
   process_id: a394b5c5-…
-  charge: 0.50 fUSDT
+  charge: 0.50 fUSD
 ```
 
 The response includes the action's result, its settled charge, and identifiers
@@ -58,7 +58,7 @@ without charge:
 
 ```
 $ juice run bob/echo '{}'
-bob/echo costs 0.50 fUSDT. Run it? [y/N] y
+bob/echo costs 0.50 fUSD. Run it? [y/N] y
 error: field msg: required field missing
 ```
 
@@ -73,7 +73,7 @@ identifies the action to connect:
 
 ```
 $ juice run bob/mail '{"body":"hi"}'
-bob/mail costs 0.00 fUSDT. Run it? [y/N] y
+bob/mail costs 0.00 fUSD. Run it? [y/N] y
 error: grant required for bob/mail
        Authorize it with: juice user connect bob/mail
 ```
@@ -96,7 +96,7 @@ If an otherwise callable action has different terms, the kernel rejects the
 request before charging and reports the current quote:
 
 ```
-error: the action's terms changed; it now costs 0.50 fUSDT
+error: the action's terms changed; it now costs 0.50 fUSD
        Nothing was charged. The price is now 500000; pass --quote-hash 4965342976414282… to accept it.
 ```
 
@@ -110,7 +110,7 @@ can be a petname known to your kernel or the remote kernel's public key:
 
 ```
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
-dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
+dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
 ```
 
 Your local balance funds the purchase. The two kernels handle the exchange,
@@ -130,12 +130,12 @@ example with the default `1.00` ticket:
 
 ```
 $ juice user me
-  available: 7.00 fUSDT
+  available: 7.00 fUSD
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
-dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
+dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
   …
 $ juice user me
-  available: 4.795 fUSDT
+  available: 4.795 fUSD
 ```
 
 ### The ticket
@@ -161,9 +161,9 @@ balance of `2.50` is insufficient:
 
 ```
 $ juice user me
-  available: 2.50 fUSDT
+  available: 2.50 fUSD
 $ juice run 'dave@beta-kernel/summarize' '{"text":"x"}'
-dave@beta-kernel/summarize costs 2.205 fUSDT. Run it? [y/N] y
+dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
 error: insufficient user balance
 ```
 

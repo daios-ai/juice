@@ -28,7 +28,7 @@ performing a further service:
 
 ```
 $ juice run sys/message '{"to":"bob","message":"approve the order?"}'
-sys/message costs 0.00 fUSDT. Run it? [y/N] y
+sys/message costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "step_id": "b75366d1-…"
   }
@@ -119,7 +119,7 @@ the process owner.
 ```
 $ juice process list
 PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
-e3539f75-…  open    0.00 fUSDT  0.00 fUSDT
+e3539f75-…  open    0.00 fUSD  0.00 fUSD
 ```
 
 ### Ending a process

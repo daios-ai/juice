@@ -28,10 +28,10 @@ $ juice tx show 116fd3a6-…
   args: { "msg": "hello" }
   result: { … }
   status: success
-  gross: 0.50 fUSDT
-  net: 0.40 fUSDT
-  fee: 0.10 fUSDT
-  refund: 0.00 fUSDT
+  gross: 0.50 fUSD
+  net: 0.40 fUSD
+  fee: 0.10 fUSD
+  refund: 0.00 fUSD
   reason:
   started_at: 2026-09-14T12:05:10Z
   ended_at: 2026-09-14T12:05:10Z
@@ -175,8 +175,8 @@ Use the process commands to follow work that has not yet finished:
 ```
 $ juice process list
 PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
-e3539f75-…  open    0.00 fUSDT  0.00 fUSDT
-25386daa-…  closed  0.00 fUSDT  0.00 fUSDT
+e3539f75-…  open    0.00 fUSD  0.00 fUSD
+25386daa-…  closed  0.00 fUSD  0.00 fUSD
 $ juice process show e3539f75-…
 ```
 
