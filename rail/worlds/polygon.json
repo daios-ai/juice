@@ -6,7 +6,9 @@
   "decimals": 6,
   "symbol": "USDT0",
   "description": "USDT0 on Polygon",
-  "seeds": [],
+  "seeds": [
+    "/dns4/tanerio.juiceos.org/tcp/31313/p2p/12D3KooWPuyNDvd2pyQg2nCFT49W2TP2mpCcW4seNA38fySCqvWb"
+  ],
   "finality": "finalized",
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
