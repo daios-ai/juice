@@ -12,13 +12,13 @@ A Juice network is defined by a shared world file, named by that file and instal
 - **defining** (identical for every member): network name, adaptor, chain id, token address.
 - **operational** (each kernel's own): RPC endpoint, gas policy, seeds.
 
-A digest of the defining part is in every signature prefix, so any artifact from another network
+A fingerprint of the defining part is in every signature prefix, so any artifact from another network
 fails verification everywhere (EIP-155 pattern). Discovery runs per network (`juice/<name>`) —
 courtesy; the signature is the lock. Catalog, transactions, and rail live inside a network and
 never cross; two networks on one chain can exchange only the raw asset, arriving as an ordinary
 deposit.
 
-The digest is a full federation protocol break, upgraded in lockstep: every signature domain,
+The fingerprint is a full federation protocol break, upgraded in lockstep: every signature domain,
 discovery namespace, identity, settlement records, config, migrations, and the test catalog
 change together. The revisions section enumerates them.
 
@@ -33,7 +33,7 @@ A kernel = one `juice kernel serve <world>` + one home: ledger, identity key, po
 chain rail — rail db and key. The world is not in the home: it is the network's, held once per
 installation. One kernel, one network, permanently; no switching, only separate kernels, one per
 world.
-First boot writes the digest into `juice.db`; startup refuses a mismatched world file (as D9
+First boot writes the fingerprint into `juice.db`; startup refuses a mismatched world file (as D9
 refuses missing keys).
 
 ## Rails are adaptors
@@ -164,7 +164,7 @@ must know.
   address. A stolen session can already move the funds by transferring them to another account
   it controls, so freezing withdrawals protected nothing; step-up authentication, if ever
   wanted, must cover transfers and withdrawals together.
-- A chain-railed kernel identity **mandates** a proven rail address: an EIP-191 signature by
+- A chain-railed kernel identity **mandates** a proven blockchain address: an EIP-191 signature by
   the rail key over `(kernel key, address)`, domain-qualified. It authenticates the settlement
   destination; without it the identity is invalid on a chain rail. Juice custodies `rail.key`
   and hands it to the rail at construction, so producing this signature is plain cryptography,
@@ -246,7 +246,7 @@ as; a run is itself consent to its price (agents are first-class).
 
 ## Operator surface
 
-`admin kernel show` gains rail address, finalized holdings, the split of `sys` into earnings and in-transit
+`admin kernel show` gains blockchain address, finalized holdings, the split of `sys` into earnings and in-transit
 (unattributed deposits, pending payouts), the solvency identity with its named terms, and the
 stop signal with its reason and age. `admin kernel deposits` lists the unattributed money on `sys`
 and every obligation still open; `admin user deposit <user> --ref <txhash>` attributes one
@@ -287,7 +287,7 @@ identity fields change lockstep.
    finalized failure compensates that commit; a finalized withdrawal failure produces one
    compensating transfer, never an edit; registration attributes prior `sys`-held deposits; one
    address one account; replacement by signature alone, an in-flight withdrawal keeping its
-   snapshotted destination; an identity without a proven rail address is invalid; unannounced peer
+   snapshotted destination; an identity without a proven blockchain address is invalid; unannounced peer
    transfers settle nothing; two equal-amount settlements resolve by their bound chain facts; no
    re-pay under a new identity; the chain-vs-ledger reconciliation detects a deliberately broken
    invariant **and names the differing term**.
@@ -297,9 +297,9 @@ identity fields change lockstep.
 
 ## Contract revisions this requires (yours)
 
-- Every P1 signature domain gains the world digest (lockstep protocol break); discovery
+- Every P1 signature domain gains the world fingerprint (lockstep protocol break); discovery
   namespace becomes per-network; migrations and the §8 test catalog change with them.
-- Identity and gossip gain network name, digest, and the mandatory proven rail address; accounts
+- Identity and gossip gain network name, fingerprint, and the mandatory proven blockchain address; accounts
   gain the registered address.
 - U3 rewritten over the two primitives (crossing on `sys` against a finalized fact; transfer on
   the owner's authority; idempotency preserved); U33 narrowed to *the* rail; the stop signal

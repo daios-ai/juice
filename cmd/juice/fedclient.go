@@ -21,18 +21,18 @@ import (
 // process federates nothing), and localPubKey/signFederation are supplied at construction from the
 // kernel, which loads the signing key at bootstrap.
 type fedAdapter struct {
-	transport      federationTransport                           // libp2p federation carrier; nil off the serving path
-	localPubKey    string                                        // this kernel's base64url Ed25519 public key
-	signFederation signerFunc                                    // signs as this kernel; the private key never leaves the kernel
-	railIdentity   func(context.Context) (address, proof string) // where a winning ticket is paid from
-	recordContact  contactRecorder                               // journals whether a peer answered (§13); nil off the serving path
+	transport          federationTransport                           // libp2p federation carrier; nil off the serving path
+	localPubKey        string                                        // this kernel's base64url Ed25519 public key
+	signFederation     signerFunc                                    // signs as this kernel; the private key never leaves the kernel
+	blockchainIdentity func(context.Context) (address, proof string) // where a winning ticket is paid from
+	recordContact      contactRecorder                               // journals whether a peer answered (§13); nil off the serving path
 }
 
 // newFedAdapter builds the adapter around the kernel's own signer. Only the signers it uses are
 // injected: outbound calls need the fed_call signature, while step and settle signing stay on the
 // paths that own them (the control path and the kernel respectively).
-func newFedAdapter(localPubKey string, sign signerFunc, railIdentity func(context.Context) (string, string)) *fedAdapter {
-	return &fedAdapter{localPubKey: localPubKey, signFederation: sign, railIdentity: railIdentity}
+func newFedAdapter(localPubKey string, sign signerFunc, blockchainIdentity func(context.Context) (string, string)) *fedAdapter {
+	return &fedAdapter{localPubKey: localPubKey, signFederation: sign, blockchainIdentity: blockchainIdentity}
 }
 
 // SetTransport installs the libp2p carrier once serve has started it, completing construction.
@@ -104,8 +104,8 @@ func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actio
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
 	var addr, proof string
-	if c.railIdentity != nil {
-		addr, proof = c.railIdentity(ctx)
+	if c.blockchainIdentity != nil {
+		addr, proof = c.blockchainIdentity(ctx)
 	}
 	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
 		peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment, lottery, addr, proof, args)
@@ -239,7 +239,7 @@ func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref s
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
 // request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
 func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, railAddress, railProof string, args map[string]any) (kernel.FederationResult, error) {
+	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, blockchainAddress, blockchainProof string, args map[string]any) (kernel.FederationResult, error) {
 
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -253,8 +253,8 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 		IdempotencyKey:       idempotencyKey,
 		Commitment:           commitment,
 		Lottery:              lottery,
-		RailAddress:          railAddress,
-		RailProof:            railProof,
+		BlockchainAddress:    blockchainAddress,
+		BlockchainProof:      blockchainProof,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {

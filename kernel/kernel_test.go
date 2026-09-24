@@ -38,7 +38,7 @@ const testIssuerUserID = "00000000-0000-0000-0000-000000000001"
 
 // testNet is the play network every test signs on. The kernels these helpers build carry it too, so
 // a signature made in a test verifies in the kernel under test rather than by coincidence.
-var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+var testNet = kernel.Network{Name: "play", Fingerprint: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
 
 // newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
 // a test that funds an account twice must name two payments (U3).
@@ -2395,8 +2395,8 @@ type fakeFederationHTTP struct {
 	resolveHandle   string
 	resolveErr      error
 	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
-	resolveRailAddress string
-	resolveRailProof   string
+	resolveBlockchainAddress string
+	resolveBlockchainProof   string
 	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt —
 	// naming no transaction and naming the request it refuses, exactly how a real serving kernel
 	// refuses a call (§13, P5) — so a test can drive an ACTUAL rejection settlement.
@@ -2452,7 +2452,7 @@ func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, na
 	// A world without payment addresses carries none, which is what the manual rail these tests run
 	// on reports; a test about paying a peer supplies one.
 	return &kernel.ResolvedAction{Manifest: f.resolveManifest,
-		RailAddress: f.resolveRailAddress, RailProof: f.resolveRailProof}, nil
+		BlockchainAddress: f.resolveBlockchainAddress, BlockchainProof: f.resolveBlockchainProof}, nil
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (string, string, error) {

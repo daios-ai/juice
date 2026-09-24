@@ -362,16 +362,16 @@ func errorFromResponse(status int, body []byte) error {
 // serverHealth is the open identity banner every client reads before it trusts a server: which
 // kernel this is, and which network it serves (D23). It needs no token.
 type serverHealth struct {
-	Status      string `json:"status"`
-	Handle      string `json:"handle"`
-	PublicKey   string `json:"public_key"`
-	Network     string `json:"network"`
-	Digest      string `json:"network_digest"`
-	Decimals    uint8  `json:"decimals"`
-	Symbol      string `json:"symbol"`
-	Token       string `json:"token"`
-	RailAddress string `json:"rail_address"`
-	base        string // the address it was read from: a banner is a claim about one place
+	Status            string `json:"status"`
+	Handle            string `json:"handle"`
+	PublicKey         string `json:"public_key"`
+	Network           string `json:"network"`
+	Fingerprint       string `json:"network_fingerprint"`
+	Decimals          uint8  `json:"decimals"`
+	Symbol            string `json:"symbol"`
+	Token             string `json:"token"`
+	BlockchainAddress string `json:"blockchain_address"`
+	base              string // the address it was read from: a banner is a claim about one place
 }
 
 // health reads a server's identity banner, at most once per address per command: deciding what a
@@ -499,7 +499,7 @@ func (c *client) network(ctx context.Context) (kernel.Network, error) {
 		// commands meet it first, so it must not report a unit problem.
 		return kernel.Network{}, err
 	}
-	return kernel.Network{Name: h.Network, Digest: h.Digest, Decimals: h.Decimals,
+	return kernel.Network{Name: h.Network, Fingerprint: h.Fingerprint, Decimals: h.Decimals,
 		Symbol: h.Symbol, Token: h.Token}, nil
 }
 
@@ -513,12 +513,12 @@ func (c *client) network(ctx context.Context) (kernel.Network, error) {
 // The key and network are what a login checks before it is selected, so a command never lands on a
 // kernel other than the one this record was made for.
 type kernelRec struct {
-	Endpoint    string `json:"endpoint"`
-	PublicKey   string `json:"public_key,omitempty"`
-	WorldDigest string `json:"world_digest,omitempty"`
-	Network     string `json:"network,omitempty"`
-	Decimals    uint8  `json:"decimals,omitempty"`
-	Symbol      string `json:"symbol,omitempty"`
+	Endpoint         string `json:"endpoint"`
+	PublicKey        string `json:"public_key,omitempty"`
+	WorldFingerprint string `json:"world_fingerprint,omitempty"`
+	Network          string `json:"network,omitempty"`
+	Decimals         uint8  `json:"decimals,omitempty"`
+	Symbol           string `json:"symbol,omitempty"`
 }
 
 type clientConfig struct {
@@ -672,7 +672,7 @@ func sameKernel(name string, k *kernelRec, h *serverHealth) error {
 	case k.PublicKey != "" && h.PublicKey != k.PublicKey:
 		return kernel.ErrInvalidState.Wrapf(
 			"the kernel at %s is not the one you registered as \"%s\". Nothing was sent.%s", h.base, name, again)
-	case k.WorldDigest != "" && h.Digest != k.WorldDigest:
+	case k.WorldFingerprint != "" && h.Fingerprint != k.WorldFingerprint:
 		return kernel.ErrInvalidState.Wrapf(
 			"the kernel at %s now serves the %s network, not the one you registered as \"%s\". Nothing was "+
 				"sent, because money and signatures mean something different there.%s", h.base, h.Network, name, again)
@@ -931,13 +931,13 @@ func migrateLegacyRecords() *clientConfig {
 	var old struct {
 		Active   string `json:"active"`
 		Profiles map[string]struct {
-			Endpoint     string `json:"endpoint"`
-			PublicKey    string `json:"public_key"`
-			WorldDigest  string `json:"world_digest"`
-			Network      string `json:"network"`
-			Decimals     uint8  `json:"decimals"`
-			Token        string `json:"token"`
-			RefreshToken string `json:"refresh_token"`
+			Endpoint         string `json:"endpoint"`
+			PublicKey        string `json:"public_key"`
+			WorldFingerprint string `json:"world_digest"`
+			Network          string `json:"network"`
+			Decimals         uint8  `json:"decimals"`
+			Token            string `json:"token"`
+			RefreshToken     string `json:"refresh_token"`
 		} `json:"profiles"`
 	}
 	if json.Unmarshal(data, &old) != nil {
@@ -946,7 +946,7 @@ func migrateLegacyRecords() *clientConfig {
 	cfg := &clientConfig{Kernels: map[string]*kernelRec{}}
 	for name, p := range old.Profiles {
 		cfg.Kernels[name] = &kernelRec{
-			Endpoint: p.Endpoint, PublicKey: p.PublicKey, WorldDigest: p.WorldDigest,
+			Endpoint: p.Endpoint, PublicKey: p.PublicKey, WorldFingerprint: p.WorldFingerprint,
 			Network: p.Network, Decimals: p.Decimals,
 		}
 		if p.Token != "" || p.RefreshToken != "" {

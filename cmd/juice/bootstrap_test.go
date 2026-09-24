@@ -129,24 +129,24 @@ func TestCheckNetworkReadsTheRecord(t *testing.T) {
 		t.Cleanup(func() { db.Close() })
 		return db
 	}
-	recorded := func(digest string) *store.DB {
+	recorded := func(fingerprint string) *store.DB {
 		db := fresh()
-		if serr := db.SetConfig(ctx, configKeyWorldDigest, digest); serr != nil {
+		if serr := db.SetConfig(ctx, configKeyWorldFingerprint, fingerprint); serr != nil {
 			t.Fatal(serr)
 		}
 		return db
 	}
 
 	// The world it was created on: served.
-	if err := checkNetwork(ctx, recorded(play.Network().Digest), play); err != nil {
+	if err := checkNetwork(ctx, recorded(play.Network().Fingerprint), play); err != nil {
 		t.Errorf("a kernel was refused its own network: %v", err)
 	}
 	// Another: refused, naming the network it holds, the world asked for, and that world's network.
-	err = checkNetwork(ctx, recorded(play.Network().Digest), other)
+	err = checkNetwork(ctx, recorded(play.Network().Fingerprint), other)
 	if err == nil {
 		t.Fatal("a kernel was served on a network it was not created on")
 	}
-	for _, want := range []string{play.Network().Digest, "arbitrum-sepolia", other.Network().Digest} {
+	for _, want := range []string{play.Network().Fingerprint, "arbitrum-sepolia", other.Network().Fingerprint} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal must name %s: %v", want, err)
 		}

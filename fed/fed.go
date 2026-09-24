@@ -74,15 +74,15 @@ type ResolveResponse = Response
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
-	Action               string `json:"action"`                 // the action's stable id on the serving kernel
-	Counterparty         string `json:"counterparty"`           // caller's base64url Ed25519 public key
-	ExpectedContractHash string `json:"expected_contract_hash"` // contract hash the caller cached (§8 If-Match)
-	IdempotencyKey       string `json:"idempotency_key"`        //
-	Timestamp            string `json:"timestamp"`              // RFC3339
-	Commitment           string `json:"commitment,omitempty"`   // hash of the caller's half of the settlement draw (P10)
-	Lottery              int64  `json:"lottery,omitempty"`      // the ticket face value this call is dispatched under (P10)
-	RailAddress          string `json:"rail_address,omitempty"` // where a winning ticket will be paid from, proven by the rail key
-	RailProof            string `json:"rail_proof,omitempty"`   // that address's own signature over the caller's key (D23)
+	Action               string `json:"action"`                       // the action's stable id on the serving kernel
+	Counterparty         string `json:"counterparty"`                 // caller's base64url Ed25519 public key
+	ExpectedContractHash string `json:"expected_contract_hash"`       // contract hash the caller cached (§8 If-Match)
+	IdempotencyKey       string `json:"idempotency_key"`              //
+	Timestamp            string `json:"timestamp"`                    // RFC3339
+	Commitment           string `json:"commitment,omitempty"`         // hash of the caller's half of the settlement draw (P10)
+	Lottery              int64  `json:"lottery,omitempty"`            // the ticket face value this call is dispatched under (P10)
+	BlockchainAddress    string `json:"blockchain_address,omitempty"` // where a winning ticket will be paid from, proven by the rail key
+	BlockchainProof      string `json:"blockchain_proof,omitempty"`   // that address's own signature over the caller's key (D23)
 	// Signature is Ed25519 over JCS({action,args_hash,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
@@ -166,7 +166,7 @@ type Config struct {
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).
 	AllowPrivateAddrs bool
 	// Namespace is the rendezvous string this kernel advertises and enumerates. It carries the
-	// network digest, so kernels of different worlds never find each other (D23). Empty is a
+	// network fingerprint, so kernels of different worlds never find each other (D23). Empty is a
 	// configuration error, not a default: an unnamespaced kernel would meet every world at once.
 	Namespace string
 	// MaxInboundPeers is how many inbound connections this host accepts, RelaySlots how many

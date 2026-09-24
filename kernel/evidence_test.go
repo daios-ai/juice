@@ -255,7 +255,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 		Signature: sig, // signature is for `good`, not `bad`
 	}
 	forged := &kernel.GossipResponse{
-		NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good, bad},
 	}
 	if _, err := k.AccumulateGossip(ctx, forged, peerKey); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -266,7 +266,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	}
 
 	g := &kernel.GossipResponse{
-		NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good},
 	}
 	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
@@ -440,7 +440,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 		return m
 	}
 	page := func(next string, ids ...string) *kernel.GossipResponse {
-		g := &kernel.GossipResponse{NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "peerk",
+		g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
 			NextCatalogCursor: next}
 		for _, id := range ids {
 			g.ActionManifests = append(g.ActionManifests, manifest(id))
@@ -678,7 +678,7 @@ func TestAGossipPageOverTheProtocolsSizeIsRefusedWhole(t *testing.T) {
 		m.Signature = sig
 		return m
 	}
-	g := &kernel.GossipResponse{NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "peerk"}
+	g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk"}
 	for i := 0; i <= kernel.CatalogPageSizeForTest; i++ { // one over the page this protocol serves
 		g.ActionManifests = append(g.ActionManifests, manifest(fmt.Sprintf("a%03d", i)))
 	}

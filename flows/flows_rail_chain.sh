@@ -61,7 +61,7 @@ _chain_pay_in() {
 }
 
 # vault_of db — where a kernel is paid, read from its own banner.
-vault_of() { strfield "$(http_body GET "$(url "$1")/health")" rail_address; }
+vault_of() { strfield "$(http_body GET "$(url "$1")/health")" blockchain_address; }
 
 # await_owed db home peer want — wait for what a peer owes to reach want, mining as we go:
 # an obligation closes only once its payment is final and the worker has seen it.
@@ -135,7 +135,7 @@ PYEOF
     vault=$(vault_of "$db")
     assert_nonempty "rail_chain.kernel_serves_its_address" "$vault"
     aaddr=$(_chain_pay_in "$db" "$ha" "$akey" 25000000)
-    assert_eq "rail_chain.address_registered" "${aaddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" rail_address)"
+    assert_eq "rail_chain.address_registered" "${aaddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" blockchain_address)"
     assert_jnum "rail_chain.payment_credited" "$(jj "$db" "$ha" user me)" available 25000000
     # Several more passes over the same payment: a fact seen twice is still one payment.
     sleep 3
@@ -378,7 +378,7 @@ PYEOF
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
     j "$db" "$ha" user address "$waddr" --signature "$sig" >/dev/null 2>&1
-    assert_eq "sepolia.address_registered" "${waddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" rail_address)"
+    assert_eq "sepolia.address_registered" "${waddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" blockchain_address)"
 
     # Pay in, and wait out L1 finality. This is the assertion: the kernel credits nothing until the
     # payment is final, however long that takes.

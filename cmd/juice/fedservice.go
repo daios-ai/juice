@@ -145,7 +145,7 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
 		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, kernel.BuyerTerms{
-			Commitment: req.Commitment, Lottery: req.Lottery, RailAddress: req.RailAddress, RailProof: req.RailProof,
+			Commitment: req.Commitment, Lottery: req.Lottery, BlockchainAddress: req.BlockchainAddress, BlockchainProof: req.BlockchainProof,
 		}, []byte(req.Args))
 	if err != nil {
 		// No receipt to settle on → the caller treats this as pending (retry).
@@ -245,8 +245,8 @@ func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.Res
 		// obligation the moment it calls, so it must know how to pay before it does — and one cold
 		// resolve is all a first call has (P10). It rides beside the manifest rather than inside it:
 		// the contract is what the action is, not where its kernel banks.
-		addr, proof := h.kernel.RailIdentity(ctx)
-		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, RailAddress: addr, RailProof: proof})
+		addr, proof := h.kernel.BlockchainIdentity(ctx)
+		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, BlockchainAddress: addr, BlockchainProof: proof})
 	case "user":
 		id, handle, err := h.kernel.ResolvePrincipal(ctx, req.User)
 		if err != nil {

@@ -8,19 +8,19 @@ import (
 	"time"
 )
 
-// playNetworkDigest is the play world's digest, pinned identically in rail/world_test.go. These
+// playNetworkFingerprint is the play world's fingerprint, pinned identically in rail/world_test.go. These
 // fixtures are signatures on that network, so the two constants must agree or kernels that believe
 // they share a world would reject each other.
-const playNetworkDigest = "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"
+const playNetworkFingerprint = "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"
 
 // playNet is the network every test signs on, so a fixture and a round-trip agree by construction.
-var playNet = Network{Name: "play", Digest: playNetworkDigest}
+var playNet = Network{Name: "play", Fingerprint: playNetworkFingerprint}
 
 // Golden signature fixtures. Every signed federation payload (§12 signature domains, §13 protocols)
 // is pinned here as an exact signature string over a fixed key and fixed field values. These digests
 // ARE the wire contract: a peer verifies them offline, and the network upgrades in lockstep, so no
 // refactor of how a payload is represented in Go may move a single byte — and neither may the
-// network digest the prefix carries. A failure here is a protocol break, not a test to update.
+// network fingerprint the prefix carries. A failure here is a protocol break, not a test to update.
 func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	net := playNet
 	seed := make([]byte, ed25519.SeedSize)

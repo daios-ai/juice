@@ -135,7 +135,7 @@ named in the reveal. Its sender must match the buyer's address proved at
 admission, and its amount must match the draw. One payment can close only one
 obligation. A losing draw closes after its reveal is verified, with no payment.
 
-Settlement payments and user deposits arrive at the same rail address.
+Settlement payments and user deposits arrive at the same blockchain address.
 Reconciliation matches obligations first, then attributes remaining deposits
 by registered sender. A payment from the payer of an unresolved obligation can
 remain held until the reveal establishes its purpose; this prevents premature

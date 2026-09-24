@@ -536,11 +536,11 @@ func (s *DB) RailPosition(ctx context.Context, sys string) (*kernel.RailPosition
 	return &p, dbErr(err, "rail: position")
 }
 
-// SetRailAddress records where an account is paid. The unique index is the backstop: one address
+// SetBlockchainAddress records where an account is paid. The unique index is the backstop: one address
 // belongs to one account, whoever registers it first.
-func (s *DB) SetRailAddress(ctx context.Context, userID, address string, at time.Time) error {
+func (s *DB) SetBlockchainAddress(ctx context.Context, userID, address string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE accounts SET rail_address=?, updated_at=? WHERE id=?`, address, timeToStr(at), userID)
+		`UPDATE accounts SET blockchain_address=?, updated_at=? WHERE id=?`, address, timeToStr(at), userID)
 	return dbErr(err, "rail: set address")
 }
 
@@ -570,7 +570,7 @@ var unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
 // reservedDeposit says a deposit d comes from an address some unresolved foreign call named as its
 // payer, so it may be that call's money and is nobody else's to take yet. A world with no addresses
 // reserves nothing: there the payment is the reveal that names its own obligation (D23).
-var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_rail_address = d.party)`
+var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_blockchain_address = d.party)`
 
 // owedSelect is the projection, from the peer's name for the call to the reveal on its trace. The
 // obligation is what the receipt charged plus the markup, so it is zero until the call commits.
@@ -581,7 +581,7 @@ var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unre
 const owedSelect = `SELECT json_extract(t.dispatch_json,'$.idempotency_key'), t.caller_user_id,
        t.action_owner_id, t.id,
        t.dispatch_json, x.id IS NOT NULL, COALESCE(r.charge + r.premium, 0),
-       t.owed_status, t.owed_amount, t.owed_tx_hash, t.owed_rail_address, t.created_at
+       t.owed_status, t.owed_amount, t.owed_tx_hash, t.owed_blockchain_address, t.created_at
   FROM traces t
   LEFT JOIN transactions x ON x.trace_id = t.id
   LEFT JOIN receipts r ON r.trace_id = t.id`
@@ -595,7 +595,7 @@ func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 	var terms sql.NullString
 	var createdAt string
 	if err := scan(&o.ID, &o.PeerUserID, &o.UserID, &o.TraceID, &terms, &o.Settled, &o.Obligation,
-		&o.Status, &o.Amount, &o.TxHash, &o.RailAddr, &createdAt); err != nil {
+		&o.Status, &o.Amount, &o.TxHash, &o.BlockchainAddr, &createdAt); err != nil {
 		return nil, err
 	}
 	o.Terms = terms.String
@@ -709,7 +709,7 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 			   FROM traces t
 			   JOIN rail_transfers d
 			     ON d.kind = 'deposit' AND d.status = 'held'
-			    AND d.party = t.owed_rail_address AND d.tx_hash = t.owed_tx_hash AND d.amount = t.owed_amount
+			    AND d.party = t.owed_blockchain_address AND d.tx_hash = t.owed_tx_hash AND d.amount = t.owed_amount
 			  WHERE t.owed_status = ? AND t.owed_tx_hash <> ''
 			  ORDER BY t.created_at LIMIT ?`, kernel.OwedAnnounced, limit)
 		if err != nil {
@@ -740,7 +740,7 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 		}
 		known, err := collect(
 			`SELECT '', '', d.id, a.id FROM rail_transfers d
-			   JOIN accounts a ON a.rail_address = d.party
+			   JOIN accounts a ON a.blockchain_address = d.party
 			  WHERE d.kind = 'deposit' AND d.status = 'held' AND d.party <> ''
 			    AND a.kernel_public_key IS NULL AND a.suspended_at IS NULL AND a.password_hash <> ''
 			    AND NOT (`+reservedDeposit+`)

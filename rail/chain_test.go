@@ -400,7 +400,7 @@ func TestChainWitnessNamesExactlyOnePayment(t *testing.T) {
 // canonical form — so one address cannot be registered twice under different spellings.
 func TestChainSignsAndVerifiesAnAddress(t *testing.T) {
 	c, _ := testChain(t)
-	msg := kernel.RailAddressMessage("kernel-key", "user-1", c.Address())
+	msg := kernel.BlockchainAddressMessage("kernel-key", "user-1", c.Address())
 
 	sig, err := c.Sign(msg)
 	if err != nil || sig == "" {

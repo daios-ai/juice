@@ -140,13 +140,13 @@ func identityCmd() *cobra.Command {
 			}
 			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel", nil, output{id: "public_key", human: func(b []byte) error {
 				var out struct {
-					Handle      string   `json:"handle"`
-					PublicKey   string   `json:"public_key"`
-					About       string   `json:"about"`
-					Addrs       []string `json:"addrs"`
-					Network     string   `json:"network"`
-					RailAddress string   `json:"rail_address"`
-					Finalized   *struct {
+					Handle            string   `json:"handle"`
+					PublicKey         string   `json:"public_key"`
+					About             string   `json:"about"`
+					Addrs             []string `json:"addrs"`
+					Network           string   `json:"network"`
+					BlockchainAddress string   `json:"blockchain_address"`
+					Finalized         *struct {
 						Token int64  `json:"token"`
 						Gas   string `json:"gas"`
 						Block uint64 `json:"block"`
@@ -190,8 +190,8 @@ func identityCmd() *cobra.Command {
 				if out.Network != "" {
 					fmt.Printf("Network:    %s\n", out.Network)
 				}
-				if out.RailAddress != "" {
-					fmt.Printf("Paid at:    %s\n", out.RailAddress)
+				if out.BlockchainAddress != "" {
+					fmt.Printf("Paid at:    %s\n", out.BlockchainAddress)
 				}
 				if out.Finalized != nil {
 					fmt.Printf("Holdings:   %s (gas %s) as of block %d\n",

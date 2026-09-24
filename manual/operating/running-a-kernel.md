@@ -141,7 +141,7 @@ the kernel's home. This key controls its account on the chain.
 > lose what the kernel holds.
 
 **3. Read the kernel's address.** After registering the kernel with your client
-and logging in as `sys`, inspect its rail address:
+and logging in as `sys`, inspect its blockchain address:
 
 ```
 $ juice admin kernel show

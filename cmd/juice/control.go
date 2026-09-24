@@ -82,7 +82,7 @@ func (s *server) rosterView(ctx context.Context, acct *kernel.Account, key strin
 	rk, _ := s.kernel.ReadKernel(ctx, key)
 	out := map[string]any{"public_key": key}
 	if rk != nil {
-		out["petname"], out["nickname"], out["about"], out["rail_address"] = rk.Petname, rk.Nickname, rk.About, rk.RailAddress
+		out["petname"], out["nickname"], out["about"], out["blockchain_address"] = rk.Petname, rk.Nickname, rk.About, rk.BlockchainAddress
 		out["last_seen"] = rk.LastSeen
 	}
 	if acct != nil {
@@ -359,8 +359,8 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	// up (D23). An operator reads this before believing any other number here.
 	if rep, err := s.kernel.RailInspect(ctx, callerFrom(r)); err == nil {
 		out["network"] = rep.Network.Name
-		out["network_digest"] = rep.Network.Digest
-		out["rail_address"] = rep.Address
+		out["network_fingerprint"] = rep.Network.Fingerprint
+		out["blockchain_address"] = rep.Address
 		out["finalized"] = rep.Finalized
 		out["sys"] = map[string]any{"earnings": rep.Position.SysAvailable,
 			"pending_payouts": rep.Position.PendingPayouts, "held_deposits": rep.Position.HeldDeposits,

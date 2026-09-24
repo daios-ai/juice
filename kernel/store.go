@@ -503,8 +503,8 @@ type Store interface {
 	// RailPosition sums the ledger into the operator's account of external money (D23).
 	RailPosition(ctx context.Context, sys string) (*RailPosition, error)
 
-	// SetRailAddress records where an account is paid. The address is unique across accounts.
-	SetRailAddress(ctx context.Context, userID, address string, at time.Time) error
+	// SetBlockchainAddress records where an account is paid. The address is unique across accounts.
+	SetBlockchainAddress(ctx context.Context, userID, address string, at time.Time) error
 
 	// ListLedgerByUser returns ledger entries where userID is the source or the
 	// destination, most recent first, bounded by limit/offset.
@@ -575,7 +575,7 @@ type Store interface {
 	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
 	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen, each of which
 	// advances only after its own work is verified and committed (§13).
-	UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error
+	UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string, now time.Time) error
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.

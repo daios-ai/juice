@@ -258,7 +258,7 @@ func TestWithdrawalReservesPaysAndCrossesOut(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -297,7 +297,7 @@ func TestFailedWithdrawalCompensatesOnce(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.stall = true // submitted, not yet final — the state a chain payment sits in
@@ -333,7 +333,7 @@ func TestBlockedPaymentHaltsOutgoingWorkOnly(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.outcome = kernel.RailOutcome{Blocked: "stablecoin too low, top up"}
@@ -367,7 +367,7 @@ func TestUnbookedPaymentIsFoundOnTheNextPass(t *testing.T) {
 	k, st, fr, sys := railFixture(t)
 	ctx := context.Background()
 	alice := setupUser(t, st, "alice", 0)
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.deposits = []kernel.RailDeposit{{Key: "rail:tx-9", TxHash: "tx-9", From: "0xalice", Amount: 70, Block: 5}}
@@ -402,7 +402,7 @@ func TestRegisteringAnAddressAttributesEarlierPayments(t *testing.T) {
 		t.Fatalf("nothing may be credited before the sender is known, got %d", avail)
 	}
 
-	if _, attributed, err := k.SetRailAddress(ctx, alice.ID, "0xALICE", "sig"); err != nil {
+	if _, attributed, err := k.SetBlockchainAddress(ctx, alice.ID, "0xALICE", "sig"); err != nil {
 		t.Fatalf("register: %v", err)
 	} else if len(attributed) != 1 {
 		t.Fatalf("registering must deliver what that address already paid in, got %d", len(attributed))
@@ -412,7 +412,7 @@ func TestRegisteringAnAddressAttributesEarlierPayments(t *testing.T) {
 	}
 	// The canonical form is what is stored, so a differently-cased duplicate collides.
 	bob := setupUser(t, st, "bob", 0)
-	if _, _, err := k.SetRailAddress(ctx, bob.ID, "0xalice", "sig"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, _, err := k.SetBlockchainAddress(ctx, bob.ID, "0xalice", "sig"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("one address, one account: got %v", err)
 	}
 }
@@ -443,11 +443,11 @@ func TestGossipRefusesForeignNetworkAndUnprovenAddress(t *testing.T) {
 	ctx := context.Background()
 
 	foreign := &kernel.GossipResponse{PublicKey: "k", Handle: "peer",
-		NetworkDigest: "0000000000000000000000000000000000000000000000000000000000000000"}
+		NetworkFingerprint: "0000000000000000000000000000000000000000000000000000000000000000"}
 	if _, err := k.AccumulateGossip(ctx, foreign, ""); err == nil {
 		t.Error("a reply from another network must not be accumulated")
 	}
-	// A reply that names no network is not ours either: an omitted digest is not a passport
+	// A reply that names no network is not ours either: an omitted fingerprint is not a passport
 	// (P9). Before this rule a peer could be indexed simply by leaving the field out.
 	silent := &kernel.GossipResponse{PublicKey: "k", Handle: "peer"}
 	if _, err := k.AccumulateGossip(ctx, silent, ""); err == nil {
@@ -456,9 +456,9 @@ func TestGossipRefusesForeignNetworkAndUnprovenAddress(t *testing.T) {
 
 	fr.verifyErr = kernel.ErrUnauthorized.Wrap("signature was not made by that address")
 	unproven := &kernel.GossipResponse{PublicKey: "k", Handle: "peer",
-		NetworkDigest: testNet.Digest, RailAddress: "0xsomeone", RailProof: "bad"}
+		NetworkFingerprint: testNet.Fingerprint, BlockchainAddress: "0xsomeone", BlockchainProof: "bad"}
 	if _, err := k.AccumulateGossip(ctx, unproven, ""); err == nil {
-		t.Error("a peer's unproven rail address must not be accumulated")
+		t.Error("a peer's unproven blockchain address must not be accumulated")
 	}
 }
 
@@ -521,7 +521,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	}
 	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: sellerID, Status: kernel.ProcessOpen, CreatedAt: now}
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: sellerID, ActionID: "a",
-		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedRailAddress: from, CreatedAt: now,
+		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedBlockchainAddress: from, CreatedAt: now,
 		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm", id, "peer-key")}
 	// The execution itself is free here so the seller's balance stays what each test set it to; the
 	// obligation is read off the receipt's charge, which is what the buyer owes.
@@ -630,7 +630,7 @@ func TestHeldPaymentsCannotStarveTheWorker(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 600; i++ {
@@ -664,7 +664,7 @@ func TestRefillIsRecordedBeforeSigningAndAdoptedAfterACrash(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true
@@ -742,7 +742,7 @@ func TestUnaffordableFuelBlocksThePayment(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true
@@ -962,7 +962,7 @@ func TestAStalledPurchaseIsPresentedAgainNotRepeated(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetRailAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true
@@ -1112,7 +1112,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	})
 
 	fr.verifyErr = errors.New("bad proof")
-	if err := run(kernel.BuyerTerms{Commitment: "cm", RailAddress: "0xbuyer", RailProof: "forged"}); !errors.Is(err, kernel.ErrUnauthorized) {
+	if err := run(kernel.BuyerTerms{Commitment: "cm", BlockchainAddress: "0xbuyer", BlockchainProof: "forged"}); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("an unproven payer must be refused, got %v", err)
 	}
 	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
@@ -1125,7 +1125,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	var withTicket int64
 	if err := st.(*store.DB).QueryRowForTest(ctx,
 		`SELECT COUNT(*) FROM traces WHERE action_id=?
-		   AND (COALESCE(json_extract(dispatch_json,'$.nonce'),'') <> '' OR owed_rail_address <> '')`,
+		   AND (COALESCE(json_extract(dispatch_json,'$.nonce'),'') <> '' OR owed_blockchain_address <> '')`,
 		free.ID, &withTicket); err != nil {
 		t.Fatal(err)
 	}
@@ -1145,12 +1145,12 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	if err := run(kernel.BuyerTerms{Commitment: "cm"}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("a priced call naming no payer must be refused on a world with addresses, got %v", err)
 	}
-	if err := run(kernel.BuyerTerms{Commitment: "cm", RailAddress: "0xBUYER", RailProof: "ok"}); err != nil {
+	if err := run(kernel.BuyerTerms{Commitment: "cm", BlockchainAddress: "0xBUYER", BlockchainProof: "ok"}); err != nil {
 		t.Fatalf("a proven payer must be admitted: %v", err)
 	}
 	var id string
 	if err := st.(*store.DB).QueryRowForTest(ctx,
-		`SELECT owed_rail_address FROM traces WHERE caller_user_id=? AND owed_rail_address <> ''`, peer.ID, &id); err != nil {
+		`SELECT owed_blockchain_address FROM traces WHERE caller_user_id=? AND owed_blockchain_address <> ''`, peer.ID, &id); err != nil {
 		t.Fatalf("no trace froze the payer: %v", err)
 	}
 	if id != "0xbuyer" {

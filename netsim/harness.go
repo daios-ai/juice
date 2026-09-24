@@ -66,12 +66,12 @@ type Net struct {
 // runInfo identifies what ran. A commit alone does not: the worktree may be dirty, the binary older
 // than the tree, and the network a chain rail talked to is part of the result.
 type runInfo struct {
-	Commit       string    `json:"commit"`
-	Dirty        bool      `json:"worktree_dirty"`
-	BinarySHA    string    `json:"binary_sha256"`
-	WorldDigest  string    `json:"world_digest"`
-	StoryVersion string    `json:"story_version"`
-	StartedAt    time.Time `json:"started_at"`
+	Commit           string    `json:"commit"`
+	Dirty            bool      `json:"worktree_dirty"`
+	BinarySHA        string    `json:"binary_sha256"`
+	WorldFingerprint string    `json:"world_fingerprint"`
+	StoryVersion     string    `json:"story_version"`
+	StartedAt        time.Time `json:"started_at"`
 }
 
 // Kernel is one juice server and the client homes that talk to it.
@@ -378,7 +378,7 @@ func (n *Net) installWorld(dir, boot string) (string, error) {
 		seeds = []string{boot}
 	}
 	doc["seeds"] = seeds
-	n.Run.WorldDigest = fmt.Sprintf("%s/%v/%v", name, doc["chainId"], doc["token"])
+	n.Run.WorldFingerprint = fmt.Sprintf("%s/%v/%v", name, doc["chainId"], doc["token"])
 	b, _ := json.MarshalIndent(doc, "", " ")
 	return name, os.WriteFile(path, b, 0o600)
 }

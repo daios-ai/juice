@@ -145,10 +145,10 @@ func runServer(name string) error {
 		return fmt.Errorf("rail: %w", err)
 	}
 	k.SetRail(railway)
-	// Record the network once the rail has verified it, so the digest a kernel is bound to for life
+	// Record the network once the rail has verified it, so the fingerprint a kernel is bound to for life
 	// names a network that was checked rather than one that was merely configured. Every later boot
 	// writes the same value it read (D23).
-	if err := k.SetConfig(context.Background(), configKeyWorldDigest, world.Network().Digest); err != nil {
+	if err := k.SetConfig(context.Background(), configKeyWorldFingerprint, world.Network().Fingerprint); err != nil {
 		return err
 	}
 
@@ -656,9 +656,9 @@ const fedOpTimeout = 8 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
-// railAddress is where this kernel is paid, empty on a world with no addresses.
-func (s *server) railAddress(ctx context.Context) string {
-	addr, _ := s.kernel.RailIdentity(ctx)
+// blockchainAddress is where this kernel is paid, empty on a world with no addresses.
+func (s *server) blockchainAddress(ctx context.Context) string {
+	addr, _ := s.kernel.BlockchainIdentity(ctx)
 	return addr
 }
 
@@ -670,15 +670,15 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 	pub, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
 	net := s.kernel.Network()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         "ok",
-		"handle":         globalCfg.KernelHandle,
-		"public_key":     pub,
-		"network":        net.Name,
-		"network_digest": net.Digest,
-		"decimals":       net.Decimals,
-		"symbol":         net.Symbol,
-		"token":          net.Token,
-		"rail_address":   s.railAddress(r.Context()),
+		"status":              "ok",
+		"handle":              globalCfg.KernelHandle,
+		"public_key":          pub,
+		"network":             net.Name,
+		"network_fingerprint": net.Fingerprint,
+		"decimals":            net.Decimals,
+		"symbol":              net.Symbol,
+		"token":               net.Token,
+		"blockchain_address":  s.blockchainAddress(r.Context()),
 		// Where peers dial this kernel. Public already — the kernel advertises these in the
 		// routing table — and the one place a person outside can read them, which is what an
 		// operator checking their own node from elsewhere, and a client turning a client address
@@ -748,7 +748,7 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
-		r.Put("/v1/me/address", srv.putRailAddress)
+		r.Put("/v1/me/address", srv.putBlockchainAddress)
 		r.Post("/v1/withdrawals", srv.postWithdrawal)
 		r.Get("/v1/withdrawals", srv.getWithdrawals)
 		r.Post("/v1/transfers", srv.postTransfer)
@@ -1486,9 +1486,9 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 // getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
-// putRailAddress registers where the caller is paid, against a signature proving they hold it.
+// putBlockchainAddress registers where the caller is paid, against a signature proving they hold it.
 // Registering also delivers anything that address has already paid in (D23).
-func (s *server) putRailAddress(w http.ResponseWriter, r *http.Request) {
+func (s *server) putBlockchainAddress(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Address   string `json:"address"`
 		Signature string `json:"signature"`
@@ -1496,7 +1496,7 @@ func (s *server) putRailAddress(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, attributed, err := s.kernel.SetRailAddress(r.Context(), callerFrom(r), req.Address, req.Signature)
+	u, attributed, err := s.kernel.SetBlockchainAddress(r.Context(), callerFrom(r), req.Address, req.Signature)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1506,7 +1506,7 @@ func (s *server) putRailAddress(w http.ResponseWriter, r *http.Request) {
 	for _, e := range attributed {
 		views = append(views, enrichLedger(e, uc))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"address": u.RailAddress, "attributed": views})
+	writeJSON(w, http.StatusOK, map[string]any{"address": u.BlockchainAddress, "attributed": views})
 }
 
 // postWithdrawal sends the caller's own credits back out. The id is theirs and is the row, so a

@@ -328,7 +328,7 @@ func strVal(s *string) string {
 
 // ---- Accounts ----
 
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,rail_address,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,blockchain_address,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.Account) error {
 	_, err := s.db.ExecContext(ctx,
@@ -527,13 +527,13 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, er
 func scanUserFn(scan func(...any) error) (*kernel.Account, error) {
 	var u kernel.Account
 	var createdAt, updatedAt string
-	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey, railAddress *string
+	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey, blockchainAddress *string
 	if err := scan(&u.ID, &handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey, &railAddress,
+		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey, &blockchainAddress,
 		&createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
-	u.RailAddress = strVal(railAddress)
+	u.BlockchainAddress = strVal(blockchainAddress)
 	u.Handle = strVal(handle)
 	u.SuspendedAt = strToNullTime(suspendedAt)
 	u.KernelPublicKey = strVal(kernelPublicKey)
@@ -967,9 +967,9 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 	// revealed is written explicitly: the column defaults to 1 so the calls that predate the draw are
 	// never queued for a reveal they have no secret for, but every call made since owes one.
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_rail_address,value,value_to,created_at)
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,created_at)
 		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedRailAddress, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedBlockchainAddress, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
 	)
 	return dbErr(err, "insert trace")
 }
@@ -2984,17 +2984,17 @@ func ftsMatchQuery(query string) string {
 // outbound act) NOR gossip_cursor/last_seen, each of which has its own narrow path that
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
-func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string, now time.Time) error {
+func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO kernels (public_key,nickname,about,rail_address,rail_proof,first_seen,updated_at)
+		`INSERT INTO kernels (public_key,nickname,about,blockchain_address,blockchain_proof,first_seen,updated_at)
 		 VALUES (?,?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
-		   rail_address=CASE WHEN excluded.rail_address != '' THEN excluded.rail_address ELSE kernels.rail_address END,
-		   rail_proof=CASE WHEN excluded.rail_proof != '' THEN excluded.rail_proof ELSE kernels.rail_proof END,
+		   blockchain_address=CASE WHEN excluded.blockchain_address != '' THEN excluded.blockchain_address ELSE kernels.blockchain_address END,
+		   blockchain_proof=CASE WHEN excluded.blockchain_proof != '' THEN excluded.blockchain_proof ELSE kernels.blockchain_proof END,
 		   updated_at=excluded.updated_at`,
-		publicKey, nickname, about, railAddress, railProof, timeToStr(now), timeToStr(now),
+		publicKey, nickname, about, blockchainAddress, blockchainProof, timeToStr(now), timeToStr(now),
 	)
 	return dbErr(err, "upsert kernel")
 }
@@ -3123,9 +3123,9 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	var firstSeen, updatedAt string
 	var lastSeen, failedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,rail_address,rail_proof,gossip_cursor,last_seen,last_contact_failed_at,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,blockchain_proof,gossip_cursor,last_seen,last_contact_failed_at,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
-		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.RailAddress, &k.RailProof, &k.GossipCursor,
+		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.BlockchainAddress, &k.BlockchainProof, &k.GossipCursor,
 			&lastSeen, &failedAt, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3536,7 +3536,7 @@ func firstErr(errs ...error) error {
 // conflict. Every other unique key is kernel-minted, so its collision is a broken invariant and
 // stays internal — unlisted keys fail closed. ledger.external_key never reaches the index (§12).
 var callerUnique = []string{
-	"accounts.handle", "accounts.rail_address", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
+	"accounts.handle", "accounts.blockchain_address", "kernels.petname", "actions.owner_user_id", "ratings.rated_tx_id",
 	"connections.user_id", "grants.grantor_user_id",
 	"idempotency_records.idempotency_key",
 }

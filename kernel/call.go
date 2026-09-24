@@ -434,9 +434,9 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	// learns this with the contract rather than waiting for a gossip pass that may not have run
 	// (P10). An unproven address is simply not learned: the peer stays unpayable, and the call that
 	// would take on a debt is refused rather than settled into a payment nobody can send.
-	if _, verr := k.verifyRailIdentity(peerKey, res.RailAddress, res.RailProof); res.RailAddress != "" && verr == nil {
-		if uerr := k.store.UpsertKernel(ctx, peerKey, "", "", res.RailAddress, res.RailProof, time.Now().UTC()); uerr != nil {
-			k.log.With(ctx).Warn("kernel.rail_address.store_failed", "public_key", peerKey, "error", uerr.Error())
+	if _, verr := k.verifyBlockchainIdentity(peerKey, res.BlockchainAddress, res.BlockchainProof); res.BlockchainAddress != "" && verr == nil {
+		if uerr := k.store.UpsertKernel(ctx, peerKey, "", "", res.BlockchainAddress, res.BlockchainProof, time.Now().UTC()); uerr != nil {
+			k.log.With(ctx).Warn("kernel.blockchain_address.store_failed", "public_key", peerKey, "error", uerr.Error())
 		}
 	}
 	if mount == nil {

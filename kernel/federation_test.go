@@ -2790,17 +2790,17 @@ func TestAccumulateGossipBinding(t *testing.T) {
 	sender := pexKey(t)
 
 	// binding: a reply claiming an identity other than the authenticated key is rejected.
-	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkDigest: testNet.Digest, PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("introducer mismatch: got %v, want ErrInvalidInput", err)
 	}
 	// invalid identity: empty and non-bare handles are failed pulls, not verified ones.
 	for _, bad := range []string{"", "a/b", "a@b"} {
-		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkDigest: testNet.Digest, PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
+		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
 			t.Errorf("handle %q: got %v, want ErrInvalidInput", bad, err)
 		}
 	}
 	// a valid pull refreshes the discovered-kernel row (verified).
-	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkDigest: testNet.Digest, PublicKey: sender, Handle: "sendername"}, sender); err != nil {
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: "sendername"}, sender); err != nil {
 		t.Fatal(err)
 	}
 	if dk, _ := st.ReadKernel(ctx, sender); dk == nil || dk.Nickname != "sendername" {
@@ -3211,7 +3211,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 	// Gossip ingest skips the same manifests while indexing a sound one alongside them.
 	good := signed("sound", 100, 500)
 	g := &kernel.GossipResponse{
-		NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good, bad["negative-price"], bad["negative-bps"], bad["out-of-range-bps"]},
 	}
 	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
@@ -3528,7 +3528,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 
 	// Leg 1: learn it from gossip, then read the hash lookup would show a local caller.
 	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{
-		NetworkDigest: testNet.Digest, PublicKey: peerKey, Handle: "carolkernel", ActionManifests: []*kernel.ActionManifest{&m},
+		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "carolkernel", ActionManifests: []*kernel.ActionManifest{&m},
 	}, ""); err != nil {
 		t.Fatalf("AccumulateGossip: %v", err)
 	}

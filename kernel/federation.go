@@ -385,14 +385,14 @@ const (
 	sigDomainRecovery        = "recovery"
 )
 
-// Network identifies the one network a kernel belongs to for life (D23). Digest is the SHA-256 of
+// Network identifies the one network a kernel belongs to for life (D23). Fingerprint is the SHA-256 of
 // the JCS of the world file's defining part; it rides inside every signature prefix, so no artifact
 // of one network can verify on another. Name and Decimals are display only.
 type Network struct {
-	Name     string `json:"name"`
-	Digest   string `json:"digest"`
-	Decimals uint8  `json:"decimals"`
-	Symbol   string `json:"symbol"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	Decimals    uint8  `json:"decimals"`
+	Symbol      string `json:"symbol"`
 	// Token is the contract money is paid in, empty where the world has no chain. A symbol names
 	// no token — a chain carries several with one name and one decimals — so the address is what a
 	// depositor must be told, and it travels beside the symbol rather than being fetched separately.
@@ -428,8 +428,8 @@ func (n Network) Amount(v int64) string {
 }
 
 // DiscoveryNamespace is the rendezvous string kernels of one network advertise and enumerate. It
-// carries the network digest, so worlds cannot meet even when they share a bootstrap node (D23).
-func DiscoveryNamespace(n Network) string { return "juice/fed/discovery/1/" + n.Digest }
+// carries the network fingerprint, so worlds cannot meet even when they share a bootstrap node (D23).
+func DiscoveryNamespace(n Network) string { return "juice/fed/discovery/1/" + n.Fingerprint }
 
 // payload prepends the versioned network-and-domain tag to the JCS-canonical bytes of v, giving the
 // exact byte string signed and verified under domain on this network.
@@ -438,7 +438,7 @@ func (n Network) payload(domain string, v any) ([]byte, error) {
 	if err != nil {
 		return nil, ErrInternal.Wrapf("canonicalize: %v", err)
 	}
-	prefix := []byte("juice/v1/" + n.Digest + "/" + domain + "\n")
+	prefix := []byte("juice/v1/" + n.Fingerprint + "/" + domain + "\n")
 	return append(prefix, canon...), nil
 }
 
@@ -455,7 +455,7 @@ func (n Network) sign(key ed25519.PrivateKey, domain string, v any) (string, err
 }
 
 // verify checks that sigB64 is a valid Ed25519 signature over the prefixed JCS-canonical form of v.
-// One rule serves wire and storage alike: an artifact signed before this network's digest existed is
+// One rule serves wire and storage alike: an artifact signed before this network's fingerprint existed is
 // reported invalid rather than repaired (U36).
 func (n Network) verify(pub ed25519.PublicKey, domain string, v any, sigB64 string) error {
 	payload, err := n.payload(domain, v)
@@ -847,7 +847,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// nonce, and the obligation — so neither can pick the outcome and neither has to trust the
 	// other's report of it. A losing ticket pays nothing; a winning one pays the face value; an
 	// obligation at or above the face value is paid exactly.
-	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerRailAddress(ctx, target.ID))
+	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerBlockchainAddress(ctx, target.ID))
 
 	// Detach settlement from execution-scoped cancellation so the remote settlement
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
@@ -1280,11 +1280,11 @@ func (k *Kernel) ObserveKernel(ctx context.Context, publicKey, nickname, about s
 }
 
 // observeKernel records what a verified reply said about a kernel, including where it is paid.
-func (k *Kernel) observeKernel(ctx context.Context, publicKey, nickname, about, railAddress, railProof string) error {
+func (k *Kernel) observeKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string) error {
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return err
 	}
-	return k.store.UpsertKernel(ctx, publicKey, nickname, about, railAddress, railProof, time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, nickname, about, blockchainAddress, blockchainProof, time.Now().UTC())
 }
 
 // BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming). Automatic binding
@@ -1822,15 +1822,15 @@ func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipRespo
 		about = sys.Description
 	}
 
-	railAddr, railProof := k.RailIdentity(ctx)
+	blockchainAddr, blockchainProof := k.BlockchainIdentity(ctx)
 	resp := &GossipResponse{
-		PublicKey:     ourKey,
-		Handle:        handle,
-		About:         about,
-		Network:       k.cfg.Network.Name,
-		NetworkDigest: k.cfg.Network.Digest,
-		RailAddress:   railAddr,
-		RailProof:     railProof,
+		PublicKey:          ourKey,
+		Handle:             handle,
+		About:              about,
+		Network:            k.cfg.Network.Name,
+		NetworkFingerprint: k.cfg.Network.Fingerprint,
+		BlockchainAddress:  blockchainAddr,
+		BlockchainProof:    blockchainProof,
 	}
 
 	manifests, next, err := k.catalogPage(ctx, req.CatalogCursor)
@@ -2149,13 +2149,13 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	}
 	// A reply from another world is not ours to accumulate: nothing it carries could verify here,
 	// and adopting its catalog would offer actions no call could ever pay for (D23).
-	if gossip.NetworkDigest != k.cfg.Network.Digest {
+	if gossip.NetworkFingerprint != k.cfg.Network.Fingerprint {
 		return "", ErrInvalidInput.Wrapf("peer serves network %q, not ours", gossip.Network)
 	}
 	// Where the rail has addresses, a kernel must prove it controls the one it advertises: an
 	// address merely declared could name a third party's and claim their payment (D23).
-	if _, err := k.verifyRailIdentity(gossip.PublicKey, gossip.RailAddress, gossip.RailProof); err != nil {
-		return "", ErrInvalidInput.Wrap("peer rail address is unproven")
+	if _, err := k.verifyBlockchainIdentity(gossip.PublicKey, gossip.BlockchainAddress, gossip.BlockchainProof); err != nil {
+		return "", ErrInvalidInput.Wrap("peer blockchain address is unproven")
 	}
 	// A page is the size this protocol serves, and a peer sending more is not offering more: it is
 	// asking this kernel to verify signatures and embed descriptions by the thousand off one
@@ -2166,7 +2166,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			len(gossip.ActionManifests), len(gossip.Evidence), catalogPageSize, gossipEvidencePageSize)
 	}
 	now := time.Now().UTC()
-	if err := k.observeKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About, gossip.RailAddress, gossip.RailProof); err != nil {
+	if err := k.observeKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About, gossip.BlockchainAddress, gossip.BlockchainProof); err != nil {
 		return "", err
 	}
 

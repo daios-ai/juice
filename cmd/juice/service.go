@@ -382,8 +382,8 @@ func userView(u *kernel.Account) map[string]any {
 		"available":   u.Available,
 		"locked":      u.Locked,
 	}
-	if u.RailAddress != "" {
-		v["rail_address"] = u.RailAddress
+	if u.BlockchainAddress != "" {
+		v["blockchain_address"] = u.BlockchainAddress
 	}
 	return v
 }

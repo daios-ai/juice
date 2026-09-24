@@ -113,9 +113,9 @@ func (c *chainRail) World() (string, map[string]any) { return c.worldName, c.wor
 func (c *chainRail) Scale() int64                    { return c.scale }
 
 func (c *chainRail) GasUp(k *Kernel, payments int) error {
-	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "kernel", "show")
+	vault := k.Field("sysop-"+k.Name, "blockchain_address", "admin", "kernel", "show")
 	if vault == "" {
-		return fmt.Errorf("kernel %s serves no rail address", k.Name)
+		return fmt.Errorf("kernel %s serves no blockchain address", k.Name)
 	}
 	if _, err := cast("send", "--private-key", c.payer, "--rpc-url", c.rpc, vault, "--value", c.gas(payments)); err != nil {
 		return err
@@ -137,7 +137,7 @@ func (c *chainRail) Fund(k *Kernel, user string, credits int64) error {
 		"mint(address,uint256)", w.addr, strconv.FormatInt(base, 10)); err != nil {
 		return fmt.Errorf("minting %d for %s: %w", base, user, err)
 	}
-	vault := k.Field("sysop-"+k.Name, "rail_address", "admin", "kernel", "show")
+	vault := k.Field("sysop-"+k.Name, "blockchain_address", "admin", "kernel", "show")
 	uid := k.Field(user, "id", "user", "me")
 	msg := fmt.Sprintf("juice address registration\nkernel: %s\nuser: %s\naddress: %s", k.Key, uid, w.addr)
 	sig := castOut("wallet", "sign", "--private-key", w.key, msg)
@@ -369,7 +369,7 @@ func (s *sepoliaRail) Prepare(n *Net, shape Shape) error {
 		return err
 	}
 	w["rpc"] = s.rpc
-	// Only {name, rail, chainId, token} fix the network digest, so the gas band and the endpoint
+	// Only {name, rail, chainId, token} fix the network fingerprint, so the gas band and the endpoint
 	// are the run's to choose:
 	// the shipped one suits a kernel running for months, and one that lives for a run needs only
 	// enough for its payments — which also keeps it off the refill path this chain's shallow pool

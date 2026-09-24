@@ -638,10 +638,10 @@ func userLedgerCmd() *cobra.Command {
 
 // meView is the caller's own record, the only place a client reads its own id and payout address.
 type meView struct {
-	ID          string `json:"id"`
-	Handle      string `json:"handle"`
-	RailAddress string `json:"rail_address"`
-	Available   int64  `json:"available"`
+	ID                string `json:"id"`
+	Handle            string `json:"handle"`
+	BlockchainAddress string `json:"blockchain_address"`
+	Available         int64  `json:"available"`
 }
 
 func readMe(ctx context.Context) (*meView, error) {
@@ -684,7 +684,7 @@ func userAddressCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrap("--signature is required when nobody is at the terminal to sign")
 				}
 				fmt.Fprintf(os.Stderr, "Sign this message with the wallet holding %s:\n\n%s\n\n",
-					args[0], string(kernel.RailAddressMessage(h.PublicKey, me.ID, args[0])))
+					args[0], string(kernel.BlockchainAddressMessage(h.PublicKey, me.ID, args[0])))
 				fmt.Fprint(os.Stderr, "Signature: ")
 				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				signature = strings.TrimSpace(line)
@@ -717,18 +717,18 @@ func userDepositCmd() *cobra.Command {
 				return err
 			}
 			facts, err := json.Marshal(map[string]string{
-				"network": h.Network, "kernel_address": h.RailAddress, "your_address": me.RailAddress,
+				"network": h.Network, "kernel_address": h.BlockchainAddress, "your_address": me.BlockchainAddress,
 				"token": h.Token})
 			if err != nil {
 				return err
 			}
 			return emit(facts, output{human: func([]byte) error {
-				if h.RailAddress == "" {
+				if h.BlockchainAddress == "" {
 					fmt.Printf("Money on the %s network has no addresses to send to.\n", h.Network)
 					fmt.Println("The operator of this kernel records payments here; there is nothing to send from your side.")
 					return nil
 				}
-				fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.RailAddress)
+				fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.BlockchainAddress)
 				// The contract, not the symbol, is what says which money this is: one chain carries
 				// several tokens called the same thing, and a payment in the wrong one is never
 				// credited. An older kernel does not publish it, and a blank line under an
@@ -744,12 +744,12 @@ func userDepositCmd() *cobra.Command {
 					fmt.Println("Ask the operator for the exact contract address before sending anything.")
 					fmt.Println()
 				}
-				if me.RailAddress == "" {
+				if me.BlockchainAddress == "" {
 					fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
 					fmt.Println("Register the address you will pay from first:  juice user address ADDRESS")
 					return nil
 				}
-				fmt.Printf("Pay from your registered address:\n  %s\n\n", me.RailAddress)
+				fmt.Printf("Pay from your registered address:\n  %s\n\n", me.BlockchainAddress)
 				fmt.Println("Money is credited to whoever finally sent it, so it must arrive from that address.")
 				fmt.Println("A payment from any other address, an exchange paying on your behalf included, is held")
 				fmt.Println("for the operator to assign by hand: withdraw to your own wallet first, then pay from there.")
@@ -794,8 +794,8 @@ func userWithdrawCmd() *cobra.Command {
 			// Name the destination when there is one. Whether this world needs one is the rail's rule,
 			// not the client's, so a withdrawal with nowhere to go is refused by the server that knows.
 			where := ""
-			if me.RailAddress != "" {
-				where = " to " + me.RailAddress
+			if me.BlockchainAddress != "" {
+				where = " to " + me.BlockchainAddress
 			}
 			if err := cli.confirm(fmt.Sprintf("Withdraw %s on %s%s", net.Amount(amount), net.Name, where), yes); err != nil {
 				return err

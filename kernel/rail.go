@@ -54,7 +54,7 @@ type Rail interface {
 	FinalizedBalances(ctx context.Context) (token int64, gas string, block uint64, ok bool, err error)
 	// DepositsScannedTo is how far payments have been observed; false before any scan has run.
 	DepositsScannedTo() (uint64, bool, error)
-	// Sign proves control of this kernel's own rail address. Empty where there are no addresses.
+	// Sign proves control of this kernel's own blockchain address. Empty where there are no addresses.
 	Sign(msg []byte) (string, error)
 	// Verify checks a signature by address over msg and returns the address in canonical form —
 	// the only form the kernel stores or compares, so a differently-cased duplicate cannot exist.
@@ -372,7 +372,7 @@ func (k *Kernel) Withdraw(ctx context.Context, callerID, id string, amount int64
 	if err != nil {
 		return nil, err
 	}
-	dest, err := rail.Destination(u.RailAddress)
+	dest, err := rail.Destination(u.BlockchainAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -404,24 +404,24 @@ func (k *Kernel) ListWithdrawals(ctx context.Context, callerID string, limit, of
 
 // ---- Addresses (D23) ----
 
-// RailAddressMessage is what a user signs to prove an address is theirs. It names this kernel and
+// BlockchainAddressMessage is what a user signs to prove an address is theirs. It names this kernel and
 // this account, so a signature captured here proves nothing anywhere else. Exported because the
 // client builds the same bytes for the wallet to sign: one definition, or the two would drift.
-func RailAddressMessage(kernelKey, userID, address string) []byte {
+func BlockchainAddressMessage(kernelKey, userID, address string) []byte {
 	return []byte("juice address registration\nkernel: " + kernelKey + "\nuser: " + userID + "\naddress: " + address)
 }
 
-// railIdentityMessage is what a kernel signs with its rail key to prove the address it advertises is
+// blockchainIdentityMessage is what a kernel signs with its rail key to prove the address it advertises is
 // its own. Without it a kernel could name a third party's address and claim their payment.
-func railIdentityMessage(kernelKey, network, address string) []byte {
-	return []byte("juice kernel rail address\nkernel: " + kernelKey + "\nnetwork: " + network + "\naddress: " + address)
+func blockchainIdentityMessage(kernelKey, network, address string) []byte {
+	return []byte("juice kernel blockchain address\nkernel: " + kernelKey + "\nnetwork: " + network + "\naddress: " + address)
 }
 
-// SetRailAddress registers where a user is paid, against a signature proving they control it. The
+// SetBlockchainAddress registers where a user is paid, against a signature proving they control it. The
 // canonical form is stored, so one address cannot be registered twice under different spellings.
 // Registering also attributes anything that address has already paid in: attribution is a function
 // of the address, not of when the kernel learned it.
-func (k *Kernel) SetRailAddress(ctx context.Context, callerID, address, signature string) (*Account, []*LedgerEntry, error) {
+func (k *Kernel) SetBlockchainAddress(ctx context.Context, callerID, address, signature string) (*Account, []*LedgerEntry, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, nil, err
@@ -434,11 +434,11 @@ func (k *Kernel) SetRailAddress(ctx context.Context, callerID, address, signatur
 	if err != nil {
 		return nil, nil, err
 	}
-	canonical, err := rail.Verify(RailAddressMessage(self, u.ID, address), address, signature)
+	canonical, err := rail.Verify(BlockchainAddressMessage(self, u.ID, address), address, signature)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := k.store.SetRailAddress(ctx, u.ID, canonical, time.Now().UTC()); err != nil {
+	if err := k.store.SetBlockchainAddress(ctx, u.ID, canonical, time.Now().UTC()); err != nil {
 		return nil, nil, err
 	}
 	// Money already here from this sender is now theirs. Deciding that is reconciliation's job and
@@ -454,13 +454,13 @@ func (k *Kernel) SetRailAddress(ctx context.Context, callerID, address, signatur
 			attributed = append(attributed, e)
 		}
 	}
-	u.RailAddress = canonical
+	u.BlockchainAddress = canonical
 	k.log.With(ctx).Info("rail.address.registered", "caller_user_id", u.ID, "attributed", len(attributed))
 	return u, attributed, nil
 }
 
-// RailIdentity is this kernel's own address and the proof it controls it, for gossip (P9).
-func (k *Kernel) RailIdentity(ctx context.Context) (address, proof string) {
+// BlockchainIdentity is this kernel's own address and the proof it controls it, for gossip (P9).
+func (k *Kernel) BlockchainIdentity(ctx context.Context) (address, proof string) {
 	if k.rail == nil {
 		return "", ""
 	}
@@ -472,23 +472,23 @@ func (k *Kernel) RailIdentity(ctx context.Context) (address, proof string) {
 	if err != nil {
 		return "", ""
 	}
-	proof, err = k.rail.Sign(railIdentityMessage(self, k.cfg.Network.Digest, address))
+	proof, err = k.rail.Sign(blockchainIdentityMessage(self, k.cfg.Network.Fingerprint, address))
 	if err != nil {
 		return "", ""
 	}
 	return address, proof
 }
 
-// verifyRailIdentity checks a peer's advertised address. On a world without addresses both must be
+// verifyBlockchainIdentity checks a peer's advertised address. On a world without addresses both must be
 // empty; on one with them the signature must prove control, or the peer could name a stranger's.
-// verifyRailIdentity checks a peer's claim to a rail address and returns the address in the form
+// verifyBlockchainIdentity checks a peer's claim to a blockchain address and returns the address in the form
 // the rail itself reports senders in — the form a payment from it will carry, and so the only form
 // worth freezing against one.
-func (k *Kernel) verifyRailIdentity(peerKey, address, proof string) (string, error) {
+func (k *Kernel) verifyBlockchainIdentity(peerKey, address, proof string) (string, error) {
 	if k.rail == nil {
 		return address, nil
 	}
-	return k.rail.Verify(railIdentityMessage(peerKey, k.cfg.Network.Digest, address), address, proof)
+	return k.rail.Verify(blockchainIdentityMessage(peerKey, k.cfg.Network.Fingerprint, address), address, proof)
 }
 
 // ---- The worker (D23) ----
@@ -761,18 +761,18 @@ func (k *Kernel) reconcileDeposits(ctx context.Context) {
 	}
 }
 
-// peerRailAddress is where a peer account's kernel proved it is paid from — the sender a payment
+// peerBlockchainAddress is where a peer account's kernel proved it is paid from — the sender a payment
 // of theirs must carry. Empty when unknown, which matches nothing.
-func (k *Kernel) peerRailAddress(ctx context.Context, accountID string) string {
+func (k *Kernel) peerBlockchainAddress(ctx context.Context, accountID string) string {
 	peer, err := k.store.ReadUser(ctx, accountID)
 	if err != nil || peer == nil || peer.KernelPublicKey == "" {
 		return ""
 	}
 	kern, err := k.store.ReadKernel(ctx, peer.KernelPublicKey)
-	if err != nil || kern == nil || kern.RailAddress == "" {
+	if err != nil || kern == nil || kern.BlockchainAddress == "" {
 		return ""
 	}
-	return kern.RailAddress
+	return kern.BlockchainAddress
 }
 
 // RailHoldings is what the rail itself holds at a block that can no longer change — the only
@@ -786,7 +786,7 @@ type RailHoldings struct {
 // RailReport is the operator's whole picture of external money (U44).
 type RailReport struct {
 	Network        Network       `json:"network"`
-	Address        string        `json:"rail_address"`
+	Address        string        `json:"blockchain_address"`
 	Finalized      *RailHoldings `json:"finalized,omitempty"`
 	Position       RailPosition  `json:"position"`
 	Gap            int64         `json:"gap"`

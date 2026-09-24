@@ -22,10 +22,10 @@ import (
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
-	"github.com/multiformats/go-multiaddr"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/record"
+	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/multiformats/go-multiaddr"
 )
 
 // ---- Identity ----

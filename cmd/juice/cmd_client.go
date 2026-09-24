@@ -233,7 +233,7 @@ func registerKernel(ctx context.Context, name, url string) (string, *kernelRec, 
 			// this is that kernel.
 			outcome = "moved; existing logins kept"
 		}
-		k = &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldDigest: h.Digest,
+		k = &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldFingerprint: h.Fingerprint,
 			Network: h.Network, Decimals: h.Decimals, Symbol: h.Symbol}
 		cfg.Kernels[name] = k
 		return true, nil
@@ -693,7 +693,7 @@ func enrollRecovery(label string, commit func(recoveryPublicKey string) error) e
 
 // signRecoveryChallenge signs the recovery nonce with the phrase-derived key, matching the kernel's
 // verification payload exactly (kernel.RecoveryChallenge, a disjoint signature domain). net carries
-// the server's network digest, which the prefix binds the signature to (D23).
+// the server's network fingerprint, which the prefix binds the signature to (D23).
 func signRecoveryChallenge(net kernel.Network, priv ed25519.PrivateKey, nonce string) (string, error) {
 	payload, err := net.RecoveryChallengeSigningBytes(nonce)
 	if err != nil {

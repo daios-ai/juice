@@ -32,7 +32,7 @@ type Config struct {
 	ScriptMemory      int64              // bytes
 	AllowLocalSources bool               // permit private/LAN/reserved URLs as action sources (loopback is allowed by default)
 	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
-	// Network is the one network this kernel serves for life (D23); its digest rides in every
+	// Network is the one network this kernel serves for life (D23); its fingerprint rides in every
 	// signature prefix and in the discovery namespace.
 	Network      Network
 	IssuerUserID string // @sys user ID, set during bootstrap
@@ -2422,16 +2422,16 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		// world with addresses a priced call from a buyer that proves none could never be paid, and
 		// a payer learned only later could be mistaken for somebody else's in the meantime (P10).
 		var payer string
-		if buyer.RailAddress != "" {
+		if buyer.BlockchainAddress != "" {
 			var perr error
-			if payer, perr = k.verifyRailIdentity(caller.KernelPublicKey, buyer.RailAddress, buyer.RailProof); perr != nil {
+			if payer, perr = k.verifyBlockchainIdentity(caller.KernelPublicKey, buyer.BlockchainAddress, buyer.BlockchainProof); perr != nil {
 				return nil, ErrUnauthorized.Wrap("the caller's paying address is not proven")
 			}
 		}
 		if dmax > 0 && payer == "" && k.rail != nil && k.rail.Address() != "" {
 			return nil, ErrInvalidInput.Wrap("a paid call must say where it will be paid from on this world")
 		}
-		buyer.RailAddress = payer
+		buyer.BlockchainAddress = payer
 		owner, limit, reserve = seller, k.econ.CreditLimit, dmax
 		// Every admitted call records what it answers and what it was sold under, so any path that
 		// later signs its receipt — settlement, crash recovery — can name the request the buyer
@@ -2495,7 +2495,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// the exposure for it — so a crash between admission and settlement leaves the debt, the exposure
 	// and the receipt's own arithmetic all recoverable from the one record (P10, D19).
 	if servingTerms != nil {
-		t.DispatchJSON, t.OwedRailAddress = servingTerms, buyer.RailAddress
+		t.DispatchJSON, t.OwedBlockchainAddress = servingTerms, buyer.BlockchainAddress
 	}
 	if err := k.store.BeginRun(ctx, p, t, owner.ID, lockPrice, reserve, limit); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
@@ -3241,7 +3241,7 @@ func (k *Kernel) isUserSuperuser(_ context.Context, u *Account) bool {
 
 // IsSuperuser reports whether userID is the configured superuser. Exported so the service
 // layer can widen read scope for @sys (supervision is scope on the normal endpoints, §14).
-// Network returns the network this kernel serves (D23) — the digest every signature is bound to.
+// Network returns the network this kernel serves (D23) — the fingerprint every signature is bound to.
 func (k *Kernel) Network() Network { return k.cfg.Network }
 
 func (k *Kernel) IsSuperuser(ctx context.Context, userID string) bool {

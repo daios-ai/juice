@@ -92,7 +92,7 @@ func TestHeldDepositIsNotSpendable(t *testing.T) {
 		t.Fatalf("an unclaimed payment was given away: %d %v", len(n), err)
 	}
 	// Once its sender registers, it is delivered, and the operator's hold ends.
-	if err := db.SetRailAddress(ctx, alice, "0xstranger", time.Now().UTC()); err != nil {
+	if err := db.SetBlockchainAddress(ctx, alice, "0xstranger", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
@@ -298,7 +298,7 @@ func TestOpenAndAllRailTransfersAreDifferentQuestions(t *testing.T) {
 
 // One address belongs to one account, whoever registers it first, and it is found by exactly the
 // canonical form that was stored.
-func TestRailAddressIsUniqueAcrossAccounts(t *testing.T) {
+func TestBlockchainAddressIsUniqueAcrossAccounts(t *testing.T) {
 	db, sys, alice := railFixture(t)
 	ctx := context.Background()
 	bob := newUser("bob", 0)
@@ -306,10 +306,10 @@ func TestRailAddressIsUniqueAcrossAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := db.SetRailAddress(ctx, alice, "0xabc", time.Now().UTC()); err != nil {
+	if err := db.SetBlockchainAddress(ctx, alice, "0xabc", time.Now().UTC()); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := db.SetRailAddress(ctx, bob.ID, "0xabc", time.Now().UTC()); err == nil {
+	if err := db.SetBlockchainAddress(ctx, bob.ID, "0xabc", time.Now().UTC()); err == nil {
 		t.Error("one address must belong to one account")
 	}
 	// The address is what reconciliation attributes a payment by, so the registration must be what
@@ -562,7 +562,7 @@ func admitFrom(t *testing.T, db *DB, seller, peer *kernel.Account, id, payer str
 	terms := fmt.Sprintf(`{"reserve":%d,"nonce":"0a0b","commitment":"cm","lottery":1000,"idempotency_key":%q,"counterparty":"peer-key"}`, dmax, id)
 	p := newProcess(seller.ID)
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: seller.ID, ActionID: "a",
-		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, DispatchJSON: &terms, OwedRailAddress: payer, CreatedAt: now}
+		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, DispatchJSON: &terms, OwedBlockchainAddress: payer, CreatedAt: now}
 	if err := db.BeginRun(ctx, p, tr, seller.ID, dmax, dmax, limit); err != nil {
 		t.Fatalf("admit %s: %v", id, err)
 	}
@@ -1133,7 +1133,7 @@ func TestAnObligationIsSettledBeforeItsSenderIsAttributed(t *testing.T) {
 	if err := db.CreateUser(ctx, collider); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetRailAddress(ctx, collider.ID, "0xbuyer", time.Now().UTC()); err != nil {
+	if err := db.SetBlockchainAddress(ctx, collider.ID, "0xbuyer", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	call := admit(t, db, seller, peer, "call-1", 40, 100000)
@@ -1180,7 +1180,7 @@ func TestAPaymentFromAPeerWaitsForItsRevealBeforeAnyoneElseGetsIt(t *testing.T) 
 	if err := db.CreateUser(ctx, collider); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetRailAddress(ctx, collider.ID, "0xbuyer", time.Now().UTC()); err != nil {
+	if err := db.SetBlockchainAddress(ctx, collider.ID, "0xbuyer", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	// Settled, owing 40, and not yet revealed.

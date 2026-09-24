@@ -740,7 +740,7 @@ func TestReceiptHashJoinDefinition(t *testing.T) {
 }
 
 // TestSignatureBindsDomainAndNetwork: one verification rule serves the wire and storage alike, so a
-// signature made before this network's digest existed — or on another network — is reported invalid
+// signature made before this network's fingerprint existed — or on another network — is reported invalid
 // rather than repaired (U36, G7, D23). A signature made under one domain never verifies under another.
 func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -752,7 +752,7 @@ func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	canon, _ := CanonicalJSON(payload)
 	legacySig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, canon))
 	if err := net.verify(pub, sigDomainReceipt, payload, legacySig); err == nil {
-		t.Error("a signature made before the network digest existed must be reported invalid")
+		t.Error("a signature made before the network fingerprint existed must be reported invalid")
 	}
 
 	sig, err := net.sign(priv, sigDomainReceipt, payload)
@@ -765,7 +765,7 @@ func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	if err := net.verify(pub, sigDomainRating, payload, sig); err == nil {
 		t.Error("a receipt-domain signature must not verify under the rating domain")
 	}
-	other := Network{Digest: "0000000000000000000000000000000000000000000000000000000000000000"}
+	other := Network{Fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"}
 	if err := other.verify(pub, sigDomainReceipt, payload, sig); err == nil {
 		t.Error("a signature from one network must not verify on another")
 	}

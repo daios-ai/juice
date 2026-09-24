@@ -46,7 +46,7 @@ const (
 )
 
 // World is one network's definition. The defining part — name, rail, chain, token — is identical
-// for every member and fixes the network digest; everything else is operational and belongs to
+// for every member and fixes the network fingerprint; everything else is operational and belongs to
 // whoever runs the kernel, so changing an endpoint or a gas policy never changes the network.
 type World struct {
 	// Name is the file's own name, never a field inside it: one string names the world on the
@@ -59,7 +59,7 @@ type World struct {
 	Decimals uint8  `json:"decimals"`
 	// Symbol is what an amount on this world is called when it is shown to a person, and Description
 	// is the one line that tells an operator choosing a network what this one means. Both are display
-	// only: neither enters the digest, so renaming a token or rewording a line is not a new network.
+	// only: neither enters the fingerprint, so renaming a token or rewording a line is not a new network.
 	Symbol      string `json:"symbol"`
 	Description string `json:"description"`
 
@@ -218,7 +218,7 @@ func validName(name string) error {
 }
 
 // definingPart is exactly what every member of a network shares, and nothing else. Its canonical
-// form is hashed into the digest, so two kernels agree iff they run the same network — whatever
+// form is hashed into the fingerprint, so two kernels agree iff they run the same network — whatever
 // endpoint, gas policy, or file name each of them uses locally. The adaptor is in it because two
 // worlds settling by different rules are different money even where everything else matches.
 type definingPart struct {
@@ -228,7 +228,7 @@ type definingPart struct {
 	Token   string `json:"token"`
 }
 
-// Network is what the kernel needs: the name for people, the digest for signatures and discovery,
+// Network is what the kernel needs: the name for people, the fingerprint for signatures and discovery,
 // the decimals a client renders amounts with, and the token those amounts are paid in — empty
 // where the world has no chain, and the only thing that says which money this is.
 func (w World) Network() kernel.Network {
@@ -242,7 +242,7 @@ func (w World) Network() kernel.Network {
 		panic("rail: canonicalize world: " + err.Error())
 	}
 	sum := sha256.Sum256(canon)
-	return kernel.Network{Name: w.Name, Digest: hex.EncodeToString(sum[:]), Decimals: w.Decimals,
+	return kernel.Network{Name: w.Name, Fingerprint: hex.EncodeToString(sum[:]), Decimals: w.Decimals,
 		Symbol: w.Symbol, Token: token}
 }
 

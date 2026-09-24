@@ -153,18 +153,18 @@ func ceilDiv(a, b int64) int64 {
 // only fall out of step with them. The buyer's side is the mirror: its trace, its receipt, and the
 // rail row carrying a winning payment.
 type Owed struct {
-	ID         string    `json:"id"` // the call's idempotency key — the name both kernels share
-	PeerUserID string    `json:"-"`  // the buyer's account here
-	UserID     string    `json:"-"`  // the provider who is owed
-	TraceID    string    `json:"-"`
-	Settled    bool      `json:"-"`          // the call has committed, so the obligation is known
-	Obligation int64     `json:"obligation"` // charge plus premium from the receipt, once settled
-	Terms      string    `json:"-"`          // the trace's frozen record (D19)
-	Amount     int64     `json:"amount"`     // what the draw decided moves, set at the reveal
-	TxHash     string    `json:"tx_hash"`    // the payment the buyer named
-	RailAddr   string    `json:"-"`          // the buyer's proven sender, frozen at admission
-	Status     string    `json:"status"`     // empty until the buyer reveals
-	CreatedAt  time.Time `json:"created_at"`
+	ID             string    `json:"id"` // the call's idempotency key — the name both kernels share
+	PeerUserID     string    `json:"-"`  // the buyer's account here
+	UserID         string    `json:"-"`  // the provider who is owed
+	TraceID        string    `json:"-"`
+	Settled        bool      `json:"-"`          // the call has committed, so the obligation is known
+	Obligation     int64     `json:"obligation"` // charge plus premium from the receipt, once settled
+	Terms          string    `json:"-"`          // the trace's frozen record (D19)
+	Amount         int64     `json:"amount"`     // what the draw decided moves, set at the reveal
+	TxHash         string    `json:"tx_hash"`    // the payment the buyer named
+	BlockchainAddr string    `json:"-"`          // the buyer's proven sender, frozen at admission
+	Status         string    `json:"status"`     // empty until the buyer reveals
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Reveal states, on the trace. Empty is the buyer not having said yet. The draw's outcome is read
@@ -263,7 +263,7 @@ func (k *Kernel) payableOnThisRail(ctx context.Context, peerAccountID string, ob
 	if obligation <= 0 || k.rail == nil || k.rail.Address() == "" {
 		return nil // nothing owed, or a world with no addresses: the operator's record is the payment
 	}
-	if k.peerRailAddress(ctx, peerAccountID) != "" {
+	if k.peerBlockchainAddress(ctx, peerAccountID) != "" {
 		return nil
 	}
 	peer, _ := k.store.ReadUser(ctx, peerAccountID)
@@ -281,10 +281,10 @@ func (k *Kernel) payableOnThisRail(ctx context.Context, peerAccountID string, ob
 // knows every obligation's payer before any payment can land — a payment that arrives ahead of its
 // reveal is then never mistaken for somebody else's.
 type BuyerTerms struct {
-	Commitment  string
-	Lottery     int64
-	RailAddress string
-	RailProof   string
+	Commitment        string
+	Lottery           int64
+	BlockchainAddress string
+	BlockchainProof   string
 	// IdempotencyKey is the call's own name, as the buyer signed it. It is frozen with the rest of
 	// the admitted terms so every receipt this kernel signs for the call names the request it
 	// answers (P4, P5).

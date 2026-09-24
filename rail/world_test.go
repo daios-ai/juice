@@ -19,10 +19,10 @@ import (
 // verifying the others and every receipt already stored reports invalid. A change here must be a
 // deliberate protocol break rather than an accident of refactoring.
 const (
-	playDigest     = "baed18ae3f0c2b63f04f593d113a8af947eea60410d2748771d4ad38df9ecf96"
-	sepoliaDigest  = "42f84b8255e166d4c7b419e34d031bb7f6aed83afa5bde4d0f2a1c8a39313e08"
-	arbitrumDigest = "04a8e2ce745261cc9cc92214d5ba3ce4b327c8949eb57c7e25b44695608dfef0"
-	polygonDigest  = "745bdb1ebcadda5d669bdac5638ba13f1102674f2decf89f137b5ba08b1b8666"
+	playFingerprint     = "baed18ae3f0c2b63f04f593d113a8af947eea60410d2748771d4ad38df9ecf96"
+	sepoliaFingerprint  = "42f84b8255e166d4c7b419e34d031bb7f6aed83afa5bde4d0f2a1c8a39313e08"
+	arbitrumFingerprint = "04a8e2ce745261cc9cc92214d5ba3ce4b327c8949eb57c7e25b44695608dfef0"
+	polygonFingerprint  = "745bdb1ebcadda5d669bdac5638ba13f1102674f2decf89f137b5ba08b1b8666"
 )
 
 // installed is an installation's worlds directory: what `kernel serve` writes before it looks a
@@ -36,23 +36,23 @@ func installed(t *testing.T) string {
 	return dir
 }
 
-// The shipped worlds are pinned whole: name, adaptor, digest, decimals, token and symbol together.
+// The shipped worlds are pinned whole: name, adaptor, fingerprint, decimals, token and symbol together.
 // The symbol is what a depositor is shown and the token is what they must send; a file that names
 // one while holding the other tells them to send the wrong money. Changing either alone fails here.
 func TestShippedWorldsLoad(t *testing.T) {
 	dir := installed(t)
 	for _, tc := range []struct {
-		name     string
-		rail     string
-		decimals uint8
-		digest   string
-		token    string
-		symbol   string
+		name        string
+		rail        string
+		decimals    uint8
+		fingerprint string
+		token       string
+		symbol      string
 	}{
-		{"play", rail.RailManual, 6, playDigest, "", "fUSD"},
-		{"arbitrum-sepolia", rail.RailEVM, 6, sepoliaDigest, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT0"},
-		{"arbitrum-one", rail.RailEVM, 6, arbitrumDigest, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT0"},
-		{"polygon", rail.RailEVM, 6, polygonDigest, "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", "USDT0"},
+		{"play", rail.RailManual, 6, playFingerprint, "", "fUSD"},
+		{"arbitrum-sepolia", rail.RailEVM, 6, sepoliaFingerprint, "0x8e87deee3bf1efe27e8e96abf205bedf802ed568", "USDT0"},
+		{"arbitrum-one", rail.RailEVM, 6, arbitrumFingerprint, "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9", "USDT0"},
+		{"polygon", rail.RailEVM, 6, polygonFingerprint, "0xc2132d05d31c914a87c6611c10748aeb04b58e8f", "USDT0"},
 	} {
 		w, err := rail.Load(dir, tc.name)
 		if err != nil {
@@ -63,8 +63,8 @@ func TestShippedWorldsLoad(t *testing.T) {
 			t.Fatalf("%s: name=%q rail=%q", tc.name, w.Name, w.Rail)
 		}
 		n := w.Network()
-		if n.Decimals != tc.decimals || n.Digest != tc.digest {
-			t.Fatalf("%s: network %+v, want decimals %d digest %s", tc.name, n, tc.decimals, tc.digest)
+		if n.Decimals != tc.decimals || n.Fingerprint != tc.fingerprint {
+			t.Fatalf("%s: network %+v, want decimals %d fingerprint %s", tc.name, n, tc.decimals, tc.fingerprint)
 		}
 		if n.Token != tc.token || n.Symbol != tc.symbol {
 			t.Fatalf("%s: token %q symbol %q, want %q %q", tc.name, n.Token, n.Symbol, tc.token, tc.symbol)
@@ -156,7 +156,7 @@ func TestInstallWritesOnceAndKeepsEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load own world: %v", err)
 	}
-	if own.Name != "mine" || own.Network().Digest == w.Network().Digest {
+	if own.Name != "mine" || own.Network().Fingerprint == w.Network().Fingerprint {
 		t.Fatalf("own world %+v shares a network with a shipped one", own.Network())
 	}
 }
@@ -164,13 +164,13 @@ func TestInstallWritesOnceAndKeepsEdits(t *testing.T) {
 // Relabelling is not a new network: the symbol and description are what a person reads, and the
 // fingerprint is what signatures carry. This is the guard that correcting a label never strands a
 // kernel.
-func TestLabelsDoNotMoveTheDigest(t *testing.T) {
+func TestLabelsDoNotMoveTheFingerprint(t *testing.T) {
 	dir := installed(t)
 	doc := readDoc(t, filepath.Join(dir, "arbitrum-one.json"))
 	doc["symbol"] = "SOMETHING-ELSE"
 	doc["description"] = "reworded entirely"
-	if got := digestOf(t, dir, "arbitrum-one", doc); got != arbitrumDigest {
-		t.Fatalf("a label moved the digest: %s (was %s)", got, arbitrumDigest)
+	if got := fingerprintOf(t, dir, "arbitrum-one", doc); got != arbitrumFingerprint {
+		t.Fatalf("a label moved the fingerprint: %s (was %s)", got, arbitrumFingerprint)
 	}
 }
 
@@ -183,9 +183,9 @@ func TestShippedWorldsAreDistinct(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		d := w.Network().Digest
+		d := w.Network().Fingerprint
 		if other, dup := seen[d]; dup {
-			t.Fatalf("%s and %s share a digest", n, other)
+			t.Fatalf("%s and %s share a fingerprint", n, other)
 		}
 		seen[d] = n
 	}
@@ -195,27 +195,27 @@ func TestShippedWorldsAreDistinct(t *testing.T) {
 // run different endpoints, meeting points and gas policies, and must still verify each other's
 // signatures. What settles the money is shared, so it is covered: two worlds paying by different
 // rules are different money even where everything else matches.
-func TestOnlyTheAgreementMovesTheDigest(t *testing.T) {
+func TestOnlyTheAgreementMovesTheFingerprint(t *testing.T) {
 	dir := installed(t)
 	doc := readDoc(t, filepath.Join(dir, "arbitrum-one.json"))
-	base := digestOf(t, dir, "arbitrum-one", doc)
+	base := fingerprintOf(t, dir, "arbitrum-one", doc)
 
 	doc["rpc"] = "https://example.invalid/rpc"
 	doc["finality"] = "safe"
 	doc["seeds"] = []string{"/dns4/elsewhere.example/tcp/31313"}
 	doc["gas"].(map[string]any)["slippageBps"] = float64(999)
-	if moved := digestOf(t, dir, "arbitrum-one", doc); moved != base {
-		t.Fatalf("an operational change moved the digest: %s vs %s", moved, base)
+	if moved := fingerprintOf(t, dir, "arbitrum-one", doc); moved != base {
+		t.Fatalf("an operational change moved the fingerprint: %s vs %s", moved, base)
 	}
 
 	doc["chainId"] = float64(1)
-	if digestOf(t, dir, "arbitrum-one", doc) == base {
+	if fingerprintOf(t, dir, "arbitrum-one", doc) == base {
 		t.Fatal("a different chain must be a different network")
 	}
 	// The file's own name is the network's, so serving the same document under another name is
 	// serving another network.
 	doc = readDoc(t, filepath.Join(dir, "arbitrum-one.json"))
-	if digestOf(t, dir, "elsewhere", doc) == base {
+	if fingerprintOf(t, dir, "elsewhere", doc) == base {
 		t.Fatal("a different world name must be a different network")
 	}
 }
@@ -233,7 +233,7 @@ func TestTheAdaptorIsPartOfTheNetwork(t *testing.T) {
 	}
 	b := a
 	b.Rail = rail.RailEVM
-	if a.Network().Digest == b.Network().Digest {
+	if a.Network().Fingerprint == b.Network().Fingerprint {
 		t.Fatal("two adaptors under one name share a network")
 	}
 }
@@ -384,14 +384,14 @@ func writeDoc(t *testing.T, path string, doc map[string]any) {
 	}
 }
 
-// digestOf writes doc under name and reports the network it defines, so a test changes one field
+// fingerprintOf writes doc under name and reports the network it defines, so a test changes one field
 // and reads the consequence.
-func digestOf(t *testing.T, dir, name string, doc map[string]any) string {
+func fingerprintOf(t *testing.T, dir, name string, doc map[string]any) string {
 	t.Helper()
 	writeDoc(t, filepath.Join(dir, name+".json"), doc)
 	w, err := rail.Load(dir, name)
 	if err != nil {
 		t.Fatalf("load written world: %v", err)
 	}
-	return w.Network().Digest
+	return w.Network().Fingerprint
 }

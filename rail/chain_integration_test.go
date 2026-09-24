@@ -536,7 +536,7 @@ func TestChainSignsWithItsRealKey(t *testing.T) {
 		t.Fatalf("open second kernel: %v", err)
 	}
 
-	msg := []byte("juice kernel rail address\nkernel: k\nnetwork: n\naddress: " + c.Address())
+	msg := []byte("juice kernel blockchain address\nkernel: k\nnetwork: n\naddress: " + c.Address())
 	sig, err := c.Sign(msg)
 	if err != nil {
 		t.Fatalf("sign: %v", err)

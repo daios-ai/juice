@@ -32,7 +32,7 @@ import (
 // ---- CLI test helpers ----
 
 // testNet is the play network these tests sign on, matching what a kernel serves by default.
-var testNet = kernel.Network{Name: "play", Digest: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
+var testNet = kernel.Network{Name: "play", Fingerprint: "ef1fac03f5f78ca42dfa05b9eb975b5e0944e013ed1eb5ea30a2be9328e34a67"}
 
 // newTestStore opens a fresh database that closes with the test.
 func newTestStore(t *testing.T) *store.DB {
@@ -2120,12 +2120,12 @@ func resolves(words []string) bool {
 }
 
 // TestAdminKernelShowRelaysEveryFieldTheServerSent: the identity view is read whole — an operator
-// checks a kernel's network digest here before believing anything else it says. The CLI once kept
+// checks a kernel's network fingerprint here before believing anything else it says. The CLI once kept
 // its own copy of the response shape, and the field it had not copied vanished from --json.
 func TestAdminKernelShowRelaysEveryFieldTheServerSent(t *testing.T) {
 	body := map[string]any{
 		"handle": "acme", "public_key": "KEY", "network": "play",
-		"network_digest": "5e0dcafe", "lottery": 1000000, "lottery_max": 5000000,
+		"network_fingerprint": "5e0dcafe", "lottery": 1000000, "lottery_max": 5000000,
 		"credit_limit": 500000000, "exposure": 0, "fee_bps": 2000, "remote_bps": 500, "import_bps": 500,
 	}
 	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) })
@@ -2367,7 +2367,7 @@ func TestAVerbReadsOrWrites(t *testing.T) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "w-1", "amount": 5000000}})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u", "rail_address": "0xabc", "amount": 1000000})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u", "blockchain_address": "0xabc", "amount": 1000000})
 	})
 	for _, c := range []struct {
 		name string
@@ -2452,7 +2452,7 @@ func TestWithdrawalsPageByOffset(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	u, tok := makeUser(t, env.k, "payer")
-	if err := env.db.SetRailAddress(ctx, u, "0xpayer", time.Now().UTC()); err != nil {
+	if err := env.db.SetBlockchainAddress(ctx, u, "0xpayer", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
@@ -2544,12 +2544,12 @@ func depositKernel(t *testing.T, network, kernelAddr, token, mine string) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"status": "ok", "handle": "bank", "public_key": "bank-key",
 				"network": network, "decimals": 6, "symbol": "USDT",
-				"token": token, "rail_address": kernelAddr,
+				"token": token, "blockchain_address": kernelAddr,
 			})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "u-1", "handle": "alice", "available": 0, "locked": 0, "rail_address": mine})
+			"id": "u-1", "handle": "alice", "available": 0, "locked": 0, "blockchain_address": mine})
 	}))
 	t.Cleanup(srv.Close)
 	old := flagServer

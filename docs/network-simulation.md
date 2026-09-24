@@ -214,5 +214,5 @@ its issued tokens. Read it in place; share `report.md` and `metrics.json`; delet
 you are done.
 
 `metrics.json` carries the commit, whether the worktree was dirty, the hash of the binary that was
-driven, the network digest and the story version. Two runs are comparable only when those agree —
+driven, the network fingerprint and the story version. Two runs are comparable only when those agree —
 otherwise a graph compares two different economies and calls the difference a protocol improvement.

@@ -314,7 +314,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	// Federation is a separate adapter, constructed around the kernel's own signer and attached
 	// after (§13): it holds neither the kernel nor the private key, and its transport arrives at
 	// serve time via SetTransport. Signing goes live when bootstrap calls SetSigningKey.
-	fedAdapter := newFedAdapter("", k.SignFederation, k.RailIdentity)
+	fedAdapter := newFedAdapter("", k.SignFederation, k.BlockchainIdentity)
 	k.SetFederation(fedAdapter)
 
 	// Credential encryption. The key is minted at first boot and only read here; one that cannot be

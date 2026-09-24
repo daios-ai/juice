@@ -228,7 +228,7 @@ flow_rail_profile() {
     # A record that no longer names the kernel it pinned refuses to switch rather than guessing.
     profile_set "$hc" public_key "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert_fails "rail_profile.key_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@ka
-    profile_set "$hc" world_digest "0000000000000000000000000000000000000000000000000000000000000000"
+    profile_set "$hc" world_fingerprint "0000000000000000000000000000000000000000000000000000000000000000"
     assert_fails "rail_profile.digest_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@ka
 }
 
@@ -503,7 +503,7 @@ flow_one_output_policy() {
     assert_nonempty "output.json_names_the_kernel_added" "$(strfield "$(jj "$db" "$ha" kernel add "${SERVER_URL[$db]}" "$KERNEL_NAME")" outcome)"
 
     # --json is what the server sent, so a field the CLI does not print is still carried. The
-    # network digest is read here before an operator believes any other number.
-    assert_nonempty "output.identity_keeps_the_digest" "$(strfield "$(jj "$db" "$hs" admin kernel show)" network_digest)"
+    # network fingerprint is read here before an operator believes any other number.
+    assert_nonempty "output.identity_keeps_the_digest" "$(strfield "$(jj "$db" "$hs" admin kernel show)" network_fingerprint)"
     assert_nonempty "output.health_is_the_banner" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" public_key)"
 }

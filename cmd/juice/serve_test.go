@@ -283,15 +283,15 @@ func TestServeHealth(t *testing.T) {
 	// The banner is an enumerated contract (D20): a client pins what it finds here, and everything
 	// it needs to render or pay money must be in it. A missing key is indistinguishable from a
 	// kernel that has nothing to say, so every one is required, whatever its value.
-	for _, key := range []string{"status", "handle", "public_key", "network", "network_digest",
-		"decimals", "symbol", "token", "rail_address"} {
+	for _, key := range []string{"status", "handle", "public_key", "network", "network_fingerprint",
+		"decimals", "symbol", "token", "blockchain_address"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("the health banner omits %q; a client cannot tell that from an empty value", key)
 		}
 	}
 	// This kernel serves play, where money has no contract and nothing is sent anywhere.
-	if body["token"] != "" || body["rail_address"] != "" {
-		t.Errorf("play names a token or an address: %v / %v", body["token"], body["rail_address"])
+	if body["token"] != "" || body["blockchain_address"] != "" {
+		t.Errorf("play names a token or an address: %v / %v", body["token"], body["blockchain_address"])
 	}
 }
 
@@ -3438,7 +3438,7 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok", "handle": "acme", "public_key": "KEY-SELF",
-			"network": "play", "network_digest": "D", "decimals": 6, "symbol": "fUSD",
+			"network": "play", "network_fingerprint": "D", "decimals": 6, "symbol": "fUSD",
 		})
 	})
 	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}
@@ -3785,7 +3785,6 @@ func TestAnUpstreamReplyOverTheBoundIsRefusedNotTruncated(t *testing.T) {
 		t.Errorf("the failure must say what was wrong with it, got %v", runErr)
 	}
 }
-
 
 // The numbers in the file are the numbers the transport runs under. Built the way `serve` builds
 // it, from the configuration: a relay with one slot grants one reservation and refuses the next,

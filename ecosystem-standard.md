@@ -87,7 +87,7 @@ never as a step in switching kernels.
     "work": {
       "endpoint": "http://localhost:4040",
       "public_key": "<43-char base64url Ed25519 key>",
-      "world_digest": "…", "network": "play", "decimals": 0
+      "world_fingerprint": "…", "network": "play", "decimals": 0
     }
   }
 }
@@ -106,7 +106,7 @@ which is what "logged out" means: ending it ends it for both.
 The file name is a label. A handle can be renamed, and its old name taken by someone else, so the
 account is recorded inside as `principal_id`, and it is the token — never the name — that
 authenticates. Anything durable an agent remembers is keyed by
-`(network digest, kernel public key, principal id)`, never by a login or kernel name, and never by
+`(network fingerprint, kernel public key, principal id)`, never by a login or kernel name, and never by
 a handle.
 
 Commands:

@@ -4732,6 +4732,57 @@ func TestPriceSnapshotColumnsRoundTrip(t *testing.T) {
 // is gone, the payment is final, and the money that crossed the rail has to keep counting in the
 // solvency audit. 047 converts both sides — a creditor's credited claim, a debtor's announced
 // settlement — and gives the cash record the shape of the crossing it always was.
+// TestMigration053RenamesInPlace: the address money is paid to and the network's identity are
+// renamed, not redefined. An existing kernel's pin to its network must come through under the new
+// key, or the bound-network check would read it as never bound; and no column may survive under
+// the old name, or a second nomenclature would exist in the schema.
+func TestMigration053RenamesInPlace(t *testing.T) {
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		if _, err := raw.Exec(`INSERT INTO config (key,value) VALUES ('world_digest','abc123')`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	db := openAt(t, path)
+	ctx := context.Background()
+	got, err := db.GetConfig(ctx, "world_fingerprint")
+	if err != nil || got != "abc123" {
+		t.Fatalf("the network pin must come through under its new key: %q, %v", got, err)
+	}
+	if _, err := db.GetConfig(ctx, "world_digest"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Fatalf("the old key must be gone, not copied: %v", err)
+	}
+	for _, tc := range []struct{ table, old, renamed string }{
+		{"accounts", "rail_address", "blockchain_address"},
+		{"kernels", "rail_address", "blockchain_address"},
+		{"kernels", "rail_proof", "blockchain_proof"},
+		{"traces", "owed_rail_address", "owed_blockchain_address"},
+	} {
+		cols := map[string]bool{}
+		rows, err := db.db.QueryContext(ctx, `PRAGMA table_info(`+tc.table+`)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notnull, pk int
+			var dflt any
+			if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+				t.Fatal(err)
+			}
+			cols[name] = true
+		}
+		rows.Close()
+		if cols[tc.old] || !cols[tc.renamed] {
+			t.Errorf("%s: want column %s and no %s; have %v", tc.table, tc.renamed, tc.old, cols)
+		}
+	}
+	var idx int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_accounts_blockchain_address'`).Scan(&idx); err != nil || idx != 1 {
+		t.Fatalf("the unique address index must exist under the new name: %d, %v", idx, err)
+	}
+}
+
 func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 	now := timeToStr(time.Now().UTC())
 	path := preValueMigrationDB(t, func(raw *sql.DB) {
@@ -4970,7 +5021,7 @@ func TestRequestBindingUpgradeRefusesWhileACallIsInDoubt(t *testing.T) {
 // out of the evidence stream, because whether it was public then cannot be read off the action now
 // (P5, P9, G3).
 func TestRequestBindingUpgradeLeavesSignedHistoryAlone(t *testing.T) {
-	net := kernel.Network{Name: "play", Digest: "testdigest"}
+	net := kernel.Network{Name: "play", Fingerprint: "testdigest"}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	now := time.Now().UTC().Truncate(time.Second)
 	nowStr := timeToStr(now)

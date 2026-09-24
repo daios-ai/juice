@@ -384,7 +384,7 @@ of it: that the responder's claimed key equals the key that was dialed, that the
 that every signed item inside verifies. A pull that fails any check counts as failed and writes
 nothing.
 
-**What is recorded.** From a good pull: the peer's row (key, nickname, rail address and the proof
+**What is recorded.** From a good pull: the peer's row (key, nickname, blockchain address and the proof
 of it), its catalogue entries, and one page of evidence. The cursor advances only after the page
 has been committed, so an interrupted pull is re-fetched rather than skipped.
 
@@ -414,7 +414,7 @@ whole card index plus the next hundred pages after that bookmark, plus a new boo
          |                                                | read own identity
          |                                                | sign every public manifest (<=100)
          |                                                | select evidence after cursor (<=100)
-         |  { public_key, handle, network, rail_address,   |
+         |  { public_key, handle, network, blockchain_address,   |
          |    action_manifests: [ ...10 cards... ],        |
          |    evidence:         [ ...100 items... ],       |
          |    next_cursor: "...| r-8931" }                 |
@@ -465,7 +465,7 @@ A reply has three parts (`kernel/federation.go:1579`):
 
 | Part | Size | Sent when |
 |---|---|---|
-| identity: key, nickname, description, network, rail address and its proof | ~0.5 KB | every pull |
+| identity: key, nickname, description, network, blockchain address and its proof | ~0.5 KB | every pull |
 | catalogue: one signed manifest per public action, capped at 100 | ~1 KB each, so up to ~100 KB | every pull |
 | evidence: items after the cursor, capped at 100 | ~0.4 KB each, so up to ~40 KB | every pull |
 
@@ -771,7 +771,7 @@ the protocol reveals the gap. The cursor is B's own ordering, so a page is what 
 
 **A stores three things**, all in its own database:
 
-- `kernels` — one row per kernel it has met: key, nickname, rail address and proof, last seen.
+- `kernels` — one row per kernel it has met: key, nickname, blockchain address and proof, last seen.
 - `discovery_docs`, with a full-text index — the catalogue cards, which is what local search reads.
 - `evidence` — one row per bundle, keyed by issuer, subject action and remote receipt hash.
 

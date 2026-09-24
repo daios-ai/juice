@@ -30,7 +30,7 @@ Explicit selection keeps later invocations tied to the intended account even
 when a person changes the client's current login. If the named login does not
 exist, the command fails instead of selecting another account.
 
-For persistent records, identify the kernel by public key and network digest
+For persistent records, identify the kernel by public key and network fingerprint
 and the account by its ID. You can obtain these from `kernel list` and
 `user me`. Handles and local kernel names are useful for interaction but may
 be renamed or reused.
@@ -249,8 +249,8 @@ the key and network you expect:
 ```
 $ curl -s localhost:4040/health
 {"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
- "handle":"acme","network":"play","network_digest":"baed18ae…",
- "public_key":"fdlMi64P…","rail_address":"","status":"ok","symbol":"fUSD","token":""}
+ "handle":"acme","network":"play","network_fingerprint":"baed18ae…",
+ "public_key":"fdlMi64P…","blockchain_address":"","status":"ok","symbol":"fUSD","token":""}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

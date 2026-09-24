@@ -92,7 +92,7 @@ exact root or a uniform lower bound over all permitted \(L\) and \(P\).
 
 1. The buyer's node locks the advertised all-in price for the call's budget and \(L\) from the
    buyer's own balance, and sends the request with a settlement identifier, \(L\), a commitment
-   to fresh randomness, and the proven rail address a winning ticket will be paid from. An
+   to fresh randomness, and the proven blockchain address a winning ticket will be paid from. An
    insufficient balance is refused locally before anything is sent.
 2. The seller's node atomically reserves the advertised maximum charge against its credit limit and
    checks the seller can fund the execution. Either failure is a signed rejection.

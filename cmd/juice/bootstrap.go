@@ -21,13 +21,13 @@ import (
 )
 
 const (
-	// configKeyWorldDigest records the network this database belongs to, written once and checked
+	// configKeyWorldFingerprint records the network this database belongs to, written once and checked
 	// at every startup (D9, D23).
-	configKeyWorldDigest    = "world_digest"
-	configKeySuperuser      = "superuser_handle"
-	configKeySigningPublic  = "signing_public_key"
-	configKeySigningPrivate = "signing_private_key"
-	superuserHandle         = "sys"
+	configKeyWorldFingerprint = "world_fingerprint"
+	configKeySuperuser        = "superuser_handle"
+	configKeySigningPublic    = "signing_public_key"
+	configKeySigningPrivate   = "signing_private_key"
+	superuserHandle           = "sys"
 )
 
 // firstBootConfig gathers the configuration of a kernel that does not exist yet. It asks and
@@ -124,15 +124,15 @@ func askHandle(path string) (string, error) {
 func checkNetwork(ctx context.Context, db *store.DB, w rail.World) error {
 	// A database that cannot be read must not read as one that was never bound: that is the one
 	// answer that would serve a kernel's ledger under a second meaning.
-	stored, err := db.GetConfig(ctx, configKeyWorldDigest)
+	stored, err := db.GetConfig(ctx, configKeyWorldFingerprint)
 	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
 		return err
 	}
-	if stored != "" && stored != w.Network().Digest {
+	if stored != "" && stored != w.Network().Fingerprint {
 		return kernel.ErrInvalidState.Wrapf(
 			"this kernel is bound to network %s, and %s is network %s; one kernel serves one network "+
 				"for life, so serve it as the world it was created on or create a new kernel",
-			stored, w.Name, w.Network().Digest)
+			stored, w.Name, w.Network().Fingerprint)
 	}
 	return nil
 }
