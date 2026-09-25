@@ -908,25 +908,12 @@ func loggingMiddleware(logger *log.Logger) func(http.Handler) http.Handler {
 
 func (s *server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			writeErr(w, kernel.ErrUnauthenticated.Wrap("missing bearer token"))
-			return
+		callerID, err := s.authenticate(r)
+		if err == nil && callerID == "" {
+			err = kernel.ErrUnauthenticated.Wrap("missing bearer token")
 		}
-		tok := strings.TrimPrefix(auth, "Bearer ")
-		callerID, err := s.kernel.VerifyToken(tok)
 		if err != nil {
 			writeErr(w, err)
-			return
-		}
-		// Verify caller exists and is not suspended.
-		u, err := s.kernel.ReadUser(r.Context(), callerID)
-		if err != nil {
-			writeErr(w, kernel.ErrUnauthenticated.Wrap("caller not found"))
-			return
-		}
-		if u.SuspendedAt != nil {
-			writeErr(w, kernel.ErrUnauthenticated.Wrap("account suspended"))
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxCallerID, callerID)
@@ -1001,22 +988,30 @@ func callerFromContext(ctx context.Context) string {
 	return v
 }
 
-// optionalAuth extracts and verifies a Bearer token without failing the request.
-// Returns the caller user ID or "" if absent, invalid, or suspended.
-func (s *server) optionalAuth(r *http.Request) string {
+// authenticate is the one credential check. Only a request carrying no Authorization header is
+// anonymous (""); a header that is empty, not a bearer, or names a token or account that fails is
+// refused, so a caller who sent credentials is never answered as a stranger. Header.Get cannot
+// tell an absent header from an empty one, so absence is counted.
+func (s *server) authenticate(r *http.Request) (string, error) {
+	if len(r.Header.Values("Authorization")) == 0 {
+		return "", nil
+	}
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return ""
+		return "", kernel.ErrUnauthenticated.Wrap("missing bearer token")
 	}
 	callerID, err := s.kernel.VerifyToken(strings.TrimPrefix(auth, "Bearer "))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	u, err := s.kernel.ReadUser(r.Context(), callerID)
-	if err != nil || u.SuspendedAt != nil {
-		return ""
+	if err != nil {
+		return "", kernel.ErrUnauthenticated.Wrap("caller not found")
 	}
-	return callerID
+	if u.SuspendedAt != nil {
+		return "", kernel.ErrUnauthenticated.Wrap("account suspended")
+	}
+	return callerID, nil
 }
 
 // ---- handlers ----
@@ -1055,6 +1050,11 @@ func (s *server) postRecoverComplete(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	caller, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	// Reference mode resolves one reference through the kernel's resolver instead of filtering the
 	// listing, so a client never has to know the naming rules (§14). It is authenticated because
 	// resolving a kernel-qualified reference can dial a peer, and this route is otherwise open.
@@ -1063,7 +1063,6 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, kernel.ErrInvalidInput.Wrap("ref cannot be combined with owner or name"))
 			return
 		}
-		caller := s.optionalAuth(r)
 		// Authentication is required by the dial, not by resolution: a kernel-qualified reference
 		// reaches a peer, so only a local caller may ask for one. A local reference is a store read
 		// and stays open, which is what keeps a public action's ratings anonymously readable (§11).
@@ -1077,7 +1076,7 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	}
 	all := q.Get("all") == "1" || q.Get("all") == "true"
 	limit, offset := listBounds(r)
-	resps, err := listPublicActions(s.kernel, r.Context(), s.optionalAuth(r),
+	resps, err := listPublicActions(s.kernel, r.Context(), caller,
 		q.Get("owner"), q.Get("name"), all, limit, offset)
 	writeOr(w, resps, err)
 }
@@ -1138,7 +1137,12 @@ func (s *server) getAction(w http.ResponseWriter, r *http.Request) {
 func (s *server) listActionRatings(w http.ResponseWriter, r *http.Request) {
 	// Gate on the action's own visibility (anonymous caller allowed for a public action); the read
 	// is independent of the action's active state so reputation survives deactivation (§8).
-	action, err := s.kernel.ReadActionForSubject(r.Context(), s.optionalAuth(r), pathID(r))
+	caller, err := s.authenticate(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	action, err := s.kernel.ReadActionForSubject(r.Context(), caller, pathID(r))
 	if err != nil {
 		writeErr(w, err)
 		return

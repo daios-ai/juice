@@ -87,6 +87,18 @@ flow_local_auth() {
         profile_set "$hs" refresh_token "$new_rt"
     fi
 
+    # A read an anonymous caller may also make still belongs to the login that sent a token: an
+    # expired one is refused with 401, so the client refreshes and the operator reads their own
+    # local natives instead of being told they do not exist.
+    profile_set "$hs" token 'stale.access.token'
+    local rt_before; rt_before=$(profile_get "$hs" refresh_token)
+    assert_json "local_auth.stale_read_refreshes" "$(jj "$db" "$hs" action show sys/lookup)" name lookup
+    assert_ne "local_auth.stale_read_rotated" "$rt_before" "$(profile_get "$hs" refresh_token)"
+    assert_contains "local_auth.http_read_invalid_rejected" "unauthenticated" \
+        "$(curl -s -H "Authorization: Bearer bad.token.here" "$(url "$db")/v1/actions?ref=sys/lookup" 2>/dev/null)"
+    assert_eq "local_auth.http_read_anonymous" "[]" \
+        "$(curl -s "$(url "$db")/v1/actions?ref=sys/lookup" 2>/dev/null)"
+
     j "$db" "$hs" auth logout >/dev/null 2>&1
     assert_eq "local_auth.logout_removes_token" "" "$(profile_get "$hs" token)"
     assert_fails "local_auth.post_logout_rejected" "login\|not logged in\|error" -- j "$db" "$hs" user me

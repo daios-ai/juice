@@ -3830,3 +3830,67 @@ func TestServeBuildsTheTransportWithTheConfiguredLimits(t *testing.T) {
 		t.Fatal("max_inbound_peers 2 accepted a third connection")
 	}
 }
+
+// TestServeOptionalReadsRefuseFailedCredentials pins the one credential rule on the three reads an
+// anonymous caller may make: only a request with no Authorization header is anonymous. Anything
+// else that fails is a 401 — an expired session read as a stranger hid every local native behind
+// "not found" and gave the client no 401 to refresh on. One case per branch of authenticate.
+func TestServeOptionalReadsRefuseFailedCredentials(t *testing.T) {
+	ctx := context.Background()
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	spec, price := sysSpec("lookup")
+	if err := ensureSysNative(ctx, k, "sys", spec, price); err != nil {
+		t.Fatal(err)
+	}
+	sys, _ := k.ReadUserByHandle(ctx, "sys")
+	lookup, err := k.ReadActionByOwnerName(ctx, sys.ID, "lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, valid := makeUser(t, k, "cred-reader")
+	suspendedID, suspended := makeUser(t, k, "cred-suspended")
+	if err := db.SuspendUser(ctx, suspendedID); err != nil {
+		t.Fatal(err)
+	}
+	cfg := kernel.DefaultConfig()
+	expired, err := kernel.IssueToken(sys.ID, "flow-test-secret", cfg.AuthIssuer, cfg.AuthAudience, -time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, header string
+		absent       bool
+		status       int
+	}{
+		{"absent", "", true, http.StatusOK},
+		{"valid", "Bearer " + valid, false, http.StatusOK},
+		{"empty", "", false, http.StatusUnauthorized},
+		{"not a bearer", "Basic " + valid, false, http.StatusUnauthorized},
+		{"expired", "Bearer " + expired, false, http.StatusUnauthorized},
+		{"suspended", "Bearer " + suspended, false, http.StatusUnauthorized},
+	}
+	for _, path := range []string{"/v1/actions?ref=sys/lookup", "/v1/actions?owner=sys&all=1", "/v1/actions/" + lookup.ID + "/ratings"} {
+		for _, c := range cases {
+			req, _ := http.NewRequest("GET", srv.URL+path, nil)
+			if !c.absent {
+				req.Header["Authorization"] = []string{c.header}
+			}
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			want, ratings := c.status, strings.HasSuffix(path, "/ratings")
+			if ratings && c.absent {
+				want = http.StatusForbidden // a local action's ratings are refused to a stranger (D11)
+			}
+			if resp.StatusCode != want {
+				t.Errorf("%s %s: status %d, want %d: %s", path, c.name, resp.StatusCode, want, body)
+			} else if want == http.StatusOK && !ratings && strings.Contains(string(body), lookup.ID) != !c.absent {
+				t.Errorf("%s %s: sys/lookup visibility wrong: %s", path, c.name, body)
+			}
+		}
+	}
+}

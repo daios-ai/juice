@@ -327,7 +327,7 @@ Required suites:
 
 ```text
 user creation; a taken handle and a duplicate owner/name give ErrInvalidInput with no SQL text, while kernel-minted unique keys and CHECK/FK violations stay ErrInternal; replay is unchanged
-authentication token validation
+a read open to anonymous callers refuses a bearer token that fails verification or names a suspended account; only a request with no Authorization header is anonymous
 user update description; change reflected in GET /v1/me
 user update password with correct current_password; old password rejected after change
 user update password with wrong current_password returns ErrUnauthenticated
