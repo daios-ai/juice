@@ -61,8 +61,8 @@ func capCallback(cb, capTok, path string, body any) (int, []byte) {
 
 // TestCapabilityComposition drives the whole feature end to end: a kind=http action, while its
 // call is in flight, uses the trace-scoped capability to subcall another action (POST /v1/call)
-// and to create a step (POST /v1/steps). It asserts the role law, funding from the trace, and the
-// step's parentage — the concrete C1–C8 acceptance.
+// and to create a task (POST /v1/tasks). It asserts the role law, funding from the trace, and the
+// task's parentage — the concrete C1–C8 acceptance.
 func TestCapabilityComposition(t *testing.T) {
 	srv, k, db := newCapabilityKernel(t)
 	ctx := context.Background()
@@ -80,22 +80,22 @@ func TestCapabilityComposition(t *testing.T) {
 	createEnabledPublicAction(t, srv, subTok, "sub", "http", leaf.URL, "leaf sub-action", 10)
 
 	// Capture what the composing endpoint's callbacks returned.
-	var callStatus, stepStatus int
-	var stepID string
+	var callStatus, taskStatus int
+	var taskID string
 	compose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cb := r.Header.Get(callbackHeader)
 		capTok := r.Header.Get(capabilityHeader)
 		// Subcall @sub/sub within our trace (juice.call ≡ /v1/call).
 		callStatus, _ = capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub@k/sub", "args": map[string]any{}})
-		// Create a step addressed to @caller (juice.step_create ≡ /v1/steps, no trace_id).
+		// Create a task addressed to @caller (juice.task_create ≡ /v1/tasks, no trace_id).
 		var sBody []byte
-		stepStatus, sBody = capCallback(cb, capTok, "/v1/steps", map[string]any{
+		taskStatus, sBody = capCallback(cb, capTok, "/v1/tasks", map[string]any{
 			"action": "sub@k/sub", "required_caller": "caller@k", "partial_args": map[string]any{},
 		})
 		var sv map[string]any
 		_ = json.Unmarshal(sBody, &sv)
 		if id, ok := sv["id"].(string); ok {
-			stepID = id
+			taskID = id
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
 	}))
@@ -107,8 +107,8 @@ func TestCapabilityComposition(t *testing.T) {
 	if callStatus != http.StatusOK {
 		t.Fatalf("/v1/call callback status = %d, want 200", callStatus)
 	}
-	if stepStatus != http.StatusCreated {
-		t.Fatalf("/v1/steps callback status = %d, want 201", stepStatus)
+	if taskStatus != http.StatusCreated {
+		t.Fatalf("/v1/tasks callback status = %d, want 201", taskStatus)
 	}
 
 	// Role law of the subcall: caller = the composing action's owner (§6/§9), target = sub owner,
@@ -136,24 +136,24 @@ func TestCapabilityComposition(t *testing.T) {
 		t.Errorf("subcall owner = %s, want %s (process owner)", sub.OwnerUserID, callerID)
 	}
 
-	// The step was created under the capability, parented to the composing action's trace and
+	// The task was created under the capability, parented to the composing action's trace and
 	// parked from it (§9/§10).
-	if stepID == "" {
-		t.Fatal("no step id returned from /v1/steps callback")
+	if taskID == "" {
+		t.Fatal("no task id returned from /v1/tasks callback")
 	}
-	step, err := db.ReadStep(ctx, stepID)
+	task, err := db.ReadTask(ctx, taskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if step.ParentTraceID == nil || *step.ParentTraceID != reply.TraceID {
-		t.Errorf("step parent_trace_id = %v, want %s (the composing action's trace)", step.ParentTraceID, reply.TraceID)
+	if task.ParentTraceID == nil || *task.ParentTraceID != reply.TraceID {
+		t.Errorf("task parent_trace_id = %v, want %s (the composing action's trace)", task.ParentTraceID, reply.TraceID)
 	}
-	if step.RequiredCallerUserID != callerID {
-		t.Errorf("step required_caller = %s, want %s", step.RequiredCallerUserID, callerID)
+	if task.RequiredCallerUserID != callerID {
+		t.Errorf("task required_caller = %s, want %s", task.RequiredCallerUserID, callerID)
 	}
 
 	// Funding from the trace: the composing call's price (100) bounded the subcall (10) and the
-	// step park (10); the remaining 80 is its taxable value added.
+	// task park (10); the remaining 80 is its taxable value added.
 	var comp *kernel.Transaction
 	for _, tx := range txs {
 		if tx.ActionName == "compose" {
@@ -164,7 +164,7 @@ func TestCapabilityComposition(t *testing.T) {
 		t.Fatal("no compose transaction")
 	}
 	if comp.Net+comp.Fee != 80 {
-		t.Errorf("compose taxable net+fee = %d, want 80 (100 − subcall 10 − step park 10)", comp.Net+comp.Fee)
+		t.Errorf("compose taxable net+fee = %d, want 80 (100 − subcall 10 − task park 10)", comp.Net+comp.Fee)
 	}
 }
 
@@ -229,12 +229,12 @@ func readAvailable(t *testing.T, db *store.DB, userID string) int64 {
 	return u.Available
 }
 
-// TestCapabilityStepCompleteIsTraceConfined proves the capability cannot complete a step outside
-// its own trace (§9 "no other trace"). The endpoint runs in ITS OWN process while a step addressed
+// TestCapabilityTaskCompleteIsTraceConfined proves the capability cannot complete a task outside
+// its own trace (§9 "no other trace"). The endpoint runs in ITS OWN process while a task addressed
 // to the same owner waits in a victim's process: without confinement, holding the capability would
-// fire that step — spending funds the victim committed, at a time the attacker chooses. The step
+// fire that task — spending funds the victim committed, at a time the attacker chooses. The task
 // stays waiting and the victim's balance is untouched.
-func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
+func TestCapabilityTaskCompleteIsTraceConfined(t *testing.T) {
 	srv, k, db := newCapabilityKernel(t)
 	ctx := context.Background()
 
@@ -243,35 +243,35 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 	giveCredits(t, k, provID, 1000)
 	giveCredits(t, k, victimID, 1000)
 
-	// A leaf the parked step will target, owned by the victim so its price is the victim's to spend.
+	// A leaf the parked task will target, owned by the victim so its price is the victim's to spend.
 	leaf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	}))
 	t.Cleanup(leaf.Close)
 	createEnabledPublicAction(t, srv, victimTok, "leaf", "http", leaf.URL, "victim leaf", 10)
 
-	// The victim's own composing action parks a step addressed to @prov, inside the VICTIM's process.
-	var victimStepID string
+	// The victim's own composing action parks a task addressed to @prov, inside the VICTIM's process.
+	var victimTaskID string
 	victimCompose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, body := capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader), "/v1/steps",
+		_, body := capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader), "/v1/tasks",
 			map[string]any{"action": "victim@k/leaf", "required_caller": "prov@k", "partial_args": map[string]any{}})
 		var sv map[string]any
 		_ = json.Unmarshal(body, &sv)
-		victimStepID, _ = sv["id"].(string)
+		victimTaskID, _ = sv["id"].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{"parked": true})
 	}))
 	t.Cleanup(victimCompose.Close)
 	createEnabledPublicAction(t, srv, victimTok, "park", "http", victimCompose.URL, "victim parker", 100)
 	runAction(t, srv, victimTok, "victim@k/park", map[string]any{})
-	if victimStepID == "" {
-		t.Fatal("setup: the victim's process did not park a step")
+	if victimTaskID == "" {
+		t.Fatal("setup: the victim's process did not park a task")
 	}
 
-	// @prov's own action, running in @prov's process, tries to complete that step with its capability.
+	// @prov's own action, running in @prov's process, tries to complete that task with its capability.
 	var completeStatus int
 	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		completeStatus, _ = capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader),
-			"/v1/steps/"+victimStepID+"/complete", map[string]any{"args": map[string]any{}})
+			"/v1/tasks/"+victimTaskID+"/complete", map[string]any{"args": map[string]any{}})
 		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
 	}))
 	t.Cleanup(attacker.Close)
@@ -283,12 +283,12 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 	if completeStatus != http.StatusForbidden {
 		t.Errorf("cross-trace capability completion: status = %d, want 403 (unauthorized)", completeStatus)
 	}
-	step, err := db.ReadStep(ctx, victimStepID)
+	task, err := db.ReadTask(ctx, victimTaskID)
 	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
+		t.Fatalf("ReadTask: %v", err)
 	}
-	if step.Status != kernel.StepWaiting {
-		t.Errorf("the victim's step must stay waiting, got %s", step.Status)
+	if task.Status != kernel.TaskWaiting {
+		t.Errorf("the victim's task must stay waiting, got %s", task.Status)
 	}
 	if after := readAvailable(t, db, victimID); after != before {
 		t.Errorf("the victim's balance moved: %d → %d", before, after)
@@ -299,13 +299,13 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 // authority (§9), so it must never reach the `--peer` completion path — that request is signed by the
 // whole kernel. The trap is that a capability request has no session caller, so an empty caller reads
 // as "kernel-level completion", the superuser form. An untrusted endpoint holding any valid
-// capability would then complete a kernel-addressed step on a peer with operator authority.
+// capability would then complete a kernel-addressed task on a peer with operator authority.
 // The assertion is that NOTHING is dispatched, not merely that the call errors.
 func TestCapabilityCannotDriveFederation(t *testing.T) {
 	srv, k, _ := newCapabilityKernel(t)
 
-	// A recording transport behind a real adapter: any federation dispatch shows up in lastStep.
-	f := &fakeFed{stepBody: json.RawMessage(`{"tx_id":"tx-peer"}`), stepStatus: 200}
+	// A recording transport behind a real adapter: any federation dispatch shows up in lastTask.
+	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-peer"}`), taskStatus: 200}
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
 	adapter := newFedAdapter(self, nil, nil)
 	adapter.SetTransport(f)
@@ -322,7 +322,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	var body []byte
 	compose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status, body = capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader),
-			"/v1/steps/"+uuid.New().String()+"/complete",
+			"/v1/tasks/"+uuid.New().String()+"/complete",
 			map[string]any{"peer": strangerKey, "args": map[string]any{}})
 		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
 	}))
@@ -334,8 +334,8 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	if status != http.StatusForbidden {
 		t.Errorf("capability + --peer: status = %d, want 403; body=%s", status, body)
 	}
-	if f.lastStep.Kind != "" {
-		t.Errorf("a capability must not reach federation at all; dispatched %+v", f.lastStep)
+	if f.lastTask.Kind != "" {
+		t.Errorf("a capability must not reach federation at all; dispatched %+v", f.lastTask)
 	}
 }
 

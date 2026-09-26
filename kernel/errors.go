@@ -111,7 +111,7 @@ func HTTPStatusFromCode(code string) int {
 	return ErrorFromCode(code).HTTP
 }
 
-// ErrStepNotClaimed marks a completion that never took the step: another completer already holds
+// ErrTaskNotClaimed marks a completion that never took the task: another completer already holds
 // it, or it was already resolved. It is a *cause* attached with Because(), not a new error code —
 // the outer error stays ErrInvalidState, so the wire status, KernelErrorCode, and the ErrorFromCode
 // table are all unchanged, while errors.Is can still tell "someone else got there first" apart from
@@ -119,7 +119,7 @@ func HTTPStatusFromCode(code string) int {
 // alone, so two sentinels sharing invalid_state are indistinguishable.
 //
 // Note the construction order: Wrap() drops the cause, so it must be Wrap(...).Because(...).
-var ErrStepNotClaimed = errors.New("step not claimed by this completion")
+var ErrTaskNotClaimed = errors.New("task not claimed by this completion")
 
 // Sentinel errors.
 var (
@@ -166,7 +166,7 @@ func GrantRequiredError(ref string) error {
 
 // PeerUnreachableError attributes an unreachable peer to that peer (§13): the reference in both the
 // message and Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer —
-// call dispatch, resolve, step, settlement — mints it here, so a client never has to infer who was
+// call dispatch, resolve, task, settlement — mints it here, so a client never has to infer who was
 // unreachable from what the user typed. The reference is a petname where the caller knows one and
 // the raw key otherwise (both name a kernel, §13); a call adds its refund clause on top.
 func PeerUnreachableError(ref string) *KernelError {

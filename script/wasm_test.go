@@ -102,10 +102,10 @@ func TestMemoryPages(t *testing.T) {
 type nilHost struct{}
 
 func (nilHost) Call(_ context.Context, _ string, _ []byte) ([]byte, error) { return nil, nil }
-func (nilHost) StepCreate(_ context.Context, _ []byte, _, _ string) (string, error) {
+func (nilHost) TaskCreate(_ context.Context, _ []byte, _, _ string) (string, error) {
 	return "", nil
 }
-func (nilHost) StepComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
+func (nilHost) TaskComplete(_ context.Context, _ string, _ []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }
 func (nilHost) Log(_ context.Context, _, _ string) error { return nil }
@@ -264,7 +264,7 @@ func TestExecuteConcurrent(t *testing.T) {
 	}
 }
 
-func TestHostModuleExportsStepCreate(t *testing.T) {
+func TestHostModuleExportsTaskCreate(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	builder := e.runtime.NewHostModuleBuilder("juice-test")
 	registerHostFunctions(builder)
@@ -274,12 +274,12 @@ func TestHostModuleExportsStepCreate(t *testing.T) {
 	}
 	defer mod.Close(context.Background())
 
-	if mod.ExportedFunctionDefinitions()["step_create"] == nil {
-		t.Fatal("expected host module to export step_create")
+	if mod.ExportedFunctionDefinitions()["task_create"] == nil {
+		t.Fatal("expected host module to export task_create")
 	}
 }
 
-func TestHostModuleExportsStepComplete(t *testing.T) {
+func TestHostModuleExportsTaskComplete(t *testing.T) {
 	e := New(Config{TimeoutMS: 5000, MemoryBytes: 4 * 1024 * 1024})
 	builder := e.runtime.NewHostModuleBuilder("juice-test2")
 	registerHostFunctions(builder)
@@ -289,7 +289,7 @@ func TestHostModuleExportsStepComplete(t *testing.T) {
 	}
 	defer mod.Close(context.Background())
 
-	if mod.ExportedFunctionDefinitions()["step_complete"] == nil {
-		t.Fatal("expected host module to export step_complete")
+	if mod.ExportedFunctionDefinitions()["task_complete"] == nil {
+		t.Fatal("expected host module to export task_complete")
 	}
 }

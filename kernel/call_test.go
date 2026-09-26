@@ -1222,12 +1222,12 @@ type failingCommitStore struct {
 	calls int
 }
 
-func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (f *failingCommitStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 	f.calls++
 	if f.calls > 0 {
 		return kernel.ErrInternal.Wrap("injected commit failure")
 	}
-	return f.Store.CommitCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, stepID)
+	return f.Store.CommitCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, taskID)
 }
 
 func TestCommitCallAtomicOnFailure(t *testing.T) {
@@ -1306,7 +1306,7 @@ func TestCallInvalidParentTraceDoesNotLockFunds(t *testing.T) {
 
 func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
 	// Even a process owner must not supply a parent trace from a different process
-	// on a non-step-completion call: doing so would mutate ancestor cost/latency
+	// on a non-task-completion call: doing so would mutate ancestor cost/latency
 	// in the foreign process (B1 fix).
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
@@ -1475,7 +1475,7 @@ func TestFailedCallReceiptChargeMatchesCommittedCharge(t *testing.T) {
 	if rErr != nil {
 		t.Fatalf("ReadReceiptByTxID: %v", rErr)
 	}
-	// Pure execution failure with no subcalls or steps: trace.available = gross at failure,
+	// Pure execution failure with no subcalls or tasks: trace.available = gross at failure,
 	// so refund = gross, charge = gross - refund = 0.
 	// This verifies the buildReceipt callback received the atomically-computed refund.
 	if receipt.Gross != tx.Gross {
@@ -1879,28 +1879,28 @@ func TestResolveLocalPrincipal(t *testing.T) {
 	}
 }
 
-// stepCreateHostExec drives the WASM host StepCreate with name references, proving the host
+// taskCreateHostExec drives the WASM host TaskCreate with name references, proving the host
 // resolves @owner/name and @handle just like juice.call (previously it required raw UUIDs).
-type stepCreateHostExec struct {
+type taskCreateHostExec struct {
 	requiredCaller string
 	action         string
-	stepID         string
+	taskID         string
 	err            error
 }
 
-func (e *stepCreateHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+func (e *taskCreateHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
 	return src, "fakehash", nil
 }
 
-func (e *stepCreateHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
-	e.stepID, e.err = host.StepCreate(ctx, []byte(`{"message":"hi"}`), e.requiredCaller, e.action)
+func (e *taskCreateHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	e.taskID, e.err = host.TaskCreate(ctx, []byte(`{"message":"hi"}`), e.requiredCaller, e.action)
 	if e.err != nil {
 		return nil, e.err
 	}
 	return []byte(`{"ok":true}`), nil
 }
 
-func TestHostStepCreateResolvesNames(t *testing.T) {
+func TestHostTaskCreateResolvesNames(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -1924,7 +1924,7 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exec := &stepCreateHostExec{requiredCaller: "bob@k", action: "bob@k/approve"}
+	exec := &taskCreateHostExec{requiredCaller: "bob@k", action: "bob@k/approve"}
 	k := newTestKernelWithScripts(st, exec)
 
 	_, tr := beginTestRun(t, st, alice.ID, orch)
@@ -1935,65 +1935,65 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 		t.Fatalf("run orchestrate: %v", err)
 	}
 	if exec.err != nil {
-		t.Fatalf("host StepCreate: %v", exec.err)
+		t.Fatalf("host TaskCreate: %v", exec.err)
 	}
 
-	step, err := st.ReadStep(ctx, exec.stepID)
+	task, err := st.ReadTask(ctx, exec.taskID)
 	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
+		t.Fatalf("ReadTask: %v", err)
 	}
-	if step.ActionID != approve.ID {
-		t.Errorf("action ref not resolved: got %s, want %s", step.ActionID, approve.ID)
+	if task.ActionID != approve.ID {
+		t.Errorf("action ref not resolved: got %s, want %s", task.ActionID, approve.ID)
 	}
-	if step.RequiredCallerUserID != bob.ID {
-		t.Errorf("required caller handle not resolved: got %s, want %s", step.RequiredCallerUserID, bob.ID)
+	if task.RequiredCallerUserID != bob.ID {
+		t.Errorf("required caller handle not resolved: got %s, want %s", task.RequiredCallerUserID, bob.ID)
 	}
-	if step.Status != kernel.StepWaiting {
-		t.Errorf("step status: got %s, want waiting", step.Status)
+	if task.Status != kernel.TaskWaiting {
+		t.Errorf("task status: got %s, want waiting", task.Status)
 	}
 }
 
-// stepCompleteHostExec drives the WASM host's juice.step_complete against a step the executing
+// taskCompleteHostExec drives the WASM host's juice.task_complete against a task the executing
 // trace did not park, recording what the host returned.
-type stepCompleteHostExec struct {
-	stepID string
+type taskCompleteHostExec struct {
+	taskID string
 	err    error
 }
 
-func (e *stepCompleteHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
+func (e *taskCompleteHostExec) Compile(_ context.Context, src []byte) ([]byte, string, error) {
 	return src, "fakehash", nil
 }
 
-func (e *stepCompleteHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
-	if _, e.err = host.StepComplete(ctx, e.stepID, []byte(`{}`)); e.err != nil {
+func (e *taskCompleteHostExec) Execute(ctx context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	if _, e.err = host.TaskComplete(ctx, e.taskID, []byte(`{}`)); e.err != nil {
 		return nil, e.err
 	}
 	return []byte(`{"ok":true}`), nil
 }
 
-// TestHostStepCompleteIsTraceConfined: a script resumes only a step its own trace parked (§10). The
+// TestHostTaskCompleteIsTraceConfined: a script resumes only a task its own trace parked (§10). The
 // script runs as its action's owner, so being the required caller would otherwise let any execution
-// of that action fire a step living in an unrelated process — the WASM half of the capability rule.
-func TestHostStepCompleteIsTraceConfined(t *testing.T) {
+// of that action fire a task living in an unrelated process — the WASM half of the capability rule.
+func TestHostTaskCompleteIsTraceConfined(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
 	victim := setupUser(t, st, "hsc-victim", 1000)
 	mallory := setupUser(t, st, "hsc-mallory", 1000)
 
-	// The step's target and the script are both mallory's, so the script's owner IS the required
+	// The task's target and the script are both mallory's, so the script's owner IS the required
 	// caller: only the trace check can refuse this.
 	target := setupWasmAction(t, st, mallory.ID, "hsc-target", "", 0)
 	script := setupWasmAction(t, st, mallory.ID, "hsc-script", "", 0)
 
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
-	exec := &stepCompleteHostExec{}
+	exec := &taskCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, kernel.Principal{AccountID: mallory.ID})
+	task, err := k.CreateTask(ctx, victimTrace.ID, target.ID, nil, kernel.Principal{AccountID: mallory.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	exec.stepID = step.ID
+	exec.taskID = task.ID
 
 	_, tr := beginTestRun(t, st, mallory.ID, script)
 	_, callErr := k.TestCall(ctx, kernel.TestCallRequest{
@@ -2004,10 +2004,10 @@ func TestHostStepCompleteIsTraceConfined(t *testing.T) {
 		t.Fatal("the call must fail: the host completion is refused")
 	}
 	if !errors.Is(exec.err, kernel.ErrUnauthorized) {
-		t.Fatalf("host StepComplete across traces must be ErrUnauthorized, got %v", exec.err)
+		t.Fatalf("host TaskComplete across traces must be ErrUnauthorized, got %v", exec.err)
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
-		t.Errorf("the step must stay waiting, got %s", s.Status)
+	if s, _ := st.ReadTask(ctx, task.ID); s.Status != kernel.TaskWaiting {
+		t.Errorf("the task must stay waiting, got %s", s.Status)
 	}
 }
 

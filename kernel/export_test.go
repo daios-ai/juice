@@ -10,7 +10,7 @@ import (
 )
 
 // Test-only seam (the standard export_test.go idiom): the call engine and its request are private,
-// because most orchestration modes — a pre-funded trace, a step id, an inbound idempotency record —
+// because most orchestration modes — a pre-funded trace, a task id, an inbound idempotency record —
 // are only valid when the kernel itself supplies them (§4). The package's external tests still need
 // to drive those modes directly, so they reach them here rather than through an exported surface a
 // client could misuse.
@@ -20,7 +20,7 @@ type TestCallRequest struct {
 	Action          *Action
 	ActionRef       string
 	Args            map[string]any
-	StepID          string
+	TaskID          string
 	ExistingTraceID string
 	// TargetUserID + ActionName name the action by owner id and stored name, a test convenience
 	// that reads the row directly: production names an action by address or id alone.
@@ -45,7 +45,7 @@ func (k *Kernel) TestCall(ctx context.Context, req TestCallRequest) (*CallReply,
 		}
 	}
 	return k.call(ctx, callRequest{CallerID: req.CallerID, ParentTraceID: req.ParentTraceID, Action: req.Action,
-		ActionRef: req.ActionRef, Args: req.Args, StepID: req.StepID, ExistingTraceID: req.ExistingTraceID})
+		ActionRef: req.ActionRef, Args: req.Args, TaskID: req.TaskID, ExistingTraceID: req.ExistingTraceID})
 }
 
 // DispatchRecordForTest builds the record beginRun freezes on a dispatched trace: the rates, the

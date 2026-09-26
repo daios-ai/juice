@@ -313,7 +313,7 @@ func (c *Chain) Destination(registered string) (string, error) {
 	return strings.ToLower(addr.Hex()), nil
 }
 
-// Pay presents one payment. It uses the rail's separate steps rather than its combined verb: when
+// Pay presents one payment. It uses the rail's separate tasks rather than its combined verb: when
 // fuel is short it must sign nothing and say so, so that the kernel can record the refill it is
 // about to ask for before any refill exists.
 func (c *Chain) Pay(ctx context.Context, id, to string, amount int64) (kernel.RailOutcome, error) {

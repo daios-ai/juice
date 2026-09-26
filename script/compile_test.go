@@ -104,7 +104,7 @@ func TestSDKEmbedded(t *testing.T) {
 }
 
 // TestSDKContract pins the author-facing contract: the SDK owns the entry point
-// (main + run) and delegates to an author-supplied Handle, exposes the call/step/log
+// (main + run) and delegates to an author-supplied Handle, exposes the call/task/log
 // helpers, and no longer references the removed juice.emit host import.
 func TestSDKContract(t *testing.T) {
 	must := []string{
@@ -112,8 +112,8 @@ func TestSDKContract(t *testing.T) {
 		"func run(",
 		"Handle(in)", // run delegates to author's Handle
 		"func JuiceCall(",
-		"func JuiceStepCreate(",
-		"func JuiceStepComplete(",
+		"func JuiceTaskCreate(",
+		"func JuiceTaskComplete(",
 		"func JuiceLog(",
 		"//export alloc",
 		"func main()",
@@ -170,7 +170,7 @@ func Handle(in map[string]any) (map[string]any, error) {
 	if !hasAlloc || !hasRun {
 		t.Errorf("artifact must export alloc and run; exports=%v", exports)
 	}
-	allowed := map[string]bool{"call": true, "step_create": true, "step_complete": true, "log": true}
+	allowed := map[string]bool{"call": true, "task_create": true, "task_complete": true, "log": true}
 	for _, imp := range imports {
 		if imp.Module == "wasi_snapshot_preview1" {
 			continue
@@ -295,10 +295,10 @@ func (h *reentrantHost) Call(ctx context.Context, _ string, _ []byte) ([]byte, e
 	// Re-enter Execute on a different artifact; the reply bytes are echoed back.
 	return h.e.Execute(ctx, echoWASM, h.reply, nilHost{})
 }
-func (h *reentrantHost) StepCreate(context.Context, []byte, string, string) (string, error) {
+func (h *reentrantHost) TaskCreate(context.Context, []byte, string, string) (string, error) {
 	return "", nil
 }
-func (h *reentrantHost) StepComplete(context.Context, string, []byte) ([]byte, error) {
+func (h *reentrantHost) TaskComplete(context.Context, string, []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }
 func (h *reentrantHost) Log(context.Context, string, string) error { return nil }
@@ -307,10 +307,10 @@ func (h *reentrantHost) Log(context.Context, string, string) error { return nil 
 type sdkTestHost struct{}
 
 func (sdkTestHost) Call(context.Context, string, []byte) ([]byte, error) { return []byte("{}"), nil }
-func (sdkTestHost) StepCreate(context.Context, []byte, string, string) (string, error) {
+func (sdkTestHost) TaskCreate(context.Context, []byte, string, string) (string, error) {
 	return "", nil
 }
-func (sdkTestHost) StepComplete(context.Context, string, []byte) ([]byte, error) {
+func (sdkTestHost) TaskComplete(context.Context, string, []byte) ([]byte, error) {
 	return []byte("{}"), nil
 }
 func (sdkTestHost) Log(context.Context, string, string) error { return nil }

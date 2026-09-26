@@ -40,11 +40,11 @@ var (
 //go:wasmimport juice call
 func hostCall(namePtr, nameLen, argsPtr, argsLen uint32) uint64
 
-//go:wasmimport juice step_create
-func hostStepCreate(partialPtr, partialLen, callerPtr, callerLen, actionPtr, actionLen uint32) uint64
+//go:wasmimport juice task_create
+func hostTaskCreate(partialPtr, partialLen, callerPtr, callerLen, actionPtr, actionLen uint32) uint64
 
-//go:wasmimport juice step_complete
-func hostStepComplete(stepPtr, stepLen, inputPtr, inputLen uint32) uint64
+//go:wasmimport juice task_complete
+func hostTaskComplete(taskPtr, taskLen, inputPtr, inputLen uint32) uint64
 
 //go:wasmimport juice log
 func hostLog(lvlPtr, lvlLen, msgPtr, msgLen uint32)
@@ -92,15 +92,15 @@ func JuiceCall(action string, args []byte) ([]byte, error) {
 	return out, nil
 }
 
-// JuiceStepCreate creates a waiting step bound to the current process and trace,
-// returning the new step id. partialArgs is JSON; requiredCaller is the allowed
+// JuiceTaskCreate creates a waiting task bound to the current process and trace,
+// returning the new task id. partialArgs is JSON; requiredCaller is the allowed
 // completer as handle@kernel and actionID is the onward action as owner@kernel/name
 // (or id) — resolved kernel-side just like JuiceCall.
-func JuiceStepCreate(partialArgs []byte, requiredCaller, actionID string) string {
+func JuiceTaskCreate(partialArgs []byte, requiredCaller, actionID string) string {
 	pPtr, pLen := _ptrLen(partialArgs)
 	cPtr, cLen := _strPtrLen(requiredCaller)
 	aPtr, aLen := _strPtrLen(actionID)
-	out := _unpack(hostStepCreate(pPtr, pLen, cPtr, cLen, aPtr, aLen))
+	out := _unpack(hostTaskCreate(pPtr, pLen, cPtr, cLen, aPtr, aLen))
 	var id string
 	if out != nil {
 		_ = json.Unmarshal(out, &id)
@@ -108,12 +108,12 @@ func JuiceStepCreate(partialArgs []byte, requiredCaller, actionID string) string
 	return id
 }
 
-// JuiceStepComplete completes a waiting step with JSON input and returns the
+// JuiceTaskComplete completes a waiting task with JSON input and returns the
 // resumed call's JSON reply.
-func JuiceStepComplete(stepID string, input []byte) []byte {
-	sPtr, sLen := _strPtrLen(stepID)
+func JuiceTaskComplete(taskID string, input []byte) []byte {
+	sPtr, sLen := _strPtrLen(taskID)
 	iPtr, iLen := _ptrLen(input)
-	out := _unpack(hostStepComplete(sPtr, sLen, iPtr, iLen))
+	out := _unpack(hostTaskComplete(sPtr, sLen, iPtr, iLen))
 	if out == nil {
 		return []byte("{}")
 	}
@@ -144,7 +144,7 @@ func mustMarshal(v any) []byte {
 // Authors implement Handle; they never touch run, alloc, or the wasm ABI.
 //
 //	func Handle(in map[string]any) (map[string]any, error) {
-//	    // your logic; call JuiceCall / JuiceStepCreate / JuiceLog as needed
+//	    // your logic; call JuiceCall / JuiceTaskCreate / JuiceLog as needed
 //	    return map[string]any{"result": in["x"]}, nil
 //	}
 //

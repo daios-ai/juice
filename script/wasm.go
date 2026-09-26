@@ -226,7 +226,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder) {
 			[]api.ValueType{},
 		).Export("log")
 
-	// juice.step_create(partialArgsPtr, partialArgsLen,
+	// juice.task_create(partialArgsPtr, partialArgsLen,
 	//                   requiredCallerPtr, requiredCallerLen, actionIDPtr, actionIDLen) -> packedI64
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
@@ -236,27 +236,27 @@ func registerHostFunctions(b wazero.HostModuleBuilder) {
 				partialArgs, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
 				requiredCaller, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
 				actionID, _ := mem.Read(uint32(stack[4]), uint32(stack[5]))
-				stepID, err := host.StepCreate(ctx, partialArgs, string(requiredCaller), string(actionID))
+				taskID, err := host.TaskCreate(ctx, partialArgs, string(requiredCaller), string(actionID))
 				if err != nil {
 					panic(err.Error())
 				}
-				ptrs := writeToMem(ctx, mod, []byte(`"`+stepID+`"`))
+				ptrs := writeToMem(ctx, mod, []byte(`"`+taskID+`"`))
 				stack[0] = ptrs[0]<<32 | ptrs[1]
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32,
 				api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{api.ValueTypeI64},
-		).Export("step_create")
+		).Export("task_create")
 
-	// juice.step_complete(stepIDPtr, stepIDLen, inputPtr, inputLen) -> packedI64
+	// juice.task_complete(taskIDPtr, taskIDLen, inputPtr, inputLen) -> packedI64
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(
 			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 				host := hostFromCtx(ctx)
 				mem := mod.Memory()
-				stepID, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
+				taskID, _ := mem.Read(uint32(stack[0]), uint32(stack[1]))
 				input, _ := mem.Read(uint32(stack[2]), uint32(stack[3]))
-				result, err := host.StepComplete(ctx, string(stepID), input)
+				result, err := host.TaskComplete(ctx, string(taskID), input)
 				if err != nil {
 					panic(err.Error())
 				}
@@ -265,7 +265,7 @@ func registerHostFunctions(b wazero.HostModuleBuilder) {
 			}),
 			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32, api.ValueTypeI32},
 			[]api.ValueType{api.ValueTypeI64},
-		).Export("step_complete")
+		).Export("task_complete")
 }
 
 // writeToMem writes data into the module's memory via `alloc` and returns (ptr, len).

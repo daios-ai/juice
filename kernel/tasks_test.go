@@ -46,28 +46,28 @@ func setupWasmAction(t *testing.T, st kernel.Store, ownerID, name, inputSchemaJS
 	return a
 }
 
-// setupStep creates a step in the store directly (bypassing kernel auth).
-func setupStep(t *testing.T, st kernel.Store, parentTraceID, actionID, requiredCallerID string, partialArgs json.RawMessage) *kernel.Step {
+// setupTask creates a task in the store directly (bypassing kernel auth).
+func setupTask(t *testing.T, st kernel.Store, parentTraceID, actionID, requiredCallerID string, partialArgs json.RawMessage) *kernel.Task {
 	t.Helper()
 	if len(partialArgs) == 0 {
 		partialArgs = json.RawMessage("{}")
 	}
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID:                   uuid.New().String(),
 		ParentTraceID:        &parentTraceID,
 		RequiredCallerUserID: requiredCallerID,
 		ActionID:             actionID,
 		PartialArgs:          partialArgs,
-		Status:               kernel.StepWaiting,
+		Status:               kernel.TaskWaiting,
 		CreatedAt:            time.Now().UTC(),
 	}
-	if err := st.CreateStep(context.Background(), step); err != nil {
+	if err := st.CreateTask(context.Background(), task); err != nil {
 		t.Fatal(err)
 	}
-	return step
+	return task
 }
 
-func TestStepCreateReturnsWaitingStep(t *testing.T) {
+func TestTaskCreateReturnsWaitingTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -78,22 +78,22 @@ func TestStepCreateReturnsWaitingStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	if step.Status != kernel.StepWaiting {
-		t.Errorf("expected status=waiting, got %s", step.Status)
+	if task.Status != kernel.TaskWaiting {
+		t.Errorf("expected status=waiting, got %s", task.Status)
 	}
-	if step.ID == "" {
-		t.Error("expected non-empty step ID")
+	if task.ID == "" {
+		t.Error("expected non-empty task ID")
 	}
-	if step.RequiredCallerUserID != caller.ID {
+	if task.RequiredCallerUserID != caller.ID {
 		t.Errorf("required_caller_user_id mismatch")
 	}
 }
 
-func TestStepCompleteMergesArgs(t *testing.T) {
+func TestTaskCompleteMergesArgs(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"merged":true}`})
 	ctx := context.Background()
@@ -105,48 +105,48 @@ func TestStepCompleteMergesArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"from_partial":"A","shared":"partial-val"}`)
-	step, err := k.CreateStep(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	// input overrides "shared" key
 	input := json.RawMessage(`{"from_input":"B","shared":"input-val"}`)
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, input)
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, input)
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 	if reply == nil || reply.TxID == "" {
 		t.Error("expected TxID in reply")
 	}
 }
 
-func TestStepCompleteInputValidatedAgainstInputSchema(t *testing.T) {
+func TestTaskCompleteInputValidatedAgainstInputSchema(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "schema-owner", 500)
 	caller := setupUser(t, st, "schema-caller", 0)
-	// Action carries the input schema; CompleteStep validates against it.
+	// Action carries the input schema; CompleteTask validates against it.
 	action := setupWasmAction(t, st, owner.ID, "schema-action",
 		`{"type":"object","properties":{"required_field":{"type":"string"}},"required":["required_field"]}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	// input missing required_field → should be rejected
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Errorf("expected ErrSchemaViolation for schema violation, got %v", err)
 	}
 }
 
-func TestStepCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
+func TestTaskCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -158,23 +158,23 @@ func TestStepCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: rightCaller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: rightCaller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, wrongCaller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, wrongCaller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for wrong caller, got %v", err)
 	}
 }
 
-// TestCompleteStepInTraceIsTraceConfined: in-execution completion (the HTTP capability and the WASM
+// TestCompleteTaskInTraceIsTraceConfined: in-execution completion (the HTTP capability and the WASM
 // host) is confined to the trace that authorized it (§9 "no other trace"). Being the required caller
-// is not enough — otherwise a capability minted for one process would fire steps parked in another
+// is not enough — otherwise a capability minted for one process would fire tasks parked in another
 // user's process, spending funds that user committed. The same caller completing through its own
-// trace still succeeds, and the session path (CompleteStep) is untouched.
-func TestCompleteStepInTraceIsTraceConfined(t *testing.T) {
+// trace still succeeds, and the session path (CompleteTask) is untouched.
+func TestCompleteTaskInTraceIsTraceConfined(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -183,31 +183,31 @@ func TestCompleteStepInTraceIsTraceConfined(t *testing.T) {
 	mallory := setupUser(t, st, "confine-mallory", 500)
 	action := setupWasmAction(t, st, victim.ID, "confine-action", "", 0)
 
-	// A step in VICTIM's process, addressed to mallory.
+	// A task in VICTIM's process, addressed to mallory.
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
-	step, err := k.CreateStep(ctx, victimTrace.ID, action.ID, nil, kernel.Principal{AccountID: mallory.ID})
+	task, err := k.CreateTask(ctx, victimTrace.ID, action.ID, nil, kernel.Principal{AccountID: mallory.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 	// A trace of mallory's own, standing in for the one a capability would name.
 	_, mallorysTrace := setupOrphanTrace(t, st, mallory.ID, mallory.ID, mallory.ID)
 
-	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, mallorysTrace.ID, step.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("a foreign trace must not complete the step, got %v", err)
+	if _, err := k.CompleteTaskInTrace(ctx, mallory.ID, mallorysTrace.ID, task.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("a foreign trace must not complete the task, got %v", err)
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
-		t.Errorf("a refused completion must leave the step waiting, got %s", s.Status)
+	if s, _ := st.ReadTask(ctx, task.ID); s.Status != kernel.TaskWaiting {
+		t.Errorf("a refused completion must leave the task waiting, got %s", s.Status)
 	}
-	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, "", step.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.CompleteTaskInTrace(ctx, mallory.ID, "", task.ID, json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("an empty authorizing trace must be refused, got %v", err)
 	}
-	// The authorizing trace IS the step's parent: ordinary in-execution completion still works.
-	if _, err := k.CompleteStepInTrace(ctx, mallory.ID, victimTrace.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+	// The authorizing trace IS the task's parent: ordinary in-execution completion still works.
+	if _, err := k.CompleteTaskInTrace(ctx, mallory.ID, victimTrace.ID, task.ID, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("completion from the parking trace must succeed, got %v", err)
 	}
 }
 
-func TestStepCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
+func TestTaskCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -218,24 +218,24 @@ func TestStepCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	// Complete it once
-	if _, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("first CompleteStep: %v", err)
+	if _, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("first CompleteTask: %v", err)
 	}
 
 	// Try again — should be done now
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState for done step, got %v", err)
+		t.Errorf("expected ErrInvalidState for done task, got %v", err)
 	}
 }
 
-func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
+func TestTaskCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	st := newTestStore(t)
 	// Action runs but always fails at execution time — CommitFailedCall fires, creating a failure tx.
 	k := newTestKernelWithScripts(st, &fakeScriptExec{err: kernel.ErrExecutionFailed.Wrap("simulated failure")})
@@ -249,27 +249,27 @@ func TestStepCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err == nil {
-		t.Fatal("expected CompleteStep to return error on action failure")
+		t.Fatal("expected CompleteTask to return error on action failure")
 	}
 
 	// Requirements: Call completion (success or failure) atomically records status=done + tx_id.
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("expected step.status=done after execution failure, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("expected task.status=done after execution failure, got %s", got.Status)
 	}
 	if got.TxID == nil {
 		t.Error("expected tx_id to be set after execution failure")
 	}
 }
 
-func TestStepTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
+func TestTaskTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -280,29 +280,29 @@ func TestStepTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
 		t.Errorf("expected status=done, got %s", got.Status)
 	}
 	if got.TxID == nil {
-		t.Fatal("expected tx_id to be set after CompleteStep")
+		t.Fatal("expected tx_id to be set after CompleteTask")
 	}
 	if *got.TxID != reply.TxID {
-		t.Errorf("step.tx_id=%q, reply.TxID=%q — mismatch", *got.TxID, reply.TxID)
+		t.Errorf("task.tx_id=%q, reply.TxID=%q — mismatch", *got.TxID, reply.TxID)
 	}
 }
 
-func TestStepCompletionTraceParentTraceID(t *testing.T) {
+func TestTaskCompletionTraceParentTraceID(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -315,23 +315,23 @@ func TestStepCompletionTraceParentTraceID(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	parentTraceID := orphan.ID
 
-	step, err := k.CreateStep(ctx, parentTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, parentTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// ParentTraceID stored on step
-	if step.ParentTraceID == nil || *step.ParentTraceID != parentTraceID {
-		t.Errorf("expected ParentTraceID=%q, got %v", parentTraceID, step.ParentTraceID)
+	// ParentTraceID stored on task
+	if task.ParentTraceID == nil || *task.ParentTraceID != parentTraceID {
+		t.Errorf("expected ParentTraceID=%q, got %v", parentTraceID, task.ParentTraceID)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 }
 
-func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
+func TestCanListTaskProcessOwnerSeesOwnTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -342,27 +342,27 @@ func TestCanListStepProcessOwnerSeesOwnStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, owner.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, owner.ID, "", "", 50, 0)
 	if err != nil {
-		t.Fatalf("ListSteps: %v", err)
+		t.Fatalf("ListTasks: %v", err)
 	}
 	found := false
-	for _, s := range steps {
-		if s.ID == step.ID {
+	for _, s := range tasks {
+		if s.ID == task.ID {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("process owner should see step in ListSteps")
+		t.Error("process owner should see task in ListTasks")
 	}
 }
 
-func TestCanListStepRequiredCallerSeesStep(t *testing.T) {
+func TestCanListTaskRequiredCallerSeesTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -373,27 +373,27 @@ func TestCanListStepRequiredCallerSeesStep(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, caller.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, caller.ID, "", "", 50, 0)
 	if err != nil {
-		t.Fatalf("ListSteps by caller: %v", err)
+		t.Fatalf("ListTasks by caller: %v", err)
 	}
 	found := false
-	for _, s := range steps {
-		if s.ID == step.ID {
+	for _, s := range tasks {
+		if s.ID == task.ID {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("required_caller_user_id should see step in ListSteps")
+		t.Error("required_caller_user_id should see task in ListTasks")
 	}
 }
 
-func TestCanListStepUnrelatedUserDenied(t *testing.T) {
+func TestCanListTaskUnrelatedUserDenied(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -405,55 +405,55 @@ func TestCanListStepUnrelatedUserDenied(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	steps, err := k.ListSteps(ctx, unrelated.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, unrelated.ID, "", "", 50, 0)
 	if err != nil {
-		t.Fatalf("ListSteps for unrelated: %v", err)
+		t.Fatalf("ListTasks for unrelated: %v", err)
 	}
-	for _, s := range steps {
-		if s.ID == step.ID {
-			t.Error("unrelated user should not see step in ListSteps")
+	for _, s := range tasks {
+		if s.ID == task.ID {
+			t.Error("unrelated user should not see task in ListTasks")
 		}
 	}
 }
 
-func TestCanReadStepSameRulesAsCanListStep(t *testing.T) {
+func TestCanReadTaskSameRulesAsCanListTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "read-step-owner", 500)
-	caller := setupUser(t, st, "read-step-caller", 0)
-	unrelated := setupUser(t, st, "read-step-unrelated", 0)
-	action := setupLocalAction(t, st, owner.ID, "read-step-action", 0)
+	owner := setupUser(t, st, "read-task-owner", 500)
+	caller := setupUser(t, st, "read-task-caller", 0)
+	unrelated := setupUser(t, st, "read-task-unrelated", 0)
+	action := setupLocalAction(t, st, owner.ID, "read-task-action", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	// owner can read
-	if _, err := k.ReadStep(ctx, owner.ID, step.ID); err != nil {
-		t.Errorf("owner ReadStep: %v", err)
+	if _, err := k.ReadTask(ctx, owner.ID, task.ID); err != nil {
+		t.Errorf("owner ReadTask: %v", err)
 	}
 	// caller can read
-	if _, err := k.ReadStep(ctx, caller.ID, step.ID); err != nil {
-		t.Errorf("caller ReadStep: %v", err)
+	if _, err := k.ReadTask(ctx, caller.ID, task.ID); err != nil {
+		t.Errorf("caller ReadTask: %v", err)
 	}
 	// unrelated cannot read
-	_, err = k.ReadStep(ctx, unrelated.ID, step.ID)
+	_, err = k.ReadTask(ctx, unrelated.ID, task.ID)
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized for unrelated user, got %v", err)
 	}
 }
 
-func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
+func TestBootstrapResetsRunningTasksToWaiting(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -464,37 +464,37 @@ func TestBootstrapResetsRunningStepsToWaiting(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, _ := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, _ := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 
-	// Manually claim the step via BeginStepCall to simulate a crash mid-execution (step running, no tx).
-	stepTrace := &kernel.Trace{
+	// Manually claim the task via BeginTaskCall to simulate a crash mid-execution (task running, no tx).
+	taskTrace := &kernel.Trace{
 		ID:        uuid.New().String(),
 		ProcessID: p.ID,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := st.BeginStepCall(ctx, step.ID, stepTrace); err != nil {
-		t.Fatalf("BeginStepCall: %v", err)
+	if err := st.BeginTaskCall(ctx, task.ID, taskTrace); err != nil {
+		t.Fatalf("BeginTaskCall: %v", err)
 	}
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepRunning {
-		t.Fatalf("expected running after BeginStepCall, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskRunning {
+		t.Fatalf("expected running after BeginTaskCall, got %s", got.Status)
 	}
 
 	// The store transition startup recovery drives in phase B (§5) restores it to waiting.
 	// Recovery through Kernel.Recover is covered end-to-end by
-	// TestRecoverReparkEmptyStepCompletionTrace, which supplies a settled parent trace;
+	// TestRecoverReparkEmptyTaskCompletionTrace, which supplies a settled parent trace;
 	// this fixture's parent is deliberately orphaned, so Recover would fail it and cancel
-	// the step instead — the very behaviour TestRecoverWithOrphanParentAndPendingChild pins.
-	if err := st.ResetRunningSteps(ctx); err != nil {
-		t.Fatalf("ResetRunningSteps: %v", err)
+	// the task instead — the very behaviour TestRecoverWithOrphanParentAndPendingChild pins.
+	if err := st.ResetRunningTasks(ctx); err != nil {
+		t.Fatalf("ResetRunningTasks: %v", err)
 	}
-	got, _ = st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepWaiting {
+	got, _ = st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskWaiting {
 		t.Errorf("expected waiting after recovery, got %s", got.Status)
 	}
 }
 
-func TestWaitingStepOnClosedProcessIsNonCompletable(t *testing.T) {
+func TestWaitingTaskOnClosedProcessIsNonCompletable(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -505,31 +505,31 @@ func TestWaitingStepOnClosedProcessIsNonCompletable(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// Close the process — waiting step must become cancelled.
+	// Close the process — waiting task must become cancelled.
 	if err := k.EndProcess(ctx, owner.ID, p.ID); err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
-	updated, err := k.ReadStep(ctx, owner.ID, step.ID)
+	updated, err := k.ReadTask(ctx, owner.ID, task.ID)
 	if err != nil {
-		t.Fatalf("ReadStep after EndProcess: %v", err)
+		t.Fatalf("ReadTask after EndProcess: %v", err)
 	}
-	if updated.Status != kernel.StepCancelled {
+	if updated.Status != kernel.TaskCancelled {
 		t.Errorf("expected status cancelled, got %s", updated.Status)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState for cancelled step, got %v", err)
+		t.Errorf("expected ErrInvalidState for cancelled task, got %v", err)
 	}
 }
 
-func TestStepWithoutTxIDIsNeverDone(t *testing.T) {
+func TestTaskWithoutTxIDIsNeverDone(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -540,30 +540,30 @@ func TestStepWithoutTxIDIsNeverDone(t *testing.T) {
 	// Use a real trace (FK constraint) — orphan trace gives us a valid parent.
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID:                   uuid.New().String(),
 		ParentTraceID:        &trID,
 		RequiredCallerUserID: caller.ID,
 		ActionID:             action.ID,
 		PartialArgs:          json.RawMessage("{}"),
-		Status:               kernel.StepWaiting,
+		Status:               kernel.TaskWaiting,
 		CreatedAt:            time.Now().UTC(),
 	}
 
-	if err := st.CreateStep(ctx, step); err != nil {
+	if err := st.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
+	got, _ := st.ReadTask(ctx, task.ID)
 	if got.TxID != nil {
-		t.Error("new step should have nil tx_id")
+		t.Error("new task should have nil tx_id")
 	}
-	if got.Status == kernel.StepDone {
-		t.Error("step without tx_id must not be done")
+	if got.Status == kernel.TaskDone {
+		t.Error("task without tx_id must not be done")
 	}
 }
 
-func TestStepCompletionTraceCrossProcessParentRef(t *testing.T) {
+func TestTaskCompletionTraceCrossProcessParentRef(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -572,21 +572,21 @@ func TestStepCompletionTraceCrossProcessParentRef(t *testing.T) {
 	caller := setupUser(t, st, "crossproc-caller", 0)
 	action := setupWasmAction(t, st, owner.ID, "crossproc-action", "", 0)
 
-	// Use an orphan trace as the "foreign" parent — simulates a step parked during an active call.
+	// Use an orphan trace as the "foreign" parent — simulates a task parked during an active call.
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	foreignTraceID := orphan.ID
 
-	step, err := k.CreateStep(ctx, foreignTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, foreignTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	if step.ParentTraceID == nil || *step.ParentTraceID != foreignTraceID {
-		t.Errorf("parent_trace_id not stored correctly: %v", step.ParentTraceID)
+	if task.ParentTraceID == nil || *task.ParentTraceID != foreignTraceID {
+		t.Errorf("parent_trace_id not stored correctly: %v", task.ParentTraceID)
 	}
 
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 	if reply.TxID == "" {
 		t.Error("expected TxID in reply")
@@ -605,26 +605,26 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"key":"from-partial","other":"base"}`)
-	step, _ := k.CreateStep(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
+	task, _ := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
 
 	// input's "key" should win over partial's "key"
 	input := json.RawMessage(`{"key":"from-input"}`)
-	_, err := k.CompleteStep(ctx, caller.ID, step.ID, input)
+	_, err := k.CompleteTask(ctx, caller.ID, task.ID, input)
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("step should be done, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("task should be done, got %s", got.Status)
 	}
 }
 
-// TestStepCompleteRejectsOverrideOfBoundKeyAllBound verifies that when partial_args binds every
+// TestTaskCompleteRejectsOverrideOfBoundKeyAllBound verifies that when partial_args binds every
 // declared property (so the derived allowed schema has empty properties), the completer cannot
 // supply a key that overwrites a creator-fixed value. The completion is rejected before any state
-// mutation: the step stays waiting and no transaction is recorded (§10, allowed-input rule).
-func TestStepCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
+// mutation: the task stays waiting and no transaction is recorded (§10, allowed-input rule).
+func TestTaskCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -636,19 +636,19 @@ func TestStepCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{"x":"attacker"}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{"x":"attacker"}`))
 	if !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("expected ErrSchemaViolation for overriding a bound key, got %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepWaiting {
-		t.Errorf("step should remain waiting after rejected completion, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskWaiting {
+		t.Errorf("task should remain waiting after rejected completion, got %s", got.Status)
 	}
 	if got.TxID != nil {
 		t.Errorf("rejected completion must not record a transaction, got tx_id %v", *got.TxID)
@@ -659,10 +659,10 @@ func TestStepCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 	}
 }
 
-// TestStepCompleteAllowsDisjointInputAllBound is the negative control for the all-bound guard:
+// TestTaskCompleteAllowsDisjointInputAllBound is the negative control for the all-bound guard:
 // with every property bound and an empty input, the completion still succeeds. The guard fires
 // only on actual key collisions/undeclared keys, never on a no-extra-input completion.
-func TestStepCompleteAllowsDisjointInputAllBound(t *testing.T) {
+func TestTaskCompleteAllowsDisjointInputAllBound(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -673,26 +673,26 @@ func TestStepCompleteAllowsDisjointInputAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	if _, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("CompleteStep with empty input should succeed, got %v", err)
+	if _, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("CompleteTask with empty input should succeed, got %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("step should be done, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("task should be done, got %s", got.Status)
 	}
 }
 
-// TestStepCompleteGrossEqualsStepPriceAcrossPriceChange verifies the completion transaction records
-// the parked step.price snapshot as gross, even when the action's price changed (deactivate → re-enable
-// with a new price) while the step waited. BeginStepCall funds the completion trace with step.price, so
+// TestTaskCompleteGrossEqualsTaskPriceAcrossPriceChange verifies the completion transaction records
+// the parked task.price snapshot as gross, even when the action's price changed (deactivate → re-enable
+// with a new price) while the task waited. BeginTaskCall funds the completion trace with task.price, so
 // gross must equal that, not the action's current price (§10).
-func TestStepCompleteGrossEqualsStepPriceAcrossPriceChange(t *testing.T) {
+func TestTaskCompleteGrossEqualsTaskPriceAcrossPriceChange(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -701,25 +701,25 @@ func TestStepCompleteGrossEqualsStepPriceAcrossPriceChange(t *testing.T) {
 	caller := setupUser(t, st, "gross-caller", 0)
 	action := setupWasmAction(t, st, owner.ID, "gross-action", "", 100)
 
-	// Fund a root trace with the action's price (100) and snapshot step.price = 100 at creation.
+	// Fund a root trace with the action's price (100) and snapshot task.price = 100 at creation.
 	_, tr := beginTestRun(t, st, owner.ID, action)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	if step.Price != 100 {
-		t.Fatalf("expected step.price snapshot 100, got %d", step.Price)
+	if task.Price != 100 {
+		t.Fatalf("expected task.price snapshot 100, got %d", task.Price)
 	}
 
-	// Simulate the action being re-enabled with a higher price after the step was created.
+	// Simulate the action being re-enabled with a higher price after the task was created.
 	action.Price = 500
 	if err := st.UpdateAction(ctx, action); err != nil {
 		t.Fatalf("UpdateAction: %v", err)
 	}
 
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep: %v", err)
+		t.Fatalf("CompleteTask: %v", err)
 	}
 
 	tx, err := st.ReadTransaction(ctx, reply.TxID)
@@ -727,16 +727,16 @@ func TestStepCompleteGrossEqualsStepPriceAcrossPriceChange(t *testing.T) {
 		t.Fatalf("ReadTransaction: %v", err)
 	}
 	if tx.Gross != 100 {
-		t.Errorf("gross must equal the parked step.price snapshot 100, got %d (current action price 500)", tx.Gross)
+		t.Errorf("gross must equal the parked task.price snapshot 100, got %d (current action price 500)", tx.Gross)
 	}
 	if tx.Gross != tx.Net+tx.Fee {
 		t.Errorf("settlement invariant violated: gross %d != net %d + fee %d", tx.Gross, tx.Net, tx.Fee)
 	}
 }
 
-// TestCreateStepTraceAuthority verifies that an action owner who is not the process owner
-// can create a step when they own the executing action in the parent trace (F3 fix).
-func TestCreateStepTraceAuthority(t *testing.T) {
+// TestCreateTaskTraceAuthority verifies that an action owner who is not the process owner
+// can create a task when they own the executing action in the parent trace (F3 fix).
+func TestCreateTaskTraceAuthority(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -745,36 +745,36 @@ func TestCreateStepTraceAuthority(t *testing.T) {
 	actionOwner := setupUser(t, st, "trace-act-owner", 0)
 	nextUser := setupUser(t, st, "trace-next-user", 0)
 
-	// Next action the step will invoke.
+	// Next action the task will invoke.
 	nextAction := setupLocalAction(t, st, processOwner.ID, "trace-next-action", 0)
 
 	// Create an orphan trace owned by actionOwner (action_owner_id = actionOwner.ID).
 	_, orphan := setupOrphanTrace(t, st, processOwner.ID, actionOwner.ID, processOwner.ID)
 	parentTraceID := orphan.ID
 
-	// Any caller can create a step; service layer enforces trace authority. Kernel just checks action/process.
-	step, err := k.CreateStep(ctx, parentTraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
+	// Any caller can create a task; service layer enforces trace authority. Kernel just checks action/process.
+	task, err := k.CreateTask(ctx, parentTraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
 	if err != nil {
-		t.Fatalf("CreateStep with trace authority: %v", err)
+		t.Fatalf("CreateTask with trace authority: %v", err)
 	}
-	if step == nil || step.Status != kernel.StepWaiting {
-		t.Fatal("expected a waiting step")
+	if task == nil || task.Status != kernel.TaskWaiting {
+		t.Fatal("expected a waiting task")
 	}
 }
 
-// TestCreateStepTraceAuthorityWrongProcess verifies that a trace from a closed process
-// cannot be used to create a new step (the process is already closed).
-func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
+// TestCreateTaskTraceAuthorityWrongProcess verifies that a trace from a closed process
+// cannot be used to create a new task (the process is already closed).
+func TestCreateTaskTraceAuthorityWrongProcess(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
 
-	procOwner := setupUser(t, st, "xproc-step-owner", 500)
-	actionOwner := setupUser(t, st, "xproc-step-actowner", 0)
-	nextUser := setupUser(t, st, "xproc-step-next", 0)
+	procOwner := setupUser(t, st, "xproc-task-owner", 500)
+	actionOwner := setupUser(t, st, "xproc-task-actowner", 0)
+	nextUser := setupUser(t, st, "xproc-task-next", 0)
 
-	action := setupWasmAction(t, st, actionOwner.ID, "xproc-step-action", "", 0)
-	nextAction := setupLocalAction(t, st, procOwner.ID, "xproc-step-next-action", 0)
+	action := setupWasmAction(t, st, actionOwner.ID, "xproc-task-action", "", 0)
+	nextAction := setupLocalAction(t, st, procOwner.ID, "xproc-task-next-action", 0)
 
 	_, tr1 := beginTestRun(t, st, procOwner.ID, action)
 
@@ -791,14 +791,14 @@ func TestCreateStepTraceAuthorityWrongProcess(t *testing.T) {
 	}
 	p1TraceID := reply.TraceID
 
-	// p1 is now closed; CreateStep using p1's trace must fail with ErrInvalidState.
-	_, err = k.CreateStep(ctx, p1TraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
+	// p1 is now closed; CreateTask using p1's trace must fail with ErrInvalidState.
+	_, err = k.CreateTask(ctx, p1TraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for closed-process trace, got %v", err)
 	}
 }
 
-func TestCreateStepRejectsNonObjectPartialArgs(t *testing.T) {
+func TestCreateTaskRejectsNonObjectPartialArgs(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -809,14 +809,49 @@ func TestCreateStepRejectsNonObjectPartialArgs(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	_, err := k.CreateStep(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.Principal{AccountID: caller.ID})
+	_, err := k.CreateTask(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.Principal{AccountID: caller.ID})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-object partial_args, got %v", err)
 	}
 }
 
-// TestCreateStepEmptyTraceIDReturnsErrInvalidInput verifies that an empty trace_id is rejected.
-func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
+// A null partial_args means nothing is filled in yet, like an omitted one: creation stores {}, and a
+// row stored with null before that completes with the completer's input rather than crashing the
+// merge (D6).
+func TestNullPartialArgsMeanNothingFilledIn(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
+	ctx := context.Background()
+
+	owner := setupUser(t, st, "null-owner", 500)
+	caller := setupUser(t, st, "null-caller", 0)
+	action := setupWasmAction(t, st, owner.ID, "null-action", "", 0)
+	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`null`), kernel.Principal{AccountID: caller.ID})
+	if err != nil {
+		t.Fatalf("CreateTask(null): %v", err)
+	}
+	if got, _ := st.ReadTask(ctx, task.ID); string(got.PartialArgs) != "{}" {
+		t.Errorf("stored partial_args = %s, want {}", got.PartialArgs)
+	}
+
+	stored := setupTask(t, st, tr.ID, action.ID, caller.ID, json.RawMessage(`null`))
+	reply, err := k.CompleteTask(ctx, caller.ID, stored.ID, json.RawMessage(`{"x":"1"}`))
+	if err != nil {
+		t.Fatalf("completing a task stored with null partial_args: %v", err)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tx.ArgsJSON) != `{"x":"1"}` {
+		t.Errorf("completion args = %s, want the input alone", tx.ArgsJSON)
+	}
+}
+
+// TestCreateTaskEmptyTraceIDReturnsErrInvalidInput verifies that an empty trace_id is rejected.
+func TestCreateTaskEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -825,7 +860,7 @@ func TestCreateStepEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	caller := setupUser(t, st, "nil-pt-caller", 0)
 	action := setupLocalAction(t, st, owner.ID, "nil-pt-action", 0)
 
-	_, err := k.CreateStep(ctx, "", action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	_, err := k.CreateTask(ctx, "", action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty traceID, got %v", err)
 	}
@@ -845,12 +880,12 @@ func setupPrivateWasmAction(t *testing.T, st kernel.Store, ownerID, name string)
 	return a
 }
 
-// TestCreateStepChecksCreatorNotRequiredCaller: visibility is bound at creation against the
+// TestCreateTaskChecksCreatorNotRequiredCaller: visibility is bound at creation against the
 // creating trace's action owner (§4 binding rule, §10), NOT the required caller. A provider may
 // park its own private action for a customer who could never call it directly; the customer then
 // completes it — visibility is not re-checked at completion, exactly as a closure over a private
 // function is invocable by whoever holds it.
-func TestCreateStepChecksCreatorNotRequiredCaller(t *testing.T) {
+func TestCreateTaskChecksCreatorNotRequiredCaller(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
@@ -863,25 +898,25 @@ func TestCreateStepChecksCreatorNotRequiredCaller(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
 	// canCall(customer, action) is false (private, non-owner) — the OLD rule rejected this.
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
 	if err != nil {
-		t.Fatalf("CreateStep parking a private action for a non-owner: %v", err)
+		t.Fatalf("CreateTask parking a private action for a non-owner: %v", err)
 	}
 
 	// The customer completes it despite being unable to see the target: completion re-checks
 	// only liveness, never visibility.
-	reply, err := k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, customer.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep by required caller who cannot see the target: %v", err)
+		t.Fatalf("CompleteTask by required caller who cannot see the target: %v", err)
 	}
 	if reply == nil || reply.TxID == "" {
 		t.Fatal("expected a settled completion")
 	}
 }
 
-// TestCreateStepRejectedWhenCreatorCannotCall: the binding check is real — a creator that cannot
+// TestCreateTaskRejectedWhenCreatorCannotCall: the binding check is real — a creator that cannot
 // see the target is rejected at creation, even if the required caller could.
-func TestCreateStepRejectedWhenCreatorCannotCall(t *testing.T) {
+func TestCreateTaskRejectedWhenCreatorCannotCall(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
@@ -894,16 +929,16 @@ func TestCreateStepRejectedWhenCreatorCannotCall(t *testing.T) {
 	// The required caller is the action owner, who could call it: irrelevant under the binding rule.
 	_, tr := setupOrphanTrace(t, st, creator.ID, creator.ID, creator.ID)
 
-	_, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: actionOwner.ID})
+	_, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: actionOwner.ID})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when the creator cannot call the action, got %v", err)
 	}
 }
 
-// TestStepCompletionIgnoresVisibilityNarrowing: narrowing an action to private after a step is
-// parked no longer bricks the step. The OLD rule reset it to waiting forever (funds parked, no
+// TestTaskCompletionIgnoresVisibilityNarrowing: narrowing an action to private after a task is
+// parked no longer bricks the task. The OLD rule reset it to waiting forever (funds parked, no
 // refund); the binding rule completes it, since the target was captured at creation.
-func TestStepCompletionIgnoresVisibilityNarrowing(t *testing.T) {
+func TestTaskCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
@@ -913,9 +948,9 @@ func TestStepCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "narrow-action", "", 0) // public
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	// Narrow to private after parking: the customer can no longer see it.
@@ -924,19 +959,19 @@ func TestStepCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 		t.Fatalf("UpdateAction: %v", err)
 	}
 
-	reply, err := k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, customer.ID, task.ID, json.RawMessage(`{}`))
 	if err != nil {
-		t.Fatalf("CompleteStep after visibility narrowed: %v", err)
+		t.Fatalf("CompleteTask after visibility narrowed: %v", err)
 	}
 	if reply == nil || reply.TxID == "" {
 		t.Fatal("expected a settled completion despite the narrowed visibility")
 	}
 }
 
-// TestStepCompletionResetsOnDeactivatedAction: liveness still gates completion. Deactivating the
-// target resets the step to waiting with its price parked (§5, §10) — the distinction the binding
+// TestTaskCompletionResetsOnDeactivatedAction: liveness still gates completion. Deactivating the
+// target resets the task to waiting with its price parked (§5, §10) — the distinction the binding
 // rule preserves: visibility is bound once, liveness is checked at every dispatch.
-func TestStepCompletionResetsOnDeactivatedAction(t *testing.T) {
+func TestTaskCompletionResetsOnDeactivatedAction(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
@@ -946,9 +981,9 @@ func TestStepCompletionResetsOnDeactivatedAction(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "deact-action", "", 0)
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
 	action.Active = false
@@ -956,24 +991,24 @@ func TestStepCompletionResetsOnDeactivatedAction(t *testing.T) {
 		t.Fatalf("UpdateAction: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, customer.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, customer.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState completing a deactivated action, got %v", err)
 	}
-	// The step is reset to waiting, price still parked.
-	got, err := k.ReadStep(ctx, owner.ID, step.ID)
+	// The task is reset to waiting, price still parked.
+	got, err := k.ReadTask(ctx, owner.ID, task.ID)
 	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
+		t.Fatalf("ReadTask: %v", err)
 	}
-	if got.Status != kernel.StepWaiting {
-		t.Errorf("step status = %q, want waiting (reset after a liveness failure)", got.Status)
+	if got.Status != kernel.TaskWaiting {
+		t.Errorf("task status = %q, want waiting (reset after a liveness failure)", got.Status)
 	}
 }
 
-// setupStepWithCompletionTrace sets up the state just after a BeginStepCall (step is running,
+// setupTaskWithCompletionTrace sets up the state just after a BeginTaskCall (task is running,
 // completion trace exists, no tx). Simulates a crash mid-execution.
-// Returns the step and its completion trace.
-func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kernel, ownerID string, price int64) (*kernel.Step, *kernel.Trace) {
+// Returns the task and its completion trace.
+func setupTaskWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kernel, ownerID string, price int64) (*kernel.Task, *kernel.Trace) {
 	t.Helper()
 	ctx := context.Background()
 	action := setupLocalAction(t, st, ownerID, "recovery-action-"+uuid.New().String(), price)
@@ -994,12 +1029,12 @@ func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		CreatedAt:     time.Now().UTC(),
 	}
 	if err := st.BeginRun(ctx, p, root, ownerID, price, 0, 0); err != nil {
-		t.Fatalf("setupStepWithCompletionTrace: BeginRun: %v", err)
+		t.Fatalf("setupTaskWithCompletionTrace: BeginRun: %v", err)
 	}
 	ptID := root.ID
-	step, err := k.CreateStep(ctx, ptID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, ptID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("setupStepWithCompletionTrace: CreateStep: %v", err)
+		t.Fatalf("setupTaskWithCompletionTrace: CreateTask: %v", err)
 	}
 	ct := &kernel.Trace{
 		ID:            uuid.New().String(),
@@ -1009,32 +1044,32 @@ func setupStepWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		CallerUserID:  caller.ID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	if err := st.BeginStepCall(ctx, step.ID, ct); err != nil {
-		t.Fatalf("setupStepWithCompletionTrace: BeginStepCall: %v", err)
+	if err := st.BeginTaskCall(ctx, task.ID, ct); err != nil {
+		t.Fatalf("setupTaskWithCompletionTrace: BeginTaskCall: %v", err)
 	}
-	return step, ct
+	return task, ct
 }
 
-func TestRecoverReparkEmptyStepCompletionTrace(t *testing.T) {
+func TestRecoverReparkEmptyTaskCompletionTrace(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "repark-owner", 100)
-	step, _ := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+	task, _ := setupTaskWithCompletionTrace(t, st, k, owner.ID, 100)
 
 	// Completion trace is empty (available==price, locked==0): re-park path.
 	if err := k.Recover(ctx); err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
 
-	// After re-park, root trace recovery cancels the step (not done, no tx_id).
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepCancelled {
-		t.Errorf("step.status=%s after Recover; want cancelled (re-park path)", got.Status)
+	// After re-park, root trace recovery cancels the task (not done, no tx_id).
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskCancelled {
+		t.Errorf("task.status=%s after Recover; want cancelled (re-park path)", got.Status)
 	}
 	if got.TxID != nil {
-		t.Errorf("step.TxID=%v; want nil (re-park path does not settle the step)", got.TxID)
+		t.Errorf("task.TxID=%v; want nil (re-park path does not settle the task)", got.TxID)
 	}
 
 	// Wallet invariant: all 100 credits restored to owner.
@@ -1047,13 +1082,13 @@ func TestRecoverReparkEmptyStepCompletionTrace(t *testing.T) {
 	}
 }
 
-func TestRecoverSettlesNonEmptyStepCompletionTrace(t *testing.T) {
+func TestRecoverSettlesNonEmptyTaskCompletionTrace(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "settle-owner", 200)
-	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 200)
+	task, ct := setupTaskWithCompletionTrace(t, st, k, owner.ID, 200)
 
 	// Make the completion trace non-empty: lock funds via a subcall.
 	// This causes HasSettled=true so Recover settles rather than re-parks.
@@ -1072,13 +1107,13 @@ func TestRecoverSettlesNonEmptyStepCompletionTrace(t *testing.T) {
 		t.Fatalf("Recover: %v", err)
 	}
 
-	// Recover must settle the step (done, tx_id set), not re-park it.
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("step.status=%s after Recover; want done (settle path)", got.Status)
+	// Recover must settle the task (done, tx_id set), not re-park it.
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("task.status=%s after Recover; want done (settle path)", got.Status)
 	}
 	if got.TxID == nil {
-		t.Error("step.TxID should be non-nil after settlement")
+		t.Error("task.TxID should be non-nil after settlement")
 	}
 
 	// No negative balances.
@@ -1088,30 +1123,30 @@ func TestRecoverSettlesNonEmptyStepCompletionTrace(t *testing.T) {
 	}
 }
 
-// TestEndProcessFailsRunningStep verifies that force-closing a process with a running
-// step-completion trace settles that completion as a failed CALL (transaction + receipt),
-// not a silent balance drain: the step ends `done` with a tx_id, a failure transaction and
+// TestEndProcessFailsRunningTask verifies that force-closing a process with a running
+// task-completion trace settles that completion as a failed CALL (transaction + receipt),
+// not a silent balance drain: the task ends `done` with a tx_id, a failure transaction and
 // receipt exist, the process closes, and the owner's funds are fully restored.
-func TestEndProcessFailsRunningStep(t *testing.T) {
+func TestEndProcessFailsRunningTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "ep-fail-owner", 100)
-	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+	task, ct := setupTaskWithCompletionTrace(t, st, k, owner.ID, 100)
 	processID := ct.ProcessID
 
 	if err := k.EndProcess(ctx, owner.ID, processID); err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
-	// Step must be done with a tx_id (settled as a failed call), NOT cancelled.
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("step.status=%s after EndProcess; want done (failed-call settlement)", got.Status)
+	// Task must be done with a tx_id (settled as a failed call), NOT cancelled.
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("task.status=%s after EndProcess; want done (failed-call settlement)", got.Status)
 	}
 	if got.TxID == nil {
-		t.Fatal("step.TxID must be set atomically with done")
+		t.Fatal("task.TxID must be set atomically with done")
 	}
 
 	// A failure transaction and a receipt must explain the balance change (audit conservation).
@@ -1164,7 +1199,7 @@ func TestEndProcessAbortsOnSettlementError(t *testing.T) {
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "ep-abort-owner", 100)
-	_, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+	_, ct := setupTaskWithCompletionTrace(t, st, k, owner.ID, 100)
 	processID := ct.ProcessID
 	fs.failProcessID = processID // inject only after setup
 
@@ -1183,16 +1218,16 @@ func TestEndProcessAbortsOnSettlementError(t *testing.T) {
 	}
 }
 
-// TestEndProcessFailsNonEmptyRunningStep is TestEndProcessFailsRunningStep with a settled
+// TestEndProcessFailsNonEmptyRunningTask is TestEndProcessFailsRunningTask with a settled
 // subcall beneath the running completion trace: the settled subcall stays paid, the remainder
 // refunds up, the completion settles as failure, and balances stay conserved (no negatives).
-func TestEndProcessFailsNonEmptyRunningStep(t *testing.T) {
+func TestEndProcessFailsNonEmptyRunningTask(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	owner := setupUser(t, st, "ep-fail-ne-owner", 200)
-	step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 200)
+	task, ct := setupTaskWithCompletionTrace(t, st, k, owner.ID, 200)
 	processID := ct.ProcessID
 
 	// Lock funds into a child subcall so the completion trace is non-empty (HasSettled=true).
@@ -1211,9 +1246,9 @@ func TestEndProcessFailsNonEmptyRunningStep(t *testing.T) {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone || got.TxID == nil {
-		t.Errorf("step after EndProcess: status=%s tx_id=%v, want done with tx_id", got.Status, got.TxID)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone || got.TxID == nil {
+		t.Errorf("task after EndProcess: status=%s tx_id=%v, want done with tx_id", got.Status, got.TxID)
 	}
 	tx, err := st.ReadTransaction(ctx, *got.TxID)
 	if err != nil {
@@ -1236,9 +1271,9 @@ func TestEndProcessFailsNonEmptyRunningStep(t *testing.T) {
 	}
 }
 
-// TestStepCompleteRemoteProxyPersistsIdempotencyKey verifies Fix 3A: CompleteStep generates
+// TestTaskCompleteRemoteProxyPersistsIdempotencyKey verifies Fix 3A: CompleteTask generates
 // and persists idempotency_key and dispatch_json on the completion trace before dispatching.
-func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
+func TestTaskCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	st := newTestStore(t)
 	// Empty receiptJSON → parseAndVerifyRemoteReceipt returns ErrTimeout.
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
@@ -1259,19 +1294,19 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrTimeout) {
-		t.Fatalf("expected ErrTimeout from remote-proxy step, got %v", err)
+		t.Fatalf("expected ErrTimeout from remote-proxy task, got %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
+	got, _ := st.ReadTask(ctx, task.ID)
 	if got.CompletionTraceID == nil {
-		t.Fatal("step.completion_trace_id must be set after BeginStepCall")
+		t.Fatal("task.completion_trace_id must be set after BeginTaskCall")
 	}
 	ct, err := st.ReadTrace(ctx, *got.CompletionTraceID)
 	if err != nil {
@@ -1285,11 +1320,11 @@ func TestStepCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	}
 }
 
-// TestStepCompleteRemoteProxyMissingExecutorSettlesFailure verifies the step-completion variant of the
-// missing-FederationExecutor fix: instead of leaving the step running with stranded funds, the completion
-// settles as a failure — the step is marked done with a tx, and the recorded gross is the parked step.price
+// TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure verifies the task-completion variant of the
+// missing-FederationExecutor fix: instead of leaving the task running with stranded funds, the completion
+// settles as a failure — the task is marked done with a tx, and the recorded gross is the parked task.price
 // snapshot (exercising the Bug 2 fix in the same path), not the action's current price.
-func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
+func TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	st := newTestStore(t)
 	// fakeSuccessHTTP implements HTTPExecutor but NOT FederationExecutor → triggers the !ok branch.
 	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
@@ -1308,24 +1343,24 @@ func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 		t.Fatalf("CreateAction: %v", err)
 	}
 
-	// Fund a root trace with 50 and park step.price=50 from it.
+	// Fund a root trace with 50 and park task.price=50 from it.
 	_, root := beginTestRun(t, st, procOwner.ID, remoteAct)
-	step, err := k.CreateStep(ctx, root.ID, remoteAct.ID, nil, kernel.Principal{AccountID: completer.ID})
+	task, err := k.CreateTask(ctx, root.ID, remoteAct.ID, nil, kernel.Principal{AccountID: completer.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, completer.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, completer.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for missing federation executor, got %v", err)
 	}
 
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepDone {
-		t.Errorf("step should be done after settled failure, got %s", got.Status)
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskDone {
+		t.Errorf("task should be done after settled failure, got %s", got.Status)
 	}
 	if got.TxID == nil {
-		t.Fatal("settled failure must record a tx_id on the step")
+		t.Fatal("settled failure must record a tx_id on the task")
 	}
 	tx, err := st.ReadTransaction(ctx, *got.TxID)
 	if err != nil {
@@ -1335,7 +1370,7 @@ func TestStepCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 		t.Errorf("transaction status: got %q, want failure", tx.Status)
 	}
 	if tx.Gross != 50 {
-		t.Errorf("gross must be the parked step.price snapshot 50, got %d", tx.Gross)
+		t.Errorf("gross must be the parked task.price snapshot 50, got %d", tx.Gross)
 	}
 }
 
@@ -1663,105 +1698,105 @@ func TestParentFailureLeavesExecutingChildAlone(t *testing.T) {
 	}
 }
 
-// TestParentFailureLeavesRunningStepAlone: a claimed step's price has left the parent's lock and
+// TestParentFailureLeavesRunningTaskAlone: a claimed task's price has left the parent's lock and
 // funds its completion trace, so it is a call in flight with its own settler (§5). A parent failing
-// meanwhile cancels only waiting steps; the running one completes, is paid, and its refund follows
+// meanwhile cancels only waiting tasks; the running one completes, is paid, and its refund follows
 // the settled parent's to the process.
-func TestParentFailureLeavesRunningStepAlone(t *testing.T) {
+func TestParentFailureLeavesRunningTaskAlone(t *testing.T) {
 	st := newTestStore(t)
 	target := &blockingHTTP{release: make(chan struct{})}
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st,
 		Scripts: &fakeScriptExec{err: errors.New("parent blew up")}, HTTP: target})
 	ctx := context.Background()
 
-	const parentPrice, stepPrice = 100, 40
+	const parentPrice, taskPrice = 100, 40
 	owner := setupUser(t, st, "prs-owner", 0)
 	caller := setupUser(t, st, "prs-caller", parentPrice)
 	completer := setupUser(t, st, "prs-completer", 0)
 	parentAct := setupWasmAction(t, st, owner.ID, "prs-parent", "", parentPrice)
-	stepAct := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "prs-step", Kind: kernel.KindHTTP,
-		Active: true, Visibility: kernel.VisibilityLocal, Price: stepPrice, Source: "https://step.example/run",
+	taskAct := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "prs-task", Kind: kernel.KindHTTP,
+		Active: true, Visibility: kernel.VisibilityLocal, Price: taskPrice, Source: "https://task.example/run",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := st.CreateAction(ctx, stepAct); err != nil {
+	if err := st.CreateAction(ctx, taskAct); err != nil {
 		t.Fatal(err)
 	}
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
-	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// The completer claims the step and is executing it.
+	// The completer claims the task and is executing it.
 	done := make(chan error, 1)
 	go func() {
-		_, err := k.CompleteStep(ctx, completer.ID, step.ID, json.RawMessage(`{}`))
+		_, err := k.CompleteTask(ctx, completer.ID, task.ID, json.RawMessage(`{}`))
 		done <- err
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if s, _ := st.ReadStep(ctx, step.ID); s != nil && s.Status == kernel.StepRunning {
+		if s, _ := st.ReadTask(ctx, task.ID); s != nil && s.Status == kernel.TaskRunning {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s == nil || s.Status != kernel.StepRunning {
-		t.Fatalf("the completion never claimed the step")
+	if s, _ := st.ReadTask(ctx, task.ID); s == nil || s.Status != kernel.TaskRunning {
+		t.Fatalf("the completion never claimed the task")
 	}
 
-	// The creating call fails while the step is running.
+	// The creating call fails while the task is running.
 	if _, err := k.TestCall(ctx, kernel.TestCallRequest{CallerID: caller.ID, Action: parentAct,
 		Args: map[string]any{}, ExistingTraceID: root.ID}); err == nil {
 		t.Fatal("parent call must fail")
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepRunning {
-		t.Fatalf("the parent's failure touched a running step: status %q", s.Status)
+	if s, _ := st.ReadTask(ctx, task.ID); s.Status != kernel.TaskRunning {
+		t.Fatalf("the parent's failure touched a running task: status %q", s.Status)
 	}
 	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
-		t.Fatal("process closed over a running step")
+		t.Fatal("process closed over a running task")
 	}
 	if txs, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID}); len(txs) != 0 {
-		t.Fatalf("the parent settled ahead of the running step: %+v", txs)
+		t.Fatalf("the parent settled ahead of the running task: %+v", txs)
 	}
 
-	// The step completes: paid, done; its settlement settles the parent, whose refund excludes
-	// the price the step consumed; the process closes whole.
+	// The task completes: paid, done; its settlement settles the parent, whose refund excludes
+	// the price the task consumed; the process closes whole.
 	close(target.release)
 	if err := <-done; err != nil {
-		t.Fatalf("the running step must settle on its own: %v", err)
+		t.Fatalf("the running task must settle on its own: %v", err)
 	}
 	parentTx, _ := st.ListTransactions(ctx, kernel.TxFilter{ProcessID: p.ID, TargetUserID: owner.ID})
 	found := false
 	for _, tx := range parentTx {
 		if tx.TraceID == root.ID {
 			found = true
-			if tx.Refund != parentPrice-stepPrice {
-				t.Errorf("parent refund=%d, want %d: the completed step's price is consumed", tx.Refund, parentPrice-stepPrice)
+			if tx.Refund != parentPrice-taskPrice {
+				t.Errorf("parent refund=%d, want %d: the completed task's price is consumed", tx.Refund, parentPrice-taskPrice)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("the parent never settled after its step completed")
+		t.Fatal("the parent never settled after its task completed")
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepDone || s.TxID == nil {
-		t.Errorf("step %q with tx %v, want done with its transaction", s.Status, s.TxID)
+	if s, _ := st.ReadTask(ctx, task.ID); s.Status != kernel.TaskDone || s.TxID == nil {
+		t.Errorf("task %q with tx %v, want done with its transaction", s.Status, s.TxID)
 	}
 	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessClosed {
 		t.Errorf("process %q, want closed", proc.Status)
 	}
-	net, _ := testEconomy().Fee(stepPrice)
+	net, _ := testEconomy().Fee(taskPrice)
 	if u, _ := st.ReadUser(ctx, owner.ID); u.Available != net {
-		t.Errorf("the step's provider holds %d, want its net %d", u.Available, net)
+		t.Errorf("the task's provider holds %d, want its net %d", u.Available, net)
 	}
-	if u, _ := st.ReadUser(ctx, caller.ID); u.Available != parentPrice-stepPrice || u.Locked != 0 {
-		t.Errorf("caller available=%d locked=%d, want %d and 0: the step's price was refunded twice or never", u.Available, u.Locked, parentPrice-stepPrice)
+	if u, _ := st.ReadUser(ctx, caller.ID); u.Available != parentPrice-taskPrice || u.Locked != 0 {
+		t.Errorf("caller available=%d locked=%d, want %d and 0: the task's price was refunded twice or never", u.Available, u.Locked, parentPrice-taskPrice)
 	}
 }
 
 // TestFundingRefusesSettledTraceAtAnyPrice: the rules a spend depends on live in the funding
 // statement (§6, §9). A settled trace, or a closed process, funds nothing — zero included, which
 // no balance check alone would refuse — so a capability that expired between its check and its
-// write can start no work and park no step.
+// write can start no work and park no task.
 func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
@@ -1782,22 +1817,22 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free subcall on a settled trace: want ErrInvalidState, got %v", err)
 	}
-	if _, err := k.CreateStep(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: owner.ID}); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("a free step on a settled trace: want ErrInvalidState, got %v", err)
+	if _, err := k.CreateTask(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: owner.ID}); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a free task on a settled trace: want ErrInvalidState, got %v", err)
 	}
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
 		t.Errorf("a trace was funded under a settled parent: %d traces", len(traces))
 	}
-	if steps, _ := st.ListSteps(ctx, owner.ID, p.ID, "", true, 10, 0); len(steps) != 0 {
-		t.Errorf("a step was parked in a closed process: %d", len(steps))
+	if tasks, _ := st.ListTasks(ctx, owner.ID, p.ID, "", true, 10, 0); len(tasks) != 0 {
+		t.Errorf("a task was parked in a closed process: %d", len(tasks))
 	}
 }
 
-// claimsDuringSnapshot is a store that claims a waiting step the moment forced closure has taken
+// claimsDuringSnapshot is a store that claims a waiting task the moment forced closure has taken
 // its snapshot of unsettled traces: the exact window between the settlement pass and the close.
 type claimsDuringSnapshot struct {
 	kernel.Store
-	stepID string
+	taskID string
 	armed  bool
 }
 
@@ -1806,10 +1841,10 @@ func (c *claimsDuringSnapshot) ListUnsettledTracesForProcess(ctx context.Context
 	if err == nil && c.armed {
 		c.armed = false
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: processID, CreatedAt: time.Now().UTC()}
-		if step, rerr := c.Store.ReadStep(ctx, c.stepID); rerr == nil {
-			ct.ActionOwnerID, ct.CallerUserID, ct.ActionID = step.RequiredCallerUserID, step.RequiredCallerUserID, step.ActionID
+		if task, rerr := c.Store.ReadTask(ctx, c.taskID); rerr == nil {
+			ct.ActionOwnerID, ct.CallerUserID, ct.ActionID = task.RequiredCallerUserID, task.RequiredCallerUserID, task.ActionID
 		}
-		if berr := c.Store.BeginStepCall(ctx, c.stepID, ct); berr != nil {
+		if berr := c.Store.BeginTaskCall(ctx, c.taskID, ct); berr != nil {
 			return nil, berr
 		}
 	}
@@ -1829,23 +1864,23 @@ func TestEndProcessRefusesToCloseOverACallStartedMeanwhile(t *testing.T) {
 	owner := setupUser(t, st, "epr-owner", price)
 	completer := setupUser(t, st, "epr-completer", 0)
 	act := setupLocalAction(t, st, owner.ID, "epr-act", price)
-	stepAct := setupLocalAction(t, st, owner.ID, "epr-step", 40)
+	taskAct := setupLocalAction(t, st, owner.ID, "epr-task", 40)
 	p, root := beginTestRun(t, st, owner.ID, act)
-	step, err := k.CreateStep(ctx, root.ID, stepAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	race.stepID, race.armed = step.ID, true
+	race.taskID, race.armed = task.ID, true
 
 	err = k.EndProcess(ctx, owner.ID, p.ID)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("closing over a call that started meanwhile: want ErrInvalidState, got %v", err)
 	}
 	if proc, _ := st.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
-		t.Fatal("the process closed over a running step")
+		t.Fatal("the process closed over a running task")
 	}
-	if s, _ := st.ReadStep(ctx, step.ID); s.Status != kernel.StepRunning {
-		t.Fatalf("the claimed step is %q, want running", s.Status)
+	if s, _ := st.ReadTask(ctx, task.ID); s.Status != kernel.TaskRunning {
+		t.Fatalf("the claimed task is %q, want running", s.Status)
 	}
 	if u, _ := st.ReadUser(ctx, owner.ID); u.Available+u.Locked != price {
 		t.Fatalf("money moved on a refused close: available=%d locked=%d", u.Available, u.Locked)
@@ -1869,7 +1904,7 @@ var errDiskGone = errors.New("disk gone")
 
 type reparkFails struct{ kernel.Store }
 
-func (reparkFails) ResetStepAndRepark(context.Context, string) error { return errDiskGone }
+func (reparkFails) ResetTaskAndRepark(context.Context, string) error { return errDiskGone }
 
 type settleFails struct{ kernel.Store }
 
@@ -1878,20 +1913,20 @@ func (settleFails) CommitFailedCall(context.Context, *kernel.Transaction, func(i
 }
 
 // TestRecoveryAbortsOnAFailedMoneyStep: a recovery that cannot re-park or settle refuses to
-// continue — and so the boot fails — rather than sweep on and mark a step waiting whose price is
-// still in an unreferenced completion trace, a step nothing could ever complete again (G4).
+// continue — and so the boot fails — rather than sweep on and mark a task waiting whose price is
+// still in an unreferenced completion trace, a task nothing could ever complete again (G4).
 func TestRecoveryAbortsOnAFailedMoneyStep(t *testing.T) {
 	cases := map[string]struct {
 		wrap  func(kernel.Store) kernel.Store
 		abort error // the failure recovery must stop at, as the returned error reports it
-		check func(t *testing.T, st kernel.Store, step *kernel.Step, ct *kernel.Trace)
+		check func(t *testing.T, st kernel.Store, task *kernel.Task, ct *kernel.Trace)
 	}{
-		// The re-park fails first: nothing after it ran, so the step was not flipped to waiting
+		// The re-park fails first: nothing after it ran, so the task was not flipped to waiting
 		// over a price still sitting in its completion trace.
 		"re-park fails": {func(s kernel.Store) kernel.Store { return reparkFails{s} }, errDiskGone,
-			func(t *testing.T, st kernel.Store, step *kernel.Step, ct *kernel.Trace) {
-				if s, _ := st.ReadStep(context.Background(), step.ID); s.Status != kernel.StepRunning {
-					t.Errorf("step %q, want still running for the next attempt", s.Status)
+			func(t *testing.T, st kernel.Store, task *kernel.Task, ct *kernel.Trace) {
+				if s, _ := st.ReadTask(context.Background(), task.ID); s.Status != kernel.TaskRunning {
+					t.Errorf("task %q, want still running for the next attempt", s.Status)
 				}
 				if settled, _ := st.TraceHasTransaction(context.Background(), ct.ID); settled {
 					t.Error("recovery went on to settle the completion trace after the re-park failed")
@@ -1901,8 +1936,8 @@ func TestRecoveryAbortsOnAFailedMoneyStep(t *testing.T) {
 		// parent stays unsettled for the next attempt, never presumed done.
 		// (A settlement wraps its store failure as an internal error, the class the boot reports.)
 		"settle fails": {func(s kernel.Store) kernel.Store { return settleFails{s} }, kernel.ErrInternal,
-			func(t *testing.T, st kernel.Store, step *kernel.Step, _ *kernel.Trace) {
-				if settled, _ := st.TraceHasTransaction(context.Background(), *step.ParentTraceID); settled {
+			func(t *testing.T, st kernel.Store, task *kernel.Task, _ *kernel.Trace) {
+				if settled, _ := st.TraceHasTransaction(context.Background(), *task.ParentTraceID); settled {
 					t.Error("the parent trace was marked settled by a settlement that failed")
 				}
 			}},
@@ -1912,11 +1947,11 @@ func TestRecoveryAbortsOnAFailedMoneyStep(t *testing.T) {
 			st := newTestStore(t)
 			k := newTestKernel(st)
 			owner := setupUser(t, st, "rab-owner", 100)
-			step, ct := setupStepWithCompletionTrace(t, st, k, owner.ID, 100)
+			task, ct := setupTaskWithCompletionTrace(t, st, k, owner.ID, 100)
 			if err := newTestKernel(tc.wrap(st)).Recover(context.Background()); !errors.Is(err, tc.abort) {
-				t.Fatalf("recovery must abort at the failed money step and say so; got %v", err)
+				t.Fatalf("recovery must abort at the failed money task and say so; got %v", err)
 			}
-			tc.check(t, st, step, ct)
+			tc.check(t, st, task, ct)
 		})
 	}
 }
@@ -2128,9 +2163,9 @@ func TestDeferredParentSettlesAfterItsChild(t *testing.T) {
 	_ = child
 }
 
-// TestStepCompleteRemoteProxyTimeoutLeavesStepRunning verifies Fix 3B: CompleteStep does not
-// call ResetStepAndRepark on ErrTimeout, leaving the step running for RetryPendingRemoteDispatches.
-func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {
+// TestTaskCompleteRemoteProxyTimeoutLeavesTaskRunning verifies Fix 3B: CompleteTask does not
+// call ResetTaskAndRepark on ErrTimeout, leaving the task running for RetryPendingRemoteDispatches.
+func TestTaskCompleteRemoteProxyTimeoutLeavesTaskRunning(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{receiptJSON: ""})
 	ctx := context.Background()
@@ -2150,30 +2185,30 @@ func TestStepCompleteRemoteProxyTimeoutLeavesStepRunning(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	_, _ = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, _ = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 
-	// Step must remain running — not reset to waiting — so retry can find the pending trace.
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepRunning {
-		t.Errorf("step.status after ErrTimeout: got %s, want running", got.Status)
+	// Task must remain running — not reset to waiting — so retry can find the pending trace.
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskRunning {
+		t.Errorf("task.status after ErrTimeout: got %s, want running", got.Status)
 	}
 	// Completion trace must not be deleted (retry needs idempotency state).
 	if got.CompletionTraceID == nil {
-		t.Error("step.completion_trace_id must not be nil after ErrTimeout")
+		t.Error("task.completion_trace_id must not be nil after ErrTimeout")
 	}
 	if _, err := st.ReadTrace(ctx, *got.CompletionTraceID); err != nil {
 		t.Errorf("completion trace must still exist after ErrTimeout: %v", err)
 	}
 }
 
-// TestStepCompleteSuspendedCallerRejectedBeforeMutation verifies that a suspended
-// required_caller_user_id is rejected before BeginStepCall mutates state.
-func TestStepCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
+// TestTaskCompleteSuspendedCallerRejectedBeforeMutation verifies that a suspended
+// required_caller_user_id is rejected before BeginTaskCall mutates state.
+func TestTaskCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -2184,32 +2219,32 @@ func TestStepCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	step, err := k.CreateStep(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// Suspend the caller before they complete the step.
+	// Suspend the caller before they complete the task.
 	if err := st.SuspendUser(ctx, caller.ID); err != nil {
 		t.Fatalf("SuspendUser: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("expected ErrUnauthenticated for suspended caller, got %v", err)
 	}
 
-	// Step must still be waiting — no state mutation occurred.
-	got, _ := st.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepWaiting {
-		t.Errorf("step.status after suspended caller: got %s, want waiting", got.Status)
+	// Task must still be waiting — no state mutation occurred.
+	got, _ := st.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskWaiting {
+		t.Errorf("task.status after suspended caller: got %s, want waiting", got.Status)
 	}
 }
 
-// CompleteStep's outcome contract (§10): callers must be able to tell "someone else claimed it"
-// from "my resumed call failed" from "nothing settled" WITHOUT re-reading the step's status, which
+// CompleteTask's outcome contract (§10): callers must be able to tell "someone else claimed it"
+// from "my resumed call failed" from "nothing settled" WITHOUT re-reading the task's status, which
 // is racy and cannot see an in-flight dispatch. These assertions pin that contract.
-func TestCompleteStepClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
+func TestCompleteTaskClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -2219,24 +2254,24 @@ func TestCompleteStepClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "claim-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	if _, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+	if _, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("first completion: %v", err)
 	}
 
-	// The second attempt never takes the step.
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	// The second attempt never takes the task.
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected the second completion to fail")
 	}
 	if reply != nil {
-		t.Errorf("a completion that never claimed the step must return a nil reply, got %+v", reply)
+		t.Errorf("a completion that never claimed the task must return a nil reply, got %+v", reply)
 	}
-	if !errors.Is(err, kernel.ErrStepNotClaimed) {
-		t.Errorf("expected ErrStepNotClaimed, got %v", err)
+	if !errors.Is(err, kernel.ErrTaskNotClaimed) {
+		t.Errorf("expected ErrTaskNotClaimed, got %v", err)
 	}
 	// The marker must not change what crosses a process or kernel boundary.
 	if code := kernel.KernelErrorCode(err); code != kernel.ErrInvalidState.Code {
@@ -2252,7 +2287,7 @@ func TestCompleteStepClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 
 // A rejection before anything settles is NOT a claim race: conflating the two would make a gate
 // silently swallow a genuine error as "someone else won".
-func TestCompleteStepRejectionIsNotAClaimFailure(t *testing.T) {
+func TestCompleteTaskRejectionIsNotAClaimFailure(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -2263,25 +2298,25 @@ func TestCompleteStepRejectionIsNotAClaimFailure(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "rej-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	reply, err := k.CompleteStep(ctx, stranger.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, stranger.ID, task.ID, json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected the wrong caller to be refused")
 	}
 	if reply != nil {
 		t.Errorf("nothing settled, so the reply must be nil, got %+v", reply)
 	}
-	if errors.Is(err, kernel.ErrStepNotClaimed) {
-		t.Error("a wrong-caller rejection is not a claim race and must not carry ErrStepNotClaimed")
+	if errors.Is(err, kernel.ErrTaskNotClaimed) {
+		t.Error("a wrong-caller rejection is not a claim race and must not carry ErrTaskNotClaimed")
 	}
 }
 
-// Scenario (review finding 4): BeginStepCall returns ErrInvalidState for three distinct
-// conditions, one of which — "step park invariant violated: parent trace locked < step price" —
-// is a LEDGER CORRUPTION, not a claim race. Blanket-marking the whole code as ErrStepNotClaimed
+// Scenario (review finding 4): BeginTaskCall returns ErrInvalidState for three distinct
+// conditions, one of which — "task park invariant violated: parent trace locked < task price" —
+// is a LEDGER CORRUPTION, not a claim race. Blanket-marking the whole code as ErrTaskNotClaimed
 // makes a gate report that corruption as a normal lost race and drop the contribution silently.
 // The marker must be attached only where a claim genuinely lost.
 func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
@@ -2301,22 +2336,22 @@ func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
 	if err := db.ExecForTest(ctx, `UPDATE traces SET available=100 WHERE id=?`, tr.ID); err != nil {
 		t.Fatalf("fund trace: %v", err)
 	}
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	// Break the parked-funds invariant behind the kernel's back: the step is still waiting, but
+	// Break the parked-funds invariant behind the kernel's back: the task is still waiting, but
 	// its parent trace no longer holds the locked price.
 	_ = ok
 	if err := db.ExecForTest(ctx, `UPDATE traces SET locked=0 WHERE id=?`, tr.ID); err != nil {
 		t.Fatalf("corrupt trace locked: %v", err)
 	}
 
-	_, err = k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	_, err = k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected the park-invariant violation to fail the completion")
 	}
-	if errors.Is(err, kernel.ErrStepNotClaimed) {
+	if errors.Is(err, kernel.ErrTaskNotClaimed) {
 		t.Errorf("a park-invariant violation is corruption, not a lost claim: %v", err)
 	}
 }
@@ -2389,12 +2424,12 @@ func TestCallReturnsTheCommittedReplyWhenPostExecutionReadFails(t *testing.T) {
 	_ = action
 }
 
-// Scenario (review finding 3): ErrTimeout reaches completeStep from two unrelated places — a WASM
+// Scenario (review finding 3): ErrTimeout reaches completeTask from two unrelated places — a WASM
 // execution timeout, which settles and CHARGES like any other failure, and a parked remote
 // dispatch, which commits nothing. Classifying on the error before the reply conflated them, so a
 // settled, charged completion was reported as "nothing happened yet": its transaction ids were
 // lost, and the federation handler left an already-completed idempotency record pending.
-func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
+func TestCompleteTaskReportsACommittedWasmTimeout(t *testing.T) {
 	st := newTestStore(t)
 	// Must wrap context.DeadlineExceeded: that is what executeScript classifies as ErrTimeout
 	// (call.go), and a bare ErrTimeout would be re-classified as ErrExecutionFailed and never
@@ -2407,11 +2442,11 @@ func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "to-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep: %v", err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	reply, err := k.CompleteStep(ctx, caller.ID, step.ID, json.RawMessage(`{}`))
+	reply, err := k.CompleteTask(ctx, caller.ID, task.ID, json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected the timeout to surface")
 	}
@@ -2421,27 +2456,27 @@ func TestCompleteStepReportsACommittedWasmTimeout(t *testing.T) {
 	if reply.TxID == "" {
 		t.Errorf("expected the committed transaction's id, got %+v", reply)
 	}
-	// It is genuinely settled: the step is done, not left running for a retry that will never come.
-	done, err := k.ReadStep(ctx, owner.ID, step.ID)
+	// It is genuinely settled: the task is done, not left running for a retry that will never come.
+	done, err := k.ReadTask(ctx, owner.ID, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if done.Status != kernel.StepDone {
-		t.Errorf("step status = %s, want done", done.Status)
+	if done.Status != kernel.TaskDone {
+		t.Errorf("task status = %s, want done", done.Status)
 	}
 }
 
-// TestCreateStepHealsLegacyProxy: parking money is a funding boundary, so a proxy imported before
-// the seller's price was stored heals BEFORE its price is parked (§16). Otherwise the step parks a
+// TestCreateTaskHealsLegacyProxy: parking money is a funding boundary, so a proxy imported before
+// the seller's price was stored heals BEFORE its price is parked (§16). Otherwise the task parks a
 // frozen total and its completion dispatches the local total as the seller's price, which makes the
 // peer's valid receipt fail the charge==mp check and quarantine.
-func TestCreateStepHealsLegacyProxy(t *testing.T) {
+func TestCreateTaskHealsLegacyProxy(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-step-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-task-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -2459,8 +2494,8 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	owner := setupUser(t, st, "step-legacy-owner", 1000)
-	caller := setupUser(t, st, "step-legacy-caller", 0)
+	owner := setupUser(t, st, "task-legacy-owner", 1000)
+	caller := setupUser(t, st, "task-legacy-caller", 0)
 	local := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "host", Kind: kernel.KindHTTP,
 		Active: true, Visibility: kernel.VisibilityPublic, Description: "host",
@@ -2475,9 +2510,9 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	step, err := k.CreateStep(ctx, root.ID, a.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, root.ID, a.ID, nil, kernel.Principal{AccountID: caller.ID})
 	if err != nil {
-		t.Fatalf("CreateStep against a legacy proxy: %v", err)
+		t.Fatalf("CreateTask against a legacy proxy: %v", err)
 	}
 	healed, err := st.ReadAction(ctx, a.ID)
 	if err != nil {
@@ -2486,18 +2521,18 @@ func TestCreateStepHealsLegacyProxy(t *testing.T) {
 	if healed.BasePrice == nil || *healed.BasePrice != 100 {
 		t.Fatalf("the row must heal before parking, got base price %v", healed.BasePrice)
 	}
-	if step.Price != 111 { // sr=105, import 500bps → 111
-		t.Errorf("parked price = %d, want 111", step.Price)
+	if task.Price != 111 { // sr=105, import 500bps → 111
+		t.Errorf("parked price = %d, want 111", task.Price)
 	}
-	if step.ImportBPS == nil || *step.ImportBPS != 500 {
-		t.Errorf("step must freeze the fee it was funded under, got %v", step.ImportBPS)
+	if task.ImportBPS == nil || *task.ImportBPS != 500 {
+		t.Errorf("task must freeze the fee it was funded under, got %v", task.ImportBPS)
 	}
 }
 
-// TestStepSettlementPostsToLedger: a step is a call whose payment was parked earlier, and it
+// TestTaskSettlementPostsToLedger: a task is a call whose payment was parked earlier, and it
 // settles like any other call — so the money it moves between accounts is posted, and the accounts
 // it touches still hold exactly what their postings say (D4, G1).
-func TestStepSettlementPostsToLedger(t *testing.T) {
+func TestTaskSettlementPostsToLedger(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
 	ctx := context.Background()
@@ -2505,7 +2540,7 @@ func TestStepSettlementPostsToLedger(t *testing.T) {
 
 	payer := setupUser(t, st, "payer", 0)
 	worker := setupUser(t, st, "worker", 0)
-	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 1000, "test", "seed-step"); err != nil {
+	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 1000, "test", "seed-task"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2520,11 +2555,11 @@ func TestStepSettlementPostsToLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, tr := beginTestRun(t, st, payer.ID, action)
-	step, err := k.CreateStep(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: worker.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: worker.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.CompleteStep(ctx, worker.ID, step.ID, json.RawMessage(`{}`)); err != nil {
+	if _, err := k.CompleteTask(ctx, worker.ID, task.ID, json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 

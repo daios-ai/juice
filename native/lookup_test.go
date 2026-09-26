@@ -82,7 +82,7 @@ func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {
 }
 
 // seedAction creates an active public action. price is optional and defaults to 0; pass one only
-// where the price itself is under test (a nonzero price would otherwise unfund step-parking tests).
+// where the price itself is under test (a nonzero price would otherwise unfund task-parking tests).
 func seedAction(t *testing.T, st kernel.Store, ownerID, name, desc string, price ...int64) *kernel.Action {
 	t.Helper()
 	var p int64

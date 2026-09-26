@@ -214,7 +214,7 @@ func setupAction(t *testing.T, st kernel.Store, ownerID, name string, price int6
 	return a
 }
 
-// setupLocalAction is setupAction with local visibility, so a step parked for any local required
+// setupLocalAction is setupAction with local visibility, so a task parked for any local required
 // caller can be completed (caller-scoped CanCall, §4). setupAction stays private for tests that
 // assert a non-owner cannot call it.
 func setupLocalAction(t *testing.T, st kernel.Store, ownerID, name string, price int64) *kernel.Action {
@@ -305,7 +305,7 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 }
 
 // setupOrphanTrace atomically creates a zero-price process+trace via BeginRun, mirroring
-// the production entry point. The trace keeps the process open (no tx) for CreateStep/Call.
+// the production entry point. The trace keeps the process open (no tx) for CreateTask/Call.
 // actionOwnerID sets action_owner_id on the trace (used for non-owner authority checks).
 func setupOrphanTrace(t *testing.T, st kernel.Store, ownerID, actionOwnerID, callerID string) (*kernel.Process, *kernel.Trace) {
 	t.Helper()
@@ -2428,13 +2428,13 @@ type fakeFederationHTTP struct {
 	// fail so a test can watch the worker resend it.
 	revealed  []kernel.RevealPayload
 	revealErr error
-	// Outbound step protocol (§13): the canned list/complete replies, and what the kernel sent.
-	stepListBody      string
-	stepBody          string
-	stepStatus        int
-	stepNotDispatched bool
-	stepInput         string
-	stepForUserID     string
+	// Outbound task protocol (§13): the canned list/complete replies, and what the kernel sent.
+	taskListBody      string
+	taskBody          string
+	taskStatus        int
+	taskNotDispatched bool
+	taskInput         string
+	taskForUserID     string
 }
 
 // signsAs makes the fake answer as the peer whose key priv is, for calls bought by k: the receipts
@@ -2474,29 +2474,29 @@ func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.Reveal
 	return nil
 }
 
-// stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
+// taskStatus/taskBody/taskNotDispatched drive the outbound task protocol (§13); zero values make
 // every unrelated test see an unreachable peer, which no call path consults.
-func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID string, _ bool) (int, []byte, bool, error) {
-	f.stepInput, f.stepForUserID = string(input), forUserID
-	return f.stepReply()
+func (f *fakeFederationHTTP) CompletePeerTask(_ context.Context, _, _, _, _, _ string, input []byte, forUserID string, _ bool) (int, []byte, bool, error) {
+	f.taskInput, f.taskForUserID = string(input), forUserID
+	return f.taskReply()
 }
 
-func (f *fakeFederationHTTP) ListPeerSteps(_ context.Context, _, _, _, _ string) (int, []byte, bool, error) {
-	if f.stepListBody == "" {
+func (f *fakeFederationHTTP) ListPeerTasks(_ context.Context, _, _, _, _ string) (int, []byte, bool, error) {
+	if f.taskListBody == "" {
 		return 0, nil, true, nil // no listing configured: peer unreachable, so no payment descriptor
 	}
-	return 200, []byte(f.stepListBody), false, nil
+	return 200, []byte(f.taskListBody), false, nil
 }
 
-func (f *fakeFederationHTTP) stepReply() (int, []byte, bool, error) {
-	if f.stepBody == "" {
-		return 0, nil, f.stepNotDispatched, kernel.ErrPeerUnreachable.Wrap("step transport failure")
+func (f *fakeFederationHTTP) taskReply() (int, []byte, bool, error) {
+	if f.taskBody == "" {
+		return 0, nil, f.taskNotDispatched, kernel.ErrPeerUnreachable.Wrap("task transport failure")
 	}
-	status := f.stepStatus
+	status := f.taskStatus
 	if status == 0 {
 		status = 200
 	}
-	return status, []byte(f.stepBody), false, nil
+	return status, []byte(f.taskBody), false, nil
 }
 
 func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
@@ -2872,7 +2872,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 // TestRateInboundForeignCallRefused: a call this kernel served to a peer is funded and therefore
 // owned by the seller (§6 role law), so the plain buyer check would let a provider rate its own
 // work and gossip it as trade evidence. The payer is on the other kernel and rates its own proxy
-// transaction there. A step a peer completes here stays the local payer's to rate.
+// transaction there. A task a peer completes here stays the local payer's to rate.
 func TestRateInboundForeignCallRefused(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{"ok":true}`})
@@ -3234,7 +3234,7 @@ var _ = fmt.Sprintf
 
 // TestListProcessesSuperuserWidening proves supervision is scope: the superuser sees every
 // process and may read any, while an ordinary user stays scoped to their own (mirrors the
-// existing ListTransactions/ListSteps widening).
+// existing ListTransactions/ListTasks widening).
 func TestListProcessesSuperuserWidening(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)

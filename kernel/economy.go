@@ -150,7 +150,7 @@ func ceilDiv(a, b int64) int64 {
 // Owed is one cross-kernel obligation as the side that is owed sees it: a projection over the
 // call's own records, never a row of its own. The trace froze the terms and carries the reveal; the
 // receipt says what was charged; the idempotency record names it for the peer. A separate row could
-// only fall out of step with them. The buyer's side is the mirror: its trace, its receipt, and the
+// only fall out of task with them. The buyer's side is the mirror: its trace, its receipt, and the
 // rail row carrying a winning payment.
 type Owed struct {
 	ID             string    `json:"id"` // the call's idempotency key — the name both kernels share
@@ -229,9 +229,9 @@ func mustHex(s string) []byte {
 // obligation by, the buyer's half of the draw, and the stake that funds a winning ticket. Every
 // pricing input is frozen on the record here, so a retry after a restart draws with exactly the
 // values the peer was committed to (P10, D19). It refuses first if the obligation could not be paid.
-func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args map[string]any, stepID string, gross, importBPS int64, caller *Account) error {
+func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args map[string]any, taskID string, gross, importBPS int64, caller *Account) error {
 	// A trace answers a peer or asks one, never both (P6, D19): a served call is never a proxy, and
-	// a step completion carries no admission terms. The record is one slot, so this is the guard.
+	// a task completion carries no admission terms. The record is one slot, so this is the guard.
 	if t.DispatchJSON != nil {
 		return ErrInvalidState.Wrap("a trace admitted under a peer's terms cannot dispatch to one")
 	}
@@ -256,7 +256,7 @@ func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args 
 	key := uuid.New().String()
 	t.IdempotencyKey = &key
 	t.Ticket = k.econ.Stake(dmax)
-	t.DispatchJSON = marshalDispatch(args, stepID, mp, gross, a.ArtifactHash, rbps, importBPS, secret, lottery, callerOnWire(caller))
+	t.DispatchJSON = marshalDispatch(args, taskID, mp, gross, a.ArtifactHash, rbps, importBPS, secret, lottery, callerOnWire(caller))
 	return nil
 }
 

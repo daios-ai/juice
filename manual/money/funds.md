@@ -22,18 +22,18 @@ $ juice user me
 ```
 
 The **available** balance is the amount you can spend. The **locked** balance
-is reserved for existing commitments: running calls, steps awaiting input, and
+is reserved for existing commitments: running calls, tasks awaiting input, and
 stakes for calls to other kernels.
 
 Starting a paid action moves its price from available to locked. Successful
 settlement pays for the work from that reservation; failure returns the portion
-that was not consumed. A step can keep funds reserved after the creating action
+that was not consumed. A task can keep funds reserved after the creating action
 has returned, because its future execution still needs a budget.
 
 If funds remain locked, inspect `juice process list` to find outstanding work.
 The process owner can end abandoned work and recover unused reservations,
 although a remote call awaiting a receipt is normally best left to settle.
-See [Steps and processes](../providing/steps.html) before forcing closure.
+See [Tasks and processes](../providing/tasks.html) before forcing closure.
 
 ## Amounts
 

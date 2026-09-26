@@ -88,11 +88,11 @@ share of the budget. The initial call has a root trace. Each further call has a
 child trace linked to the call that requested it. These links let you follow
 the execution and let the kernel account for spending within each budget.
 
-A **step** reserves a future action call for completion by a named party. Its
+A **task** reserves a future action call for completion by a named party. Its
 creator supplies the arguments already known and reserves the execution price;
 the named party later supplies the missing input. The creating action can return
-while the step waits, but its process remains open. Completion executes the
-step's target action using the reserved funds.
+while the task waits, but its process remains open. Completion executes the
+task's target action using the reserved funds.
 
 A **transaction** records a settled call: its payer, requester, and payee, its
 arguments and result, its outcome, and the amounts charged or refunded. Once
@@ -111,7 +111,7 @@ be read wherever the action is visible, without disclosing the rater's identity.
 ## Money
 
 An account's **available** balance is money it can spend. Its **locked** balance
-is reserved for commitments, including running calls, waiting steps, and stakes
+is reserved for commitments, including running calls, waiting tasks, and stakes
 for remote calls. Settlement pays for the completed work and releases unused
 reservations. The operator's account also holds funds committed to external
 payments and fuel purchases.

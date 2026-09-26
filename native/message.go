@@ -9,16 +9,16 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// Message declares @sys/message (§9): delivery by parking a Step the recipient must acknowledge.
+// Message declares @sys/message (§9): delivery by parking a Task the recipient must acknowledge.
 func Message() Spec {
 	return Spec{
 		Name:        "message",
-		Description: "Sends a message to another platform user and creates a Step they must acknowledge",
+		Description: "Sends a message to another platform user and creates a Task they must acknowledge",
 		InputSchema: obj(map[string]any{
 			"to":      str("Recipient, as handle@kernel"),
 			"message": str("Message body"),
 		}, "to", "message"),
-		OutputSchema: obj(map[string]any{"step_id": str("ID of the created step")}),
+		OutputSchema: obj(map[string]any{"task_id": str("ID of the created task")}),
 		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
 				return executeMessage(ctx, args, callerID, parentTraceID, k)
@@ -37,7 +37,7 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 		return nil, kernel.ErrInvalidInput.Wrap("message requires message")
 	}
 
-	// `to` is an address, here or on a peer: resolved to the account that routes the step, plus the
+	// `to` is an address, here or on a peer: resolved to the account that routes the task, plus the
 	// completer's stable remote id and handle when they are on a peer.
 	recipient, err := k.ResolvePrincipal(ctx, to)
 	if err != nil {
@@ -51,10 +51,10 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 
 	partialArgs, _ := json.Marshal(map[string]any{"message": msg})
 
-	step, err := k.CreateStep(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient)
+	task, err := k.CreateTask(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient)
 	if err != nil {
 		return nil, err
 	}
 
-	return map[string]any{"step_id": step.ID}, nil
+	return map[string]any{"task_id": task.ID}, nil
 }

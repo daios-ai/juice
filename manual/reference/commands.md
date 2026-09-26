@@ -82,7 +82,7 @@ those values without an interactive prompt.
 | `juice user create USER@KERNEL` | create an account; prints the recovery phrase once |
 | `juice user me` | handle, balance, locked funds, connections |
 | `juice user update` | `--description`, `--password` |
-| `juice user connect SELECTOR` | consent for an action to use your upstream account ([Consent](../calling/consent-and-steps.html)) |
+| `juice user connect SELECTOR` | consent for an action to use your upstream account ([Consent](../calling/consent-and-tasks.html)) |
 | `juice user disconnect [SELECTOR]` | revoke it; `--account KEY` removes the whole upstream account |
 | `juice user transfer RECIPIENT AMOUNT` | send money to another user of this kernel ([Funds](../money/funds.html)) |
 | `juice user ledger` | deposits, withdrawals, transfers, delivered value, and settlement postings |
@@ -128,18 +128,18 @@ non-interactive confirmation.
 |---|---|
 | `juice process list` | your processes and what they hold |
 | `juice process show ID` | one process |
-| `juice process end ID` | close it, cancelling waiting steps and returning their money; refused while awaiting a peer's receipt |
+| `juice process end ID` | close it, cancelling waiting tasks and returning their money; refused while awaiting a peer's receipt |
 
-## step
+## task
 
 | Command | |
 |---|---|
-| `juice step create ACTION` | set work aside ([Steps and processes](../providing/steps.html)) |
-| `juice step list` | steps you may complete or own; `--status`, `--process`, `--peer` |
-| `juice step show ID` | one step, with `allowed_input` |
-| `juice step complete ID [JSON]` | supply what is missing and run it; `--peer` |
+| `juice task create ACTION` | set work aside ([Tasks and processes](../providing/tasks.html)) |
+| `juice task list` | tasks you may complete or own; `--status`, `--process`, `--peer` |
+| `juice task show ID` | one task, with `allowed_input` |
+| `juice task complete ID [JSON]` | supply what is missing and run it; `--peer` |
 
-`step create` requires `--trace` and `--required-caller`, and takes
+`task create` requires `--trace` and `--required-caller`, and takes
 `--partial-args`.
 
 ## admin

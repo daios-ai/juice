@@ -177,7 +177,7 @@ func TestChainReadyRefusesAVenueThatUnwrapsAnotherToken(t *testing.T) {
 }
 
 // An ordinary payment is prepared and sent, in that order — the adaptor sequences the rail's own
-// steps rather than its combined verb, because only this path can pass the kernel's reserve.
+// tasks rather than its combined verb, because only this path can pass the kernel's reserve.
 func TestChainPaySequencesPrepareThenSend(t *testing.T) {
 	c, l := testChain(t)
 	out, err := c.Pay(context.Background(), "row-1", "0x000000000000000000000000000000000000dEaD", 100)

@@ -424,7 +424,7 @@ func TestMigrationsAreFileBackedAndRecorded(t *testing.T) {
 		{"traces", "caller_user_id"},
 		{"traces", "idempotency_key"},
 		{"traces", "dispatch_json"},
-		{"steps", "completion_trace_id"},
+		{"tasks", "completion_trace_id"},
 		{"actions", "auth_json"},
 		{"ledger", "from_user_id"},
 		{"ledger", "to_user_id"},
@@ -1417,12 +1417,12 @@ func TestEndProcessWithLockedFundsForceCloseSucceeds(t *testing.T) {
 	}
 }
 
-// TestEndProcessCancelsWaitingStep verifies the store.EndProcess primitive: it cancels
-// waiting steps, returns their parked prices to the owner, and closes the process.
-// Running step-completion traces are settled as failed calls by kernel.EndProcess before
-// this primitive runs (see kernel TestEndProcessFailsRunningStep), so this method only
-// handles waiting steps and remaining available.
-func TestEndProcessCancelsWaitingStep(t *testing.T) {
+// TestEndProcessCancelsWaitingTask verifies the store.EndProcess primitive: it cancels
+// waiting tasks, returns their parked prices to the owner, and closes the process.
+// Running task-completion traces are settled as failed calls by kernel.EndProcess before
+// this primitive runs (see kernel TestEndProcessFailsRunningTask), so this method only
+// handles waiting tasks and remaining available.
+func TestEndProcessCancelsWaitingTask(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -1443,18 +1443,18 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// CreateStep parks the price from the root trace; the step stays waiting.
+	// CreateTask parks the price from the root trace; the task stays waiting.
 	ptID := root.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID:                   uuid.New().String(),
 		ParentTraceID:        &ptID,
 		RequiredCallerUserID: caller.ID,
 		ActionID:             act.ID,
 		Price:                50,
-		Status:               kernel.StepWaiting,
+		Status:               kernel.TaskWaiting,
 		CreatedAt:            time.Now().UTC(),
 	}
-	if err := db.CreateStep(ctx, step); err != nil {
+	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1463,10 +1463,10 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 		t.Fatalf("EndProcess: %v", err)
 	}
 
-	// Waiting step must be cancelled (parked price returned).
-	s, _ := db.ReadStep(ctx, step.ID)
-	if s.Status != kernel.StepCancelled {
-		t.Errorf("step.status=%s, want cancelled", s.Status)
+	// Waiting task must be cancelled (parked price returned).
+	s, _ := db.ReadTask(ctx, task.ID)
+	if s.Status != kernel.TaskCancelled {
+		t.Errorf("task.status=%s, want cancelled", s.Status)
 	}
 
 	// Process must be closed with no funds.
@@ -1488,10 +1488,10 @@ func TestEndProcessCancelsWaitingStep(t *testing.T) {
 	}
 }
 
-// TestEndProcessDoesNotDoubleCountCompletedStep verifies that a step which was
+// TestEndProcessDoesNotDoubleCountCompletedTask verifies that a task which was
 // successfully completed before EndProcess is called is left as 'done' and its
 // funds are not double-counted in the refund.
-func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
+func TestEndProcessDoesNotDoubleCountCompletedTask(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -1512,43 +1512,43 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 
 	ptID := root.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID:                   uuid.New().String(),
 		ParentTraceID:        &ptID,
 		RequiredCallerUserID: caller.ID,
 		ActionID:             act.ID,
 		Price:                50,
-		Status:               kernel.StepWaiting,
+		Status:               kernel.TaskWaiting,
 		CreatedAt:            time.Now().UTC(),
 	}
-	if err := db.CreateStep(ctx, step); err != nil {
+	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+	if err := db.BeginTaskCall(ctx, task.ID, ct); err != nil {
 		t.Fatal(err)
 	}
 
-	// Simulate successful call completion: step is done, tx_id is set, trace is consumed.
-	// The step completes for real: its transaction pays the provider (user) net 40 and the fee
-	// recipient (also user here) 10, and marks the step done with that transaction.
+	// Simulate successful call completion: task is done, tx_id is set, trace is consumed.
+	// The task completes for real: its transaction pays the provider (user) net 40 and the fee
+	// recipient (also user here) 10, and marks the task done with that transaction.
 	done := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: ct.ID, OwnerUserID: user.ID,
 		CallerUserID: caller.ID, TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10,
 		StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
 	rc := &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: done.ID, TraceID: ct.ID, ActionID: act.ID,
 		Status: kernel.TxSuccess, Gross: 50, Net: 40, Fee: 10, Charge: 50, CreatedAt: time.Now().UTC()}
-	if err := db.CommitCall(ctx, done, rc, ct.ID, "", kernel.CallerStep, user.ID, user.ID, 40, 10, nil, "", step.ID); err != nil {
-		t.Fatalf("complete the step: %v", err)
+	if err := db.CommitCall(ctx, done, rc, ct.ID, "", kernel.CallerTask, user.ID, user.ID, 40, 10, nil, "", task.ID); err != nil {
+		t.Fatalf("complete the task: %v", err)
 	}
-	// The creating call returned successfully before; settled, its parked step stays untouched.
+	// The creating call returned successfully before; settled, its parked task stays untouched.
 	settleTrace(t, db, p.ID, root.ID, user.ID, kernel.CallerProcess, p.ID, 50, kernel.TxSuccess)
 	if err := db.EndProcess(ctx, p.ID); !errors.Is(err, kernel.ErrInvalidState) && err != nil {
 		t.Fatalf("EndProcess: %v", err)
 	}
-	s, _ := db.ReadStep(ctx, step.ID)
-	if s.Status != kernel.StepDone || s.TxID == nil || *s.TxID != done.ID {
-		t.Errorf("step %q tx %v, want done with its own transaction: a completed step is never re-cancelled", s.Status, s.TxID)
+	s, _ := db.ReadTask(ctx, task.ID)
+	if s.Status != kernel.TaskDone || s.TxID == nil || *s.TxID != done.ID {
+		t.Errorf("task %q tx %v, want done with its own transaction: a completed task is never re-cancelled", s.Status, s.TxID)
 	}
 	// 1000 parked 50, earned back 40 net + 10 fee: exactly whole, nothing counted twice.
 	if u, _ := db.ReadUser(ctx, user.ID); u.Available != 1000 || u.Locked != 0 {
@@ -1556,10 +1556,10 @@ func TestEndProcessDoesNotDoubleCountCompletedStep(t *testing.T) {
 	}
 }
 
-// TestBeginStepCallGuardsParkInvariant verifies BeginStepCall returns a typed ErrInvalidState
-// (not a raw CHECK constraint failure) if the parent trace's locked is below the step price —
+// TestBeginTaskCallGuardsParkInvariant verifies BeginTaskCall returns a typed ErrInvalidState
+// (not a raw CHECK constraint failure) if the parent trace's locked is below the task price —
 // i.e. the park invariant is broken. Mirrors BeginSubcall's guarded-update pattern.
-func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
+func TestBeginTaskCallGuardsParkInvariant(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -1578,23 +1578,23 @@ func TestBeginStepCallGuardsParkInvariant(t *testing.T) {
 		t.Fatal(err)
 	}
 	ptID := root.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: caller.ID,
-		ActionID: act.ID, Price: 50, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		ActionID: act.ID, Price: 50, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CreateStep(ctx, step); err != nil {
+	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 
-	// Corrupt the park: drop the parent trace's locked below the step price.
+	// Corrupt the park: drop the parent trace's locked below the task price.
 	if _, err := db.db.ExecContext(ctx, `UPDATE traces SET locked=0 WHERE id=?`, root.ID); err != nil {
 		t.Fatalf("corrupt locked: %v", err)
 	}
 
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	err := db.BeginStepCall(ctx, step.ID, ct)
+	err := db.BeginTaskCall(ctx, task.ID, ct)
 	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("BeginStepCall with broken park: got %v, want ErrInvalidState", err)
+		t.Errorf("BeginTaskCall with broken park: got %v, want ErrInvalidState", err)
 	}
 }
 
@@ -2254,7 +2254,7 @@ func TestListRatings(t *testing.T) {
 	}
 }
 
-func TestListStepsPagination(t *testing.T) {
+func TestListTasksPagination(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -2273,42 +2273,42 @@ func TestListStepsPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Park three waiting steps from the root trace (3 * 10 = 30 <= 100).
+	// Park three waiting tasks from the root trace (3 * 10 = 30 <= 100).
 	ptID := root.ID
 	for i := 0; i < 3; i++ {
-		step := &kernel.Step{
+		task := &kernel.Task{
 			ID:                   uuid.New().String(),
 			ParentTraceID:        &ptID,
 			RequiredCallerUserID: caller.ID,
 			ActionID:             act.ID,
 			Price:                10,
-			Status:               kernel.StepWaiting,
+			Status:               kernel.TaskWaiting,
 			CreatedAt:            time.Now().UTC().Add(time.Duration(i) * time.Second),
 		}
-		if err := db.CreateStep(ctx, step); err != nil {
+		if err := db.CreateTask(ctx, task); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// The process owner sees all three; limit bounds the page.
-	page1, err := db.ListSteps(ctx, user.ID, "", "", false, 2, 0)
+	page1, err := db.ListTasks(ctx, user.ID, "", "", false, 2, 0)
 	if err != nil {
-		t.Fatalf("ListSteps: %v", err)
+		t.Fatalf("ListTasks: %v", err)
 	}
 	if len(page1) != 2 {
-		t.Fatalf("limit=2: want 2 steps, got %d", len(page1))
+		t.Fatalf("limit=2: want 2 tasks, got %d", len(page1))
 	}
 
 	// Offset skips the first page.
-	page2, _ := db.ListSteps(ctx, user.ID, "", "", false, 2, 2)
+	page2, _ := db.ListTasks(ctx, user.ID, "", "", false, 2, 2)
 	if len(page2) != 1 {
-		t.Fatalf("limit=2 offset=2: want 1 step, got %d", len(page2))
+		t.Fatalf("limit=2 offset=2: want 1 task, got %d", len(page2))
 	}
 
 	// A non-positive limit falls back to the default (50), returning all three.
-	all, _ := db.ListSteps(ctx, user.ID, "", "", false, 0, 0)
+	all, _ := db.ListTasks(ctx, user.ID, "", "", false, 0, 0)
 	if len(all) != 3 {
-		t.Fatalf("limit=0 fallback: want all 3 steps, got %d", len(all))
+		t.Fatalf("limit=0 fallback: want all 3 tasks, got %d", len(all))
 	}
 }
 
@@ -3007,7 +3007,7 @@ func TestBeginRunIsAtomic(t *testing.T) {
 	}
 }
 
-func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
+func TestListOrphanRunningTasksDistinguishesSettled(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -3016,21 +3016,21 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 	act := newAction(user.ID, "orphan-settled-act", 100, true)
 	_ = db.CreateAction(ctx, act)
 
-	// mkSetup: create process → root trace → step → completion trace via BeginStepCall.
-	mkSetup := func(price int64) (*kernel.Step, *kernel.Trace) {
+	// mkSetup: create process → root trace → task → completion trace via BeginTaskCall.
+	mkSetup := func(price int64) (*kernel.Task, *kernel.Trace) {
 		p := newProcess(user.ID)
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 		_ = db.BeginRun(ctx, p, root, user.ID, price, 0, 0)
 		ptID := root.ID
-		step := &kernel.Step{
+		task := &kernel.Task{
 			ID: uuid.New().String(), ParentTraceID: &ptID,
 			RequiredCallerUserID: user.ID, ActionID: act.ID,
-			Price: price, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+			Price: price, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 		}
-		_ = db.CreateStep(ctx, step)
+		_ = db.CreateTask(ctx, task)
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		_ = db.BeginStepCall(ctx, step.ID, ct)
-		return step, ct
+		_ = db.BeginTaskCall(ctx, task.ID, ct)
+		return task, ct
 	}
 
 	// ct1 is an empty completion trace (HasSettled should be false).
@@ -3043,15 +3043,15 @@ func TestListOrphanRunningStepsDistinguishesSettled(t *testing.T) {
 		t.Fatalf("BeginSubcall: %v", err)
 	}
 
-	rows, err := db.ListOrphanRunningSteps(ctx)
+	rows, err := db.ListOrphanRunningTasks(ctx, "")
 	if err != nil {
-		t.Fatalf("ListOrphanRunningSteps: %v", err)
+		t.Fatalf("ListOrphanRunningTasks: %v", err)
 	}
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 rows, got %d", len(rows))
 	}
 
-	byTrace := make(map[string]kernel.OrphanRunningStep)
+	byTrace := make(map[string]kernel.OrphanRunningTask)
 	for _, r := range rows {
 		byTrace[r.CompletionTraceID] = r
 	}
@@ -3112,8 +3112,8 @@ func TestListUnsettledTracesChildFirst(t *testing.T) {
 
 // settleTrace settles a trace the way the kernel does before it ever asks the store to close a
 // process: store.EndProcess refuses to close over an unsettled trace. A failure rolls up and
-// cancels the waiting steps beneath it; a success leaves them parked, which is the only state in
-// which a settled root still has steps for a forced close to cancel.
+// cancels the waiting tasks beneath it; a success leaves them parked, which is the only state in
+// which a settled root still has tasks for a forced close to cancel.
 func settleTrace(t *testing.T, db *DB, processID, traceID, ownerID, walletKind, walletID string, gross int64, status kernel.TxStatus) {
 	t.Helper()
 	ctx := context.Background()
@@ -3139,7 +3139,7 @@ func settleTrace(t *testing.T, db *DB, processID, traceID, ownerID, walletKind, 
 
 // TestFundingStatementRefusesSettledAndClosed: the rules a spend depends on live in the funding
 // statement (D2). A settled trace, or a trace in a closed process, funds no subcall and parks no
-// step — at price zero, which no balance check alone would refuse.
+// task — at price zero, which no balance check alone would refuse.
 func TestFundingStatementRefusesSettledAndClosed(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -3150,20 +3150,20 @@ func TestFundingStatementRefusesSettledAndClosed(t *testing.T) {
 	child := func(processID string) *kernel.Trace {
 		return &kernel.Trace{ID: uuid.New().String(), ProcessID: processID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
 	}
-	step := func(parent string) *kernel.Step {
-		return &kernel.Step{ID: uuid.New().String(), ParentTraceID: &parent, RequiredCallerUserID: user.ID, ActionID: act.ID,
-			PartialArgs: json.RawMessage(`{}`), Status: kernel.StepWaiting, CreatedAt: time.Now().UTC()}
+	task := func(parent string) *kernel.Task {
+		return &kernel.Task{ID: uuid.New().String(), ParentTraceID: &parent, RequiredCallerUserID: user.ID, ActionID: act.ID,
+			PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
 	}
 	p := newProcess(user.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: user.ID, CallerUserID: user.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
 	if err := db.BeginRun(ctx, p, root, user.ID, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	// A waiting step keeps the process open once the root settles (a trace never settles ahead of
+	// A waiting task keeps the process open once the root settles (a trace never settles ahead of
 	// a child, so nothing else could).
-	keeper := step(root.ID)
-	if err := db.CreateStep(ctx, keeper); err != nil {
-		t.Fatalf("fixture step before settlement: %v", err)
+	keeper := task(root.ID)
+	if err := db.CreateTask(ctx, keeper); err != nil {
+		t.Fatalf("fixture task before settlement: %v", err)
 	}
 	tx := &kernel.Transaction{ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID, OwnerUserID: user.ID, CallerUserID: user.ID,
 		TargetUserID: user.ID, ActionID: act.ID, Status: kernel.TxSuccess, StartedAt: time.Now().UTC(), EndedAt: time.Now().UTC()}
@@ -3172,13 +3172,13 @@ func TestFundingStatementRefusesSettledAndClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if proc, _ := db.ReadProcess(ctx, p.ID); proc.Status != kernel.ProcessOpen {
-		t.Fatal("fixture: the waiting step must keep the process open")
+		t.Fatal("fixture: the waiting task must keep the process open")
 	}
 	if err := db.BeginSubcall(ctx, root.ID, child(p.ID), 0); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("free subcall on a settled trace: want ErrInvalidState, got %v", err)
 	}
-	if err := db.CreateStep(ctx, step(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("free step on a settled trace: want ErrInvalidState, got %v", err)
+	if err := db.CreateTask(ctx, task(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free task on a settled trace: want ErrInvalidState, got %v", err)
 	}
 	if err := db.EndProcess(ctx, p.ID); err != nil {
 		t.Fatal(err)
@@ -3186,8 +3186,8 @@ func TestFundingStatementRefusesSettledAndClosed(t *testing.T) {
 	if err := db.BeginSubcall(ctx, root.ID, child(p.ID), 0); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("free subcall in a closed process: want ErrInvalidState, got %v", err)
 	}
-	if err := db.CreateStep(ctx, step(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("free step in a closed process: want ErrInvalidState, got %v", err)
+	if err := db.CreateTask(ctx, task(root.ID)); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("free task in a closed process: want ErrInvalidState, got %v", err)
 	}
 	if traces, _ := db.ListTraces(ctx, p.ID); len(traces) != 1 {
 		t.Errorf("a trace was funded past the guard: %d traces", len(traces))
@@ -3221,7 +3221,7 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 		return &kernel.Receipt{ID: uuid.New().String(), IssuerUserID: user.ID, TxID: tx.ID, TraceID: root.ID,
 			ActionID: act.ID, Status: kernel.TxFailure, Gross: 100, Charge: 100 - refund, CreatedAt: time.Now().UTC()}, nil
 	}
-	err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", "step-x")
+	err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", "task-x")
 	if !errors.Is(err, kernel.ErrSettlementDeferred) {
 		t.Fatalf("a failure commit over an unsettled child: want ErrSettlementDeferred, got %v", err)
 	}
@@ -3230,7 +3230,7 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 		t.Fatal("the refusal recorded no outcome")
 	}
 	var o kernel.TraceOutcome
-	if json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil || o.Status != kernel.TxFailure || o.Gross != 100 || o.Reason != "execution_failed" || o.StepID != "step-x" {
+	if json.Unmarshal([]byte(*tr.OutcomeJSON), &o) != nil || o.Status != kernel.TxFailure || o.Gross != 100 || o.Reason != "execution_failed" || o.TaskID != "task-x" {
 		t.Errorf("recorded outcome %+v, want the failure the caller brought", o)
 	}
 	if settled, _ := db.TraceHasTransaction(ctx, root.ID); settled {
@@ -3256,7 +3256,7 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 	}
 }
 
-// TestReparkReleasesTheCompletersReserves: claiming a step locks the completer's ticket stake and
+// TestReparkReleasesTheCompletersReserves: claiming a task locks the completer's ticket stake and
 // transfer value on their own account; re-parking deletes the trace that recorded them, so it
 // releases them first — and deletes the completion trace at any price, zero included.
 func TestReparkReleasesTheCompletersReserves(t *testing.T) {
@@ -3275,21 +3275,21 @@ func TestReparkReleasesTheCompletersReserves(t *testing.T) {
 			t.Fatal(err)
 		}
 		ptID := root.ID
-		step := &kernel.Step{ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: completer.ID, ActionID: act.ID,
-			Price: price, PartialArgs: json.RawMessage(`{}`), Status: kernel.StepWaiting, CreatedAt: time.Now().UTC()}
-		if err := db.CreateStep(ctx, step); err != nil {
+		task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: completer.ID, ActionID: act.ID,
+			Price: price, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
+		if err := db.CreateTask(ctx, task); err != nil {
 			t.Fatal(err)
 		}
 		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: act.ID, CallerUserID: completer.ID,
 			Ticket: 7, Value: 5, ValueTo: owner.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginStepCall(ctx, step.ID, ct); err != nil {
+		if err := db.BeginTaskCall(ctx, task.ID, ct); err != nil {
 			t.Fatal(err)
 		}
 		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 12 {
 			t.Fatalf("fixture: the claim locked %d on the completer, want 12", u.Locked)
 		}
-		if err := db.ResetStepAndRepark(ctx, step.ID); err != nil {
-			t.Fatalf("ResetStepAndRepark at price %d: %v", price, err)
+		if err := db.ResetTaskAndRepark(ctx, task.ID); err != nil {
+			t.Fatalf("ResetTaskAndRepark at price %d: %v", price, err)
 		}
 		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 0 || u.Available != 50 {
 			t.Errorf("price %d: completer available=%d locked=%d after re-park, want 50 and 0: reserves released", price, u.Available, u.Locked)
@@ -3297,8 +3297,8 @@ func TestReparkReleasesTheCompletersReserves(t *testing.T) {
 		if tr, _ := db.ReadTrace(ctx, ct.ID); tr != nil {
 			t.Errorf("price %d: the empty completion trace survived the re-park", price)
 		}
-		if s, _ := db.ReadStep(ctx, step.ID); s.Status != kernel.StepWaiting {
-			t.Errorf("price %d: step %q, want waiting", price, s.Status)
+		if s, _ := db.ReadTask(ctx, task.ID); s.Status != kernel.TaskWaiting {
+			t.Errorf("price %d: task %q, want waiting", price, s.Status)
 		}
 	}
 }
@@ -3380,10 +3380,10 @@ func TestReceiptHashWrittenAndBackfilled(t *testing.T) {
 	db.Close()
 }
 
-// TestResetStepAndReparkWithDescendantTransaction verifies that ResetStepAndRepark rejects
+// TestResetTaskAndReparkWithDescendantTransaction verifies that ResetTaskAndRepark rejects
 // a re-park when the completion trace has a committed descendant transaction, even if the
 // trace's own available/locked look correct.
-func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
+func TestResetTaskAndReparkWithDescendantTransaction(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -3398,14 +3398,14 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 	_ = db.BeginRun(ctx, p, root, user.ID, 100, 0, 0)
 	ptID := root.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID: uuid.New().String(), ParentTraceID: &ptID,
 		RequiredCallerUserID: user.ID, ActionID: act.ID,
-		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		Price: 100, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 	}
-	_ = db.CreateStep(ctx, step)
+	_ = db.CreateTask(ctx, task)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginTaskCall(ctx, task.ID, ct)
 
 	// Create a descendant subcall of the completion trace and commit a transaction for it.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -3430,19 +3430,19 @@ func TestResetStepAndReparkWithDescendantTransaction(t *testing.T) {
 
 	// ct.available == price and ct.locked == 0 at this point (subcall settled and released lock),
 	// but there IS a committed descendant transaction. Re-park must be rejected.
-	err := db.ResetStepAndRepark(ctx, step.ID)
+	err := db.ResetTaskAndRepark(ctx, task.ID)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for completion trace with descendant tx, got %v", err)
 	}
-	got, _ := db.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepRunning {
-		t.Errorf("step.status after failed re-park: got %s, want running", got.Status)
+	got, _ := db.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskRunning {
+		t.Errorf("task.status after failed re-park: got %s, want running", got.Status)
 	}
 }
 
-// TestResetStepAndReparkNonEmptyTrace verifies Fix 2: ResetStepAndRepark returns
+// TestResetTaskAndReparkNonEmptyTrace verifies Fix 2: ResetTaskAndRepark returns
 // ErrInvalidState when the completion trace has committed downstream work.
-func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
+func TestResetTaskAndReparkNonEmptyTrace(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -3455,14 +3455,14 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 	_ = db.BeginRun(ctx, p, root, user.ID, 100, 0, 0)
 	ptID := root.ID
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID: uuid.New().String(), ParentTraceID: &ptID,
 		RequiredCallerUserID: user.ID, ActionID: act.ID,
-		Price: 100, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		Price: 100, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 	}
-	_ = db.CreateStep(ctx, step)
+	_ = db.CreateTask(ctx, task)
 	ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	_ = db.BeginStepCall(ctx, step.ID, ct)
+	_ = db.BeginTaskCall(ctx, task.ID, ct)
 
 	// Make the completion trace non-empty: lock funds via a subcall.
 	sub := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -3470,15 +3470,15 @@ func TestResetStepAndReparkNonEmptyTrace(t *testing.T) {
 		t.Fatalf("BeginSubcall: %v", err)
 	}
 
-	err := db.ResetStepAndRepark(ctx, step.ID)
+	err := db.ResetTaskAndRepark(ctx, task.ID)
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for non-empty completion trace, got %v", err)
 	}
 
-	// Step must still be running (re-park was aborted).
-	got, _ := db.ReadStep(ctx, step.ID)
-	if got.Status != kernel.StepRunning {
-		t.Errorf("step.status after failed re-park: got %s, want running", got.Status)
+	// Task must still be running (re-park was aborted).
+	got, _ := db.ReadTask(ctx, task.ID)
+	if got.Status != kernel.TaskRunning {
+		t.Errorf("task.status after failed re-park: got %s, want running", got.Status)
 	}
 }
 
@@ -3631,15 +3631,15 @@ func TestListPurgeablePeers(t *testing.T) {
 	txp := newPeer(t, db, "txp", "k-txp", 0, 0, old)
 	insertTx(t, db, txp.ID, txp.ID, "some-target", "some-action", now)
 
-	// excluded: a waiting step is addressed to the peer as required caller
-	stepp := newPeer(t, db, "stepp", "k-stepp", 0, 0, old)
+	// excluded: a waiting task is addressed to the peer as required caller
+	taskp := newPeer(t, db, "taskp", "k-taskp", 0, 0, old)
 	owner := newUser("sowner", 0)
 	_ = db.CreateUser(ctx, owner)
 	act := newAction(owner.ID, "approve", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateStep(ctx, &kernel.Step{ID: uuid.New().String(), RequiredCallerUserID: stepp.ID, ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: now}); err != nil {
+	if err := db.CreateTask(ctx, &kernel.Task{ID: uuid.New().String(), RequiredCallerUserID: taskp.ID, ActionID: act.ID, Price: 0, Status: kernel.TaskWaiting, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4024,10 +4024,10 @@ func TestCreateLedgerEntry(t *testing.T) {
 	}
 }
 
-// ListStepsAwaitingCaller must be scoped in SQL and oldest-first: the federation step list (§13)
-// relies on it, and filtering ListSteps' disjunction in Go after its row cap discarded exactly the
-// steps a peer could complete.
-func TestListStepsAwaitingCaller(t *testing.T) {
+// ListTasksAwaitingCaller must be scoped in SQL and oldest-first: the federation task list (§13)
+// relies on it, and filtering ListTasks' disjunction in Go after its row cap discarded exactly the
+// tasks a peer could complete.
+func TestListTasksAwaitingCaller(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -4043,7 +4043,7 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 	if err := db.CreateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	mkStep := func(processOwner, requiredCaller string) string {
+	mkTask := func(processOwner, requiredCaller string) string {
 		t.Helper()
 		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: processOwner, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
@@ -4051,34 +4051,34 @@ func TestListStepsAwaitingCaller(t *testing.T) {
 			t.Fatal(err)
 		}
 		ptID := root.ID
-		st := &kernel.Step{
+		st := &kernel.Task{
 			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: requiredCaller,
-			ActionID: act.ID, Price: 0, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+			ActionID: act.ID, Price: 0, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 		}
-		if err := db.CreateStep(ctx, st); err != nil {
+		if err := db.CreateTask(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 		return st.ID
 	}
 
-	// The assignee's own step comes first in time; 60 steps in processes it owns follow. Under the
+	// The assignee's own task comes first in time; 60 tasks in processes it owns follow. Under the
 	// old "cap then filter in Go" shape those 60 would fill the page and hide this one.
-	mine := mkStep(owner.ID, assignee.ID)
+	mine := mkTask(owner.ID, assignee.ID)
 	for i := 0; i < 60; i++ {
-		mkStep(assignee.ID, other.ID)
+		mkTask(assignee.ID, other.ID)
 	}
 
-	got, err := db.ListStepsAwaitingCaller(ctx, assignee.ID, "", 200)
+	got, err := db.ListTasksAwaitingCaller(ctx, assignee.ID, "", 200)
 	if err != nil {
-		t.Fatalf("ListStepsAwaitingCaller: %v", err)
+		t.Fatalf("ListTasksAwaitingCaller: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != mine {
-		t.Fatalf("expected only the assignee's own waiting step, got %d rows", len(got))
+		t.Fatalf("expected only the assignee's own waiting task, got %d rows", len(got))
 	}
 
-	// Oldest first: the longest-stranded step is what an operator needs to see.
-	second := mkStep(owner.ID, assignee.ID)
-	got, _ = db.ListStepsAwaitingCaller(ctx, assignee.ID, "", 200)
+	// Oldest first: the longest-stranded task is what an operator needs to see.
+	second := mkTask(owner.ID, assignee.ID)
+	got, _ = db.ListTasksAwaitingCaller(ctx, assignee.ID, "", 200)
 	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
 		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
 	}
@@ -4706,7 +4706,7 @@ func TestPriceSnapshotColumnsRoundTrip(t *testing.T) {
 		t.Errorf("legacy row base_price = %v, want nil", l.BasePrice)
 	}
 
-	// steps.import_bps behaves the same way.
+	// tasks.import_bps behaves the same way.
 	p := newProcess(owner.ID)
 	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
 	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
@@ -4714,17 +4714,17 @@ func TestPriceSnapshotColumnsRoundTrip(t *testing.T) {
 	}
 	ptID := root.ID
 	ibps := int64(500)
-	step := &kernel.Step{
+	task := &kernel.Task{
 		ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: owner.ID,
 		ActionID: withPrice.ID, Price: 0,
-		ImportBPS: &ibps, Status: kernel.StepWaiting, CreatedAt: time.Now().UTC(),
+		ImportBPS: &ibps, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
 	}
-	if err := db.CreateStep(ctx, step); err != nil {
+	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
-	back, err := db.ReadStep(ctx, step.ID)
+	back, err := db.ReadTask(ctx, task.ID)
 	if err != nil || back.ImportBPS == nil || *back.ImportBPS != 500 {
-		t.Errorf("step import_bps round-trip = %v (err %v), want 500", back.ImportBPS, err)
+		t.Errorf("task import_bps round-trip = %v (err %v), want 500", back.ImportBPS, err)
 	}
 }
 
@@ -4780,6 +4780,44 @@ func TestMigration053RenamesInPlace(t *testing.T) {
 	var idx int
 	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_accounts_blockchain_address'`).Scan(&idx); err != nil || idx != 1 {
 		t.Fatalf("the unique address index must exist under the new name: %d, %v", idx, err)
+	}
+}
+
+// TestMigration055RenamesTasksInPlace: a step is a task, renamed and not redefined. A waiting row
+// comes through under the new table, and a trace's own record of the task it completes keeps its
+// value under the new key, since a retried completion reads it back (D19).
+func TestMigration055RenamesTasksInPlace(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		for _, q := range []string{
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at) VALUES ('p1','u1',0,0,'open','` + now + `')`,
+			`INSERT INTO "traces" (id,process_id,caller_user_id,available,locked,dispatch_json,created_at)
+			 VALUES ('t1','p1','u1',0,0,'{"step_id":"s1","mp":5}','` + now + `')`,
+			`INSERT INTO actions (id,owner_user_id,name,kind,created_at,updated_at) VALUES ('a1','u1','x','wasm','` + now + `','` + now + `')`,
+			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,action_id,status,created_at)
+			 VALUES ('s1','t1','u1','a1','waiting','` + now + `')`,
+		} {
+			if _, err := raw.Exec(q); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+	})
+	db := openAt(t, path)
+	ctx := context.Background()
+	if task, err := db.ReadTask(ctx, "s1"); err != nil || task.Status != kernel.TaskWaiting {
+		t.Fatalf("the waiting row must come through as a task: %+v, %v", task, err)
+	}
+	var dispatch string
+	if err := db.db.QueryRowContext(ctx, `SELECT dispatch_json FROM traces WHERE id='t1'`).Scan(&dispatch); err != nil {
+		t.Fatal(err)
+	}
+	var d map[string]any
+	if err := json.Unmarshal([]byte(dispatch), &d); err != nil || d["task_id"] != "s1" || d["mp"] != float64(5) || d["step_id"] != nil {
+		t.Errorf("dispatch record = %s, want task_id s1 beside the rest and no step_id", dispatch)
+	}
+	var n int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('steps','idx_steps_status','idx_steps_required_caller')`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("no table or index may survive under the old name: %d, %v", n, err)
 	}
 }
 

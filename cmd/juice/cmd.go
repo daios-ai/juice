@@ -231,7 +231,7 @@ func (o output) idField() string {
 
 // resources is the part of a reply that holds the resources it names. Most replies are a resource
 // or a list of them and are their own; one that wraps a list beside something else — a page of a
-// peer's steps beside whether more are waiting — names the field, rather than having every reply
+// peer's tasks beside whether more are waiting — names the field, rather than having every reply
 // searched for one.
 func (o output) resources(body []byte) []byte {
 	if o.rows == "" {
@@ -436,7 +436,7 @@ var (
 	moneyTx      = []string{"gross", "net", "fee", "refund"}
 	moneyRail    = []string{"amount", "credit"}
 	moneyLedger  = []string{"amount"}
-	moneyStep    = []string{"price"}
+	moneyTask    = []string{"price"}
 	moneyCall    = []string{"charge"}
 	moneyOwed    = []string{"obligation", "amount"}
 )
@@ -1468,21 +1468,21 @@ func processShowCmd() *cobra.Command {
 	}
 }
 
-// ---- step ----
+// ---- task ----
 
 func init() {
-	stepCmd := &cobra.Command{Use: "step", Short: "Manage steps"}
-	stepCmd.AddCommand(stepCreateCmd(), stepListCmd(), stepShowCmd(), stepCompleteCmd())
-	rootCmd.AddCommand(stepCmd)
+	taskCmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
+	taskCmd.AddCommand(taskCreateCmd(), taskListCmd(), taskShowCmd(), taskCompleteCmd())
+	rootCmd.AddCommand(taskCmd)
 }
 
-func stepCreateCmd() *cobra.Command {
+func taskCreateCmd() *cobra.Command {
 	var traceID, requiredCaller string
 	var partialArgs string
 	cmd := &cobra.Command{
 		Use:   "create ACTION",
-		Short: "Create a step",
-		Long:  "Create a step: a prepaid continuation of a running call, addressed to one user who later completes it with `step complete`. The step's price is reserved now, so completion needs no further funds.\n\n" + actionRefHelp,
+		Short: "Create a task",
+		Long:  "Create a task: a prepaid continuation of a running call, addressed to one user who later completes it with `task complete`. The task's price is reserved now, so completion needs no further funds.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pa := json.RawMessage("{}")
@@ -1492,105 +1492,101 @@ func stepCreateCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrapf("invalid --partial-args: %v", err)
 				}
 			}
-			body := createStepParams{
+			body := createTaskParams{
 				TraceID:        traceID,
 				ActionRef:      args[0], // an address or id; the server resolves it
 				RequiredCaller: requiredCaller,
 				PartialArgs:    pa,
 			}
-			return cli.emit("POST", "/v1/steps", body, output{money: moneyStep})
+			return cli.emit("POST", "/v1/tasks", body, output{money: moneyTask})
 		},
 	}
-	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the step (required)")
-	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step, handle@kernel, here or on a peer (required)")
+	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the task (required)")
+	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the task, handle@kernel, here or on a peer (required)")
 	cmd.Flags().StringVar(&partialArgs, "partial-args", "", "Partial args as JSON object")
 	_ = cmd.MarkFlagRequired("trace")
 	_ = cmd.MarkFlagRequired("required-caller")
 	return cmd
 }
 
-func stepListCmd() *cobra.Command {
+func taskListCmd() *cobra.Command {
 	var processID, status, peer string
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List steps",
+		Short: "List tasks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Every flag typed is sent: the server decides what combines, so none is silently dropped.
 			q := url.Values{}
-			// A peer holds the step and answers for it, so the reply carries only what it may
-			// disclose: the id to complete, what is already filled in, and what you may supply.
-			if peer != "" {
-				if cmd.Flags().Changed("process") || cmd.Flags().Changed("status") ||
-					cmd.Flags().Changed("limit") || cmd.Flags().Changed("offset") {
-					return fmt.Errorf("--peer lists the one page of steps a peer holds for you; it takes no filter or paging flag")
+			for flag, param := range map[string]string{"peer": "peer", "process": "process_id", "status": "status", "limit": "limit", "offset": "offset"} {
+				if cmd.Flags().Changed(flag) {
+					q.Set(param, cmd.Flags().Lookup(flag).Value.String())
 				}
-				q.Set("peer", peer)
-				ctx := context.Background()
-				net, err := humanUnits(ctx)
-				if err != nil {
+			}
+			if peer == "" {
+				return cli.emit("GET", "/v1/tasks?"+q.Encode(), nil, output{human: list(
+					column{"TASK", text("id")},
+					column{"STATUS", text("status")},
+					column{"CREATED BY", text("created_by")},
+					column{"COMPLETES", text("action")},
+					column{"CALLER", text("required_caller")},
+				)})
+			}
+			// A peer holds the task and answers for it, so the reply carries only what it may
+			// disclose: the id to complete, what is already filled in, and what you may supply.
+			ctx := context.Background()
+			net, err := humanUnits(ctx)
+			if err != nil {
+				return err
+			}
+			return cli.emitCtx(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, output{rows: "tasks", human: func(b []byte) error {
+				var held struct {
+					Tasks     json.RawMessage `json:"tasks"`
+					Truncated bool            `json:"truncated"`
+				}
+				if err := json.Unmarshal(b, &held); err != nil {
 					return err
 				}
-				return cli.emitCtx(ctx, "GET", "/v1/steps?"+q.Encode(), nil, output{rows: "steps", human: func(b []byte) error {
-					var held kernel.PeerStepList
-					if err := json.Unmarshal(b, &held); err != nil {
-						return err
-					}
-					rows, _ := json.Marshal(held.Steps)
-					if err := list(
-						column{"STEP", text("id")},
-						column{"PRICE", money("price", net)},
-						column{"CREATED", text("created_at")},
-						column{"SUPPLIED", text("partial_args")},
-					)(rows); err != nil {
-						return err
-					}
-					if held.Truncated {
-						fmt.Println("more steps are waiting than one page carries; complete some and ask again")
-					}
-					return nil
-				}})
-			}
-			if processID != "" {
-				q.Set("process_id", processID)
-			}
-			if status != "" {
-				q.Set("status", status)
-			}
-			setLimitOffset(q, limit, offset)
-			return cli.emit("GET", "/v1/steps?"+q.Encode(), nil, output{human: list(
-				column{"STEP", text("id")},
-				column{"STATUS", text("status")},
-				column{"CREATED BY", text("created_by")},
-				column{"COMPLETES", text("action")},
-				column{"CALLER", text("required_caller")},
-			)})
+				if err := list(
+					column{"TASK", text("id")},
+					column{"PRICE", money("price", net)},
+					column{"CREATED", text("created_at")},
+					column{"SUPPLIED", text("partial_args")},
+				)(held.Tasks); err != nil {
+					return err
+				}
+				if held.Truncated {
+					fmt.Println("more tasks are waiting than one page carries; complete some and ask again")
+				}
+				return nil
+			}})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
-	cmd.Flags().StringVar(&peer, "peer", "", "List steps this peer (its local name or key) is holding for you, over federation")
+	cmd.Flags().StringVar(&peer, "peer", "", "List tasks this peer (its local name or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
 
-func stepShowCmd() *cobra.Command {
+func taskShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show ID",
-		Short: "Show step details",
+		Short: "Show task details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cli.emit("GET", "/v1/steps/"+args[0], nil, output{money: moneyStep})
+			return cli.emit("GET", "/v1/tasks/"+args[0], nil, output{money: moneyTask})
 		},
 	}
 }
 
-func stepCompleteCmd() *cobra.Command {
+func taskCompleteCmd() *cobra.Command {
 	var peer string
 	cmd := &cobra.Command{
 		Use:   "complete ID [JSON]",
-		Short: "Complete a waiting step",
-		Long:  "Complete a waiting step addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a file. `step show` lists the fields still expected under allowed_input.",
+		Short: "Complete a waiting task",
+		Long:  "Complete a waiting task addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a file. `task show` lists the fields still expected under allowed_input.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			raw := ""
@@ -1605,10 +1601,10 @@ func stepCompleteCmd() *cobra.Command {
 			if peer != "" {
 				body["peer"] = peer
 			}
-			return cli.emit("POST", "/v1/steps/"+args[0]+"/complete", body, output{id: "tx_id"})
+			return cli.emit("POST", "/v1/tasks/"+args[0]+"/complete", body, output{id: "tx_id"})
 		},
 	}
-	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (its local name or key), over federation")
+	cmd.Flags().StringVar(&peer, "peer", "", "Complete a task held by this peer (its local name or key), over federation")
 	return cmd
 }
 

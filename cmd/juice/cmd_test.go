@@ -1037,7 +1037,7 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 	}
 }
 
-// ---- step ----
+// ---- task ----
 
 func assertActionRef(t *testing.T, v any) {
 	t.Helper()
@@ -1054,7 +1054,7 @@ func assertActionRef(t *testing.T, v any) {
 	}
 }
 
-func newStepBackend(t *testing.T) *httptest.Server {
+func newTaskBackend(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1064,12 +1064,12 @@ func newStepBackend(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, handle, name string) (string, string) {
+func createTaskAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, handle, name string) (string, string) {
 	t.Helper()
 	emptySchema := map[string]any{"type": "object", "properties": map[string]any{}}
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
 		"name": name, "kind": "http", "price": 0, "source": backendURL,
-		"description":   "test step action",
+		"description":   "test task action",
 		"input_schema":  emptySchema,
 		"output_schema": emptySchema,
 	}, ownerTok)
@@ -1088,21 +1088,21 @@ func createStepAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 	return id, handle + "/" + name
 }
 
-func TestServeCreateStep(t *testing.T) {
-	backend := newStepBackend(t)
+func TestServeCreateTask(t *testing.T) {
+	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
 	ownerID, ownerTok := makeUser(t, k, "cs-create-owner")
 	makeUser(t, k, "cs-create-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "cs-create-owner", "cs-create-svc")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "cs-create-owner", "cs-create-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
 	traceID := setupTraceForProcess(t, db, pid)
 
-	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	resp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
 		"required_caller": "cs-create-caller@k",
@@ -1110,102 +1110,102 @@ func TestServeCreateStep(t *testing.T) {
 	}, ownerTok)
 	if resp.StatusCode != http.StatusCreated {
 		resp.Body.Close()
-		t.Fatalf("POST /v1/steps: expected 201, got %d", resp.StatusCode)
+		t.Fatalf("POST /v1/tasks: expected 201, got %d", resp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, resp, &step)
-	if step["id"] == nil || step["id"] == "" {
-		t.Error("expected step id in response")
+	var task map[string]any
+	decodeResponse(t, resp, &task)
+	if task["id"] == nil || task["id"] == "" {
+		t.Error("expected task id in response")
 	}
-	if step["status"] != "waiting" {
-		t.Errorf("expected status=waiting, got %v", step["status"])
+	if task["status"] != "waiting" {
+		t.Errorf("expected status=waiting, got %v", task["status"])
 	}
-	if step["action"] == nil || step["action"] == "" {
-		t.Error("expected computed action field in POST /v1/steps response")
+	if task["action"] == nil || task["action"] == "" {
+		t.Error("expected computed action field in POST /v1/tasks response")
 	}
-	assertActionRef(t, step["action"])
+	assertActionRef(t, task["action"])
 }
 
-func TestServeListSteps(t *testing.T) {
-	backend := newStepBackend(t)
+func TestServeListTasks(t *testing.T) {
+	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "sl-steps-owner")
-	makeUser(t, k, "sl-steps-caller")
+	ownerID, ownerTok := makeUser(t, k, "sl-tasks-owner")
+	makeUser(t, k, "sl-tasks-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "sl-steps-owner", "sl-steps-svc")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "sl-tasks-owner", "sl-tasks-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
 	traceID := setupTraceForProcess(t, db, pid)
 
 	for range 2 {
-		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+		r := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 			"trace_id":        traceID,
 			"action":          actionID,
-			"required_caller": "sl-steps-caller@k",
+			"required_caller": "sl-tasks-caller@k",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
 			r.Body.Close()
-			t.Fatalf("create step: expected 201, got %d", r.StatusCode)
+			t.Fatalf("create task: expected 201, got %d", r.StatusCode)
 		}
 		r.Body.Close()
 	}
 
-	resp := httpDo(t, srv, "GET", "/v1/steps", nil, ownerTok)
+	resp := httpDo(t, srv, "GET", "/v1/tasks", nil, ownerTok)
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		t.Fatalf("GET /v1/steps: expected 200, got %d", resp.StatusCode)
+		t.Fatalf("GET /v1/tasks: expected 200, got %d", resp.StatusCode)
 	}
-	var steps []map[string]any
-	decodeResponse(t, resp, &steps)
-	if len(steps) < 2 {
-		t.Errorf("expected at least 2 steps, got %d", len(steps))
+	var tasks []map[string]any
+	decodeResponse(t, resp, &tasks)
+	if len(tasks) < 2 {
+		t.Errorf("expected at least 2 tasks, got %d", len(tasks))
 	}
-	for _, s := range steps {
+	for _, s := range tasks {
 		assertActionRef(t, s["action"])
 	}
 
-	resp2 := httpDo(t, srv, "GET", "/v1/steps?process_id="+pid, nil, ownerTok)
+	resp2 := httpDo(t, srv, "GET", "/v1/tasks?process_id="+pid, nil, ownerTok)
 	if resp2.StatusCode != http.StatusOK {
 		resp2.Body.Close()
-		t.Fatalf("GET /v1/steps?process_id: expected 200, got %d", resp2.StatusCode)
+		t.Fatalf("GET /v1/tasks?process_id: expected 200, got %d", resp2.StatusCode)
 	}
 	var filtered []map[string]any
 	decodeResponse(t, resp2, &filtered)
 	if len(filtered) < 2 {
-		t.Errorf("expected at least 2 steps by process_id filter, got %d", len(filtered))
+		t.Errorf("expected at least 2 tasks by process_id filter, got %d", len(filtered))
 	}
 
-	resp3 := httpDo(t, srv, "GET", "/v1/steps?status=waiting", nil, ownerTok)
+	resp3 := httpDo(t, srv, "GET", "/v1/tasks?status=waiting", nil, ownerTok)
 	if resp3.StatusCode != http.StatusOK {
 		resp3.Body.Close()
-		t.Fatalf("GET /v1/steps?status=waiting: expected 200, got %d", resp3.StatusCode)
+		t.Fatalf("GET /v1/tasks?status=waiting: expected 200, got %d", resp3.StatusCode)
 	}
-	var waitingSteps []map[string]any
-	decodeResponse(t, resp3, &waitingSteps)
-	for _, s := range waitingSteps {
+	var waitingTasks []map[string]any
+	decodeResponse(t, resp3, &waitingTasks)
+	for _, s := range waitingTasks {
 		if s["status"] != "waiting" {
-			t.Errorf("list with status=waiting returned step with status=%v", s["status"])
+			t.Errorf("list with status=waiting returned task with status=%v", s["status"])
 		}
 	}
 
-	// limit bounds the step page (previously GET /v1/steps was unbounded at every layer).
-	resp4 := httpDo(t, srv, "GET", "/v1/steps?limit=1", nil, ownerTok)
+	// limit bounds the task page (previously GET /v1/tasks was unbounded at every layer).
+	resp4 := httpDo(t, srv, "GET", "/v1/tasks?limit=1", nil, ownerTok)
 	if resp4.StatusCode != http.StatusOK {
 		resp4.Body.Close()
-		t.Fatalf("GET /v1/steps?limit=1: expected 200, got %d", resp4.StatusCode)
+		t.Fatalf("GET /v1/tasks?limit=1: expected 200, got %d", resp4.StatusCode)
 	}
 	var limited []map[string]any
 	decodeResponse(t, resp4, &limited)
 	if len(limited) != 1 {
-		t.Errorf("limit=1: want 1 step, got %d", len(limited))
+		t.Errorf("limit=1: want 1 task, got %d", len(limited))
 	}
 }
 
-// TestCLIListPaginationFlags is the thin-wire guard that `process list`, `step list`, and
+// TestCLIListPaginationFlags is the thin-wire guard that `process list`, `task list`, and
 // `user ledger` register and forward --limit/--offset (a missing flag would make cobra error).
 func TestCLIListPaginationFlags(t *testing.T) {
 	env := newTestEnv(t)
@@ -1224,103 +1224,123 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	if _, err := execTestCmd(t, processListCmd(), "--limit", "1", "--offset", "0"); err != nil {
 		t.Errorf("process list --limit/--offset: %v", err)
 	}
-	if _, err := execTestCmd(t, stepListCmd(), "--limit", "1", "--offset", "0"); err != nil {
-		t.Errorf("step list --limit/--offset: %v", err)
+	if _, err := execTestCmd(t, taskListCmd(), "--limit", "1", "--offset", "0"); err != nil {
+		t.Errorf("task list --limit/--offset: %v", err)
 	}
 	if _, err := execTestCmd(t, userLedgerCmd(), "--limit", "1", "--offset", "0"); err != nil {
 		t.Errorf("user ledger --limit/--offset: %v", err)
 	}
 }
 
-func TestServeGetStep(t *testing.T) {
-	backend := newStepBackend(t)
+// `task list --peer` sends every flag typed, so the one refusal of a filter beside a peer is the
+// server's, and no flag is dropped on the way (D20).
+func TestTaskListPeerSendsEveryFlag(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "peer-cli@k", Password: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := loginTokenFor(env.k, ctx, "peer-cli", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+	for flag, value := range map[string]string{"status": "waiting", "process": "p-1", "limit": "5", "offset": "2"} {
+		_, err := execTestCmd(t, taskListCmd(), "--peer", "beta", "--"+flag, value)
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined with peer") {
+			t.Errorf("--peer with --%s: want the server's refusal, got %v", flag, err)
+		}
+	}
+}
+
+func TestServeGetTask(t *testing.T) {
+	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	ownerID, ownerTok := makeUser(t, k, "gs-steps-owner")
-	_, callerTok := makeUser(t, k, "gs-steps-caller")
-	_, unrelTok := makeUser(t, k, "gs-steps-unrelated")
+	ownerID, ownerTok := makeUser(t, k, "gs-tasks-owner")
+	_, callerTok := makeUser(t, k, "gs-tasks-caller")
+	_, unrelTok := makeUser(t, k, "gs-tasks-unrelated")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "gs-steps-owner", "gs-steps-svc")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "gs-tasks-owner", "gs-tasks-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
 	traceID := setupTraceForProcess(t, db, pid)
 
-	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	taskResp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "gs-steps-caller@k",
+		"required_caller": "gs-tasks-caller@k",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
-	if stepResp.StatusCode != http.StatusCreated {
-		stepResp.Body.Close()
-		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	if taskResp.StatusCode != http.StatusCreated {
+		taskResp.Body.Close()
+		t.Fatalf("create task: expected 201, got %d", taskResp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, stepResp, &step)
-	sid := step["id"].(string)
+	var task map[string]any
+	decodeResponse(t, taskResp, &task)
+	sid := task["id"].(string)
 
-	r1 := httpDo(t, srv, "GET", "/v1/steps/"+sid, nil, ownerTok)
+	r1 := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, ownerTok)
 	if r1.StatusCode != http.StatusOK {
 		r1.Body.Close()
-		t.Errorf("owner GET /v1/steps/%s: expected 200, got %d", sid, r1.StatusCode)
+		t.Errorf("owner GET /v1/tasks/%s: expected 200, got %d", sid, r1.StatusCode)
 	} else {
 		var got map[string]any
 		decodeResponse(t, r1, &got)
 		if got["id"] != sid {
-			t.Error("step id mismatch in read response")
+			t.Error("task id mismatch in read response")
 		}
 		if got["action"] == nil || got["action"] == "" {
-			t.Error("expected computed action field in GET /v1/steps/{id} response")
+			t.Error("expected computed action field in GET /v1/tasks/{id} response")
 		}
 		assertActionRef(t, got["action"])
 	}
 
-	r2 := httpDo(t, srv, "GET", "/v1/steps/"+sid, nil, callerTok)
+	r2 := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, callerTok)
 	if r2.StatusCode != http.StatusOK {
 		r2.Body.Close()
-		t.Errorf("caller GET /v1/steps/%s: expected 200, got %d", sid, r2.StatusCode)
+		t.Errorf("caller GET /v1/tasks/%s: expected 200, got %d", sid, r2.StatusCode)
 	} else {
 		r2.Body.Close()
 	}
 
-	r3 := httpDo(t, srv, "GET", "/v1/steps/"+sid, nil, unrelTok)
+	r3 := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, unrelTok)
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusForbidden {
-		t.Errorf("unrelated GET /v1/steps/%s: expected 403, got %d", sid, r3.StatusCode)
+		t.Errorf("unrelated GET /v1/tasks/%s: expected 403, got %d", sid, r3.StatusCode)
 	}
 }
 
-func TestServeCompleteStepMissingArgs(t *testing.T) {
-	backend := newStepBackend(t)
+func TestServeCompleteTaskMissingArgs(t *testing.T) {
+	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
 	ownerID, ownerTok := makeUser(t, k, "csmiss-owner")
 	_, callerTok := makeUser(t, k, "csmiss-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "csmiss-owner", "csmiss-svc")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "csmiss-owner", "csmiss-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
 	traceID := setupTraceForProcess(t, db, pid)
 
-	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	taskResp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
 		"required_caller": "csmiss-caller@k",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
-	if stepResp.StatusCode != http.StatusCreated {
-		stepResp.Body.Close()
-		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	if taskResp.StatusCode != http.StatusCreated {
+		taskResp.Body.Close()
+		t.Fatalf("create task: expected 201, got %d", taskResp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, stepResp, &step)
-	sid := step["id"].(string)
+	var task map[string]any
+	decodeResponse(t, taskResp, &task)
+	sid := task["id"].(string)
 
-	resp := httpDo(t, srv, "POST", "/v1/steps/"+sid+"/complete", map[string]any{
+	resp := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/complete", map[string]any{
 		"not_args": "value",
 	}, callerTok)
 	defer resp.Body.Close()
@@ -1329,62 +1349,62 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	}
 }
 
-func TestServeCompleteStep(t *testing.T) {
-	backend := newStepBackend(t)
+func TestServeCompleteTask(t *testing.T) {
+	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
 	ownerID, ownerTok := makeUser(t, k, "cs2-owner")
 	_, callerTok := makeUser(t, k, "cs2-caller")
 
-	actionID, _ := createStepAction(t, srv, backend.URL, ownerTok, "cs2-owner", "cs2-svc")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "cs2-owner", "cs2-svc")
 
 	p := setupProcessHTTP(t, db, ownerID, 0)
 	pid := p.ID
 	traceID := setupTraceForProcess(t, db, pid)
 
-	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	taskResp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
 		"required_caller": "cs2-caller@k",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
-	if stepResp.StatusCode != http.StatusCreated {
-		stepResp.Body.Close()
-		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	if taskResp.StatusCode != http.StatusCreated {
+		taskResp.Body.Close()
+		t.Fatalf("create task: expected 201, got %d", taskResp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, stepResp, &step)
-	sid := step["id"].(string)
+	var task map[string]any
+	decodeResponse(t, taskResp, &task)
+	sid := task["id"].(string)
 
-	complResp := httpDo(t, srv, "POST", "/v1/steps/"+sid+"/complete", map[string]any{
+	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/complete", map[string]any{
 		"args": map[string]any{"from_caller": "B"},
 	}, callerTok)
 	if complResp.StatusCode != http.StatusOK {
 		complResp.Body.Close()
-		t.Fatalf("complete step: expected 200, got %d", complResp.StatusCode)
+		t.Fatalf("complete task: expected 200, got %d", complResp.StatusCode)
 	}
 	var reply map[string]any
 	decodeResponse(t, complResp, &reply)
 	if reply["tx_id"] == nil || reply["tx_id"] == "" {
-		t.Error("expected tx_id in complete step reply")
+		t.Error("expected tx_id in complete task reply")
 	}
-	if reply["step_id"] != sid {
-		t.Errorf("expected step_id=%s in reply, got %v", sid, reply["step_id"])
+	if reply["task_id"] != sid {
+		t.Errorf("expected task_id=%s in reply, got %v", sid, reply["task_id"])
 	}
 
-	getResp := httpDo(t, srv, "GET", "/v1/steps/"+sid, nil, ownerTok)
-	var doneStep map[string]any
-	decodeResponse(t, getResp, &doneStep)
-	if doneStep["status"] != "done" {
-		t.Errorf("expected step status=done after complete, got %v", doneStep["status"])
+	getResp := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, ownerTok)
+	var doneTask map[string]any
+	decodeResponse(t, getResp, &doneTask)
+	if doneTask["status"] != "done" {
+		t.Errorf("expected task status=done after complete, got %v", doneTask["status"])
 	}
 }
 
-// TestStepCompleteFileArg verifies the positional json argument of `step complete` honours the
+// TestTaskCompleteFileArg verifies the positional json argument of `task complete` honours the
 // @file convention (API.md C9): a missing file is reported as a read error before any kernel
-// call, rather than the literal bytes "file" being shipped as the step input.
-func TestStepCompleteFileArg(t *testing.T) {
+// call, rather than the literal bytes "file" being shipped as the task input.
+func TestTaskCompleteFileArg(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
@@ -1399,7 +1419,7 @@ func TestStepCompleteFileArg(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "absent.json")
-	_, err := execTestCmd(t, stepCompleteCmd(), "no-such-step", "@"+missing)
+	_, err := execTestCmd(t, taskCompleteCmd(), "no-such-task", "@"+missing)
 	if err == nil || !strings.Contains(err.Error(), "read file") {
 		t.Errorf("expected file-read error for @missing-file, got %v", err)
 	}
@@ -1695,7 +1715,7 @@ func TestPrintTextParity(t *testing.T) {
 			OutputSchema: map[string]any{"type": "object"},
 		}, env.k.NewNames()),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
-		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
+		&taskWithAction{Task: &kernel.Task{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
 	}
 	for _, obj := range objects {
 		// Canonical key set from the marshaled object (what HTTP would send).
@@ -2267,16 +2287,16 @@ func TestAListOfResourcesReadsLikeOne(t *testing.T) {
 	}
 }
 
-// TestQuietFindsTheResourcesInsideAReplyThatWrapsThem: a peer answers with its page of steps beside
+// TestQuietFindsTheResourcesInsideAReplyThatWrapsThem: a peer answers with its page of tasks beside
 // whether more are waiting, so the ids are one field in. The command names that field rather than
 // having every reply searched for something id-shaped.
 func TestQuietFindsTheResourcesInsideAReplyThatWrapsThem(t *testing.T) {
 	old := flagQuiet
 	flagQuiet = true
 	t.Cleanup(func() { flagQuiet = old })
-	body := []byte(`{"steps":[{"id":"s-1"},{"id":"s-2"}],"truncated":false}`)
-	if got := captureStdout(t, func() error { return emit(body, output{rows: "steps"}) }); got != "s-1\ns-2\n" {
-		t.Errorf("--quiet = %q, want the two step ids", got)
+	body := []byte(`{"tasks":[{"id":"s-1"},{"id":"s-2"}],"truncated":false}`)
+	if got := captureStdout(t, func() error { return emit(body, output{rows: "tasks"}) }); got != "s-1\ns-2\n" {
+		t.Errorf("--quiet = %q, want the two task ids", got)
 	}
 	// Unnamed, the same reply names no resource of its own and prints nothing.
 	if got := captureStdout(t, func() error { return emit(body, output{}) }); got != "" {
@@ -2323,7 +2343,7 @@ func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
 }
 
 // TestARunThatAuthorizesOnTheWayStillAnswersOnce: a run that meets a consent it can settle inline
-// does two things and answers with one — its own reply. The connection is a step on the way, so it
+// does two things and answers with one — its own reply. The connection is a task on the way, so it
 // is reported as progress; anything else leaves --json printing two documents where a program
 // expects one, and nothing downstream can read it (§14 C8).
 func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {

@@ -498,7 +498,7 @@ func promptNewPassword(prompt string) (string, error) {
 // loadJSONArg resolves a JSON-valued CLI argument to its raw bytes, supporting the
 // @path/to/file.json convention (API.md C9): a leading "@" reads the value from the named file.
 // Empty input yields "{}". The result is validated as JSON before being returned. This is the
-// single loader for every JSON-valued CLI input (run/step-complete args, schemas, auth).
+// single loader for every JSON-valued CLI input (run/task-complete args, schemas, auth).
 func loadJSONArg(s string) (json.RawMessage, error) {
 	if s == "" {
 		return json.RawMessage("{}"), nil

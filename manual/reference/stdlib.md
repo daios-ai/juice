@@ -59,15 +59,15 @@ is an error, and a set with no resolvable candidate returns `ErrNotFound`. See
 sandboxed code, which has no direct access to operating-system entropy.
 
 **`sys/sink`** — anything → `{}`. Accepts input and returns an empty object.
-It can complete a step that needs acknowledgment without further processing.
+It can complete a task that needs acknowledgment without further processing.
 
 ## Messaging and money
 
-**`sys/message`** — `{to, message}` → `{step_id}`
+**`sys/message`** — `{to, message}` → `{task_id}`
 
-Creates a step carrying the message for the named recipient. The recipient can
-inspect it with `step list` and acknowledge it with `step complete`. See
-[Consent and assigned work](../calling/consent-and-steps.html#completing-work-addressed-to-you).
+Creates a task carrying the message for the named recipient. The recipient can
+inspect it with `task list` and acknowledge it with `task complete`. See
+[Consent and assigned work](../calling/consent-and-tasks.html#completing-work-addressed-to-you).
 
 **`sys/transfer`** — `{target, amount}` → `{amount}`
 

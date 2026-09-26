@@ -415,7 +415,7 @@ await_eq() {
     assert_eq "$name" "$want" "$got"
 }
 
-# pathf json dotted.path — a nested field, e.g. pathf "$out" result.step_id or checks.signature.
+# pathf json dotted.path — a nested field, e.g. pathf "$out" result.task_id or checks.signature.
 pathf() { python3 -c "
 import sys,json
 v=json.loads(sys.argv[1])
@@ -426,7 +426,7 @@ print('' if v is None else v)" "$1" "$2" 2>/dev/null; }
 find_id() { python3 -c "
 import sys,json
 print(next((e.get('id','') for e in json.loads(sys.argv[1]) if str(e.get(sys.argv[2],''))==sys.argv[3]), ''))" "$1" "$2" "$3" 2>/dev/null; }
-# resultf json field — a field inside a run/step reply's nested "result" object.
+# resultf json field — a field inside a run/task reply's nested "result" object.
 resultf()  { pathf "$1" "result.$2"; }
 # list_len json — number of elements in a top-level JSON array.
 list_len() { python3 -c "import sys,json; print(len(json.loads(sys.argv[1])))" "$1" 2>/dev/null; }

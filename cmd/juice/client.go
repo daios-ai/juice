@@ -114,7 +114,7 @@ func clientFor(l login) (*client, error) {
 		creds: readCredentials(l), banners: map[string]*serverHealth{}}, nil
 }
 
-// namedClient reads handle@kernel and returns the client of that login: the two steps every
+// namedClient reads handle@kernel and returns the client of that login: the two tasks every
 // command that says where it acts takes before it acts.
 func namedClient(name string) (login, *client, error) {
 	l, err := parseLogin(name)

@@ -33,7 +33,7 @@ type Spec struct {
 }
 
 // Host is everything a running native may ask of the kernel: resolve an action, read one it may
-// call, rank the catalogue, name a peer, park a step. *kernel.Kernel satisfies it, and nothing in
+// call, rank the catalogue, name a peer, park a task. *kernel.Kernel satisfies it, and nothing in
 // this package can widen it — adding a capability is an edit here, in the open.
 type Host interface {
 	Lookup(ctx context.Context, req kernel.LookupRequest) ([]*kernel.LookupResult, error)
@@ -46,7 +46,7 @@ type Host interface {
 	ResolvePrincipal(ctx context.Context, ref string) (kernel.Principal, error)
 	ActionRecord(ctx context.Context, a *kernel.Action) *kernel.ActionRecord
 	DiscoveredRecord(ctx context.Context, d *kernel.DiscoveryDoc) *kernel.ActionRecord
-	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.Principal) (*kernel.Step, error)
+	CreateTask(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.Principal) (*kernel.Task, error)
 }
 
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a

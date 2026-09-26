@@ -23,11 +23,11 @@ import (
 // is omitted. (A plain `json:"-"` would NOT work — it only removes the outer field, leaving the
 // promoted one to render.) Resolution is server-side, so HTTP and CLI stay in parity (§14).
 
-// stepWithAction enriches a step with its action's address, its creator's, and the parties as
-// addresses. waiting_on_peer flags a waiting step whose required caller is a peer's account — work
-// parked on someone who may be offline (§13); its age is the step's created_at.
-type stepWithAction struct {
-	*kernel.Step
+// taskWithAction enriches a task with its action's address, its creator's, and the parties as
+// addresses. waiting_on_peer flags a waiting task whose required caller is a peer's account — work
+// parked on someone who may be offline (§13); its age is the task's created_at.
+type taskWithAction struct {
+	*kernel.Task
 	RequiredCallerUserID   string  `json:"required_caller_user_id,omitempty"`
 	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"`
 	RequiredCallerHandle   string  `json:"required_caller_handle,omitempty"`
@@ -37,7 +37,7 @@ type stepWithAction struct {
 	RequiredCaller         string  `json:"required_caller,omitempty"`
 	WaitingOnPeer          bool    `json:"waiting_on_peer,omitempty"`
 	// AllowedInput is the derived completion schema (input_schema \ keys(partial_args), §10) for a
-	// waiting step, so the required caller can complete it without reading a private target action.
+	// waiting task, so the required caller can complete it without reading a private target action.
 	AllowedInput map[string]any `json:"allowed_input,omitempty"`
 }
 
@@ -125,21 +125,22 @@ func isPeer(k *kernel.Kernel, ctx context.Context, id string) bool {
 	return err == nil && u != nil && u.KernelPublicKey != ""
 }
 
-func enrichStep(k *kernel.Kernel, ctx context.Context, step *kernel.Step, action *kernel.Action, names *kernel.Names) *stepWithAction {
-	v := &stepWithAction{Step: step, RequiredCaller: names.Address(ctx, step.RequiredCaller()), Action: names.Action(ctx, action)}
-	// The creating action (what produced this step) carries its meaning; the target action can be a
-	// generic sink (e.g. sys/message parks a sys/sink step). Resolve it from the parent trace.
-	if step.ParentTraceID != nil {
-		if tr, err := k.ReadTrace(ctx, *step.ParentTraceID); err == nil {
+func enrichTask(k *kernel.Kernel, ctx context.Context, task *kernel.Task, names *kernel.Names) *taskWithAction {
+	action, _ := k.ReadAction(ctx, task.ActionID)
+	v := &taskWithAction{Task: task, RequiredCaller: names.Address(ctx, task.RequiredCaller()), Action: names.Action(ctx, action)}
+	// The creating action (what produced this task) carries its meaning; the target action can be a
+	// generic sink (e.g. sys/message parks a sys/sink task). Resolve it from the parent trace.
+	if task.ParentTraceID != nil {
+		if tr, err := k.ReadTrace(ctx, *task.ParentTraceID); err == nil {
 			v.CreatedBy = k.ActionAddressByID(ctx, tr.ActionID)
-			// The step's process owner is the payer of the transaction it will settle into (§10).
+			// The task's process owner is the payer of the transaction it will settle into (§10).
 			v.Owner = names.Address(ctx, kernel.Principal{AccountID: k.ProcessOwnerID(ctx, tr.ProcessID)})
 		}
 	}
-	if step.Status == kernel.StepWaiting {
-		v.WaitingOnPeer = isPeer(k, ctx, step.RequiredCallerUserID)
+	if task.Status == kernel.TaskWaiting {
+		v.WaitingOnPeer = isPeer(k, ctx, task.RequiredCallerUserID)
 		if action != nil {
-			v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, step.PartialArgs)
+			v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, task.PartialArgs)
 		}
 	}
 	return v
@@ -509,7 +510,7 @@ func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, call
 	if err != nil {
 		return nil, err
 	}
-	// Request the union of the group's scopes in the single browser step.
+	// Request the union of the group's scopes in the single browser task.
 	if auth.Config == nil {
 		auth.Config = map[string]any{}
 	}
@@ -870,35 +871,24 @@ func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*pr
 	return enrichProcess(ctx, p, since, k.NewNames()), nil
 }
 
-// ---- Step operations ----
+// ---- Task operations ----
 
-// createStepParams is both the POST /v1/steps body and the shared HTTP/CLI input (§14): one shape
+// createTaskParams is both the POST /v1/tasks body and the shared HTTP/CLI input (§14): one shape
 // for the contract. ViaCapability is authority the middleware establishes, never wire input.
-type createStepParams struct {
+type createTaskParams struct {
 	TraceID        string          `json:"trace_id"`
 	ActionRef      string          `json:"action"`
 	RequiredCaller string          `json:"required_caller"`
 	PartialArgs    json.RawMessage `json:"partial_args"`
 	// ViaCapability skips the precondition-4 trace-use check: a capability's trace authority is
-	// the executing action owning that trace (§9), matching the WASM juice.step_create path, which
-	// calls CreateStep directly without an external authorization check.
+	// the executing action owning that trace (§9), matching the WASM juice.task_create path, which
+	// calls CreateTask directly without an external authorization check.
 	ViaCapability bool `json:"-"`
 }
 
-// createStep resolves ActionRef and RequiredCaller, enforces precondition-4 for the trace,
-// calls kernel.CreateStep, and returns an enriched *stepWithAction.
-// Used by both HTTP and CLI surfaces.
-func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p createStepParams) (*stepWithAction, error) {
-	action, err := k.ResolveAction(ctx, p.ActionRef)
-	if err != nil {
-		return nil, err
-	}
-	// RequiredCaller is an address, here or on a peer: resolved to the routing account, plus the
-	// completer's stable remote id and handle when they are on a peer.
-	caller, err := k.ResolvePrincipal(ctx, p.RequiredCaller)
-	if err != nil {
-		return nil, err // typed: a malformed address is the caller's fault, an unknown one is not found
-	}
+// createTask enforces precondition-4 for the trace, creates the task from its addresses, and
+// returns it enriched. Used by both HTTP and CLI surfaces.
+func createTask(k *kernel.Kernel, ctx context.Context, callerID string, p createTaskParams) (*taskWithAction, error) {
 	// Precondition-4: external (JWT) caller must be authorized to use the trace; a capability
 	// carries that authority in the token itself.
 	if !p.ViaCapability {
@@ -906,34 +896,32 @@ func createStep(k *kernel.Kernel, ctx context.Context, callerID string, p create
 			return nil, err
 		}
 	}
-	step, err := k.CreateStep(ctx, p.TraceID, action.ID, p.PartialArgs, caller)
+	task, err := k.CreateTaskByRef(ctx, p.TraceID, p.ActionRef, p.RequiredCaller, p.PartialArgs)
 	if err != nil {
 		return nil, err
 	}
-	return enrichStep(k, ctx, step, action, k.NewNames()), nil
+	return enrichTask(k, ctx, task, k.NewNames()), nil
 }
 
-func listSteps(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*stepWithAction, error) {
-	steps, err := k.ListSteps(ctx, callerID, processID, status, limit, offset)
+func listTasks(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*taskWithAction, error) {
+	tasks, err := k.ListTasks(ctx, callerID, processID, status, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	views := make([]*stepWithAction, len(steps))
+	views := make([]*taskWithAction, len(tasks))
 	names := k.NewNames()
-	for i, step := range steps {
-		action, _ := k.ReadAction(ctx, step.ActionID)
-		views[i] = enrichStep(k, ctx, step, action, names)
+	for i, task := range tasks {
+		views[i] = enrichTask(k, ctx, task, names)
 	}
 	return views, nil
 }
 
-func getStep(k *kernel.Kernel, ctx context.Context, callerID, id string) (*stepWithAction, error) {
-	step, err := k.ReadStep(ctx, callerID, id)
+func getTask(k *kernel.Kernel, ctx context.Context, callerID, id string) (*taskWithAction, error) {
+	task, err := k.ReadTask(ctx, callerID, id)
 	if err != nil {
 		return nil, err
 	}
-	action, _ := k.ReadAction(ctx, step.ActionID)
-	return enrichStep(k, ctx, step, action, k.NewNames()), nil
+	return enrichTask(k, ctx, task, k.NewNames()), nil
 }
 
 // ---- Transaction operations ----

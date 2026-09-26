@@ -276,10 +276,10 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 			resp["about"] = g.About
 			resp["actions"] = s.kernel.PeerCatalog(ctx, peerKey, g.ActionManifests)
 			resp["source"] = "live"
-			// Kernel-level ask: the operator sees every step this kernel may complete, its users'
-			// included, which is the only place a peer-held step is visible to them (§13).
-			if held, serr := s.kernel.PeerStepsAwaitingUs(octx, peerKey, ""); serr == nil && held != nil {
-				resp["steps"], resp["steps_truncated"] = held.Steps, held.Truncated
+			// Kernel-level ask: the operator sees every task this kernel may complete, its users'
+			// included, which is the only place a peer-held task is visible to them (§13).
+			if held, serr := s.kernel.PeerTasksAwaitingUs(octx, peerKey, ""); serr == nil && held != nil {
+				resp["tasks"], resp["tasks_truncated"] = held.Tasks, held.Truncated
 			}
 			// Inspect writes nothing (§14): the discovery loop owns cache refresh, so a diagnostic
 			// read never makes retention or display state depend on being observed.

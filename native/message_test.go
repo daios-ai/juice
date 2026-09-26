@@ -63,7 +63,7 @@ func TestExecuteMessage_UnknownRecipient(t *testing.T) {
 	}
 }
 
-func TestExecuteMessage_CreatesStep(t *testing.T) {
+func TestExecuteMessage_CreatesTask(t *testing.T) {
 	k, st := newLookupTestKernel(t)
 	ctx := context.Background()
 
@@ -78,8 +78,8 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 		Status:      kernel.ProcessOpen,
 		CreatedAt:   time.Now().UTC(),
 	}
-	// The message action executes as @sys, so its trace's action owner — the step creator whose
-	// visibility is checked at CreateStep (§10 binding rule) — is @sys, the sink's owner.
+	// The message action executes as @sys, so its trace's action owner — the task creator whose
+	// visibility is checked at CreateTask (§10 binding rule) — is @sys, the sink's owner.
 	rootTrace := &kernel.Trace{
 		ID:            uuid.New().String(),
 		ProcessID:     p.ID,
@@ -97,20 +97,20 @@ func TestExecuteMessage_CreatesStep(t *testing.T) {
 		t.Fatalf("executeMessage: %v", err)
 	}
 
-	stepID, ok := result["step_id"].(string)
-	if !ok || stepID == "" {
-		t.Fatalf("expected step_id string, got %v", result["step_id"])
+	taskID, ok := result["task_id"].(string)
+	if !ok || taskID == "" {
+		t.Fatalf("expected task_id string, got %v", result["task_id"])
 	}
 
-	step, err := k.ReadStep(ctx, caller.ID, stepID)
+	task, err := k.ReadTask(ctx, caller.ID, taskID)
 	if err != nil {
-		t.Fatalf("ReadStep: %v", err)
+		t.Fatalf("ReadTask: %v", err)
 	}
-	if step.RequiredCallerUserID != recipient.ID {
-		t.Errorf("expected required_caller_user_id=%s, got %s", recipient.ID, step.RequiredCallerUserID)
+	if task.RequiredCallerUserID != recipient.ID {
+		t.Errorf("expected required_caller_user_id=%s, got %s", recipient.ID, task.RequiredCallerUserID)
 	}
 	var pa map[string]any
-	if err := json.Unmarshal(step.PartialArgs, &pa); err != nil {
+	if err := json.Unmarshal(task.PartialArgs, &pa); err != nil {
 		t.Fatalf("unmarshal partial_args: %v", err)
 	}
 	if pa["message"] != "hello" {

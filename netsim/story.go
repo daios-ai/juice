@@ -278,7 +278,7 @@ func Run(n *Net, rounds int) (*story, error) {
 		{"trading", func() error { return s.actTrading(rounds) }},
 		{"refusals", s.actRefusals},
 		{"composition and partial refunds", s.actComposition},
-		{"steps", s.actSteps},
+		{"tasks", s.actTasks},
 		{"value transfers", s.actValue},
 		{"delegated authorization", s.actDelegated},
 		{"ratings and evidence", s.actEvidence},
@@ -825,45 +825,45 @@ func (s *story) actComposition() error {
 	return nil
 }
 
-// ---- steps ------------------------------------------------------------------
+// ---- tasks ------------------------------------------------------------------
 
-func (s *story) actSteps() error {
-	// A step parks a call: the process waits, someone else supplies the result, the call resumes.
+func (s *story) actTasks() error {
+	// A task parks a call: the process waits, someone else supplies the result, the call resumes.
 	// It is a payment boundary that is not a network hop, and the rules about completing one twice
 	// or from the wrong party are what this exercises.
 	k1 := s.k("k1")
 	var ids []string
 	for i := 0; i < 4; i++ {
 		out, _ := k1.Run("ana", "--json", "run", k1.At("sys/message"),
-			fmt.Sprintf(`{"to":%q,"message":"netsim step %d"}`, k1.At("ben"), i))
+			fmt.Sprintf(`{"to":%q,"message":"netsim task %d"}`, k1.At("ben"), i))
 		var m struct {
 			Result struct {
-				StepID string `json:"step_id"`
+				TaskID string `json:"task_id"`
 			} `json:"result"`
 		}
-		if json.Unmarshal([]byte(out), &m) == nil && m.Result.StepID != "" {
-			ids = append(ids, m.Result.StepID)
+		if json.Unmarshal([]byte(out), &m) == nil && m.Result.TaskID != "" {
+			ids = append(ids, m.Result.TaskID)
 		}
 	}
-	s.n.Check("step.parked_and_visible", len(ids) > 0, "no step was parked by sys/message")
+	s.n.Check("task.parked_and_visible", len(ids) > 0, "no task was parked by sys/message")
 	if len(ids) == 0 {
 		return nil
 	}
-	s.n.MustWork("step.recipient_sees_it", k1, "ben", "step", "list")
+	s.n.MustWork("task.recipient_sees_it", k1, "ben", "task", "list")
 
-	// A step belongs to the party it was parked for, and anyone else completing it is taking the
-	// funds it holds. This is asked of a step that is still waiting: on one already completed the
+	// A task belongs to the party it was parked for, and anyone else completing it is taking the
+	// funds it holds. This is asked of a task that is still waiting: on one already completed the
 	// kernel refuses because it is finished, which proves a different rule.
-	s.n.MustRefuse("step.wrong_party_refused", "not found|denied|permitted|forbidden|only the step|required caller",
-		k1, "ana", "step", "complete", ids[0], `{"echo":"stolen"}`)
+	s.n.MustRefuse("task.wrong_party_refused", "not found|denied|permitted|forbidden|only the task|required caller",
+		k1, "ana", "task", "complete", ids[0], `{"echo":"stolen"}`)
 
 	for _, id := range ids {
-		s.n.MustWork("step.completed", k1, "ben", "step", "complete", id, `{"echo":"received"}`)
+		s.n.MustWork("task.completed", k1, "ben", "task", "complete", id, `{"echo":"received"}`)
 	}
-	// A step is a payment boundary: completing one twice must settle once, and the replay must be
+	// A task is a payment boundary: completing one twice must settle once, and the replay must be
 	// refused rather than pay again.
-	s.n.MustRefuse("step.replay_settles_once", "already|complete|settled|not waiting|not found",
-		k1, "ben", "step", "complete", ids[0], `{"echo":"again"}`)
+	s.n.MustRefuse("task.replay_settles_once", "already|complete|settled|not waiting|not found",
+		k1, "ben", "task", "complete", ids[0], `{"echo":"again"}`)
 	return nil
 }
 

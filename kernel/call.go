@@ -17,13 +17,13 @@ import (
 
 // callRequest is input to the central Call() operation. The dispatch mode is selected by which
 // trace reference is set: ParentTraceID for a subcall (funded here by BeginSubcall), or
-// ExistingTraceID for a pre-created, pre-funded trace — a root call (BeginRun) or a step
-// completion (BeginStepCall). StepID is an orthogonal flag, not a third trace mode.
+// ExistingTraceID for a pre-created, pre-funded trace — a root call (BeginRun) or a task
+// completion (BeginTaskCall). TaskID is an orthogonal flag, not a third trace mode.
 type callRequest struct {
 	// CallerID is the authenticated user making the call.
 	CallerID string
 	// ParentTraceID is the parent trace of a subcall; the call's funds are moved from it by
-	// BeginSubcall. Empty for root calls and step completions (those set ExistingTraceID).
+	// BeginSubcall. Empty for root calls and task completions (those set ExistingTraceID).
 	ParentTraceID string
 	// Action, when non-nil, is the pre-validated action from beginRun.
 	// Call uses it directly and skips the DB read, eliminating the TOCTOU window
@@ -33,12 +33,12 @@ type callRequest struct {
 	ActionRef string
 	// Args is the JSON-decoded input arguments.
 	Args map[string]any
-	// StepID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the step done
-	// and selects the CallerStep wallet kind (BeginStepCall already released the parent lock).
-	// It accompanies ExistingTraceID on a step completion; it is not itself a trace reference.
-	StepID string
+	// TaskID, if non-empty, causes CommitCall/CommitFailedCall to atomically mark the task done
+	// and selects the CallerTask wallet kind (BeginTaskCall already released the parent lock).
+	// It accompanies ExistingTraceID on a task completion; it is not itself a trace reference.
+	TaskID string
 	// ExistingTraceID names a trace already created and funded atomically by its wrapper —
-	// BeginRun (root call) or BeginStepCall (step completion). Call adopts it instead of
+	// BeginRun (root call) or BeginTaskCall (task completion). Call adopts it instead of
 	// calling BeginSubcall, and uses its pre-locked amount as gross.
 	ExistingTraceID string
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
@@ -94,7 +94,7 @@ type CallReply struct {
 	TraceID   string         `json:"trace_id"`
 	ReceiptID string         `json:"receipt_id"`
 	// ProcessID is set only by run, which creates the process: it is the handle the caller needs for
-	// `process show`/`end` when work parks (§14). Subcalls and step completions run inside a process
+	// `process show`/`end` when work parks (§14). Subcalls and task completions run inside a process
 	// the caller already addressed, so they omit it.
 	ProcessID string `json:"process_id,omitempty"`
 	// Charge is what the call drew from the caller — the receipt's own number (P5), in base units:
@@ -294,7 +294,7 @@ func (k *Kernel) resolveRemote(ctx context.Context, kr KernelRef, r Address) (*A
 // ensureBasePrice heals a proxy row whose seller price was never snapshotted (§16). Such a row's
 // total is frozen and its seller price unrecoverable — reversing the rounded total cannot recover it
 // — so it re-resolves once from the signed manifest. Called wherever a row is about to be FUNDED,
-// which includes CreateStep and a resolve by raw action id, not only a call by reference: dispatch
+// which includes CreateTask and a resolve by raw action id, not only a call by reference: dispatch
 // records the seller's price, and a legacy row would otherwise record its local total there and
 // quarantine the peer's perfectly valid receipt. Anything other than a proxy, or a proxy that
 // already has its price, is returned untouched.
@@ -402,10 +402,10 @@ func (k *Kernel) resolveUser(ctx context.Context, ident string) (*Account, error
 }
 
 // Call executes the central kernel transition, checking D2's preconditions in their stated order.
-// Each orchestration mode arrives pre-funded: a root call by Run, a step completion by BeginStepCall.
+// Each orchestration mode arrives pre-funded: a root call by Run, a task completion by BeginTaskCall.
 // SubcallRequest is the only publicly constructible call: a subcall on an existing trace (§6), the
 // HTTP twin of juice.call used by a capability callback (§9). It cannot express an orchestration
-// mode — a pre-funded trace, a step completion, or an inbound idempotency record — so no client can
+// mode — a pre-funded trace, a task completion, or an inbound idempotency record — so no client can
 // assemble a combination the kernel does not itself create.
 // It is also the POST /v1/call body (§9): both authority fields come from the capability, never
 // from the wire, so a caller can neither name another caller nor reach another trace.
@@ -416,8 +416,8 @@ type SubcallRequest struct {
 	Args          map[string]any `json:"args"`
 }
 
-// Subcall executes a subcall on an existing trace. Root calls go through Run, step completions
-// through CompleteStep, inbound federation through RunFederated — each supplying its own
+// Subcall executes a subcall on an existing trace. Root calls go through Run, task completions
+// through CompleteTask, inbound federation through RunFederated — each supplying its own
 // orchestration mode internally.
 func (k *Kernel) Subcall(ctx context.Context, req SubcallRequest) (*CallReply, error) {
 	return k.call(ctx, callRequest{
@@ -443,7 +443,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 
 	// 1.5: Derive processID from the trace reference and read the referenced trace once.
 	// ExistingTraceID names a trace already created and funded by its wrapper — BeginRun for a
-	// root call, BeginStepCall for a step completion; preReadExisting is reused in section 8 to
+	// root call, BeginTaskCall for a task completion; preReadExisting is reused in section 8 to
 	// avoid a second read. ParentTraceID names a subcall's parent.
 	var processID string
 	var preReadParent, preReadExisting *Trace
@@ -473,7 +473,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	}
 
 	// 3. Process-use authority (§4 precondition 4), enforced here for subcalls. Root calls have
-	// C = P by construction (beginRun) and step completions are checked by CompleteStep; both
+	// C = P by construction (beginRun) and task completions are checked by CompleteTask; both
 	// arrive via ExistingTraceID and satisfy it before reaching Call.
 	var parentTrace *Trace
 	if req.ExistingTraceID == "" {
@@ -486,8 +486,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	}
 
 	// 4. Resolve action.
-	// Root calls and step completions supply a pre-resolved Action (read by beginRun /
-	// CompleteStep), so no DB read is needed — this binds execution to the exact action that
+	// Root calls and task completions supply a pre-resolved Action (read by beginRun /
+	// CompleteTask), so no DB read is needed — this binds execution to the exact action that
 	// was funded and eliminates the TOCTOU window. The snapshot is still validated below.
 	// Subcalls resolve the address they were given.
 	var action *Action
@@ -518,16 +518,16 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	}
 
 	// 5 + 6. Liveness, visibility, and input-schema validation, enforced for every path (root,
-	// step, subcall). The pre-resolved snapshot (req.Action) is validated, so root calls are
+	// task, subcall). The pre-resolved snapshot (req.Action) is validated, so root calls are
 	// checked here too with no extra DB read and no TOCTOU window — Call is the single validity
-	// function; no entry path bypasses it (beginRun runs the same check before funding). A step
-	// completion (req.StepID != "") bound visibility at creation (§10), so it skips that check.
-	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.StepID == "", ""); err != nil {
+	// function; no entry path bypasses it (beginRun runs the same check before funding). A task
+	// completion (req.TaskID != "") bound visibility at creation (§10), so it skips that check.
+	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.TaskID == "", ""); err != nil {
 		return nil, err
 	}
 
-	// 7. Funds check. Only subcalls check here; ExistingTraceID calls (root via BeginRun, step
-	// completion via BeginStepCall) are pre-funded with their exact allocation.
+	// 7. Funds check. Only subcalls check here; ExistingTraceID calls (root via BeginRun, task
+	// completion via BeginTaskCall) are pre-funded with their exact allocation.
 	if req.ExistingTraceID == "" {
 		if parentTrace != nil && parentTrace.Available < action.Price {
 			return nil, ErrInsufficientFunds.Wrapf("parent trace has %d credits, action costs %d", parentTrace.Available, action.Price)
@@ -562,7 +562,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// lockPrice = q funds the EXECUTION channel from the parent trace; the value channel is a separate
 	// TransferEffect reserve locked from the immediate caller C's own balance in BeginSubcall (§13), so
 	// a composed transfer pays the value from the composing action owner, not the process budget. (For a
-	// root/step call the ExistingTraceID branch below discards this and adopts beginRun's snapshot.)
+	// root/task call the ExistingTraceID branch below discards this and adopts beginRun's snapshot.)
 	lockPrice := action.Price
 	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
 	eff, verr := k.prepareTransferEffect(ctx, false, action, req.Args)
@@ -576,7 +576,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
 		// from the rounded local total, which cannot recover it exactly (§16).
 		mp = actionBasePrice(action)
-		if err := k.prepareDispatch(ctx, trace, action, req.Args, req.StepID, lockPrice, k.econ.ImportBPS, caller); err != nil {
+		if err := k.prepareDispatch(ctx, trace, action, req.Args, req.TaskID, lockPrice, k.econ.ImportBPS, caller); err != nil {
 			return nil, err
 		}
 	}
@@ -586,8 +586,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	switch {
 	case req.ExistingTraceID != "":
 		// Trace was pre-created and funded atomically by its wrapper (BeginRun for a root call,
-		// BeginStepCall for a step completion); skip BeginSubcall and adopt that trace. Use its
-		// pre-locked amount as gross — for a step that is step.price, the snapshot taken at step
+		// BeginTaskCall for a task completion); skip BeginSubcall and adopt that trace. Use its
+		// pre-locked amount as gross — for a task that is task.price, the snapshot taken at task
 		// creation, not the action's possibly-changed current price. preReadExisting was read in
 		// section 1.5, so no second read is needed.
 		trace.ID = req.ExistingTraceID
@@ -720,7 +720,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	}
 
 	// 11. Read trace.available post-execution — this is the taxable amount.
-	// trace.available decreases with each subcall (BeginSubcall) and step park (CreateStep).
+	// trace.available decreases with each subcall (BeginSubcall) and task park (CreateTask).
 	// The taxable read and the commit that zeroes it must be atomic against a concurrent
 	// capability spend (§9), so both run under this trace's lock; error paths release it
 	// before delegating to settleFailedCall (which re-acquires it).
@@ -763,7 +763,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.StepID)
+	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.TaskID)
 	if errors.Is(commitErr, ErrSettlementDeferred) {
 		// A trace beneath this call is still in flight (D3): the outcome is recorded with the
 		// refusal, and the settlement that follows the last child's commits it.
@@ -793,13 +793,13 @@ func (k *Kernel) callerWallet(req callRequest, process *Process, parentTrace *Tr
 	if parentTrace != nil {
 		parentTraceID = &parentTrace.ID
 	}
-	return callerWalletFor(req.StepID, process.ID, parentTraceID)
+	return callerWalletFor(req.TaskID, process.ID, parentTraceID)
 }
 
 // applyPrefundedSnapshot copies the pre-funded state from a persisted trace onto the in-memory
 // trace and returns the locked amount (= dbTrace.Available) to use as gross. Shared by both
-// pre-created-trace dispatch paths: root calls (BeginRun) and step completions (BeginStepCall).
-// ParentTraceID is copied from the persisted trace — null for a root trace, the step's parent
+// pre-created-trace dispatch paths: root calls (BeginRun) and task completions (BeginTaskCall).
+// ParentTraceID is copied from the persisted trace — null for a root trace, the task's parent
 // for a completion trace — so the recorded causality is correct without a special case.
 func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.Available = dbTrace.Available
@@ -841,11 +841,11 @@ func canCall(caller *Account, action *Action) bool {
 	}
 }
 
-// checkCallPreconditions enforces the §4 semantic call-validity rules (steps 6 to 8) for a
+// checkCallPreconditions enforces the §4 semantic call-validity rules (tasks 6 to 8) for a
 // resolved action: liveness, visibility by the immediate caller, the optional quote pin, and input
 // against the action's schema. It is the single validity function — Call runs it unconditionally
 // for every entry path, and beginRun runs it once before funding so an invalid root call never
-// creates a funded process (§6). checkVisibility is false only for a step completion, which bound
+// creates a funded process (§6). checkVisibility is false only for a task completion, which bound
 // visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
 // change does not. The grant check stays keyed on the process owner: delegated consent binds to the
 // paying human (§8). quoteHash is empty on every path but a pinned root run.
@@ -862,7 +862,7 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, pr
 	// After visibility, so a mismatch never discloses a private action's terms; before input
 	// validation, so terms that changed enough to invalidate the args still report as changed terms
 	// rather than a schema violation (§4 precondition 7). Guarded rather than computed in the `if`
-	// initializer: this runs on every call, subcall and step completion, and hashing two schemas
+	// initializer: this runs on every call, subcall and task completion, and hashing two schemas
 	// for a pin nobody supplied is pure waste.
 	if quoteHash != "" {
 		if cur := QuoteHash(action); quoteHash != cur {
@@ -1029,28 +1029,19 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 	return json.Marshal(reply.Result)
 }
 
-// StepCreate resolves the onward action and required caller through the canonical resolvers, so a
-// script names them by address exactly like juice.call. CreateStep itself stays an id-only primitive.
-func (h *kernelHostFunctions) StepCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error) {
-	act, err := h.kernel.ResolveAction(ctx, action)
+// TaskCreate names the onward action and required caller by address, exactly like juice.call.
+func (h *kernelHostFunctions) TaskCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error) {
+	task, err := h.kernel.CreateTaskByRef(ctx, h.traceID, action, requiredCaller, json.RawMessage(partialArgs))
 	if err != nil {
 		return "", err
 	}
-	caller, err := h.kernel.ResolvePrincipal(ctx, requiredCaller)
-	if err != nil {
-		return "", err
-	}
-	step, err := h.kernel.CreateStep(ctx, h.traceID, act.ID, json.RawMessage(partialArgs), caller)
-	if err != nil {
-		return "", err
-	}
-	return step.ID, nil
+	return task.ID, nil
 }
 
-// StepComplete carries the executing trace, not just the owner: a script resumes only a step its own
+// TaskComplete carries the executing trace, not just the owner: a script resumes only a task its own
 // trace parked (§10), the same confinement the HTTP capability twin enforces.
-func (h *kernelHostFunctions) StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error) {
-	reply, err := h.kernel.CompleteStepInTrace(ctx, h.targetID, h.traceID, stepID, json.RawMessage(input))
+func (h *kernelHostFunctions) TaskComplete(ctx context.Context, taskID string, input []byte) ([]byte, error) {
+	reply, err := h.kernel.CompleteTaskInTrace(ctx, h.targetID, h.traceID, taskID, json.RawMessage(input))
 	if err != nil {
 		return nil, err
 	}
@@ -1125,7 +1116,7 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		committed = r
 		return r, err
 	}
-	settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, req.StepID)
+	settlErr := k.store.CommitFailedCall(ctx, tx, buildFn, traceID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, tx.Gross, stats, req.IdempotencyRecordID, req.TaskID)
 	if errors.Is(settlErr, ErrSettlementDeferred) {
 		// A trace beneath this call is still in flight (D3): its outcome decides this call's
 		// charge — settled descendants stay paid, refunded ones do not — so the outcome is recorded

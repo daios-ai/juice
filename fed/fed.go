@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Package fed is the federation transport: the sole carrier for cross-kernel calls,
-// single-action resolution, gossip, and steps (§13). It is a replaceable
+// single-action resolution, gossip, and tasks (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.
 //
 // Peers are addressed only by Ed25519 public key. The transport resolves a key to a live
@@ -34,7 +34,7 @@ const (
 	ProtocolCall    = "/juice/fed/call/1"
 	ProtocolResolve = "/juice/fed/resolve/1"
 	ProtocolGossip  = "/juice/fed/gossip/1"
-	ProtocolStep    = "/juice/fed/step/1"
+	ProtocolTask    = "/juice/fed/task/1"
 	ProtocolReveal  = "/juice/fed/settle/1"
 )
 
@@ -88,7 +88,7 @@ type CallRequest struct {
 	// Signature is Ed25519 over JCS({action,args_hash,caller_handle,caller_user_id,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
-	// to a third kernel (§13, matching the step protocol).
+	// to a third kernel (§13, matching the task protocol).
 	Signature string          `json:"signature"`
 	Args      json.RawMessage `json:"args"` // exact request bytes
 }
@@ -97,25 +97,25 @@ type CallRequest struct {
 // {error,receipt}.
 type CallResponse = Response
 
-// StepRequest is the wire form of a /juice/fed/step/1 request (§13). Kind selects the operation:
-// "list" enumerates the waiting steps this peer is the required caller of, "complete" resumes one.
+// TaskRequest is the wire form of a /juice/fed/task/1 request (§13). Kind selects the operation:
+// "list" enumerates the waiting tasks this peer is the required caller of, "complete" resumes one.
 // Input carries the exact bytes the caller hashed and signed, so input_hash matches byte-for-byte.
-type StepRequest struct {
+type TaskRequest struct {
 	Kind           string          `json:"kind"`                      // "list" | "complete"
 	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
 	Timestamp      string          `json:"timestamp"`                 // RFC3339
 	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
-	StepID         string          `json:"step_id,omitempty"`         // complete only
+	TaskID         string          `json:"task_id,omitempty"`         // complete only
 	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
 	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
 	ForUserID      string          `json:"for_user_id,omitempty"`     // list/complete: the acting user's stable id on the requesting kernel, signed into the payload (P8)
-	UserSuperuser  bool            `json:"user_superuser,omitempty"`  // complete: the home kernel's word that this user is its operator, the scope a kernel-addressed step demands
+	UserSuperuser  bool            `json:"user_superuser,omitempty"`  // complete: the home kernel's word that this user is its operator, the scope a kernel-addressed task demands
 }
 
-// StepResponse carries a step list or completion result. Unlike a call, a step completion parks
+// TaskResponse carries a task list or completion result. Unlike a call, a task completion parks
 // nothing on the requester, so failures are plain typed errors — there is no local trace awaiting a
 // signed rejection receipt (§13).
-type StepResponse = Response
+type TaskResponse = Response
 
 // RevealRequest is the wire form of a /juice/fed/settle/1 request (P10): the buyer tells the seller
 // how one obligation's draw came out. The secret makes the outcome checkable against the commitment
@@ -147,9 +147,9 @@ type Handlers interface {
 	// evidence page after req.Cursor) as JSON (§13). Gossip carries no membership — discovery of
 	// which kernels exist is routing discovery's job (Advertise/DiscoverProviders).
 	OnGossip(ctx context.Context, peerKey string, req GossipRequest) (json.RawMessage, error)
-	// OnStep handles an inbound /juice/fed/step/1 request: listing or completing the waiting
-	// steps this peer is the required caller of (§10, §13).
-	OnStep(ctx context.Context, peerKey string, req StepRequest) StepResponse
+	// OnTask handles an inbound /juice/fed/task/1 request: listing or completing the waiting
+	// tasks this peer is the required caller of (§10, §13).
+	OnTask(ctx context.Context, peerKey string, req TaskRequest) TaskResponse
 	// OnReveal handles an inbound /juice/fed/settle/1 request (P10): the seller side of one
 	// obligation's draw. peerKey is the connection's authenticated key; the handler still verifies
 	// req.Signature against req.Counterparty per §13.

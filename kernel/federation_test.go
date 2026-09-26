@@ -1420,7 +1420,7 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 }
 
 // D (§3, §14): a sigil-prefixed handle is rejected wherever it enters — a manifest owner_handle is
-// not silently embedded into a proxy name, and a step's required-caller "@bob" is not misparsed as a
+// not silently embedded into a proxy name, and a task's required-caller "@bob" is not misparsed as a
 // kernel-qualified ref with an empty owner.
 func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 	st := newTestStore(t)
@@ -1449,7 +1449,7 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 }
 
 // TestResolvePrincipalRefusesEmptyRemoteID: a peer that answers a user reference with an empty
-// id is answering with no principal. Accepted, the step would be addressed to the peer kernel
+// id is answering with no principal. Accepted, the task would be addressed to the peer kernel
 // itself — operator scope, decided by a remote reply — and the user it was meant for could never
 // complete it.
 func TestResolvePrincipalRefusesEmptyRemoteID(t *testing.T) {
@@ -1586,32 +1586,32 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	}
 }
 
-func TestStepCompleteSignatureCoversTheUser(t *testing.T) {
+func TestTaskCompleteSignatureCoversTheUser(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	cp, recip, uid, sid, ts := "cpkey", "recipkey", "user-1", "step-1", "2026-07-31T00:00:00Z"
+	cp, recip, uid, sid, ts := pubB64, "recipkey", "user-1", "task-1", "2026-07-31T00:00:00Z"
 
-	sig, err := testNet.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash", uid, false)
+	sig, err := testNet.SignTaskPayload(priv, sid, cp, recip, "idem", ts, "ihash", uid, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err != nil {
+	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)
 	}
 	// The user, the operator scope and the absence of a user are each their own payload (P8).
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", "other", false, sig); err == nil {
+	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", "other", false, sig); err == nil {
 		t.Error("wrong user_id verified")
 	}
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, true, sig); err == nil {
+	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, true, sig); err == nil {
 		t.Error("a claimed operator scope verified under a signature that did not cover it")
 	}
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", "", false, sig); err == nil {
+	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", "", false, sig); err == nil {
 		t.Error("a user-signed completion verified as a kernel-level one")
 	}
-	// Domain disjointness: a step-list signature never verifies as a completion.
-	lsig, _ := testNet.SignStepListPayload(priv, cp, recip, ts, uid)
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, false, lsig); err == nil {
-		t.Error("step_list signature verified as step_complete")
+	// Domain disjointness: a task-list signature never verifies as a completion.
+	lsig, _ := testNet.SignTaskListPayload(priv, cp, recip, ts, uid)
+	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, false, lsig); err == nil {
+		t.Error("task_list signature verified as task_complete")
 	}
 }
 
@@ -1932,19 +1932,19 @@ func TestVerifyRemoteReceiptFailsClosed(t *testing.T) {
 	}
 }
 
-// TestPeerStepsAwaitingUsCarriesTruncated: a peer serves one bounded page (P8); when more is
+// TestPeerTasksAwaitingUsCarriesTruncated: a peer serves one bounded page (P8); when more is
 // waiting the flag is the only signal, so dropping it would silently hide pending work.
-func TestPeerStepsAwaitingUsCarriesTruncated(t *testing.T) {
+func TestPeerTasksAwaitingUsCarriesTruncated(t *testing.T) {
 	st := newTestStore(t)
-	fake := &fakeFederationHTTP{stepListBody: `{"steps":[{"id":"s1","price":3}],"truncated":true}`}
+	fake := &fakeFederationHTTP{taskListBody: `{"tasks":[{"id":"s1","price":3}],"truncated":true}`}
 	k := newTestKernelWithHTTP(st, fake)
 	setupSys(t, nil, st)
-	held, err := k.PeerStepsAwaitingUs(context.Background(), "cGVlci10cnVuYw", "")
+	held, err := k.PeerTasksAwaitingUs(context.Background(), "cGVlci10cnVuYw", "")
 	if err != nil {
-		t.Fatalf("PeerStepsAwaitingUs: %v", err)
+		t.Fatalf("PeerTasksAwaitingUs: %v", err)
 	}
-	if len(held.Steps) != 1 || held.Steps[0].ID != "s1" || !held.Truncated {
-		t.Errorf("want one step and truncated=true, got %+v", held)
+	if len(held.Tasks) != 1 || held.Tasks[0].ID != "s1" || !held.Truncated {
+		t.Errorf("want one task and truncated=true, got %+v", held)
 	}
 }
 
@@ -3154,7 +3154,7 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 		t.Errorf("transfer to a tombstone: want ErrInvalidInput, got %v", err)
 	}
 	// The kernel enforces it too, not only the HTTP resolver: supervision cannot fund or freeze a
-	// tombstone, and a step parked on one would hold its price with no actor able to free it (§10).
+	// tombstone, and a task parked on one would hold its price with no actor able to free it (§10).
 	if _, err := k.Deposit(ctx, sys.ID, tomb.ID, 10, "", newRef()); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("deposit to a tombstone: want ErrNotFound, got %v", err)
 	}
@@ -3168,7 +3168,7 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	}
 	// A tombstone has no handle, so no address reaches it; an id is not an address either.
 	if _, err := k.ResolvePrincipal(ctx, tomb.ID); err == nil {
-		t.Error("park a step on a tombstone: want an error")
+		t.Error("park a task on a tombstone: want an error")
 	}
 }
 

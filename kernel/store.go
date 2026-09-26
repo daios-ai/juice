@@ -95,19 +95,19 @@ type RemoteResolver interface {
 	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
 }
 
-// StepCaller carries one /juice/fed/step/1 request to a peer (§13): listing the steps parked for
+// TaskCaller carries one /juice/fed/task/1 request to a peer (§13): listing the tasks parked for
 // this kernel, or completing one. Like TicketRevealer, it takes the signed scalars the kernel
 // produced and returns the peer's raw status/body — the kernel owns the protocol (key derivation,
 // signing, settlement disposition), the adapter owns the wire shape and its transport deadline.
 // notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
-type StepCaller interface {
-	CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
+type TaskCaller interface {
+	CompletePeerTask(ctx context.Context, peerKey, timestamp, signature, taskID, idempotencyKey string,
 		input []byte, forUserID string, userSuperuser bool) (status int, body []byte, notDispatched bool, err error)
-	ListPeerSteps(ctx context.Context, peerKey, timestamp, signature, forUserID string) (status int, body []byte, notDispatched bool, err error)
+	ListPeerTasks(ctx context.Context, peerKey, timestamp, signature, forUserID string) (status int, body []byte, notDispatched bool, err error)
 }
 
 // FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
-// (§13) — dispatch a call, reveal a draw, resolve one action or principal, carry a step.
+// (§13) — dispatch a call, reveal a draw, resolve one action or principal, carry a task.
 // cmd/juice supplies one object implementing all of them; the kernel holds it as a single named
 // dependency rather than type-asserting capabilities out of the HTTP executor, so a federation
 // change never touches the HTTP adapter. A nil client means federation is unconfigured, reported
@@ -116,14 +116,14 @@ type FederationClient interface {
 	FederationExecutor
 	TicketRevealer
 	RemoteResolver
-	StepCaller
+	TaskCaller
 }
 
 // HostFunctions are the callbacks available to a running script.
 type HostFunctions interface {
 	Call(ctx context.Context, actionName string, args []byte) ([]byte, error)
-	StepCreate(ctx context.Context, partialArgs []byte, requiredCallerUserID, actionID string) (string, error)
-	StepComplete(ctx context.Context, stepID string, input []byte) ([]byte, error)
+	TaskCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error)
+	TaskComplete(ctx context.Context, taskID string, input []byte) ([]byte, error)
 	Log(ctx context.Context, level, msg string) error
 }
 
@@ -270,17 +270,17 @@ type Store interface {
 	// BeginSubcall is D3's call-entry write set.
 	BeginSubcall(ctx context.Context, parentTraceID string, t *Trace, price int64) error
 
-	// BeginStepCall is D3's step-call write set.
-	BeginStepCall(ctx context.Context, stepID string, t *Trace) error
+	// BeginTaskCall is D3's task-call write set.
+	BeginTaskCall(ctx context.Context, taskID string, t *Trace) error
 
 	// CommitCall is D3's success write set.
-	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, stepID string) error
+	CommitCall(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *Stats, idempotencyRecordID, taskID string) error
 
 	// CommitFailedCall is D3's failure write set. Two traps for an implementation: user.locked is
 	// decremented at process closure, never here, or the two double-count; and buildReceipt runs
 	// INSIDE the transaction, with the computed refund, so the signed charge cannot disagree with
 	// what is committed.
-	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, stepID string) error
+	CommitFailedCall(ctx context.Context, tx *Transaction, buildReceipt func(refund int64) (*Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *Stats, idempotencyRecordID, taskID string) error
 
 	// EndProcess is D3's closure write set.
 	EndProcess(ctx context.Context, processID string) error
@@ -344,27 +344,25 @@ type Store interface {
 	ReadStats(ctx context.Context, actionID string) (*Stats, error)
 	UpsertStats(ctx context.Context, s *Stats) error
 
-	// ---- Steps ----
+	// ---- Tasks ----
 
-	// CreateStep atomically inserts the step and parks step.price from the parent trace's
+	// CreateTask atomically inserts the task and parks task.price from the parent trace's
 	// available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
-	CreateStep(ctx context.Context, s *Step) error
-	ReadStep(ctx context.Context, id string) (*Step, error)
-	// ListSteps returns steps visible to caller. processID and status are optional filters ("" = no filter).
-	ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Step, error)
-	ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*Step, error)
-	// ResetStepAndRepark re-parks a step's price and resets to waiting. Used when the
+	CreateTask(ctx context.Context, s *Task) error
+	ReadTask(ctx context.Context, id string) (*Task, error)
+	// ListTasks returns tasks visible to caller. processID and status are optional filters ("" = no filter).
+	ListTasks(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Task, error)
+	ListTasksAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*Task, error)
+	// ResetTaskAndRepark re-parks a task's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
-	ResetStepAndRepark(ctx context.Context, stepID string) error
-	// ListOrphanRunningSteps returns running steps that have a completion trace but no tx,
-	// with enough detail to decide between re-parking (empty trace) or settling as failed.
-	// HasSettled is true when the completion trace has locked funds or committed subcall transactions.
-	ListOrphanRunningSteps(ctx context.Context) ([]OrphanRunningStep, error)
-	// ListOrphanRunningStepsForProcess is ListOrphanRunningSteps scoped to one process.
-	// Used by EndProcess to fail in-flight step completions as failed calls before closure.
-	ListOrphanRunningStepsForProcess(ctx context.Context, processID string) ([]OrphanRunningStep, error)
-	// ResetRunningSteps sets status=waiting where status=running AND tx_id IS NULL.
-	ResetRunningSteps(ctx context.Context) error
+	ResetTaskAndRepark(ctx context.Context, taskID string) error
+	// ListOrphanRunningTasks returns running tasks that have a completion trace but no tx, in one
+	// process or in all (processID empty), with enough detail to decide between re-parking (empty
+	// trace) or settling as failed. HasSettled is true when the completion trace has locked funds or
+	// committed subcall transactions.
+	ListOrphanRunningTasks(ctx context.Context, processID string) ([]OrphanRunningTask, error)
+	// ResetRunningTasks sets status=waiting where status=running AND tx_id IS NULL.
+	ResetRunningTasks(ctx context.Context) error
 	// ListOrphanTraces returns traces that have no associated transaction and no idempotency_key,
 	// ordered deepest-first (longest parent chain first). Used by recovery to settle interrupted calls.
 	// Traces with idempotency_key are pending remote dispatches handled by RetryPendingRemoteDispatches.
@@ -397,7 +395,7 @@ type Store interface {
 	//
 	// The stake and the caller are read from the trace, so every settlement path releases exactly
 	// what was locked whether or not anything was owed.
-	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *RailTransfer, stats *Stats, idempotencyRecordID, stepID string) error
+	CommitRemoteSettlement(ctx context.Context, tx *Transaction, receipt *Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *RailTransfer, stats *Stats, idempotencyRecordID, taskID string) error
 
 	// ---- Auth codes (PKCE flow) ----
 
@@ -639,10 +637,10 @@ type Store interface {
 	// ListPurgeablePeers returns the IDs of peer users (kernel_public_key set) that are idle past
 	// cutoff at zero balance (§13 Retention): available=0, locked=0, last activity (max of
 	// created_at, latest transaction naming them, latest deposit/withdrawal, latest gossip
-	// mention) before cutoff, and no waiting/running step addressed to them or to their actions.
+	// mention) before cutoff, and no waiting/running task addressed to them or to their actions.
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
 	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
-	// their stats, its steps, its discovered_kernels row, its discovery_docs, and its evidence
+	// their stats, its tasks, its discovered_kernels row, its discovery_docs, and its evidence
 	// rows (as issuer and as subject) — and forgets the peer identity by clearing kernel_public_key on the
 	// user row. The immutable transaction/receipt ledger is preserved (party ids carry no FK),
 	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as

@@ -37,7 +37,7 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		argsHash  = "args-hash"
 		contract  = "contract-hash"
 		actionID  = "action-1"
-		stepID    = "step-1"
+		taskID    = "step-1"
 		inputHash = "input-hash"
 		userID    = "user-1"
 		settleID  = "settle-1"
@@ -71,17 +71,22 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
 	check("fed_call_caller", "vLBwQW1n2e916IxZ8diC0HF5QEPjDiKg4YqPGolxOps-TLcsSoC7HLzZPfNz6eN0SNi2oYSNFkFQFE4fQJybAQ", sig, err)
 
-	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, "", false)
-	check("step_complete", "pG89K-ofhZ8xs-ggsVRJ9eNGeOsTcTFQejYfyIboALe7WyHVjZl2qKEF2-Gk4YDCk8vL37QWlIHOwPXHkiueDA", sig, err)
+	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, "", false)
+	check("task_complete", "pQgMwIylyms1yyzW95MqbooLqNe7VtlzVLIQnSs2JIgjRrBN2iyYNwzgFqfdIHtgJtNoK4aCk4B2CeuommkNDg", sig, err)
 
 	// A completion as a user signs the user into the same payload (P8), superuser or not.
-	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, userID, false)
-	check("step_complete_user", "3uQcDVr3B0YwOvabn-N6Fhc4sIYE86alF1gP2hlCVm3_vli1MILgX8hCoXY8qg-3B-etpYqn_W-5XGq2uYTzAA", sig, err)
-	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, userID, true)
-	check("step_complete_operator", "Q-WQR3iECOH4MqFUbIGUK-zEIcYPeQxvzMS9IZDrSRaWeJprfBuHsBMrzJo-iBFr0r8c2B6cRd70gbeHRe3aDA", sig, err)
+	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, userID, false)
+	check("task_complete_user", "VaTWccPhR88m1r1NXbXjG2fjPckeAjdWoFMa7uzcUisy0SLOKh0qKRir-6X70z2_jTK89lItwo3gqKQsmS8LCw", sig, err)
+	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, userID, true)
+	check("task_complete_operator", "dSk8b4X90DqGB9n2z3bT5uuGGe94B_Y--aw2ERg36qlWBPIioLLK-JhW6ovjz-Xp_bGYQTXI7MKuzrKP7SIcCw", sig, err)
 
-	sig, err = net.SignStepListPayload(key, cp, recipient, ts, "")
-	check("step_list", "hWP8ddJWQ4eDzSPL9T55CVoFzKhWOvlgiZpBfZtNQC1Z4BA1nhU0bFxDCXvrdDE0ZN8xUG-9xB0KOLo9vyjnCg", sig, err)
+	sig, err = net.SignTaskListPayload(key, cp, recipient, ts, "")
+	check("task_list", "l86tdguovNH-CsuoZkMsBw65nXGaOG0aezBA0EC8Jc_N4EqQnvIB8VvmR2w1IXs_fJo8g4rAeLDUv1eLSF1HDw", sig, err)
+
+	// The completion key is derived, and every stored completion is found again by it (P8): its
+	// derivation string is frozen, whatever the protocol is called.
+	check("completion_key", "e95133e9c98b1993297cae98ba19229104171f941ff65f9f8d17fb9b9b74ac51",
+		TaskIdempotencyKey(recipient, taskID, inputHash), nil)
 
 	sig, err = net.sign(key, sigDomainReveal, RevealPayload{
 		Counterparty: cp, Recipient: recipient, Secret: "s", TicketID: settleID, Timestamp: ts, TxHash: "tx-1",

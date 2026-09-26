@@ -78,7 +78,7 @@ const (
 	verbCall    simVerb = "call"
 	verbResolve simVerb = "resolve"
 	verbReveal  simVerb = "reveal"
-	verbStep    simVerb = "step"
+	verbTask    simVerb = "task"
 )
 
 // simPlan is the scenario's instruction to the network: what to do to the next message of a given
@@ -298,9 +298,9 @@ func (p *simPort) Reveal(ctx context.Context, peerKey string, req fed.RevealRequ
 	})
 }
 
-func (p *simPort) Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error) {
-	return p.deliver(ctx, peerKey, verbStep, func(h *fedHandlers) fed.Response {
-		return h.OnStep(ctx, p.self, req)
+func (p *simPort) Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error) {
+	return p.deliver(ctx, peerKey, verbTask, func(h *fedHandlers) fed.Response {
+		return h.OnTask(ctx, p.self, req)
 	})
 }
 
@@ -330,7 +330,7 @@ func short(key string) string {
 // the ones that decide whether money is stranded.
 //
 // It decorates kernel.Store by embedding, the same shape as the four wrappers already in
-// kernel/call_test.go and kernel/steps_test.go, and the same shape production uses in pricedStore.
+// kernel/call_test.go and kernel/tasks_test.go, and the same shape production uses in pricedStore.
 type faultStore struct {
 	kernel.Store
 	mu sync.Mutex
@@ -390,22 +390,22 @@ func (f *faultStore) fault(method string, write func() error) error {
 
 func (f *faultStore) CommitCall(ctx context.Context, tx *kernel.Transaction, receipt *kernel.Receipt,
 	traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string,
-	net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+	net, fee int64, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 
 	return f.fault("CommitCall", func() error {
 		return f.Store.CommitCall(ctx, tx, receipt, traceID, callerWalletID, callerWalletKind,
-			targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, stepID)
+			targetUserID, feeRecipientID, net, fee, stats, idempotencyRecordID, taskID)
 	})
 }
 
 func (f *faultStore) CommitFailedCall(ctx context.Context, tx *kernel.Transaction,
 	buildReceipt func(refund int64) (*kernel.Receipt, error),
 	traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64,
-	stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+	stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 
 	return f.fault("CommitFailedCall", func() error {
 		return f.Store.CommitFailedCall(ctx, tx, buildReceipt, traceID, callerWalletID,
-			callerWalletKind, feeRecipientID, gross, stats, idempotencyRecordID, stepID)
+			callerWalletKind, feeRecipientID, gross, stats, idempotencyRecordID, taskID)
 	})
 }
 

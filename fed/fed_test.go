@@ -22,9 +22,9 @@ type fakeHandlers struct {
 	gossip         json.RawMessage
 	gossipErr      error
 	resolveBody    json.RawMessage
-	lastStepPeer   string
-	lastStep       StepRequest
-	stepBody       json.RawMessage
+	lastTaskPeer   string
+	lastTask       TaskRequest
+	taskBody       json.RawMessage
 	lastRevealPeer string
 	lastReveal     RevealRequest
 	revealBody     json.RawMessage
@@ -41,10 +41,10 @@ func (f *fakeHandlers) OnResolve(_ context.Context, _ string, _ ResolveRequest) 
 func (f *fakeHandlers) OnGossip(_ context.Context, _ string, _ GossipRequest) (json.RawMessage, error) {
 	return f.gossip, f.gossipErr
 }
-func (f *fakeHandlers) OnStep(_ context.Context, peerKey string, req StepRequest) StepResponse {
-	f.lastStepPeer = peerKey
-	f.lastStep = req
-	return StepResponse{Status: 200, Body: f.stepBody}
+func (f *fakeHandlers) OnTask(_ context.Context, peerKey string, req TaskRequest) TaskResponse {
+	f.lastTaskPeer = peerKey
+	f.lastTask = req
+	return TaskResponse{Status: 200, Body: f.taskBody}
 }
 func (f *fakeHandlers) OnReveal(_ context.Context, peerKey string, req RevealRequest) RevealResponse {
 	f.lastRevealPeer = peerKey
@@ -101,7 +101,7 @@ func TestTransportRoundTrip(t *testing.T) {
 	srv := &fakeHandlers{
 		callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
 		gossip:   json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
-		stepBody: json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
+		taskBody: json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
 	}
 	a := newTestTransport(t, srv, nil)
 
@@ -136,22 +136,22 @@ func TestTransportRoundTrip(t *testing.T) {
 		t.Fatalf("Gossip: %v body=%s", err, g)
 	}
 
-	// Step (§13): the completion verb carries the exact input bytes, like Call's args.
-	sResp, err := b.Step(ctx, a.PublicKey(), StepRequest{
+	// Task (§13): the completion verb carries the exact input bytes, like Call's args.
+	sResp, err := b.Task(ctx, a.PublicKey(), TaskRequest{
 		Kind: "complete", Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z",
-		Signature: "sig", StepID: "step-1", IdempotencyKey: "idem-2", Input: json.RawMessage(`{"approve":true}`),
+		Signature: "sig", TaskID: "task-1", IdempotencyKey: "idem-2", Input: json.RawMessage(`{"approve":true}`),
 	})
 	if err != nil {
-		t.Fatalf("Step: %v", err)
+		t.Fatalf("Task: %v", err)
 	}
 	if sResp.Status != 200 || string(sResp.Body) != `{"result":{},"tx_id":"tx-1"}` {
-		t.Fatalf("Step response: status=%d body=%s", sResp.Status, sResp.Body)
+		t.Fatalf("Task response: status=%d body=%s", sResp.Status, sResp.Body)
 	}
-	if srv.lastStepPeer != b.PublicKey() {
-		t.Errorf("server saw step peer %q, want %q", srv.lastStepPeer, b.PublicKey())
+	if srv.lastTaskPeer != b.PublicKey() {
+		t.Errorf("server saw task peer %q, want %q", srv.lastTaskPeer, b.PublicKey())
 	}
-	if string(srv.lastStep.Input) != `{"approve":true}` || srv.lastStep.StepID != "step-1" {
-		t.Errorf("server saw step %+v", srv.lastStep)
+	if string(srv.lastTask.Input) != `{"approve":true}` || srv.lastTask.TaskID != "task-1" {
+		t.Errorf("server saw task %+v", srv.lastTask)
 	}
 
 	// Reachability probe reports a live path.

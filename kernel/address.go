@@ -130,7 +130,7 @@ func (k *Kernel) LocalHandle(ctx context.Context, addr string) (string, error) {
 	return a.Handle, nil
 }
 
-// ResolvePrincipal resolves an address to who a step may be parked for (P8): a live user here, or a
+// ResolvePrincipal resolves an address to who a task may be parked for (P8): a live user here, or a
 // user on a peer — its stable id resolved over /juice/fed/resolve/1 and its billing account here,
 // which is the peer's, opened on this kernel's own act. The verified resolve binds the peer's
 // petname too, best-effort: naming turns on our own outbound act, never on a peer's.
@@ -149,7 +149,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if kr.Local {
 		u, uerr := k.store.ReadUserByHandle(ctx, a.Handle)
 		if uerr != nil || u == nil || !u.IsLive() {
-			// A tombstone resolves but can never complete: the step would park its price forever.
+			// A tombstone resolves but can never complete: the task would park its price forever.
 			return Principal{}, ErrNotFound.Wrapf("user %s not found", ref)
 		}
 		return Principal{AccountID: u.ID}, nil
@@ -161,7 +161,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if rerr != nil {
 		return Principal{}, rerr
 	}
-	// An empty id is not a principal. Accepted, it would address the step to the peer kernel
+	// An empty id is not a principal. Accepted, it would address the task to the peer kernel
 	// itself — operator scope, decided by a remote reply — and strand the user it was meant for.
 	if remoteID == "" {
 		return Principal{}, ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)

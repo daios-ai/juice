@@ -89,7 +89,7 @@ Call(caller, trace, action, args)
 ```
 
 Everything runs through it: a user-initiated run, a script's subcall, the completion of a
-suspended step, an imported HTTP action, a federated remote call. `Call` dispatches on the
+suspended task, an imported HTTP action, a federated remote call. `Call` dispatches on the
 action's *kind* (`native`, `wasm`, `http`, `remote_proxy`), never on who owns it. A
 separate band of **supervision** operations — creating users and actions, rating outcomes,
 depositing credits, importing APIs, peering with other kernels — deliberately never routes
@@ -116,9 +116,9 @@ work it defers. Money is escrowed before execution. On success, whatever the cal
 unused budget is *not* refunded. On failure, the unspent remainder rolls back up the tree
 to the caller, while any already-settled descendants stay paid.
 
-**Funded continuations (Steps).** A Step is a partially applied future `Call`: a suspended
+**Funded continuations (Tasks).** A Task is a partially applied future `Call`: a suspended
 computation that records enough context to resume when someone later supplies the missing
-input — a human approval, a webhook, an asynchronous result. Crucially, a Step is *funded
+input — a human approval, a webhook, an asynchronous result. Crucially, a Task is *funded
 at creation*: its price is parked the moment it is created and held until it completes or
 is cancelled. This is what makes long-running, human-in-the-loop composition safe and
 restartable.
@@ -132,7 +132,7 @@ restartable.
 `run(action, args)` is the user-facing entry point. It atomically creates a process funded
 with exactly `action.price`, funds a root trace from that process, and issues the root
 `Call`. Every `run` is therefore just a `Call` on a freshly funded root trace; the process
-closes automatically once the root call has returned and no Steps remain outstanding.
+closes automatically once the root call has returned and no Tasks remain outstanding.
 
 From there, every execution path is the same primitive:
 
@@ -140,7 +140,7 @@ From there, every execution path is the same primitive:
 | --------------------- | -------------------------------------------------------- |
 | Root call (`run`)     | the kernel funds a root trace and issues the call        |
 | WASM subcall          | a script invokes `juice.call` under the parent trace     |
-| Step completion       | a caller supplies the missing input to a waiting step    |
+| Task completion       | a caller supplies the missing input to a waiting task    |
 | Imported HTTP action  | `Call` dispatches on `kind = http`                       |
 | Remote (federated)    | `Call` dispatches on `kind = remote_proxy`               |
 
@@ -165,7 +165,7 @@ The transaction created by the call records `owner_user_id = P`, `caller_user_id
 | ----------------------- | ------------------------- | ------------------------ | ---------------------- |
 | Root call (`run`)       | process owner             | authenticated requester (= P) | called action owner |
 | WASM subcall            | parent process owner      | parent action owner      | subcalled action owner |
-| Step completion         | step's process owner      | required completer       | step's action owner    |
+| Task completion         | task's process owner      | required completer       | task's action owner    |
 | Remote proxy call       | local process owner       | local caller             | local proxy user       |
 
 Because all three parties are captured at transaction creation, financial history remains
@@ -197,7 +197,7 @@ lock for `q` is released; when it fails, the refunded amount returns to the call
 `available` and the lock is released.
 
 **Settlement (success).** The call's remaining `available` — what it did *not* commit to
-subcalls and steps — is its value added, and is what gets paid out:
+subcalls and tasks — is its value added, and is what gets paid out:
 
 ```
 taxable = trace.available
@@ -211,7 +211,7 @@ fee is `fee_bps = 2000` (20%). Unused budget is the provider's margin, **not** a
 because `available ≥ 0` everywhere. Each kernel taxes only its own layer.
 
 **Refund (failure).** A failed call is rolled up entirely: its remaining `available`, plus
-the parked prices of all its outstanding steps and — recursively — everything outstanding
+the parked prices of all its outstanding tasks and — recursively — everything outstanding
 beneath them, is cancelled and returned to the caller's `available` (for a root call, to
 the process, and from there to the owner at closure). The failed call charges zero fee and
 net and records `status = failure` with a failure class in `reason`. Crucially,
@@ -227,12 +227,12 @@ margin. The caller pays one advertised number that caps the whole tree; the prov
 composed the tree bears its composition risk; the fee taxes each layer's *margin* — value
 added — rather than gross flows.
 
-### 4.4 Funded continuations (Steps)
+### 4.4 Funded continuations (Tasks)
 
-A Step is a partially applied future `Call`:
+A Task is a partially applied future `Call`:
 
 ```
-CompleteStep(caller, id, input) ≡ Call(caller, step.parent_trace_id,
+CompleteTask(caller, id, input) ≡ Call(caller, task.parent_trace_id,
                                         action_id, partial_args ⊕ input)
 ```
 
@@ -242,23 +242,23 @@ the target action, pre-bound `partial_args`, and a status of `waiting → runnin
 by `partial_args`; the final merged arguments are validated against the action's input
 schema by the underlying `Call`.
 
-The distinctive property is **funding at suspension**. When a step is created, the
-action's price is snapshotted as `step.price` and moved from the creating trace's
+The distinctive property is **funding at suspension**. When a task is created, the
+action's price is snapshotted as `task.price` and moved from the creating trace's
 `available` into its `locked` — parked. That parked price *is* the completion call's
-allocation, so completion never checks funds: the money was reserved when the step was
-created. An outstanding (`waiting` or `running`) step keeps its process open and its
+allocation, so completion never checks funds: the money was reserved when the task was
+created. An outstanding (`waiting` or `running`) task keeps its process open and its
 allocation parked. Cancellation returns the parked price — to the creating caller through
 that call's failure rollup, or to the process owner at forced process closure.
 
 This is what makes asynchronous, human-in-the-loop composition safe and honest about who
 pays: the money for a deferred continuation is reserved at the moment the work is
-suspended, not hopefully re-collected when it resumes. A step parked for a human approval
+suspended, not hopefully re-collected when it resumes. A task parked for a human approval
 that arrives a week later draws on funds that have been escrowed the whole time.
 
 ### 4.5 Atomicity, receipts, and recovery
 
 **Atomicity.** Each monetary transition commits together with its audit record — the
-transaction, the receipt, the stats, and any step or idempotency state — inside *one*
+transaction, the receipt, the stats, and any task or idempotency state — inside *one*
 store operation. The money-path methods are therefore compound atomic operations, not
 fine-grained primitives coordinated from above. A monetary movement and its audit record
 either commit together or fail together; there is no window in which money has moved but
@@ -277,8 +277,8 @@ agreement protocol at all.**
 transaction was mid-execution at shutdown and can never return: it is settled as a failure
 with `reason = interrupted`, deepest first, applying the normal refund rollup — settled
 descendants stay settled, refunds flow up the chain, and processes then close by the
-automatic rule. Steps left `running` with no transaction are reset to `waiting` and their
-allocation re-parked; `waiting` steps are untouched and survive restarts with their parked
+automatic rule. Tasks left `running` with no transaction are reset to `waiting` and their
+allocation re-parked; `waiting` tasks are untouched and survive restarts with their parked
 prices intact. The one exception is a remote-proxy call that had already dispatched: it is
 not "interrupted" but resumes retrying with its stored idempotency key until a signed
 receipt settles it. Recovery is idempotent.
@@ -337,7 +337,7 @@ entirely locally.
 Native actions are a platform standard library shipped alongside the kernel and owned by
 `@sys`. They have **no special kernel privileges** — any provider could supply equivalent
 HTTP or WASM actions. They are registered at bootstrap and interact with the platform only
-through the same injected dependencies and the same `Call()` / `CreateStep()` entry points
+through the same injected dependencies and the same `Call()` / `CreateTask()` entry points
 available to every action. The stdlib includes semantic catalog `lookup`; the LLM surface
 `llm/chat`, `llm/embed`, `llm/json`, and `llm/decide` (which selects an action and proposes
 arguments without executing); `make` (synthesizes and registers a WASM action from a
@@ -347,7 +347,7 @@ ordinary actions all the way down.
 
 WASM execution is textbook object-capability: scripts receive no ambient filesystem,
 network, environment, process access, or raw user tokens — only explicit host functions
-(`juice.call`, `juice.step_create`, `juice.step_complete`, `juice.log`), each with a memory
+(`juice.call`, `juice.task_create`, `juice.task_complete`, `juice.log`), each with a memory
 limit, timeout, deterministic cancellation, and an artifact-hash compiled-module cache.
 
 ---
@@ -468,14 +468,14 @@ the micropayment strand of Rivest–Shamir *PayWord/MicroMint* (1996), DEC's *Mi
 *Mojo Nation*. This history matters for §9: it is largely a history of systems that never
 reached liquidity.
 
-**Durable execution and long-lived transactions — what Steps are.** Juice's failure
+**Durable execution and long-lived transactions — what Tasks are.** Juice's failure
 semantics are the *saga* pattern (Garcia-Molina and Salem, 1987) given a money meaning:
 compensation rather than global rollback, with committed sub-activities left intact. A
 precision note: classic *closed* nested transactions (Moss, 1981) make a child's commit
 provisional until the top level commits — the **opposite** of "settled descendants stay
 paid." The accurate lineage for that property is sagas plus *open* nested transactions
 (Weikum and Schek), where subtransaction commits are irrevocable. On the engineering side,
-Steps are durable continuations in the family of **Temporal, AWS Step Functions, Azure
+Tasks are durable continuations in the family of **Temporal, AWS Step Functions, Azure
 Durable Functions, and Cadence** — with one element those systems lack: *funding at
 suspension*.
 
@@ -575,7 +575,7 @@ no existing system packages it together:
 1. a single dispatch primitive (`Call`) for every execution path;
 2. subtree-bounded prepaid escrow in which unused budget is provider margin, not a refund;
 3. atomic settlement-with-signed-receipt as one store operation;
-4. funded continuations (Steps) for safe, restartable asynchronous composition;
+4. funded continuations (Tasks) for safe, restartable asynchronous composition;
 5. federation as "a peer is just a user," yielding bilateral netting with no separate money
    model; and
 6. capability-mediated execution plus trade-backed, non-transitive reputation —

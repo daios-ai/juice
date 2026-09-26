@@ -124,7 +124,7 @@ func checkWASMImports(wasm []byte, scripts kernel.ScriptExecutor) string {
 	if err != nil {
 		return fmt.Sprintf("WASM inspection failed: %v", err)
 	}
-	allowedImports := map[string]bool{"call": true, "step_create": true, "step_complete": true, "log": true}
+	allowedImports := map[string]bool{"call": true, "task_create": true, "task_complete": true, "log": true}
 	for _, imp := range imports {
 		if imp.Module == "wasi_snapshot_preview1" {
 			continue

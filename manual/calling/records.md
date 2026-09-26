@@ -170,7 +170,7 @@ an action has no authority to submit ratings through its execution capability.
 ## Processes
 
 A process groups the work and reserved funds of one `run`. It closes
-automatically after all calls have settled and no steps remain outstanding.
+automatically after all calls have settled and no tasks remain outstanding.
 Use the process commands to follow work that has not yet finished:
 
 ```
@@ -181,15 +181,15 @@ e3539f75-…  open    0.00 fUSD  0.00 fUSD
 $ juice process show e3539f75-…
 ```
 
-A process may remain open while a step waits for input or a remote call awaits
+A process may remain open while a task waits for input or a remote call awaits
 a receipt. The fields `awaiting_receipt` and `awaiting_receipt_since` identify
 the latter condition and its age. An open process can have a zero balance when
 its outstanding work is free.
 
-The owner can end abandoned work to cancel waiting steps and recover their
+The owner can end abandoned work to cancel waiting tasks and recover their
 reserved funds. A process awaiting a remote receipt should normally be allowed
 to settle through the retry mechanism. See
-[Ending a process](../providing/steps.html#ending-a-process) for the consequences
+[Ending a process](../providing/tasks.html#ending-a-process) for the consequences
 of forced closure.
 
 ## What you can reconstruct

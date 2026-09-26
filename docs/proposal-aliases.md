@@ -51,7 +51,7 @@ An alias confers nothing. It is a way to reach the action, and no more.
 7. **Remote actions.** A remote action is represented locally by its proxy, which is an ordinary
    action with an id. An alias points at it like at any other action. If retention purges the proxy
    (D16), the alias no longer resolves, exactly as when any target is deleted.
-8. **Binding.** A reference is resolved once, where it is bound. A step keeps the action it was
+8. **Binding.** A reference is resolved once, where it is bound. A task keeps the action it was
    created for (D6); a pinned run keeps the quote it saw (P2). Repointing an alias affects new calls
    only, and a pinned run through a repointed alias is refused as changed terms.
 

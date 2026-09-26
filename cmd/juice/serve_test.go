@@ -579,7 +579,7 @@ func TestServeListActions(t *testing.T) {
 }
 
 // TestServeListPagination proves the limit/offset query params are honored across the
-// list surface (previously getActions/listSteps discarded them).
+// list surface (previously getActions/listTasks discarded them).
 func TestServeListPagination(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
@@ -1821,8 +1821,8 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	assertSignedRejection("active-private", fedCall(t, k, priv, a.ID, "idem-s-2", map[string]any{}))
 }
 
-// TestWaitingOnPeer: a waiting step whose required caller is a peer (proxy) user is flagged
-// waiting_on_peer; a local-user caller or a non-waiting step is not (§13 — advisory, never a gate).
+// TestWaitingOnPeer: a waiting task whose required caller is a peer (proxy) user is flagged
+// waiting_on_peer; a local-user caller or a non-waiting task is not (§13 — advisory, never a gate).
 func TestWaitingOnPeer(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
@@ -1840,31 +1840,31 @@ func TestWaitingOnPeer(t *testing.T) {
 	}
 
 	names := k.NewNames()
-	peerStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
-	pv := enrichStep(k, ctx, peerStep, nil, names)
+	peerTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID}
+	pv := enrichTask(k, ctx, peerTask, names)
 	if !pv.WaitingOnPeer {
-		t.Error("step addressed to a peer should be waiting_on_peer")
+		t.Error("task addressed to a peer should be waiting_on_peer")
 	}
-	// A step addressed to the peer kernel itself names the kernel, bare: a user always carries `@`.
+	// A task addressed to the peer kernel itself names the kernel, bare: a user always carries `@`.
 	if pv.RequiredCaller != "peer-caller" {
 		t.Errorf("required_caller: got %q, want peer-caller", pv.RequiredCaller)
 	}
 	rid := "alice-remote-id"
-	userStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID, RequiredCallerRemoteID: &rid, RequiredCallerHandle: "alice"}
-	if got := enrichStep(k, ctx, userStep, nil, names).RequiredCaller; got != "alice@peer-caller" {
-		t.Errorf("a step addressed to a user on the peer: got %q, want alice@peer-caller", got)
+	userTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID, RequiredCallerRemoteID: &rid, RequiredCallerHandle: "alice"}
+	if got := enrichTask(k, ctx, userTask, names).RequiredCaller; got != "alice@peer-caller" {
+		t.Errorf("a task addressed to a user on the peer: got %q, want alice@peer-caller", got)
 	}
-	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
-	lv := enrichStep(k, ctx, localStep, nil, names)
+	localTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: localID}
+	lv := enrichTask(k, ctx, localTask, names)
 	if lv.WaitingOnPeer {
-		t.Error("step addressed to a local user should not be waiting_on_peer")
+		t.Error("task addressed to a local user should not be waiting_on_peer")
 	}
 	if !strings.HasSuffix(lv.RequiredCaller, "@"+testOwnName) {
 		t.Errorf("a local user is addressed on this kernel: got %q", lv.RequiredCaller)
 	}
-	doneStep := &kernel.Step{Status: kernel.StepDone, RequiredCallerUserID: peer.ID}
-	if enrichStep(k, ctx, doneStep, nil, names).WaitingOnPeer {
-		t.Error("a non-waiting step should never be waiting_on_peer")
+	doneTask := &kernel.Task{Status: kernel.TaskDone, RequiredCallerUserID: peer.ID}
+	if enrichTask(k, ctx, doneTask, names).WaitingOnPeer {
+		t.Error("a non-waiting task should never be waiting_on_peer")
 	}
 }
 
@@ -2718,12 +2718,12 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 
 // A peer serves one page of what it holds, under its own order: a filter or an offset has nothing
 // to act on, so combining one with ?peer= is refused rather than silently ignored.
-func TestServeListStepsPeerRefusesFilters(t *testing.T) {
+func TestServeListTasksPeerRefusesFilters(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 	_, tok := makeUser(t, k, "peer-list-flags")
 	for _, q := range []string{"limit=5", "offset=1", "status=waiting", "process_id=x"} {
-		resp := httpDo(t, srv, "GET", "/v1/steps?peer=cGVlcg&"+q, nil, tok)
+		resp := httpDo(t, srv, "GET", "/v1/tasks?peer=cGVlcg&"+q, nil, tok)
 		resp.Body.Close()
 		if resp.StatusCode != kernel.ErrInvalidInput.HTTP {
 			t.Errorf("?peer with %s: want %d, got %d", q, kernel.ErrInvalidInput.HTTP, resp.StatusCode)
@@ -2731,28 +2731,28 @@ func TestServeListStepsPeerRefusesFilters(t *testing.T) {
 	}
 }
 
-// peerStepLister is a peer that holds one canned page of steps; the listing is all it answers.
-type peerStepLister struct {
+// peerTaskLister is a peer that holds one canned page of tasks; the listing is all it answers.
+type peerTaskLister struct {
 	kernel.FederationClient
 	body string
 }
 
-func (p peerStepLister) ListPeerSteps(context.Context, string, string, string, string) (int, []byte, bool, error) {
+func (p peerTaskLister) ListPeerTasks(context.Context, string, string, string, string) (int, []byte, bool, error) {
 	return http.StatusOK, []byte(p.body), false, nil
 }
 
-// A peer names the user a step waits for by that user's id here, which routes; the user reads the
-// step list with the id rendered as their address (D20), never as the raw id.
-func TestServeListStepsPeerRendersRequiredCaller(t *testing.T) {
+// A peer names the user a task waits for by that user's id here, which routes; the user reads the
+// task list with the id rendered as their address (D20), never as the raw id.
+func TestServeListTasksPeerRendersRequiredCaller(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
 	id, tok := makeUser(t, k, "peer-list-me")
-	k.SetFederation(peerStepLister{body: `{"steps":[{"id":"s-1","required_caller":"` + id + `","price":0,"created_at":"2026-01-01T00:00:00Z"}]}`})
-	resp := httpDo(t, srv, "GET", "/v1/steps?peer="+base64.RawURLEncoding.EncodeToString(make([]byte, 32)), nil, tok)
-	var list kernel.PeerStepList
+	k.SetFederation(peerTaskLister{body: `{"tasks":[{"id":"s-1","required_caller":"` + id + `","price":0,"created_at":"2026-01-01T00:00:00Z"}]}`})
+	resp := httpDo(t, srv, "GET", "/v1/tasks?peer="+base64.RawURLEncoding.EncodeToString(make([]byte, 32)), nil, tok)
+	var list kernel.PeerTaskList
 	decodeResponse(t, resp, &list)
-	if len(list.Steps) != 1 || list.Steps[0].RequiredCaller != "peer-list-me@"+testOwnName {
-		t.Fatalf("peer step list = %+v; want required_caller peer-list-me@%s", list, testOwnName)
+	if len(list.Tasks) != 1 || list.Tasks[0].RequiredCaller != "peer-list-me@"+testOwnName {
+		t.Fatalf("peer task list = %+v; want required_caller peer-list-me@%s", list, testOwnName)
 	}
 }
 

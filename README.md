@@ -234,7 +234,7 @@ output; `--quiet` prints only ids.
 ## Compose actions
 
 A WASM action can call other actions within its own advertised price, using the host
-functions `juice.call`, `juice.step_create`, `juice.step_complete`, and `juice.log` —
+functions `juice.call`, `juice.task_create`, `juice.task_complete`, and `juice.log` —
 no filesystem, network, or token access. Write the handler in Go and compile it on the
 kernel:
 
@@ -281,19 +281,19 @@ consent to request. See [docs/oauth.md](docs/oauth.md).
 
 ## Wait for a human or a webhook
 
-An action can park a **step**: a prepaid continuation addressed to one named party.
+An action can park a **task**: a prepaid continuation addressed to one named party.
 The money is already reserved, so completing it needs no further funds:
 
 ```bash
 ./juice run sys@work/message '{"to":"bob@work","message":"approve the order?"}'
-./juice step list                    # bob sees work addressed to him
-./juice step complete <step-id> '{}'
-./juice process list                 # a parked step keeps its process open
+./juice task list                    # bob sees work addressed to him
+./juice task complete <task-id> '{}'
+./juice process list                 # a parked task keeps its process open
 ./juice process end <process-id>     # owner force-closes; parked funds return
 ```
 
 External systems integrate the same way — they register as ordinary users and either
-call `run` or complete a step pre-created for them. There is no separate webhook
+call `run` or complete a task pre-created for them. There is no separate webhook
 machinery. Suspended work survives restarts.
 
 ## Search, and letting agents choose
@@ -345,7 +345,7 @@ and trust verbs:
 ./juice admin peer list                # counterparties and discovered kernels, last seen
 ./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
 ./juice admin kernel show              # own key, addresses, rail position, money rules and credit
-./juice step complete <id> --peer <key>  # complete a step a peer parked for this kernel
+./juice task complete <id> --peer <key>  # complete a task a peer parked for this kernel
 ```
 
 Every cross-kernel call is paid for on its own. A charge too small to be worth a rail

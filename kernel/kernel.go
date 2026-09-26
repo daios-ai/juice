@@ -1254,7 +1254,7 @@ func newLedgerEntry(operatorID, fromUserID, toUserID string, amount int64, reaso
 // Transfer moves credits from the caller's own available balance to another local
 // user, recording one ledger entry (from caller, to recipient). It is user self-service
 // — the self-authorized sibling of Deposit/Withdraw. It is the same-kernel leg of the
-// sys/transfer native action (§13), which composes it through Call() and Steps; a
+// sys/transfer native action (§13), which composes it through Call() and Tasks; a
 // cross-kernel transfer routes through the federation pipeline instead, never here. The
 // recipient must be a local account (a peer/proxy user is rejected, as crediting it would
 // corrupt the bilateral federation account, §13). Sufficient-funds is enforced atomically at
@@ -1705,7 +1705,7 @@ func (k *Kernel) initStats(ctx context.Context, a *Action) error {
 // overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
 // Natives are the platform stdlib, present identically on every kernel, so they are local and never
 // public (§9): serving them across federation would give away scarce local resources — model, bandwidth,
-// compiler, a write into a local user's step list — at a price this kernel's credit limit cannot bound (a
+// compiler, a write into a local user's task list — at a price this kernel's credit limit cannot bound (a
 // price-0 call adds no exposure, §13), and would put a duplicate of every native in every peer's
 // discovery cache. Local visibility keeps the whole stdlib callable by this kernel's own users (§4).
 func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
@@ -2524,28 +2524,28 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 	if p.Status != ProcessOpen {
 		return ErrInvalidState.Wrap("process is already closed")
 	}
-	// Closure cancels waiting steps, settles unsettled traces, and returns funds — a
+	// Closure cancels waiting tasks, settles unsettled traces, and returns funds — a
 	// money transition + audit record that must commit regardless of caller cancellation
 	// (§5). Detach from execution-scoped cancellation from here on.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
 	// Settle any unsettled traces (e.g. stalled remote-proxy calls holding locked funds).
-	// When the last trace settles and no steps remain, closeProcessTx auto-closes the process;
+	// When the last trace settles and no tasks remain, closeProcessTx auto-closes the process;
 	// in that case store.EndProcess is unnecessary — check before calling to avoid an error.
 	logger := k.log.With(ctx)
-	// Map each running step-completion trace to its step so recoverTrace fails the completion
-	// call with CallerStep semantics (transaction + receipt), mirroring startup Recover.
+	// Map each running task-completion trace to its task so recoverTrace fails the completion
+	// call with CallerTask semantics (transaction + receipt), mirroring startup Recover.
 	// A failure to enumerate aborts the close: closing a process whose traces were not all
 	// settled would return funds without a complete audit record (§5).
-	stepByTrace := map[string]string{}
-	runs, err := k.store.ListOrphanRunningStepsForProcess(sctx, processID)
+	taskByTrace := map[string]string{}
+	runs, err := k.store.ListOrphanRunningTasks(sctx, processID)
 	if err != nil {
 		return err
 	}
 	for _, r := range runs {
-		stepByTrace[r.CompletionTraceID] = r.StepID
+		taskByTrace[r.CompletionTraceID] = r.TaskID
 	}
-	// Settle every unsettled trace deepest-first (now including running step-completion traces).
+	// Settle every unsettled trace deepest-first (now including running task-completion traces).
 	// Children settle before parents, so a completion trace's subcalls gain a tx before it settles.
 	// Any settlement failure aborts before close so a half-settled process is never closed and
 	// credited — the all-or-nothing audit guarantee holds even under store errors.
@@ -2567,7 +2567,7 @@ func (k *Kernel) EndProcess(ctx context.Context, callerID, processID string) err
 			WithMeta("pending_since", since)
 	}
 	for _, trace := range unsettled {
-		if err := k.recoverTrace(sctx, logger, trace, "process force-closed", stepByTrace[trace.ID]); err != nil {
+		if err := k.recoverTrace(sctx, logger, trace, "process force-closed", taskByTrace[trace.ID]); err != nil {
 			logger.Error("process.end.settle_failed", "trace_id", trace.ID, "error", err)
 			return err
 		}
@@ -2616,7 +2616,7 @@ func (k *Kernel) AwaitingReceiptSince(ctx context.Context, processIDs []string) 
 	return since, nil
 }
 
-// AuthorizeTraceUse returns nil if callerID may use traceID for step creation.
+// AuthorizeTraceUse returns nil if callerID may use traceID for task creation.
 // Allowed if: caller == process.owner OR caller == Trace(trace).action_owner_id.
 func (k *Kernel) AuthorizeTraceUse(ctx context.Context, callerID, traceID string) error {
 	trace, err := k.store.ReadTrace(ctx, traceID)
@@ -2744,7 +2744,7 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	}
 	// On a call served to a peer the seller funds its own work, so it owns the process and would
 	// otherwise be rating itself (§6 role law). The payer is abroad and rates its own proxy
-	// transaction at home. The shape is a ROOT trace answering an inbound record: a step a peer
+	// transaction at home. The shape is a ROOT trace answering an inbound record: a task a peer
 	// completes here is never a root, so it stays the local payer's. Read from the trace, not from
 	// the caller's account — retention purges a peer's key from its account row, and a gate keyed on
 	// it would reopen for exactly the transactions old enough to have outlived their peer.

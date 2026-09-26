@@ -136,7 +136,7 @@ func getTxList(t *testing.T, srv *httptest.Server, tok string) []map[string]any 
 	return txs
 }
 
-func TestFlow_WebhookCompleteStep(t *testing.T) {
+func TestFlow_WebhookCompleteTask(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"webhook_result": "ok"})
@@ -152,34 +152,34 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 
 	giveCredits(t, k, ownerID, 500)
 
-	// Action targeted by the step.
+	// Action targeted by the task.
 	actionID := createPublicAction(t, srv, backend.URL, ownerTok, "wh-action", 0)
 
-	// Create process and step addressed to the webhook system.
+	// Create process and task addressed to the webhook system.
 	p := setupProcessHTTP(t, db, ownerID, 100)
 	traceID := setupTraceForProcess(t, db, p.ID)
 
-	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	taskResp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
 		"required_caller": "wh-webhook-sys@k",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
 	}, ownerTok)
-	if stepResp.StatusCode != http.StatusCreated {
-		stepResp.Body.Close()
-		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	if taskResp.StatusCode != http.StatusCreated {
+		taskResp.Body.Close()
+		t.Fatalf("create task: expected 201, got %d", taskResp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, stepResp, &step)
-	stepID := step["id"].(string)
+	var task map[string]any
+	decodeResponse(t, taskResp, &task)
+	taskID := task["id"].(string)
 
-	// Webhook system completes the step.
-	complResp := httpDo(t, srv, "POST", "/v1/steps/"+stepID+"/complete", map[string]any{
+	// Webhook system completes the task.
+	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+taskID+"/complete", map[string]any{
 		"args": map[string]any{"payment_confirmed": true},
 	}, webhookTok)
 	if complResp.StatusCode != http.StatusOK {
 		complResp.Body.Close()
-		t.Fatalf("webhook complete step: expected 200, got %d", complResp.StatusCode)
+		t.Fatalf("webhook complete task: expected 200, got %d", complResp.StatusCode)
 	}
 	var reply map[string]any
 	decodeResponse(t, complResp, &reply)
@@ -384,11 +384,11 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	actID := createPublicAction(t, srv, backend.URL, aTok, "3p-action", 0)
 	_ = actID
 
-	// P creates a process and a trace for the step funding source.
+	// P creates a process and a trace for the task funding source.
 	p := setupProcessHTTP(t, db, pID, 200)
 	traceID := setupTraceForProcess(t, db, p.ID)
 
-	// P creates a step addressed to C, pointing at A's action.
+	// P creates a task addressed to C, pointing at A's action.
 	aAction, err := k.ReadActionByOwnerName(ctx, func() string {
 		u, _ := k.ReadUserByHandle(ctx, "3p-provider")
 		return u.ID
@@ -396,34 +396,34 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	if err != nil || aAction == nil {
 		t.Fatalf("read 3p-action: %v", err)
 	}
-	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
+	taskResp := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id":        traceID,
 		"action":          aAction.ID,
 		"required_caller": "3p-caller@k",
 		"partial_args":    map[string]any{},
 	}, pTok)
-	if stepResp.StatusCode != http.StatusCreated {
-		stepResp.Body.Close()
-		t.Fatalf("create step: expected 201, got %d", stepResp.StatusCode)
+	if taskResp.StatusCode != http.StatusCreated {
+		taskResp.Body.Close()
+		t.Fatalf("create task: expected 201, got %d", taskResp.StatusCode)
 	}
-	var step map[string]any
-	decodeResponse(t, stepResp, &step)
-	stepID := step["id"].(string)
+	var task map[string]any
+	decodeResponse(t, taskResp, &task)
+	taskID := task["id"].(string)
 
-	// C completes the step.
-	complResp := httpDo(t, srv, "POST", "/v1/steps/"+stepID+"/complete",
+	// C completes the task.
+	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+taskID+"/complete",
 		map[string]any{"args": map[string]any{}}, cTok)
 	if complResp.StatusCode != http.StatusOK {
 		var body map[string]any
 		json.NewDecoder(complResp.Body).Decode(&body)
 		complResp.Body.Close()
-		t.Fatalf("complete step: expected 200, got %d — %v", complResp.StatusCode, body)
+		t.Fatalf("complete task: expected 200, got %d — %v", complResp.StatusCode, body)
 	}
 	var complBody map[string]any
 	decodeResponse(t, complResp, &complBody)
 	txID, _ := complBody["tx_id"].(string)
 	if txID == "" {
-		t.Fatal("expected tx_id in complete-step reply")
+		t.Fatal("expected tx_id in complete-task reply")
 	}
 
 	// All three parties can read the transaction.

@@ -78,7 +78,7 @@ type TransferEffect struct {
 // The value channel is local to one kernel: caller, action, and beneficiary are all accounts here, the
 // amount locked from C is exactly the amount delivered, and no fee is levied on it. Value between
 // kernels settles on the external rail, not through a call. callerIsPeer is therefore a rejection
-// rather than a pricing input: a peer completing a parked step is the one path by which a kernel
+// rather than a pricing input: a peer completing a parked task is the one path by which a kernel
 // account could otherwise reach an effect-bearing action, since completion re-checks liveness but not
 // visibility (§4 binding rule).
 //
@@ -114,7 +114,7 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 // so a pending remote call can be replayed verbatim by RetryPendingRemoteDispatches after restart.
 type dispatchPayload struct {
 	Args        map[string]any `json:"args"`
-	StepID      string         `json:"step_id"`
+	TaskID      string         `json:"task_id"`
 	RemotePrice int64          `json:"remote_price"`
 	// Gross is the funded local price this dispatch locked. Retry after restart reconstructs the
 	// locked amount from it rather than from action.Price, which is derived live from the current
@@ -254,9 +254,9 @@ func (s *pricedStore) ListAllActions(ctx context.Context, limit, offset int) ([]
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp, gross int64, contractHash string, remoteBPS, importBPS int64, secret string, lottery int64, caller Principal) *string {
+func marshalDispatch(args map[string]any, taskID string, mp, gross int64, contractHash string, remoteBPS, importBPS int64, secret string, lottery int64, caller Principal) *string {
 	b, _ := json.Marshal(dispatchPayload{
-		Args: args, StepID: stepID, RemotePrice: mp, Gross: gross, ContractHash: contractHash,
+		Args: args, TaskID: taskID, RemotePrice: mp, Gross: gross, ContractHash: contractHash,
 		RemoteBPS: remoteBPS, ImportBPS: importBPS, Secret: secret, Lottery: lottery,
 		CallerUserID: caller.RemoteID, CallerHandle: caller.Handle,
 	})
@@ -313,18 +313,18 @@ func (k *Kernel) servedRequest(ctx context.Context, t *Trace) (idempotencyKey, c
 // (idempotency_record_id) under serving terms and dispatched none of its own (D19).
 func ServingReserve(dispatchJSON *string) int64 { return dispatched(dispatchJSON).Reserve }
 
-// PeerStepView is what a remote peer may see of a step parked for it: the request, not the
-// requester. Deliberately NOT the local step view — that one carries the creating action's name,
+// PeerTaskView is what a remote peer may see of a task parked for it: the request, not the
+// requester. Deliberately NOT the local task view — that one carries the creating action's name,
 // the process owner's handle, and raw local ids, and a user identity crossing a kernel boundary is
 // precisely what §13's encapsulation forbids. Each field is here because the completer needs it:
 // partial_args is the payload channel (§14 has sys/message put its body there) and allowed_input is
 // §14's substitute for reading a target action that may be private. One type serves both ends of the
 // protocol — the serving kernel builds it, the buying kernel decodes it — so neither side can drift.
-type PeerStepView struct {
+type PeerTaskView struct {
 	ID string `json:"id"`
-	// RequiredCaller names which principal on the RECEIVING kernel the step is addressed to, when
+	// RequiredCaller names which principal on the RECEIVING kernel the task is addressed to, when
 	// it is addressed to one of its users rather than to the kernel itself. It is that kernel's own
-	// id, so it discloses nothing of the parking kernel: it lets the receiver route the step to the
+	// id, so it discloses nothing of the parking kernel: it lets the receiver route the task to the
 	// user who may complete it, which the signed completion names (P8).
 	RequiredCaller string          `json:"required_caller,omitempty"`
 	PartialArgs    json.RawMessage `json:"partial_args,omitempty"`
@@ -333,16 +333,16 @@ type PeerStepView struct {
 	CreatedAt      time.Time       `json:"created_at"`
 }
 
-// PeerStepList is one page of a peer's answer: the steps, and whether more are waiting than the
+// PeerTaskList is one page of a peer's answer: the tasks, and whether more are waiting than the
 // page could carry (P8) — a bounded page with no continuation, so the flag is the whole signal.
-type PeerStepList struct {
-	Steps     []PeerStepView `json:"steps"`
+type PeerTaskList struct {
+	Tasks     []PeerTaskView `json:"tasks"`
 	Truncated bool           `json:"truncated,omitempty"`
 }
 
-// NewPeerStepView projects one waiting step into the peer-facing shape (§13).
-func (k *Kernel) NewPeerStepView(s *Step, action *Action) *PeerStepView {
-	v := &PeerStepView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
+// NewPeerTaskView projects one waiting task into the peer-facing shape (§13).
+func (k *Kernel) NewPeerTaskView(s *Task, action *Action) *PeerTaskView {
+	v := &PeerTaskView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
 	if s.RequiredCallerRemoteID != nil {
 		v.RequiredCaller = *s.RequiredCallerRemoteID
 	}
@@ -353,13 +353,13 @@ func (k *Kernel) NewPeerStepView(s *Step, action *Action) *PeerStepView {
 }
 
 // callerWalletFor returns the (walletID, walletKind) that funds a call:
-//   - step completion → CallerStep (no wallet id; BeginStepCall already released the lock)
+//   - task completion → CallerTask (no wallet id; BeginTaskCall already released the lock)
 //   - subcall (has parent trace) → CallerTrace
 //   - root call (no parent trace) → CallerProcess
-func callerWalletFor(stepID, processID string, parentTraceID *string) (id, kind string) {
+func callerWalletFor(taskID, processID string, parentTraceID *string) (id, kind string) {
 	switch {
-	case stepID != "":
-		return "", CallerStep
+	case taskID != "":
+		return "", CallerTask
 	case parentTraceID != nil:
 		return *parentTraceID, CallerTrace
 	default:
@@ -367,10 +367,9 @@ func callerWalletFor(stepID, processID string, parentTraceID *string) (id, kind 
 	}
 }
 
-// Signature domains (§12). Every signed Juice payload is bound to exactly one domain, so a
-// signature valid in one domain is rejected in every other — disjointness is now constructive
-// (an explicit per-domain prefix) rather than emergent from disjoint JCS key-sets. The prefix is
-// versioned so a future domain scheme can coexist. The transport-handshake domain is libp2p's
+// Signature domains (§12). Every signed Juice payload is bound to exactly one domain by an explicit
+// prefix, so a signature valid in one domain is rejected in every other. The prefix is versioned so
+// a future domain scheme can coexist. The transport-handshake domain is libp2p's
 // own and is disjoint from all of these by construction.
 const (
 	sigDomainReceipt         = "receipt"
@@ -378,8 +377,8 @@ const (
 	sigDomainManifest        = "manifest"
 	sigDomainEvidenceReceipt = "evidence_receipt"
 	sigDomainFedCall         = "fed_call"
-	sigDomainStepComplete    = "step_complete"
-	sigDomainStepList        = "step_list"
+	sigDomainTaskComplete    = "task_complete"
+	sigDomainTaskList        = "task_list"
 	sigDomainReveal          = "reveal"
 	sigDomainCapability      = "capability"
 	sigDomainRecovery        = "recovery"
@@ -853,7 +852,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.StepID); err != nil {
+	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.TaskID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
 	k.SettleReady(sctx)
@@ -971,13 +970,13 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 		return ErrInvalidState.Wrap("federation executor not configured")
 	}
 	mp := dispatch.RemotePrice
-	// The locked gross is the proxy's full two-step local price (§13) — what BeginRun/BeginStepCall
+	// The locked gross is the proxy's full two-step local price (§13) — what BeginRun/BeginTaskCall
 	// funded — taken from the dispatch record, which froze it at the funding boundary: the action's
 	// price floats with local policy, so re-reading the column would refund a call at a rate it was
 	// never locked at.
 	q := dispatch.Gross
 
-	callerWalletID, callerWalletKind := callerWalletFor(dispatch.StepID, process.ID, trace.ParentTraceID)
+	callerWalletID, callerWalletKind := callerWalletFor(dispatch.TaskID, process.ID, trace.ParentTraceID)
 
 	now := time.Now().UTC()
 	ktx := newTraceFailureTx(trace, process, action, q, now)
@@ -988,7 +987,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	argsJSON, _ := json.Marshal(dispatch.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
-	req := callRequest{StepID: dispatch.StepID}
+	req := callRequest{TaskID: dispatch.TaskID}
 	// The inbound lock rides on the trace, so it survives for every action kind and is found here
 	// by whichever attempt finally settles this call and releases it.
 	if trace.IdempotencyRecordID != nil {
@@ -1028,40 +1027,40 @@ func (k *Kernel) SignFederation(c OutboundCall, counterparty, recipient, argsHas
 	return
 }
 
-// SignStep signs a step-completion payload with the platform key and returns
+// SignTask signs a task-completion payload with the platform key and returns
 // (signature, timestamp). recipient is the peer being addressed. Returns an error if the signing
 // key is not configured.
-func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, inputHash, userID string, superuser bool) (sig, ts string, err error) {
+func (k *Kernel) SignTask(taskID, counterparty, recipient, idempotencyKey, inputHash, userID string, superuser bool) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash, userID, superuser)
+	sig, err = k.cfg.Network.SignTaskPayload(k.cfg.SigningKey, taskID, counterparty, recipient, idempotencyKey, ts, inputHash, userID, superuser)
 	return
 }
 
-// SignStepList signs a step-list request with the platform key and returns
+// SignTaskList signs a task-list request with the platform key and returns
 // (signature, timestamp). recipient is the peer being addressed.
-func (k *Kernel) SignStepList(counterparty, recipient, forUserID string) (sig, ts string, err error) {
+func (k *Kernel) SignTaskList(counterparty, recipient, forUserID string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepListPayload(k.cfg.SigningKey, counterparty, recipient, ts, forUserID)
+	sig, err = k.cfg.Network.SignTaskListPayload(k.cfg.SigningKey, counterparty, recipient, ts, forUserID)
 	return
 }
 
-// ---- Outbound step protocol (§13) ----
+// ---- Outbound task protocol (§13) ----
 
-// StepIdempotencyKey derives the cross-kernel key for one step completion. It is DERIVED, never
+// TaskIdempotencyKey derives the cross-kernel key for one task completion. It is DERIVED, never
 // minted per attempt: a retry after a network failure presents the same key and recovers the stored
-// outcome, since a step completion has no local trace to persist one on (unlike a remote-proxy call).
+// outcome, since a task completion has no local trace to persist one on (unlike a remote-proxy call).
 // recipient is the serving kernel's key. Exported because the serving side recomputes it to verify
-// the requester's key. The trailing empty component is a reserved slot in the derivation, kept so a
-// later field can be added without moving what is already derived.
-func StepIdempotencyKey(recipient, stepID, inputHash string) string {
-	return sha256Hex("juice/fed/step/1|" + recipient + "|" + stepID + "|" + inputHash + "|")
+// the requester's key. The string is a frozen encoding, not a name: every stored completion is
+// found again by it, so it never changes.
+func TaskIdempotencyKey(recipient, taskID, inputHash string) string {
+	return sha256Hex("juice/fed/step/1|" + recipient + "|" + taskID + "|" + inputHash + "|")
 }
 
-// normalizeStepInput renders completion input as exactly the bytes the transport will send, and
+// normalizeTaskInput renders completion input as exactly the bytes the transport will send, and
 // hashes those. Marshaling the outer request compacts and HTML-escapes an embedded raw message, so
 // hashing the caller's raw body would sign bytes the peer never sees; marshaling a RawMessage is
 // idempotent, so this is a fixed point — hash and send the same slice.
-func normalizeStepInput(raw json.RawMessage) ([]byte, string, error) {
+func normalizeTaskInput(raw json.RawMessage) ([]byte, string, error) {
 	input := []byte(raw)
 	if len(input) == 0 {
 		input = []byte("{}")
@@ -1079,92 +1078,82 @@ func (k *Kernel) selfKey(ctx context.Context) string {
 	return key
 }
 
-// stepReply unwraps a peer's step response into a decoded body, mapping transport and protocol
-// failures to typed errors. The §13 dispatch distinction is preserved exactly as the call path
-// keeps it: only a provably-never-sent request is unreachable; anything else may already have
-// executed there, so it is a timeout the caller recovers by retrying under the same derived key.
-func stepReply(status int, body []byte, notDispatched bool, err error, peerKey string) (map[string]any, error) {
+// taskReply decodes a peer's task response into out, mapping transport and protocol failures to
+// typed errors. The §13 dispatch distinction is preserved exactly as the call path keeps it: only a
+// provably-never-sent request is unreachable; anything else may already have executed there, so it
+// is a timeout the caller recovers by retrying under the same derived key.
+func taskReply(status int, body []byte, notDispatched bool, err error, peerKey string, out any) error {
 	if err != nil || notDispatched {
 		if notDispatched {
-			return nil, PeerUnreachableError(peerKey)
+			return PeerUnreachableError(peerKey)
 		}
-		return nil, ErrTimeout.Wrapf(
+		return ErrTimeout.Wrapf(
 			"no reply from %s; the request may have executed there — retry to recover its result", peerKey).WithMeta("peer", peerKey)
 	}
-	var decoded map[string]any
-	if json.Unmarshal(body, &decoded) != nil {
-		return nil, ErrExecutionFailed.Wrap("malformed peer response")
-	}
 	if status >= 300 {
-		msg, _ := decoded["error"].(string)
-		if msg == "" {
-			msg = "peer rejected the step request"
+		var rejection struct{ Error, Code string }
+		if json.Unmarshal(body, &rejection) != nil {
+			return ErrExecutionFailed.Wrap("malformed peer response")
 		}
-		code, _ := decoded["code"].(string)
-		return nil, ErrorFromCode(code).Wrap(msg)
+		if rejection.Error == "" {
+			rejection.Error = "peer rejected the task request"
+		}
+		return ErrorFromCode(rejection.Code).Wrap(rejection.Error)
 	}
-	return decoded, nil
+	if json.Unmarshal(body, out) != nil {
+		return ErrExecutionFailed.Wrap("malformed peer response")
+	}
+	return nil
 }
 
-// PeerStepsAwaitingUs lists the steps a peer holds for this kernel (§13), for admin inspect and for
-// the payment-descriptor lookup below. One bounded fetch: the queue is a handful of pending
-// cross-kernel approvals, not a corpus.
-func (k *Kernel) PeerStepsAwaitingUs(ctx context.Context, peerKey, forUserID string) (*PeerStepList, error) {
+// PeerTasksAwaitingUs lists the tasks a peer holds for this kernel (§13), for admin inspect and
+// `task list --peer`. One bounded fetch: the queue is a handful of pending cross-kernel approvals,
+// not a corpus.
+func (k *Kernel) PeerTasksAwaitingUs(ctx context.Context, peerKey, forUserID string) (*PeerTaskList, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
-	self := k.selfKey(ctx)
-	sig, ts, err := k.SignStepList(self, peerKey, forUserID)
+	sig, ts, err := k.SignTaskList(k.selfKey(ctx), peerKey, forUserID)
 	if err != nil {
 		return nil, err
 	}
-	status, body, notDispatched, err := k.fedClient.ListPeerSteps(ctx, peerKey, ts, sig, forUserID)
-	reply, err := stepReply(status, body, notDispatched, err, peerKey)
-	if err != nil {
+	status, body, notDispatched, err := k.fedClient.ListPeerTasks(ctx, peerKey, ts, sig, forUserID)
+	// Values, not pointers: the list is peer-controlled, and a reply of {"tasks":[null]} would
+	// otherwise decode to a nil element that every reader must remember to guard.
+	var list PeerTaskList
+	if err := taskReply(status, body, notDispatched, err, peerKey, &list); err != nil {
 		return nil, err
-	}
-	// Values, not pointers: the list is peer-controlled, and a reply of {"steps":[null]} would
-	// otherwise decode to a nil element that every reader must remember to guard. Decoding into
-	// values makes the malformed entry a zero one, which matches no step id and carries no payment.
-	b, _ := json.Marshal(reply)
-	var list PeerStepList
-	if json.Unmarshal(b, &list) != nil {
-		return nil, ErrExecutionFailed.Wrap("malformed peer step list")
 	}
 	return &list, nil
 }
 
-// completePeerStepRaw signs and dispatches one completion under an ALREADY-DERIVED idempotency key:
-// a retry must present the key its first attempt used, so the key is an argument, never re-derived
-// here. forUserID, when non-empty, is the completing user's stable id here, signed into the request
-// with whether they are this kernel's operator (P8) — the same home-kernel attestation an inbound
-// call carries for its caller; empty is a kernel-level completion for a kernel-addressed step.
-func (k *Kernel) completePeerStepRaw(ctx context.Context, peerKey, stepID string, input []byte, inputHash, idempotencyKey, forUserID string) (map[string]any, error) {
+// CompletePeerTask resumes a task a peer parked for this kernel over /juice/fed/task/1 (§13). No money
+// moves here: the task's price was parked on the serving kernel at creation and completion never checks
+// funds (§10), so the requester creates no local trace or transaction and a timeout pins nothing. The
+// completion settles wholly on the serving kernel under §6. forUserID, when non-empty, is the
+// completing user's stable id here, signed into the request with whether they are this kernel's
+// operator (P8); empty is a kernel-level completion for a kernel-addressed task.
+func (k *Kernel) CompletePeerTask(ctx context.Context, peerKey, taskID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
-	self := k.selfKey(ctx)
+	input, inputHash, err := normalizeTaskInput(rawInput)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey := TaskIdempotencyKey(peerKey, taskID, inputHash)
 	superuser := forUserID != "" && k.IsSuperuser(ctx, forUserID)
-	sig, ts, err := k.SignStep(stepID, self, peerKey, idempotencyKey, inputHash, forUserID, superuser)
+	sig, ts, err := k.SignTask(taskID, k.selfKey(ctx), peerKey, idempotencyKey, inputHash, forUserID, superuser)
 	if err != nil {
 		return nil, err
 	}
-	status, body, notDispatched, err := k.fedClient.CompletePeerStep(ctx, peerKey, ts, sig, stepID,
+	status, body, notDispatched, err := k.fedClient.CompletePeerTask(ctx, peerKey, ts, sig, taskID,
 		idempotencyKey, input, forUserID, superuser)
-	return stepReply(status, body, notDispatched, err, peerKey)
-}
-
-// CompletePeerStep resumes a step a peer parked for this kernel over /juice/fed/step/1 (§13). No money
-// moves here: the step's price was parked on the serving kernel at creation and completion never checks
-// funds (§10), so the requester creates no local trace or transaction and a timeout pins nothing. The
-// completion settles wholly on the serving kernel under §6.
-func (k *Kernel) CompletePeerStep(ctx context.Context, peerKey, stepID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
-	input, inputHash, err := normalizeStepInput(rawInput)
-	if err != nil {
+	var reply map[string]any
+	if err := taskReply(status, body, notDispatched, err, peerKey, &reply); err != nil {
 		return nil, err
 	}
-	return k.completePeerStepRaw(ctx, peerKey, stepID, input, inputHash,
-		StepIdempotencyKey(peerKey, stepID, inputHash), forUserID)
+	return reply, nil
 }
 
 // ---- Peer operations ----
@@ -2600,7 +2589,7 @@ func (n Network) VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) er
 // golden fixtures in sigfixture_test.go. Adding a payload is one struct plus one domain constant.
 // fedCallPayload is what a buying kernel signs over an inbound call (P4). CallerUserID and
 // CallerHandle name the buyer's own user the call is made for — the home kernel's attestation of
-// who called, as step_list already carries one for who asks — omitted when the immediate caller is
+// who called, as task_list already carries one for who asks — omitted when the immediate caller is
 // not one of its users.
 type fedCallPayload struct {
 	Action               string `json:"action"`
@@ -2616,27 +2605,27 @@ type fedCallPayload struct {
 	Timestamp            string `json:"timestamp"`
 }
 
-// stepCompletePayload is what a home kernel signs to complete a peer's step (P8). UserID is the
+// taskCompletePayload is what a home kernel signs to complete a peer's task (P8). UserID is the
 // completing user's stable id here and Superuser the home kernel's word that this user is its
-// operator — the scope a step addressed to the kernel itself demands. Both omitted for a
+// operator — the scope a task addressed to the kernel itself demands. Both omitted for a
 // kernel-level completion, whose canonical bytes are therefore unchanged.
-type stepCompletePayload struct {
+type taskCompletePayload struct {
 	Counterparty   string `json:"counterparty"`
 	IdempotencyKey string `json:"idempotency_key"`
 	InputHash      string `json:"input_hash"`
 	Recipient      string `json:"recipient"`
-	StepID         string `json:"step_id"`
+	TaskID         string `json:"task_id"`
 	Superuser      bool   `json:"superuser,omitempty"`
 	Timestamp      string `json:"timestamp"`
 	UserID         string `json:"user_id,omitempty"`
 }
 
-// stepListPayload asks a peer which of its parked steps this kernel may complete. UserID names one
+// taskListPayload asks a peer which of its parked tasks this kernel may complete. UserID names one
 // principal on the requesting kernel when the question is asked on a user's behalf, as completion
-// already is (step_auth): listing and completing then have the same granularity, so a user can see
+// already is: listing and completing then have the same granularity, so a user can see
 // the work addressed to them rather than only its operator. Omitted for a kernel-level ask, whose
 // canonical bytes are therefore unchanged.
-type stepListPayload struct {
+type taskListPayload struct {
 	Counterparty string `json:"counterparty"`
 	Recipient    string `json:"recipient"`
 	Timestamp    string `json:"timestamp"`
@@ -2674,38 +2663,38 @@ func (n Network) SignFederationPayload(key ed25519.PrivateKey, c OutboundCall, c
 	return n.sign(key, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash))
 }
 
-// SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
+// SignTaskPayload creates a base64url Ed25519 signature over the canonical task-completion payload
 // — a key-set disjoint from every other signed Juice payload (§12, §13).
-func (n Network) SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
-	return n.sign(key, sigDomainStepComplete, stepCompletePayload{Counterparty: counterparty,
+func (n Network) SignTaskPayload(key ed25519.PrivateKey, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
+	return n.sign(key, sigDomainTaskComplete, taskCompletePayload{Counterparty: counterparty,
 		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
-		StepID: stepID, Superuser: superuser, Timestamp: timestamp, UserID: userID})
+		TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID})
 }
 
-// VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
-// recipient must be the verifying kernel's own public key.
-func (n Network) VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
-	p := stepCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
-		InputHash: inputHash, Recipient: recipient, StepID: stepID, Superuser: superuser, Timestamp: timestamp, UserID: userID}
-	if err := n.verifyPeer(pubKeyB64, sigDomainStepComplete, p, sigB64); err != nil {
-		return ErrUnauthenticated.Wrap("step signature is invalid")
+// VerifyTaskSignature verifies a counterparty's Ed25519 signature over the canonical task-completion
+// payload. recipient must be the verifying kernel's own public key.
+func (n Network) VerifyTaskSignature(taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
+	p := taskCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
+		InputHash: inputHash, Recipient: recipient, TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID}
+	if err := n.verifyPeer(counterparty, sigDomainTaskComplete, p, sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("task signature is invalid")
 	}
 	return nil
 }
 
-// SignStepListPayload creates a base64url Ed25519 signature over the canonical step-list payload.
-// The sigDomainStepList prefix keeps this key-set disjoint from every other signed payload (§12).
-func (n Network) SignStepListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp, forUserID string) (string, error) {
-	return n.sign(key, sigDomainStepList, stepListPayload{Counterparty: counterparty,
+// SignTaskListPayload creates a base64url Ed25519 signature over the canonical task-list payload.
+// The sigDomainTaskList prefix keeps this key-set disjoint from every other signed payload (§12).
+func (n Network) SignTaskListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp, forUserID string) (string, error) {
+	return n.sign(key, sigDomainTaskList, taskListPayload{Counterparty: counterparty,
 		Recipient: recipient, Timestamp: timestamp, UserID: forUserID})
 }
 
-// VerifyStepListSignature verifies an Ed25519 signature over the canonical step-list payload.
-// recipient must be the verifying kernel's own public key.
-func (n Network) VerifyStepListSignature(pubKeyB64, counterparty, recipient, timestamp, forUserID, sigB64 string) error {
-	p := stepListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp, UserID: forUserID}
-	if err := n.verifyPeer(pubKeyB64, sigDomainStepList, p, sigB64); err != nil {
-		return ErrUnauthenticated.Wrap("step signature is invalid")
+// VerifyTaskListSignature verifies a counterparty's Ed25519 signature over the canonical task-list
+// payload. recipient must be the verifying kernel's own public key.
+func (n Network) VerifyTaskListSignature(counterparty, recipient, timestamp, forUserID, sigB64 string) error {
+	p := taskListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp, UserID: forUserID}
+	if err := n.verifyPeer(counterparty, sigDomainTaskList, p, sigB64); err != nil {
+		return ErrUnauthenticated.Wrap("task list signature is invalid")
 	}
 	return nil
 }

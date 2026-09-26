@@ -1,5 +1,5 @@
-# WASM, contractor, steps, crash-recovery, rating, and TinyGo flows. Built on flows/lib.sh.
-# Dedupe: CLI == HTTP client, so step/tx/run CLI commands already exercise the HTTP surface;
+# WASM, contractor, tasks, crash-recovery, rating, and TinyGo flows. Built on flows/lib.sh.
+# Dedupe: CLI == HTTP client, so task/tx/run CLI commands already exercise the HTTP surface;
 # the old per-flow curl mirrors are dropped. Crash-recovery uses a real stop/inject/start.
 
 flow_wasm_execution() {
@@ -66,68 +66,68 @@ flow_contractor_failure() {
     assert_jnum "contractor_failure.alice_unchanged"  "$(jj "$db" "$ha" user me)" available 0
 }
 
-flow_step_success() {
-    echo "=== FLOW step_success ==="
+flow_task_success() {
+    echo "=== FLOW task_success ==="
     local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    make_admin "$db" "$hs" || { fail "step_success.boot" "server did not start"; return; }
+    make_admin "$db" "$hs" || { fail "task_success.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
-    # alice → bob message creates a waiting step (next_action=sys/sink, price 0).
-    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"review"}')" step_id)
-    assert_nonempty "step_success.create_returns_id" "$step_id"
-    assert_json "step_success.status_waiting" "$(jj "$db" "$ha" step show "$step_id")" status waiting
+    # alice → bob message creates a waiting task (next_action=sys/sink, price 0).
+    local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"review"}')" task_id)
+    assert_nonempty "task_success.create_returns_id" "$task_id"
+    assert_json "task_success.status_waiting" "$(jj "$db" "$ha" task show "$task_id")" status waiting
 
-    # Owner and required-caller both see it in their step list.
-    assert_eq "step_success.owner_sees_step"  1 "$(jj "$db" "$ha" step list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$step_id'))" 2>/dev/null)"
-    assert_eq "step_success.caller_sees_step" 1 "$(jj "$db" "$hb" step list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$step_id'))" 2>/dev/null)"
-    # The step carries owner_handle (the process owner / payer) — resolvable even to bob, who is the
-    # required caller, not the owner. The step is the continuation that settles into alice's transaction.
-    assert_json "step_success.owner_handle_from_caller" "$(jj "$db" "$hb" step show "$step_id")" owner alice@k
+    # Owner and required-caller both see it in their task list.
+    assert_eq "task_success.owner_sees_task"  1 "$(jj "$db" "$ha" task list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$task_id'))" 2>/dev/null)"
+    assert_eq "task_success.caller_sees_task" 1 "$(jj "$db" "$hb" task list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$task_id'))" 2>/dev/null)"
+    # The task carries owner_handle (the process owner / payer) — resolvable even to bob, who is the
+    # required caller, not the owner. The task is the continuation that settles into alice's transaction.
+    assert_json "task_success.owner_handle_from_caller" "$(jj "$db" "$hb" task show "$task_id")" owner alice@k
 
     # bob (required caller) completes it → done.
-    local comp; comp=$(jj "$db" "$hb" step complete "$step_id" '{}')
-    assert_nonempty "step_success.complete_returns_tx" "$(strfield "$comp" tx_id)"
-    assert_eq "step_success.complete_returns_step_id" "$step_id" "$(strfield "$comp" step_id)"
-    assert_json "step_success.status_done" "$(jj "$db" "$ha" step show "$step_id")" status done
+    local comp; comp=$(jj "$db" "$hb" task complete "$task_id" '{}')
+    assert_nonempty "task_success.complete_returns_tx" "$(strfield "$comp" tx_id)"
+    assert_eq "task_success.complete_returns_task_id" "$task_id" "$(strfield "$comp" task_id)"
+    assert_json "task_success.status_done" "$(jj "$db" "$ha" task show "$task_id")" status done
 }
 
-flow_step_failure() {
-    echo "=== FLOW step_failure ==="
+flow_task_failure() {
+    echo "=== FLOW task_failure ==="
     local dir db hs ha hb hc; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob); hc=$(home "$dir" carol)
-    make_admin "$db" "$hs" || { fail "step_failure.boot" "server did not start"; return; }
+    make_admin "$db" "$hs" || { fail "task_failure.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
 
-    # Completing an already-done step → ErrInvalidState.
-    local s1; s1=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"first"}')" step_id)
-    jj "$db" "$hb" step complete "$s1" '{}' >/dev/null 2>&1
-    assert_fails "step_failure.double_complete_rejected" "invalid.state\|already\|not.*waiting" -- j "$db" "$hb" step complete "$s1" '{}'
+    # Completing an already-done task → ErrInvalidState.
+    local s1; s1=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"first"}')" task_id)
+    jj "$db" "$hb" task complete "$s1" '{}' >/dev/null 2>&1
+    assert_fails "task_failure.double_complete_rejected" "invalid.state\|already\|not.*waiting" -- j "$db" "$hb" task complete "$s1" '{}'
 
-    # Wrong caller (carol) completing bob's step → ErrUnauthorized.
-    local s2; s2=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"second"}')" step_id)
-    assert_fails "step_failure.wrong_caller_rejected" "unauthorized\|permission\|caller" -- j "$db" "$hc" step complete "$s2" '{}'
+    # Wrong caller (carol) completing bob's task → ErrUnauthorized.
+    local s2; s2=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"second"}')" task_id)
+    assert_fails "task_failure.wrong_caller_rejected" "unauthorized\|permission\|caller" -- j "$db" "$hc" task complete "$s2" '{}'
 }
 
-flow_step_restart() {
-    echo "=== FLOW step_restart ==="
+flow_task_restart() {
+    echo "=== FLOW task_restart ==="
     local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
-    make_admin "$db" "$hs" || { fail "step_restart.boot" "server did not start"; return; }
+    make_admin "$db" "$hs" || { fail "task_restart.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
-    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"restart"}')" step_id)
-    assert_json "step_restart.initial_waiting" "$(jj "$db" "$ha" step show "$step_id")" status waiting
+    local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"restart"}')" task_id)
+    assert_json "task_restart.initial_waiting" "$(jj "$db" "$ha" task show "$task_id")" status waiting
 
-    # Inject a crashed 'running' step (ClaimStep succeeded, CompleteStep never did) while the
-    # server is stopped, then restart: bootstrap's ResetRunningSteps must revert it to waiting.
+    # Inject a crashed 'running' task (ClaimTask succeeded, CompleteTask never did) while the
+    # server is stopped, then restart: bootstrap's ResetRunningTasks must revert it to waiting.
     stop_server "$db"
-    python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE steps SET status='running' WHERE id=?\",[sys.argv[2]]); c.commit()" "$db" "$step_id"
-    start_server "$db" "$hs" || { fail "step_restart.reboot" "server did not restart"; return; }
+    python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE tasks SET status='running' WHERE id=?\",[sys.argv[2]]); c.commit()" "$db" "$task_id"
+    start_server "$db" "$hs" || { fail "task_restart.reboot" "server did not restart"; return; }
 
-    assert_json "step_restart.reset_to_waiting" "$(jj "$db" "$ha" step show "$step_id")" status waiting
-    assert_nonempty "step_restart.completable_after_reset" "$(strfield "$(jj "$db" "$hb" step complete "$step_id" '{}')" tx_id)"
+    assert_json "task_restart.reset_to_waiting" "$(jj "$db" "$ha" task show "$task_id")" status waiting
+    assert_nonempty "task_restart.completable_after_reset" "$(strfield "$(jj "$db" "$hb" task complete "$task_id" '{}')" tx_id)"
 }
 
 flow_locked_funds_recovery() {

@@ -113,7 +113,7 @@ This kernel's own calls
 
 The `requires_grant` field indicates that the action uses an upstream account
 belonging to its caller. You must connect that account before the action can
-run; see [Consent and assigned work](consent-and-steps.html).
+run; see [Consent and assigned work](consent-and-tasks.html).
 
 A provider can give a group of actions a common entry point by publishing an
 `index` action. If `bob@acme/greeter` names no action directly, for example,

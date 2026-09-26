@@ -8,7 +8,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// Sink declares @sys/sink (§9): the universal no-op a step parks against.
+// Sink declares @sys/sink (§9): the universal no-op a task parks against.
 func Sink() Spec {
 	return Spec{
 		Name:         "sink",

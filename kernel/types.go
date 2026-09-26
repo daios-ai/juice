@@ -205,47 +205,47 @@ type Process struct {
 	EndedAt     *time.Time    `json:"ended_at,omitempty"`
 }
 
-// StepStatus is the lifecycle state of a step.
-type StepStatus string
+// TaskStatus is the lifecycle state of a task.
+type TaskStatus string
 
 const (
-	StepWaiting   StepStatus = "waiting"
-	StepRunning   StepStatus = "running"
-	StepDone      StepStatus = "done"
-	StepCancelled StepStatus = "cancelled"
+	TaskWaiting   TaskStatus = "waiting"
+	TaskRunning   TaskStatus = "running"
+	TaskDone      TaskStatus = "done"
+	TaskCancelled TaskStatus = "cancelled"
 )
 
-// Step is a partially applied future Call — a suspended computation boundary that
+// Task is a partially applied future Call — a suspended computation boundary that
 // records enough context to resume when a caller later supplies the remaining input.
-// Core invariant: CompleteStep(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
+// Core invariant: CompleteTask(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
 // The allowed completion input is derived live as action.input_schema \ keys(partial_args).
-type Step struct {
+type Task struct {
 	ID                     string  `json:"id"`
 	ParentTraceID          *string `json:"parent_trace_id,omitempty"`
 	RequiredCallerUserID   string  `json:"required_caller_user_id"`
 	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
-	// RequiredCallerHandle is what that remote principal was called when the step was made. Display
+	// RequiredCallerHandle is what that remote principal was called when the task was made. Display
 	// only, exactly like a proxy's owner_handle (P6): the id above stays the identity, so a rename
-	// on the peer leaves the step addressed correctly and only this line goes stale.
+	// on the peer leaves the task addressed correctly and only this line goes stale.
 	RequiredCallerHandle string          `json:"required_caller_handle,omitempty"`
 	ActionID             string          `json:"action_id"`
 	PartialArgs          json.RawMessage `json:"partial_args"`
 	Price                int64           `json:"price"`
-	// ImportBPS freezes the origin fee this Step was funded under: CreateStep parks Price and the
-	// Step may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy steps
+	// ImportBPS freezes the origin fee this Task was funded under: CreateTask parks Price and the
+	// Task may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy tasks
 	// only; nil = parked before 041, settling from live config as before.
 	ImportBPS         *int64     `json:"import_bps,omitempty"`
-	Status            StepStatus `json:"status"`
+	Status            TaskStatus `json:"status"`
 	TxID              *string    `json:"tx_id,omitempty"`
 	CompletionTraceID *string    `json:"completion_trace_id,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 }
 
-// OrphanRunningStep is one result row from Store.ListOrphanRunningSteps.
+// OrphanRunningTask is one result row from Store.ListOrphanRunningTasks.
 // HasSettled is true when the completion trace has committed subcall transactions or locked funds,
 // meaning the trace cannot safely be re-parked and must instead be settled as failed.
-type OrphanRunningStep struct {
-	StepID            string
+type OrphanRunningTask struct {
+	TaskID            string
 	CompletionTraceID string
 	Price             int64
 	ParentTraceID     *string
@@ -254,16 +254,16 @@ type OrphanRunningStep struct {
 	HasSettled        bool
 }
 
-// StepReply is the response from a successful CompleteStep.
-type StepReply struct {
+// TaskReply is the response from a successful CompleteTask.
+type TaskReply struct {
 	*CallReply
-	StepID string `json:"step_id"`
+	TaskID string `json:"task_id"`
 }
 
 // Trace records causal structure and wallet state for one call in a call tree.
 // Root traces have ParentTraceID == nil.
-// Step-completion traces may have a ParentTraceID that crosses process boundaries.
-// Available tracks funds remaining after subcalls and step parks; zeroed at settlement.
+// Task-completion traces may have a ParentTraceID that crosses process boundaries.
+// Available tracks funds remaining after subcalls and task parks; zeroed at settlement.
 type Trace struct {
 	ID            string  `json:"id"`
 	ProcessID     string  `json:"process_id"`
@@ -273,7 +273,7 @@ type Trace struct {
 	CallerUserID  string  `json:"caller_user_id"`
 	// CallerRemoteID/CallerHandle and TargetRemoteID/TargetHandle complete the caller's and the
 	// target's principal (D4) when the account stands for a user on a peer: the caller a buying
-	// kernel attested in its signed request, or the step completer it attested; the target a proxy
+	// kernel attested in its signed request, or the task completer it attested; the target a proxy
 	// row names as its remote owner. Set once, where the call enters the kernel, and copied onto
 	// the transaction by every settlement path. Empty for a local user or the peer kernel itself.
 	CallerRemoteID string  `json:"-"`
@@ -368,8 +368,8 @@ func (t *Trace) Target() Principal {
 	return Principal{AccountID: t.ActionOwnerID, RemoteID: t.TargetRemoteID, Handle: t.TargetHandle}
 }
 
-// RequiredCaller is who the step is parked for, as a principal.
-func (s *Step) RequiredCaller() Principal {
+// RequiredCaller is who the task is parked for, as a principal.
+func (s *Task) RequiredCaller() Principal {
 	p := Principal{AccountID: s.RequiredCallerUserID, Handle: s.RequiredCallerHandle}
 	if s.RequiredCallerRemoteID != nil {
 		p.RemoteID = *s.RequiredCallerRemoteID
@@ -635,7 +635,7 @@ type TraceOutcome struct {
 	Args    json.RawMessage `json:"args,omitempty"`
 	Reply   json.RawMessage `json:"reply,omitempty"`
 	EndedAt time.Time       `json:"ended_at"`
-	StepID  string          `json:"step_id,omitempty"` // the step this trace completes, if any
+	TaskID  string          `json:"task_id,omitempty"` // the task this trace completes, if any
 }
 
 // ReceiptVerification is the result of VerifyReceipt.
@@ -671,9 +671,9 @@ func (c ReceiptChecks) allHeld() bool {
 const (
 	CallerProcess = "process" // root call — lock is in process.locked
 	CallerTrace   = "trace"   // subcall — lock is in parent trace.locked
-	// CallerStep means the call was a step-completion: BeginStepCall already released
+	// CallerTask means the call was a task-completion: BeginTaskCall already released
 	// the parent trace lock. On failure the refund returns to the process.
-	CallerStep = "step"
+	CallerTask = "task"
 )
 
 // RemoteKernelView is one row of the `admin peers` roster (§14): every known kernel, served by a

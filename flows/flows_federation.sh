@@ -110,7 +110,7 @@ flow_federation_changed_reimport() {
     local dir; dir=$(new_dir)
     _fed_setup "$dir" || { fail "fed_reimport.setup" "setup failed"; return; }
 
-    # A brand-new action on R resolves on first use (§8) — no operator step, no bulk sync.
+    # A brand-new action on R resolves on first use (§8) — no operator task, no bulk sync.
     local wid; wid=$(publish "$FED_DBR" "$FED_HR" wave --kind http --source "http://127.0.0.1:$FED_BPORT" --description "wave" --price "$(units 0)")
     assert_nonempty "fed_reimport.wave_callable" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/wave '{}')" tx_id)"
     assert_json "fed_reimport.wave_resolves_on_use" "$(jj "$FED_DBL" "$FED_HL" action show sys@kernel-r/wave)" active True
@@ -495,7 +495,7 @@ flow_fed_absent_action_rejection() {
 
 # flow_fed_discovery: cold-start discovery. L boots with R as its only bootstrap peer and must learn
 # R into its known network automatically via the startup discovery pass — routing discovery finds R
-# and a gossip pull indexes its catalog (§13). Proves discovery is independent of any peering step: the
+# and a gossip pull indexes its catalog (§13). Proves discovery is independent of any peering task: the
 # known network (global, by key) grows before any call resolves a proxy.
 flow_fed_discovery() {
     echo "=== FLOW fed_discovery ==="
@@ -701,75 +701,75 @@ flow_fed_offline() {
     assert_nonempty "fed_offline.contact_failure_recorded" "$(strfield "$peer_row" last_contact_failed_at)"
 }
 
-# flow_fed_step_complete — the peer-step trap, closed (§10, §13). A step addressed to a peer used to
+# flow_fed_task_complete — the peer-task trap, closed (§10, §13). A task addressed to a peer used to
 # be uncompletable: a key account holds no session token, and the wire carried `run` but not
 # `complete`, so its parked funds were stranded with no actor able even to force-close the process
-# (the process owner IS the keyless proxy user). /juice/fed/step/1 supplies the missing verb.
-flow_fed_step_complete() {
-    echo "=== FLOW fed_step_complete ==="
+# (the process owner IS the keyless proxy user). /juice/fed/task/1 supplies the missing verb.
+flow_fed_task_complete() {
+    echo "=== FLOW fed_task_complete ==="
     local dir; dir=$(new_dir)
-    _fed_setup "$dir" || { fail "fed_step_complete.setup" "setup failed"; return; }
+    _fed_setup "$dir" || { fail "fed_task_complete.setup" "setup failed"; return; }
 
-    # On R: sys messages L's operator, parking a sys/sink step addressed to sys@kernel-l.
+    # On R: sys messages L's operator, parking a sys/sink task addressed to sys@kernel-l.
     # R must know L as a peer for the address to resolve, and it learns one the only way a peer is
     # ever learned: L makes a signed call, and that call provisions the account (P4).
     publish "$FED_DBR" "$FED_HR" hello --kind http --source "http://127.0.0.1:$FED_BPORT" --description "hello" --price "$(units 0)" >/dev/null
-    assert_nonempty "fed_step_complete.peer_known_by_its_call" \
+    assert_nonempty "fed_task_complete.peer_known_by_its_call" \
         "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/hello '{}')" tx_id)"
-    local step_id
-    step_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"sys@$FED_LKEY\",\"message\":\"approve the shipment\"}")" step_id)
-    assert_nonempty "fed_step_complete.step_parked" "$step_id"
-    assert_json "fed_step_complete.step_waiting" "$(jj "$FED_DBR" "$FED_HR" step show "$step_id")" status waiting
+    local task_id
+    task_id=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"sys@$FED_LKEY\",\"message\":\"approve the shipment\"}")" task_id)
+    assert_nonempty "fed_task_complete.task_parked" "$task_id"
+    assert_json "fed_task_complete.task_waiting" "$(jj "$FED_DBR" "$FED_HR" task show "$task_id")" status waiting
 
     # R flags it as waiting on a peer — the operator can see the parked funds (§14).
-    assert_contains "fed_step_complete.waiting_on_peer" "waiting_on_peer" "$(jj "$FED_DBR" "$FED_HR" step list)"
+    assert_contains "fed_task_complete.waiting_on_peer" "waiting_on_peer" "$(jj "$FED_DBR" "$FED_HR" task list)"
 
-    # On L: the step is visible over the wire through the window that already exists — no second
+    # On L: the task is visible over the wire through the window that already exists — no second
     # command — carrying its derived completion schema.
     local listed; listed=$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$FED_RKEY")
-    assert_contains "fed_step_complete.peer_lists_step" "$step_id" "$listed"
-    assert_contains "fed_step_complete.allowed_input" "allowed_input" "$listed"
-    assert_contains "fed_step_complete.partial_args_visible" "approve the shipment" "$listed"
+    assert_contains "fed_task_complete.peer_lists_task" "$task_id" "$listed"
+    assert_contains "fed_task_complete.allowed_input" "allowed_input" "$listed"
+    assert_contains "fed_task_complete.partial_args_visible" "approve the shipment" "$listed"
     # A peer is served the request, not the requester (§13): no local identity crosses.
-    assert_not_contains "fed_step_complete.no_owner" '"owner"' "$listed"
-    assert_not_contains "fed_step_complete.no_created_by" "created_by" "$listed"
+    assert_not_contains "fed_task_complete.no_owner" '"owner"' "$listed"
+    assert_not_contains "fed_task_complete.no_created_by" "created_by" "$listed"
 
-    # The operator's own window is not the only one: `step list --peer` asks the same question over
-    # the same protocol, so the party who may complete a step can also see it (§13).
-    local held; held=$(jj "$FED_DBL" "$FED_HL" step list --peer="$FED_RKEY")
-    assert_contains "fed_step_complete.user_lists_peer_held_step" "$step_id" "$held"
-    assert_contains "fed_step_complete.user_list_carries_allowed_input" "allowed_input" "$held"
-    assert_not_contains "fed_step_complete.user_list_withholds_requester" '"owner"' "$held"
+    # The operator's own window is not the only one: `task list --peer` asks the same question over
+    # the same protocol, so the party who may complete a task can also see it (§13).
+    local held; held=$(jj "$FED_DBL" "$FED_HL" task list --peer="$FED_RKEY")
+    assert_contains "fed_task_complete.user_lists_peer_held_task" "$task_id" "$held"
+    assert_contains "fed_task_complete.user_list_carries_allowed_input" "allowed_input" "$held"
+    assert_not_contains "fed_task_complete.user_list_withholds_requester" '"owner"' "$held"
 
-    # L completes it with the SAME command that completes a local step — a step is a step.
+    # L completes it with the SAME command that completes a local task — a task is a task.
     # The completion runs on R, funded by the price parked there at creation.
     local first_tx
-    first_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" step complete "$step_id" --peer="$FED_RKEY" '{}')" tx_id)
-    assert_nonempty "fed_step_complete.completed" "$first_tx"
-    assert_json "fed_step_complete.step_done" "$(jj "$FED_DBR" "$FED_HR" step show "$step_id")" status done
-    assert_not_contains "fed_step_complete.queue_drained" "$step_id" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$FED_RKEY")"
+    first_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" task complete "$task_id" --peer="$FED_RKEY" '{}')" tx_id)
+    assert_nonempty "fed_task_complete.completed" "$first_tx"
+    assert_json "fed_task_complete.task_done" "$(jj "$FED_DBR" "$FED_HR" task show "$task_id")" status done
+    assert_not_contains "fed_task_complete.queue_drained" "$task_id" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$FED_RKEY")"
 
     # Repeating the SAME completion derives the same idempotency key, so R returns its STORED
     # result instead of re-executing — this is how a completion that timed out on the wire but
     # succeeded remotely is recovered. A fresh key per attempt would lose that tx and receipt.
     local retry_tx
-    retry_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" step complete "$step_id" --peer="$FED_RKEY" '{}')" tx_id)
-    assert_eq "fed_step_complete.retry_replays_stored_result" "$first_tx" "$retry_tx"
+    retry_tx=$(strfield "$(jj "$FED_DBL" "$FED_HL" task complete "$task_id" --peer="$FED_RKEY" '{}')" tx_id)
+    assert_eq "fed_task_complete.retry_replays_stored_result" "$first_tx" "$retry_tx"
 
-    # A genuinely different request is not a replay: it reaches CompleteStep and is refused,
-    # because the step is one-shot and no longer waiting.
-    assert_fails "fed_step_complete.different_input_refused" "waiting\|invalid\|state" -- \
-        j "$FED_DBL" "$FED_HL" step complete "$step_id" --peer="$FED_RKEY" '{"different":true}'
+    # A genuinely different request is not a replay: it reaches CompleteTask and is refused,
+    # because the task is one-shot and no longer waiting.
+    assert_fails "fed_task_complete.different_input_refused" "waiting\|invalid\|state" -- \
+        j "$FED_DBL" "$FED_HL" task complete "$task_id" --peer="$FED_RKEY" '{"different":true}'
 
     # A suspended peer cannot complete: suspension is the one moderation axis for peers too (§13).
-    local step2
-    step2=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"sys@$FED_LKEY\",\"message\":\"second\"}")" step_id)
+    local task2
+    task2=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"sys@$FED_LKEY\",\"message\":\"second\"}")" task_id)
     j "$FED_DBR" "$FED_HR" admin peer suspend -- "$FED_LKEY" >/dev/null 2>&1
-    assert_fails "fed_step_complete.suspended_refused" "suspend\|unauth" -- \
-        j "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}'
+    assert_fails "fed_task_complete.suspended_refused" "suspend\|unauth" -- \
+        j "$FED_DBL" "$FED_HL" task complete "$task2" --peer="$FED_RKEY" '{}'
     j "$FED_DBR" "$FED_HR" admin peer unsuspend -- "$FED_LKEY" >/dev/null 2>&1
-    assert_contains "fed_step_complete.unsuspend_restores" tx_id \
-        "$(jj "$FED_DBL" "$FED_HL" step complete "$step2" --peer="$FED_RKEY" '{}')"
+    assert_contains "fed_task_complete.unsuspend_restores" tx_id \
+        "$(jj "$FED_DBL" "$FED_HL" task complete "$task2" --peer="$FED_RKEY" '{}')"
 }
 
 # The ticket is each kernel's own: the buyer writes one it chose, and the seller takes one no larger

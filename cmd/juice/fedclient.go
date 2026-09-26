@@ -29,7 +29,7 @@ type fedAdapter struct {
 }
 
 // newFedAdapter builds the adapter around the kernel's own signer. Only the signers it uses are
-// injected: outbound calls need the fed_call signature, while step and settle signing stay on the
+// injected: outbound calls need the fed_call signature, while task and settle signing stay on the
 // paths that own them (the control path and the kernel respectively).
 func newFedAdapter(localPubKey string, sign signerFunc, blockchainIdentity func(context.Context) (string, string)) *fedAdapter {
 	return &fedAdapter{localPubKey: localPubKey, signFederation: sign, blockchainIdentity: blockchainIdentity}
@@ -119,44 +119,44 @@ type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
 	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
 	Reveal(ctx context.Context, peerKey string, req fed.RevealRequest) (fed.RevealResponse, error)
-	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
+	Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error)
 }
 
-// Transport deadlines live here, with the carrier: the kernel owns step protocol semantics but has
+// Transport deadlines live here, with the carrier: the kernel owns task protocol semantics but has
 // no business naming a wall-clock bound per operation. A list only measures reachability, while a
 // completion waits on the peer running the resumed call synchronously — hence the wider bound. Both
 // derive from the caller's context, so cancellation upstream still cuts them short.
 const (
-	fedStepListTimeout     = 8 * time.Second
-	fedStepCompleteTimeout = 60 * time.Second
+	fedTaskListTimeout     = 8 * time.Second
+	fedTaskCompleteTimeout = 60 * time.Second
 )
 
-// CompletePeerStep and ListPeerSteps implement kernel.StepCaller over /juice/fed/step/1 (§13). The
+// CompletePeerTask and ListPeerTasks implement kernel.TaskCaller over /juice/fed/task/1 (§13). The
 // kernel hands over signed scalars; this builds the wire request, dispatches it, and reports the
 // raw status/body plus the never-dispatched proof — no Juice semantics are applied here.
-func (c *fedAdapter) CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
+func (c *fedAdapter) CompletePeerTask(ctx context.Context, peerKey, timestamp, signature, taskID, idempotencyKey string,
 	input []byte, forUserID string, userSuperuser bool) (int, []byte, bool, error) {
-	return c.step(ctx, peerKey, fedStepCompleteTimeout, fed.StepRequest{
+	return c.task(ctx, peerKey, fedTaskCompleteTimeout, fed.TaskRequest{
 		Kind: "complete", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
-		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
+		TaskID: taskID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
 		ForUserID: forUserID, UserSuperuser: userSuperuser,
 	})
 }
 
-func (c *fedAdapter) ListPeerSteps(ctx context.Context, peerKey, timestamp, signature, forUserID string) (int, []byte, bool, error) {
-	return c.step(ctx, peerKey, fedStepListTimeout, fed.StepRequest{
+func (c *fedAdapter) ListPeerTasks(ctx context.Context, peerKey, timestamp, signature, forUserID string) (int, []byte, bool, error) {
+	return c.task(ctx, peerKey, fedTaskListTimeout, fed.TaskRequest{
 		Kind: "list", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
 		ForUserID: forUserID,
 	})
 }
 
-func (c *fedAdapter) step(ctx context.Context, peerKey string, timeout time.Duration, req fed.StepRequest) (int, []byte, bool, error) {
+func (c *fedAdapter) task(ctx context.Context, peerKey string, timeout time.Duration, req fed.TaskRequest) (int, []byte, bool, error) {
 	if c.transport == nil {
 		return 0, nil, true, nil // no carrier: the request provably cannot have been sent (§13)
 	}
 	octx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	resp, err := c.transport.Step(octx, peerKey, req)
+	resp, err := c.transport.Task(octx, peerKey, req)
 	// A completion is work and dates the peer; a list is a read, and `admin inspect` is built on one
 	// (§14: inspection writes nothing, so no display state depends on being looked at).
 	if req.Kind != "list" {
@@ -175,7 +175,7 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 	if c.transport == nil {
 		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
-	octx, cancel := context.WithTimeout(ctx, fedStepListTimeout)
+	octx, cancel := context.WithTimeout(ctx, fedTaskListTimeout)
 	defer cancel()
 	resp, err := c.transport.Reveal(octx, peerPublicKey, fed.RevealRequest{
 		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature,

@@ -40,7 +40,7 @@ func lastSeenStr(t *time.Time) string {
 // requireSuperuserMW, so authority is the @sys bearer token (§14).
 //
 // Everything that is merely "the same operation with wider reach" is NOT here: a superuser
-// sees all rows on `action/process/tx/step list` and may `action disable` any action, all
+// sees all rows on `action/process/tx/task list` and may `action disable` any action, all
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
 	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser commands"}
@@ -394,17 +394,17 @@ func peerInspectCmd() *cobra.Command {
 					} `json:"reachability"`
 					Source string `json:"source"`
 					Online bool   `json:"online"`
-					// Steps this peer has parked for THIS kernel: work awaiting us, and the ids
-					// `step complete ID --peer` takes (§13). A peer account holds no session token,
+					// Tasks this peer has parked for THIS kernel: work awaiting us, and the ids
+					// `task complete ID --peer` takes (§13). A peer account holds no session token,
 					// so this is the only place an operator sees them.
-					Steps []struct {
+					Tasks []struct {
 						ID           string          `json:"id"`
 						Price        int64           `json:"price"`
 						CreatedAt    time.Time       `json:"created_at"`
 						PartialArgs  json.RawMessage `json:"partial_args"`
 						AllowedInput json.RawMessage `json:"allowed_input"`
-					} `json:"steps"`
-					StepsTruncated bool `json:"steps_truncated"`
+					} `json:"tasks"`
+					TasksTruncated bool `json:"tasks_truncated"`
 				}
 				if err := json.Unmarshal(b, &out); err != nil {
 					return err
@@ -464,10 +464,10 @@ func peerInspectCmd() *cobra.Command {
 					}
 					printEvidence(subjectName, out.PublicKey, out.Evidence)
 				}
-				if len(out.Steps) > 0 {
-					fmt.Printf("\nSteps awaiting us (%d) — complete with: step complete ID --peer %s\n",
-						len(out.Steps), args[0])
-					for _, st := range out.Steps {
+				if len(out.Tasks) > 0 {
+					fmt.Printf("\nTasks awaiting us (%d) — complete with: task complete ID --peer %s\n",
+						len(out.Tasks), args[0])
+					for _, st := range out.Tasks {
 						fmt.Printf("  %s  price=%s  %s\n", st.ID, net.Amount(st.Price), st.CreatedAt.Format(time.RFC3339))
 						if len(st.PartialArgs) > 0 && string(st.PartialArgs) != "{}" {
 							fmt.Printf("      %s\n", st.PartialArgs)

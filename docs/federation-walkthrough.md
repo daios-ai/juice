@@ -41,14 +41,14 @@ policy — is local and does not enter it.
     "juice/v1/" + <network fingerprint> + "/" + <domain> + "\n" + canonical JSON of the content
 
 (`kernel/federation.go:423`), where the domain names the kind of thing being signed — there are
-eleven: `receipt`, `rating`, `manifest`, `evidence_receipt`, `fed_call`, `step_complete`,
-`step_list`, `step_auth`, `reveal`, `capability`, `recovery` (`kernel/federation.go:357`).
+eleven: `receipt`, `rating`, `manifest`, `evidence_receipt`, `fed_call`, `task_complete`,
+`task_list`, `step_auth`, `reveal`, `capability`, `recovery` (`kernel/federation.go:357`).
 
 Two consequences follow:
 
 - Nothing signed on one network verifies on another. A receipt from a play kernel cannot be
   presented as a receipt for real money, even though the same code made both.
-- Nothing signed for one purpose verifies as another. A signature that authorises completing a step
+- Nothing signed for one purpose verifies as another. A signature that authorises completing a task
   is not a signature that authorises a payment reveal.
 
 **The fingerprint also separates the meeting place.** Kernels announce themselves under
@@ -78,9 +78,9 @@ What is on offer:
 Live requests between kernels:
 
 - `fed_call` — a call request.
-- `step_list` — a request for the parked work waiting for the asker.
-- `step_complete` — the input that finishes one parked step.
-- `step_auth` — a home kernel's attestation that one of its users is the principal a step requires.
+- `task_list` — a request for the parked work waiting for the asker.
+- `task_complete` — the input that finishes one parked task.
+- `step_auth` — a home kernel's attestation that one of its users is the principal a task requires.
 
 Money:
 
@@ -95,9 +95,9 @@ Not on the wire:
   phrase, signs a challenge the kernel issued (`kernel/auth.go:277`).
 
 The separation is required because all eleven are Ed25519 signatures by one key over JSON objects,
-and several share fields. `step_list` and `step_auth` both sign `counterparty`, `recipient`,
+and several share fields. `task_list` and `step_auth` both sign `counterparty`, `recipient`,
 `timestamp` and `user_id`. Without the domain in the signed bytes, a signature asking "what work is
-waiting for my user?" would also read as "I attest this user is the one that step requires". The
+waiting for my user?" would also read as "I attest this user is the one that task requires". The
 code says so where it declines to add a `scope` field, at `kernel/federation.go:2403`.
 
 ### The same eleven, as one purchase
@@ -126,11 +126,11 @@ priced at 0.002 USDT0. Both kernels are on `arbitrum-one`.
 6. Both kernels also gossip a stripped record of the call itself — that a call to `bob/translate`
    happened and ended in success, with no amounts and no names. That is `evidence_receipt`.
 
-Steps are the other shape of work. Say the translation parks and waits for a person to approve it.
+Tasks are the other shape of work. Say the translation parks and waits for a person to approve it.
 
-7. `acme` asks `brick` what work is waiting for it: `step_list`.
-8. `acme` sends the approval that finishes the parked step: `step_complete`.
-9. The step says only Alice may finish it. `acme` signs an attestation naming her: `step_auth`.
+7. `acme` asks `brick` what work is waiting for it: `task_list`.
+8. `acme` sends the approval that finishes the parked task: `task_complete`.
+9. The task says only Alice may finish it. `acme` signs an attestation naming her: `step_auth`.
    Without it `brick` would know only that some request came from `acme`, not from whom.
 
 The last two are not federation at all:
@@ -156,13 +156,13 @@ libp2p connection per peer, and inside that connection there are five channels
 | Channel | What goes through it |
 |---|---|
 | `/juice/fed/call/1` | one call, and the receipt or signed refusal that answers it |
-| `/juice/fed/step/1` | the parked work waiting for the asker, and the input that finishes one |
+| `/juice/fed/task/1` | the parked work waiting for the asker, and the input that finishes one |
 | `/juice/fed/resolve/1` | one action's card, or one handle resolved to a principal |
 | `/juice/fed/gossip/1` | a kernel's own catalogue, plus one page of evidence |
 | `/juice/fed/settle/1` | one draw's secret |
 
 Purposes map onto channels many-to-one. `fed_call` travels on the call channel and `receipt` comes
-back on it; `step_list`, `step_complete` and `step_auth` all travel on the step channel, the third
+back on it; `task_list`, `task_complete` and `step_auth` all travel on the task channel, the third
 carried inside the second; `manifest` is served on both resolve and gossip; `rating` and
 `evidence_receipt` ride gossip. `capability` and `recovery` never leave the machine — one is handed
 to code running inside a call, the other arrives on the ordinary client port (4040 by default).
@@ -174,7 +174,7 @@ is inside the signed bytes.
 ### Why the two are easy to confuse, and why they are separate
 
 The names invite the confusion. `fed_call` is a purpose, `/juice/fed/call/1` is a channel; three
-step purposes share one step channel; the purpose `reveal` travels on the channel named `settle`.
+task purposes share one task channel; the purpose `reveal` travels on the channel named `settle`.
 There are eleven purposes and five channels, and two of the purposes use no channel at all.
 
 They cannot be the same thing for two reasons.
@@ -187,7 +187,7 @@ channel to consult — only the bytes that were signed.
 A channel is also not covered by the signature. Whoever opens a stream chooses which one to open,
 so a peer can send whatever it likes down whichever channel it likes. If the purpose were the
 channel, the only thing distinguishing two signed objects would be a choice the sender makes at
-send time and nobody can check afterwards. Since `step_auth` rides inside a `step_complete` on one
+send time and nobody can check afterwards. Since `step_auth` rides inside a `task_complete` on one
 channel, the attestation and the completion would be indistinguishable by construction.
 
 The purpose is inside the signed bytes because the channel is not.
@@ -200,9 +200,9 @@ Nearly one-to-one, with one exception and two that never travel.
 |---|---|---|
 | `fed_call` | call | buyer → seller |
 | `receipt` | call | seller → buyer, answering the same request |
-| `step_list` | step | asker → holder of the parked work |
-| `step_complete` | step | asker → holder |
-| `step_auth` | step | carried inside a completion, signed by the user's home kernel |
+| `task_list` | task | asker → holder of the parked work |
+| `task_complete` | task | asker → holder |
+| `step_auth` | task | carried inside a completion, signed by the user's home kernel |
 | `manifest` | resolve **and** gossip | seller → anyone asking |
 | `rating` | gossip | the rater's kernel → anyone pulling |
 | `evidence_receipt` | gossip | either kernel that was party to the call → anyone pulling |

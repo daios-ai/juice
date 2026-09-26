@@ -26,7 +26,7 @@ type Snapshot struct {
 	Users     []map[string]any `json:"users"`
 	Actions   []map[string]any `json:"actions"`
 	Txs       []map[string]any `json:"txs"`
-	Steps     []map[string]any `json:"steps"`
+	Tasks     []map[string]any `json:"tasks"`
 	Processes []map[string]any `json:"processes"`
 	// Owed is what this kernel is still waiting to be paid for, each obligation naming the buyer.
 	// It is the seller's own record, which is the only side an obligation is kept on.
@@ -61,8 +61,8 @@ func collect(n *Net) (map[string]Snapshot, []string) {
 		if s.Actions, err = read[[]map[string]any](k, op, "action", "list", "--all", "--limit", "200"); err != nil {
 			bad("the catalogue", err)
 		}
-		if s.Steps, err = read[[]map[string]any](k, op, "step", "list", "--limit", "200"); err != nil {
-			bad("the steps", err)
+		if s.Tasks, err = read[[]map[string]any](k, op, "task", "list", "--limit", "200"); err != nil {
+			bad("the tasks", err)
 		}
 		if s.Txs, err = pages(k, "sysop-"+name, "/v1/transactions"); err != nil {
 			bad("the transactions", err)

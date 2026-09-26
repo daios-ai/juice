@@ -8,7 +8,7 @@ nav_order: 5
 
 Some services require your participation beyond the initial call. An action
 that uses your mailbox or repository needs permission to access that account;
-a workflow awaiting your input creates a step addressed to you. This chapter
+a workflow awaiting your input creates a task addressed to you. This chapter
 explains how to give and revoke consent, and how to complete assigned work.
 
 ## Connecting an upstream account
@@ -105,17 +105,17 @@ using the action with your upstream account again.
 
 ## Completing work addressed to you
 
-A **step** is a future action call awaiting input from a named party. Its
+A **task** is a future action call awaiting input from a named party. Its
 creator reserves the execution price when setting it up, so you do not pay
 that price when completing it. An action that delivers value or calls a remote
 kernel can still require the immediate caller's separate value or stake funds.
-Use `step list` and `step show` to inspect the work addressed to you:
+Use `task list` and `task show` to inspect the work addressed to you:
 
 ```
-$ juice step list
-STEP        STATUS   CREATED BY   COMPLETES  CALLER
+$ juice task list
+TASK        STATUS   CREATED BY   COMPLETES  CALLER
 b75366d1-…  waiting  sys@acme/message  sys@acme/sink   bob@acme
-$ juice step show b75366d1-…
+$ juice task show b75366d1-…
   id: b75366d1-…
   partial_args: {
     "message": "approve the order?"
@@ -132,38 +132,38 @@ $ juice step show b75366d1-…
   }
 ```
 
-The `created_by` field identifies the action that created the step, while
+The `created_by` field identifies the action that created the task, while
 `action` identifies the service that will execute when you complete it.
 `owner` names the process owner funding the work. Read `partial_args`
 for the information already supplied and `allowed_input` for the schema of
 the remaining input:
 
 ```
-$ juice step complete b75366d1-… '{}'
+$ juice task complete b75366d1-… '{}'
   result: {}
   tx_id: 4a908ead-…
   trace_id: 3129b306-…
   receipt_id: 6954ae74-…
-  step_id: b75366d1-…
+  task_id: b75366d1-…
 ```
 
-Completion claims the step for execution, preventing a second caller from
+Completion claims the task for execution, preventing a second caller from
 executing it concurrently. Only the named party may do this. The result and
-transaction then record the completed work; a waiting step remains available
+transaction then record the completed work; a waiting task remains available
 across kernel restarts.
 
 ## Work held for you on another kernel
 
 Work addressed to you may be held by another kernel. Specify that peer to list
-or complete its steps through your own login:
+or complete its tasks through your own login:
 
 ```
-$ juice step list --peer beta-kernel
-$ juice step complete <id> '{}' --peer beta-kernel
+$ juice task list --peer beta-kernel
+$ juice task complete <id> '{}' --peer beta-kernel
 ```
 
 Your home kernel signs the completion request, which names your stable account
-ID as the party addressed by the step. The peer checks it before allowing
+ID as the party addressed by the task. The peer checks it before allowing
 completion. The
-listing returns the step's input requirements without disclosing the remote
+listing returns the task's input requirements without disclosing the remote
 process owner's identity or other local execution details.

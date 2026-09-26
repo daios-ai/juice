@@ -72,7 +72,7 @@ economy, which is why reports show eight kernels for a five-kernel story.
 6. **Composition and partial refunds.** A composite charges its advertised price whatever it spent
    inside. A composite that fails after one purchase settled refunds the price less exactly what
    that purchase consumed.
-7. **Steps.** An action parks, waiting for a person. The wrong party cannot complete it; the right
+7. **Tasks.** An action parks, waiting for a person. The wrong party cannot complete it; the right
    one can; completing it twice does not pay twice.
 8. **Value.** A transfer between users on one kernel. Overdrawing is refused, an unknown recipient
    is refused, and a transfer may not name someone on another kernel.
@@ -142,7 +142,7 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 | P5 receipt shape, tampering | `kernel/federation_test.go` |
 | P6 manifest, proxy exclusion | conformance; netsim act 10 |
 | P7 cross-kernel pricing | **netsim price fidelity** (independent) |
-| P8 steps across kernels | netsim act 7; flow `fed_step_complete` |
+| P8 tasks across kernels | netsim act 7; flow `fed_task_complete` |
 | P9 gossip, evidence | netsim act 10 |
 | P10 ticket settlement | **netsim settlement fidelity**; anvil and Sepolia rails |
 | U13 partial refunds | **netsim refund law**, act 6 |
@@ -153,7 +153,7 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 | U35 intermittent connectivity | `fedsim_test.go`; flow `fed_provider_crash_recovery`; netsim act 12 (offline only) |
 | U36 offline verification | netsim act 10; `kernel` tests |
 | U37–U40 suspend, petnames, privacy, discovery | netsim acts 10, 11, attack 5 |
-| U41 remote steps | flow `fed_step_complete` |
+| U41 remote tasks | flow `fed_task_complete` |
 | U44 observability | netsim act 12 (parked funds and their age) |
 | U47 non-transitive access | netsim attack 4 |
 | G1 conservation | **netsim conservation** (independent) |

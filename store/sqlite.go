@@ -385,7 +385,7 @@ func (s *DB) DeactivateImportedIfHash(ctx context.Context, actionID, expectedHas
 // comparison is `<=`: julianday() returns a float64 whose resolution near today's epoch is only
 // ~tens of microseconds, so last_active and a cutoff a hair later can round equal; since seeds
 // always precede the cutoff and julianday is monotonic, `<=` is deterministic where `<` flaked.
-// A peer with any waiting/running step addressed to it or to one of its actions is still in use and skipped.
+// A peer with any waiting/running task addressed to it or to one of its actions is still in use and skipped.
 func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id FROM accounts u
@@ -400,7 +400,7 @@ WHERE u.kernel_public_key IS NOT NULL AND u.kernel_public_key != ''
         COALESCE((SELECT MAX(julianday(updated_at)) FROM kernels WHERE public_key=u.kernel_public_key), julianday(u.created_at))
       ) <= julianday(?)
   AND NOT EXISTS (
-        SELECT 1 FROM steps s
+        SELECT 1 FROM tasks s
          WHERE s.status IN ('waiting','running')
            AND (s.required_caller_user_id=u.id
                 OR s.action_id IN (SELECT id FROM actions WHERE owner_user_id=u.id)))
@@ -425,12 +425,12 @@ ORDER BY u.id`, timeToStr(cutoff))
 }
 
 // PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
-// It removes the peer's proxy actions and their stats/stat_tags, the peer's steps and any steps
+// It removes the peer's proxy actions and their stats/stat_tags, the peer's tasks and any tasks
 // bound to its actions, and its kernel row; it first clears the account→kernel link so the identity is
 // forgotten (a later re-resolve starts fresh). The transaction/receipt ledger is left intact —
 // its party ids carry no foreign key, so a now-dangling peer id is harmless and local counterparties'
 // history stays reconstructible (§11). Deletes run children-before-parents so the RESTRICT foreign
-// keys (steps→actions, stats→actions) never block.
+// keys (tasks→actions, stats→actions) never block.
 func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 	return s.withTx(ctx, "purge peer cascade", func(tx *sql.Tx) error {
 		var pubKey sql.NullString
@@ -441,8 +441,8 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, userID); err != nil {
 			return dbErr(err, "delete action_stats")
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM steps WHERE required_caller_user_id=? OR action_id IN (`+owned+`)`, userID, userID); err != nil {
-			return dbErr(err, "delete steps")
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_user_id=? OR action_id IN (`+owned+`)`, userID, userID); err != nil {
+			return dbErr(err, "delete tasks")
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_user_id=?`, userID); err != nil {
 			return dbErr(err, "delete actions")
@@ -980,7 +980,7 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 // BeginSubcall atomically deducts price from parent_trace.available into parent_trace.locked
 // and creates the child trace with available=price.
 // fundFromTrace is the one funding boundary inside a computation: it moves price from a trace's
-// available into its locked for a child call or a parked step. The statement itself carries the
+// available into its locked for a child call or a parked task. The statement itself carries the
 // rules a spend depends on — the trace is unsettled and its process open — in the same predicate
 // as the funds, so nothing checked before the write can go stale between the check and the write
 // (§6, §9): a capability that expired a moment ago, or a process closed a moment ago, is refused
@@ -1035,25 +1035,25 @@ func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.T
 	})
 }
 
-// BeginStepCall atomically moves step.price from the step's parent_trace.locked back into
-// parent_trace.available (consuming the park), claims the step waiting→running, and creates
-// a new trace with available=step.price funded from the released lock.
-func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) error {
-	return s.withTx(ctx, "begin step call", func(tx *sql.Tx) error {
-		// Read step to get price and parent_trace_id.
+// BeginTaskCall atomically moves task.price from the task's parent_trace.locked back into
+// parent_trace.available (consuming the park), claims the task waiting→running, and creates
+// a new trace with available=task.price funded from the released lock.
+func (s *DB) BeginTaskCall(ctx context.Context, taskID string, t *kernel.Trace) error {
+	return s.withTx(ctx, "begin task call", func(tx *sql.Tx) error {
+		// Read task to get price and parent_trace_id.
 		var price int64
 		var parentTraceID *string
 		err := tx.QueryRowContext(ctx,
-			`SELECT price, parent_trace_id FROM steps WHERE id=? AND status='waiting'`,
-			stepID,
+			`SELECT price, parent_trace_id FROM tasks WHERE id=? AND status='waiting'`,
+			taskID,
 		).Scan(&price, &parentTraceID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return kernel.ErrInvalidState.Wrap("step not waiting").Because(kernel.ErrStepNotClaimed)
+			return kernel.ErrInvalidState.Wrap("task not waiting").Because(kernel.ErrTaskNotClaimed)
 		}
 		if err != nil {
-			return dbErr(err, "begin step call: read step")
+			return dbErr(err, "begin task call: read task")
 		}
-		// The step's price was previously parked from parent_trace.locked;
+		// The task's price was previously parked from parent_trace.locked;
 		// release the lock (parent keeps the park; it flows into the new trace's available).
 		// Guard locked>=price like BeginSubcall so a broken park invariant surfaces as a typed
 		// kernel error rather than a raw CHECK(locked>=0) constraint failure.
@@ -1063,31 +1063,31 @@ func (s *DB) BeginStepCall(ctx context.Context, stepID string, t *kernel.Trace) 
 				price, *parentTraceID, price,
 			)
 			if lerr != nil {
-				return dbErr(lerr, "begin step call: release parent trace lock")
+				return dbErr(lerr, "begin task call: release parent trace lock")
 			}
 			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInvalidState.Wrap("step park invariant violated: parent trace locked < step price")
+				return kernel.ErrInvalidState.Wrap("task park invariant violated: parent trace locked < task price")
 			}
 		}
 		// The completer C funds its own stakes — the delivered value, and a lottery ticket when the
-		// completion reaches a remote action — atomic with claiming the step; the step's execution
+		// completion reaches a remote action — atomic with claiming the task; the task's execution
 		// price stays creator-parked above.
 		if err = lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
 			return err
 		}
-		// Insert the completion trace first so the FK on steps.completion_trace_id is satisfied.
+		// Insert the completion trace first so the FK on tasks.completion_trace_id is satisfied.
 		if err = insertTraceTx(ctx, tx, t, parentTraceID, price); err != nil {
 			return err
 		}
-		// Claim the step and record which trace will complete it.
+		// Claim the task and record which trace will complete it.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE steps SET status='running', completion_trace_id=? WHERE id=? AND status='waiting'`,
-			t.ID, stepID)
+			`UPDATE tasks SET status='running', completion_trace_id=? WHERE id=? AND status='waiting'`,
+			t.ID, taskID)
 		if err != nil {
-			return dbErr(err, "begin step call: claim step")
+			return dbErr(err, "begin task call: claim task")
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return kernel.ErrInvalidState.Wrap("step already claimed").Because(kernel.ErrStepNotClaimed)
+			return kernel.ErrInvalidState.Wrap("task already claimed").Because(kernel.ErrTaskNotClaimed)
 		}
 		return nil
 	})
@@ -1168,25 +1168,25 @@ func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.St
 	return dbErr(err, label+": upsert stats")
 }
 
-// completeStepTx transitions a step to done and records the tx_id atomically.
+// completeTaskTx transitions a task to done and records the tx_id atomically.
 // Requires exactly one row to be affected; returns ErrInvalidState if not (B2 fix).
-func (s *DB) completeStepTx(ctx context.Context, tx *sql.Tx, stepID, txID, label string) error {
+func (s *DB) completeTaskTx(ctx context.Context, tx *sql.Tx, taskID, txID, label string) error {
 	res, err := tx.ExecContext(ctx,
-		`UPDATE steps SET status='done', tx_id=? WHERE id=? AND status='running'`,
-		txID, stepID,
+		`UPDATE tasks SET status='done', tx_id=? WHERE id=? AND status='running'`,
+		txID, taskID,
 	)
 	if err != nil {
-		return dbErr(err, label+": complete step")
+		return dbErr(err, label+": complete task")
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return kernel.ErrInvalidState.Wrap("step transition to done affected unexpected rows")
+		return kernel.ErrInvalidState.Wrap("task transition to done affected unexpected rows")
 	}
 	return nil
 }
 
 // finalizeTx executes the shared tail of both commit paths: audit rows, trace latency,
-// stats, optional idempotency completion, optional step completion, and commit.
-func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, stepID, label string) error {
+// stats, optional idempotency completion, optional task completion, and commit.
+func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, receipt *kernel.Receipt, stats *kernel.Stats, idempotencyRecordID, taskID, label string) error {
 	if err := s.insertAuditRows(ctx, tx, ktx, receipt, label); err != nil {
 		return err
 	}
@@ -1201,8 +1201,8 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 			return dbErr(err, label+": release idempotency lock")
 		}
 	}
-	if stepID != "" {
-		if err := s.completeStepTx(ctx, tx, stepID, ktx.ID, label); err != nil {
+	if taskID != "" {
+		if err := s.completeTaskTx(ctx, tx, taskID, ktx.ID, label); err != nil {
 			return err
 		}
 	}
@@ -1210,16 +1210,16 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 }
 
 // closeProcessTx closes a process within an existing transaction if it is quiescent:
-// no waiting/running steps and no traces without a committed transaction.
+// no waiting/running tasks and no traces without a committed transaction.
 // If not quiescent it is a no-op. Returns any remaining process.available to the owner.
-// processQuiescent reports whether nothing is in flight in a process: no step waiting or running,
+// processQuiescent reports whether nothing is in flight in a process: no task waiting or running,
 // no trace without a transaction. Automatic closure closes only then; forced closure refuses
 // otherwise, since a call that started between its settlement pass and its close would settle
 // into a closed process, and a refund landing there is never returned to anyone (§5).
 func processQuiescent(ctx context.Context, tx *sql.Tx, processID string) (bool, error) {
 	var open int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT (SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id
+		`SELECT (SELECT COUNT(*) FROM tasks s JOIN traces t ON s.parent_trace_id=t.id
 		          WHERE t.process_id=? AND s.status IN ('waiting','running'))
 		      + (SELECT COUNT(*) FROM traces t WHERE t.process_id=?
 		          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))`,
@@ -1230,7 +1230,7 @@ func processQuiescent(ctx context.Context, tx *sql.Tx, processID string) (bool, 
 }
 
 func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) error {
-	// Count open steps.
+	// Count open tasks.
 	quiet, err := processQuiescent(ctx, tx, processID)
 	if err != nil || !quiet {
 		return err
@@ -1261,10 +1261,10 @@ func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) e
 	return dbErr(err, "close process: close")
 }
 
-// cancelStepSubtree cancels all waiting and running steps whose parent_trace_id is anywhere
+// cancelTaskSubtree cancels all waiting and running tasks whose parent_trace_id is anywhere
 // in the subtree rooted at traceID, and returns the sum of their parked prices.
 // This must run inside an existing transaction.
-func (s *DB) cancelStepSubtree(ctx context.Context, tx *sql.Tx, traceID string) (int64, error) {
+func (s *DB) cancelTaskSubtree(ctx context.Context, tx *sql.Tx, traceID string) (int64, error) {
 	// Collect all trace IDs in the subtree (including traceID itself).
 	var total int64
 	err := tx.QueryRowContext(ctx, `
@@ -1273,11 +1273,11 @@ WITH RECURSIVE sub(id) AS (
     UNION ALL
     SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
 )
-SELECT COALESCE(SUM(price),0) FROM steps
+SELECT COALESCE(SUM(price),0) FROM tasks
 WHERE parent_trace_id IN (SELECT id FROM sub)
   AND status='waiting'`, traceID).Scan(&total)
 	if err != nil {
-		return 0, dbErr(err, "cancel step subtree: sum prices")
+		return 0, dbErr(err, "cancel task subtree: sum prices")
 	}
 	_, err = tx.ExecContext(ctx, `
 WITH RECURSIVE sub(id) AS (
@@ -1285,11 +1285,11 @@ WITH RECURSIVE sub(id) AS (
     UNION ALL
     SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
 )
-UPDATE steps SET status='cancelled'
+UPDATE tasks SET status='cancelled'
 WHERE parent_trace_id IN (SELECT id FROM sub)
   AND status='waiting'`, traceID)
 	if err != nil {
-		return 0, dbErr(err, "cancel step subtree: cancel steps")
+		return 0, dbErr(err, "cancel task subtree: cancel tasks")
 	}
 	return total, nil
 }
@@ -1301,7 +1301,7 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 //   - credits net to targetUserID, fee to feeRecipientID
 //
 // callerWalletKind controls the lock release: CallerProcess (process.locked),
-// CallerTrace (parent trace.locked), or CallerStep (no lock to release; BeginStepCall
+// CallerTrace (parent trace.locked), or CallerTask (no lock to release; BeginTaskCall
 // already consumed it — refund would go to process on failure).
 // releaseStake returns a lottery stake to the caller who locked it. What is released is read from
 // the trace, not from a caller argument, so every settlement path — commit, failure, crash recovery,
@@ -1434,11 +1434,11 @@ type ledgerPosting struct {
 	amount int64
 }
 
-func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, targetUserID, feeRecipientID string, net, fee int64, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit call", func(tx *sql.Tx) error {
 		var err error
-		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+		if deferred, err = settleGuard(ctx, tx, ktx, taskID); err != nil || deferred {
 			return err
 		}
 		// The taxable the caller computed must be what the row holds now — a child settling in
@@ -1452,7 +1452,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			deferred = true
-			return recordOutcome(ctx, tx, ktx, stepID)
+			return recordOutcome(ctx, tx, ktx, taskID)
 		}
 		// Release the full gross from the caller's lock row (per callerWalletKind, see doc above).
 		// Each settled subcall already released its own gross from this row, so it now holds
@@ -1469,7 +1469,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 					`UPDATE traces SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
 					return dbErr(err, "commit call: release parent trace lock")
 				}
-				// CallerStep: BeginStepCall already released the lock; nothing to do here.
+				// CallerTask: BeginTaskCall already released the lock; nothing to do here.
 			}
 		}
 		// Decrement owner.locked by taxable (only the portion that settles to target/sys).
@@ -1517,7 +1517,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit call"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, taskID, "commit call"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1526,14 +1526,14 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 }
 
 // CommitFailedCall settles a failed call:
-//   - cancels all outstanding steps in the trace's subtree, summing their parked prices
-//   - total refund = trace.available + step prices
-//   - refunds total to caller wallet (process or parent trace); CallerStep → process.available
-func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+//   - cancels all outstanding tasks in the trace's subtree, summing their parked prices
+//   - total refund = trace.available + task prices
+//   - refunds total to caller wallet (process or parent trace); CallerTask → process.available
+func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buildReceipt func(refund int64) (*kernel.Receipt, error), traceID, callerWalletID, callerWalletKind, feeRecipientID string, gross int64, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit failed call", func(tx *sql.Tx) error {
 		var err error
-		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+		if deferred, err = settleGuard(ctx, tx, ktx, taskID); err != nil || deferred {
 			return err
 		}
 		// Read trace.available before zeroing.
@@ -1543,16 +1543,16 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		).Scan(&traceAvailable); err != nil {
 			return dbErr(err, "commit failed call: read trace available")
 		}
-		// Cancel subtree steps and collect their parked prices.
-		stepPrices, err := s.cancelStepSubtree(ctx, tx, traceID)
+		// Cancel subtree tasks and collect their parked prices.
+		taskPrices, err := s.cancelTaskSubtree(ctx, tx, traceID)
 		if err != nil {
 			return err
 		}
-		refund := traceAvailable + stepPrices
+		refund := traceAvailable + taskPrices
 		// Record what actually came back, on the same row the payer audits (§3 D4). The local law is
 		// not the remote identity gross−net−fee: a failed call charges no fee or net, yet already
 		// settled descendants stay paid, so the returned amount is the unspent allocation plus the
-		// parked prices of the steps this rollup cancels.
+		// parked prices of the tasks this rollup cancels.
 		ktx.Refund = refund
 		// Build and sign the receipt inside the transaction so that charge (gross − refund)
 		// is guaranteed to match what is committed — no TOCTOU window.
@@ -1588,7 +1588,7 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		if err := correctExposureTx(ctx, tx, traceID, receipt.Charge+receipt.Premium); err != nil {
 			return err
 		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit failed call"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, taskID, "commit failed call"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1602,11 +1602,11 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 // land on a peer row — a peer row holds no money — it returns to the caller C, whose own stake then
 // carries the draw: a losing ticket leaves C exactly the obligation better off than the refund
 // alone, and a winning one reserves the face value from C for the rail to send.
-func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, stepID string) error {
+func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
 	deferred := false
 	err := s.withTx(ctx, "commit remote settlement", func(tx *sql.Tx) error {
 		var err error
-		if deferred, err = settleGuard(ctx, tx, ktx, stepID); err != nil || deferred {
+		if deferred, err = settleGuard(ctx, tx, ktx, taskID); err != nil || deferred {
 			return err
 		}
 		q := ktx.Gross // full locked amount (two-step local price)
@@ -1664,7 +1664,7 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 				return err
 			}
 		}
-		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, stepID, "commit remote settlement"); err != nil {
+		if err := s.finalizeTx(ctx, tx, ktx, receipt, stats, idempotencyRecordID, taskID, "commit remote settlement"); err != nil {
 			return err
 		}
 		return s.closeProcessTx(ctx, tx, ktx.ProcessID)
@@ -1729,13 +1729,13 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if err != nil {
 			return dbErr(err, "end process: read")
 		}
-		// The kernel settled every unsettled trace it saw before calling here; a call or a step
+		// The kernel settled every unsettled trace it saw before calling here; a call or a task
 		// completion that started since is in flight and must not be closed over. Checked in this
-		// transaction, against the rows this transaction will change — waiting steps are what this
+		// transaction, against the rows this transaction will change — waiting tasks are what this
 		// method cancels, so only running ones and unsettled traces count.
 		var inFlight int
 		if err = tx.QueryRowContext(ctx,
-			`SELECT (SELECT COUNT(*) FROM steps s JOIN traces t ON s.parent_trace_id=t.id
+			`SELECT (SELECT COUNT(*) FROM tasks s JOIN traces t ON s.parent_trace_id=t.id
 			          WHERE t.process_id=? AND s.status='running')
 			      + (SELECT COUNT(*) FROM traces t WHERE t.process_id=?
 			          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))`,
@@ -1745,19 +1745,19 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 		if inFlight > 0 {
 			return kernel.ErrInvalidState.Wrap("a call started while the process was being ended; end it again once it settles")
 		}
-		// Cancel all waiting steps and collect parked prices to return to owner.
+		// Cancel all waiting tasks and collect parked prices to return to owner.
 		var parkedTotal int64
 		if err = tx.QueryRowContext(ctx,
-			`SELECT COALESCE(SUM(s.price),0) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting'`,
+			`SELECT COALESCE(SUM(s.price),0) FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting'`,
 			processID,
 		).Scan(&parkedTotal); err != nil {
 			return dbErr(err, "end process: sum parked prices")
 		}
 		if parkedTotal > 0 {
 			// Release parked prices: remove from parent trace locks, return to user.
-			// We cancel the steps in bulk; the trace.locked decrements must also happen.
+			// We cancel the tasks in bulk; the trace.locked decrements must also happen.
 			rows, err2 := tx.QueryContext(ctx,
-				`SELECT s.parent_trace_id, SUM(s.price) FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting' GROUP BY s.parent_trace_id`,
+				`SELECT s.parent_trace_id, SUM(s.price) FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting' GROUP BY s.parent_trace_id`,
 				processID)
 			if err2 != nil {
 				return dbErr(err2, "end process: group parked by trace")
@@ -1795,9 +1795,9 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			}
 		}
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='cancelled' WHERE id IN (SELECT s.id FROM steps s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
+			`UPDATE tasks SET status='cancelled' WHERE id IN (SELECT s.id FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
 			processID); err != nil {
-			return dbErr(err, "end process: cancel waiting steps")
+			return dbErr(err, "end process: cancel waiting tasks")
 		}
 		now := timeToStr(time.Now().UTC())
 		returnAmount := available
@@ -2021,70 +2021,70 @@ func (s *DB) UpsertStats(ctx context.Context, st *kernel.Stats) error {
 	return dbErr(err, "upsert stats")
 }
 
-// ---- Steps ----
+// ---- Tasks ----
 
-// CreateStep atomically inserts the step and parks step.price from the parent trace's
+// CreateTask atomically inserts the task and parks task.price from the parent trace's
 // available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
-func (s *DB) CreateStep(ctx context.Context, step *kernel.Step) error {
-	return s.withTx(ctx, "create step", func(tx *sql.Tx) error {
+func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
+	return s.withTx(ctx, "create task", func(tx *sql.Tx) error {
 		// Parked from the funding trace at any price, zero included: the statement is also what
-		// refuses a settled trace or a closed process, which no step may be parked in.
-		if step.ParentTraceID != nil {
-			if err := fundFromTrace(ctx, tx, *step.ParentTraceID, step.Price, "create step"); err != nil {
+		// refuses a settled trace or a closed process, which no task may be parked in.
+		if task.ParentTraceID != nil {
+			if err := fundFromTrace(ctx, tx, *task.ParentTraceID, task.Price, "create task"); err != nil {
 				return err
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,
 			                    required_caller_handle,action_id,
 			                    partial_args,price,import_bps,status,created_at)
 			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			step.ID, step.ParentTraceID, step.RequiredCallerUserID, step.RequiredCallerRemoteID,
-			step.RequiredCallerHandle, step.ActionID, rawJSONStr(step.PartialArgs),
-			step.Price, step.ImportBPS, string(step.Status), timeToStr(step.CreatedAt),
+			task.ID, task.ParentTraceID, task.RequiredCallerUserID, task.RequiredCallerRemoteID,
+			task.RequiredCallerHandle, task.ActionID, rawJSONStr(task.PartialArgs),
+			task.Price, task.ImportBPS, string(task.Status), timeToStr(task.CreatedAt),
 		)
-		return dbErr(err, "create step: insert")
+		return dbErr(err, "create task: insert")
 	})
 }
 
-const stepCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
+const taskCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
 
-func scanStep(step *kernel.Step, scanFn func(...any) error) error {
+func scanTask(scanFn func(...any) error) (*kernel.Task, error) {
+	task := &kernel.Task{}
 	var parentTraceID, txID, completionTraceID, remoteID *string
 	var createdAt, partialArgs, status string
 	var importBPS sql.NullInt64
-	if err := scanFn(&step.ID, &parentTraceID, &step.RequiredCallerUserID, &remoteID, &step.RequiredCallerHandle,
-		&step.ActionID, &partialArgs, &step.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
-		return err
+	if err := scanFn(&task.ID, &parentTraceID, &task.RequiredCallerUserID, &remoteID, &task.RequiredCallerHandle,
+		&task.ActionID, &partialArgs, &task.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
+		return nil, err
 	}
 	if importBPS.Valid {
 		v := importBPS.Int64
-		step.ImportBPS = &v
+		task.ImportBPS = &v
 	}
-	step.RequiredCallerRemoteID = remoteID
-	step.ParentTraceID = parentTraceID
-	step.PartialArgs = strToRawJSON(partialArgs)
-	step.Status = kernel.StepStatus(status)
-	step.TxID = txID
-	step.CompletionTraceID = completionTraceID
-	step.CreatedAt = strToTime(createdAt)
-	return nil
+	task.RequiredCallerRemoteID = remoteID
+	task.ParentTraceID = parentTraceID
+	task.PartialArgs = strToRawJSON(partialArgs)
+	task.Status = kernel.TaskStatus(status)
+	task.TxID = txID
+	task.CompletionTraceID = completionTraceID
+	task.CreatedAt = strToTime(createdAt)
+	return task, nil
 }
 
-func (s *DB) ReadStep(ctx context.Context, id string) (*kernel.Step, error) {
-	var step kernel.Step
-	err := scanStep(&step, s.db.QueryRowContext(ctx,
-		`SELECT `+stepCols+` FROM steps WHERE id=?`, id).Scan)
+func (s *DB) ReadTask(ctx context.Context, id string) (*kernel.Task, error) {
+	task, err := scanTask(s.db.QueryRowContext(ctx,
+		`SELECT `+taskCols+` FROM tasks WHERE id=?`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, kernel.ErrNotFound.Wrap("step not found")
+		return nil, kernel.ErrNotFound.Wrap("task not found")
 	}
 	if err != nil {
-		return nil, dbErr(err, "read step")
+		return nil, dbErr(err, "read task")
 	}
-	return &step, nil
+	return task, nil
 }
 
-func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*kernel.Step, error) {
+func (s *DB) ListTasks(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*kernel.Task, error) {
 	superInt := 0
 	if isSuperuser {
 		superInt = 1
@@ -2093,8 +2093,8 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+stepCols+`
-		 FROM steps
+		`SELECT `+taskCols+`
+		 FROM tasks
 		 WHERE (parent_trace_id IN (
 		            SELECT id FROM traces WHERE process_id IN (
 		                SELECT id FROM processes WHERE owner_user_id=?))
@@ -2109,92 +2109,60 @@ func (s *DB) ListSteps(ctx context.Context, callerUserID, processID, status stri
 		limit, offset,
 	)
 	if err != nil {
-		return nil, dbErr(err, "list steps")
+		return nil, dbErr(err, "list tasks")
 	}
-	return queryList(rows, "list steps", func(scan func(...any) error) (*kernel.Step, error) {
-		var step kernel.Step
-		if err := scanStep(&step, scan); err != nil {
-			return nil, err
-		}
-		return &step, nil
+	return queryList(rows, "list tasks", scanTask)
+}
+
+// ListOrphanRunningTasks returns running tasks that have a completion trace but no tx, in one
+// process or, with processID empty, in all — recovery's and EndProcess's question alike — with
+// enough detail to decide between re-parking (empty trace) or settling as failed. HasSettled is
+// true when the completion trace has locked funds or committed subcall transactions.
+func (s *DB) ListOrphanRunningTasks(ctx context.Context, processID string) ([]kernel.OrphanRunningTask, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT st.id, st.completion_trace_id, st.price, st.parent_trace_id,
+		       t.available, t.locked,
+		       CASE WHEN t.locked > 0 OR EXISTS (
+		           WITH RECURSIVE sub(id) AS (
+		               SELECT st.completion_trace_id
+		               UNION ALL
+		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
+		           )
+		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub)
+		       ) THEN 1 ELSE 0 END AS has_settled
+		FROM tasks st
+		JOIN traces t ON t.id = st.completion_trace_id
+		WHERE st.status = 'running' AND st.tx_id IS NULL AND st.completion_trace_id IS NOT NULL
+		  AND (?='' OR t.process_id = ?)`, processID, processID)
+	if err != nil {
+		return nil, dbErr(err, "list orphan running tasks")
+	}
+	return queryList(rows, "list orphan running tasks", func(scan func(...any) error) (kernel.OrphanRunningTask, error) {
+		var row kernel.OrphanRunningTask
+		var hasSettled int
+		err := scan(&row.TaskID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
+			&row.TraceAvailable, &row.TraceLocked, &hasSettled)
+		row.HasSettled = hasSettled == 1
+		return row, err
 	})
 }
 
-// scanOrphanRunningStep is the queryList adapter shared by the orphan-running-step lists.
-func scanOrphanRunningStep(scan func(...any) error) (kernel.OrphanRunningStep, error) {
-	var row kernel.OrphanRunningStep
-	var hasSettled int
-	err := scan(&row.StepID, &row.CompletionTraceID, &row.Price, &row.ParentTraceID,
-		&row.TraceAvailable, &row.TraceLocked, &hasSettled)
-	row.HasSettled = hasSettled == 1
-	return row, err
-}
-
-// ListOrphanRunningSteps returns running steps that have a completion trace but no tx,
-// with enough detail to decide between re-parking (empty trace) or settling as failed.
-// HasSettled is true when the completion trace has locked funds or committed subcall transactions.
-func (s *DB) ListOrphanRunningSteps(ctx context.Context) ([]kernel.OrphanRunningStep, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT st.id, st.completion_trace_id, st.price, st.parent_trace_id,
-		       t.available, t.locked,
-		       CASE WHEN t.locked > 0 OR EXISTS (
-		           WITH RECURSIVE sub(id) AS (
-		               SELECT st.completion_trace_id
-		               UNION ALL
-		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
-		           )
-		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub)
-		       ) THEN 1 ELSE 0 END AS has_settled
-		FROM steps st
-		JOIN traces t ON t.id = st.completion_trace_id
-		WHERE st.status = 'running' AND st.tx_id IS NULL AND st.completion_trace_id IS NOT NULL`)
-	if err != nil {
-		return nil, dbErr(err, "list orphan running steps")
-	}
-	return queryList(rows, "list orphan running steps", scanOrphanRunningStep)
-}
-
-// ListOrphanRunningStepsForProcess is ListOrphanRunningSteps scoped to a single process.
-// Used by EndProcess to map each running step-completion trace back to its step so the
-// completion call can be failed (transaction + receipt) rather than drained.
-func (s *DB) ListOrphanRunningStepsForProcess(ctx context.Context, processID string) ([]kernel.OrphanRunningStep, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT st.id, st.completion_trace_id, st.price, st.parent_trace_id,
-		       t.available, t.locked,
-		       CASE WHEN t.locked > 0 OR EXISTS (
-		           WITH RECURSIVE sub(id) AS (
-		               SELECT st.completion_trace_id
-		               UNION ALL
-		               SELECT ch.id FROM traces ch JOIN sub ON ch.parent_trace_id = sub.id
-		           )
-		           SELECT 1 FROM transactions tx WHERE tx.trace_id IN (SELECT id FROM sub)
-		       ) THEN 1 ELSE 0 END AS has_settled
-		FROM steps st
-		JOIN traces t ON t.id = st.completion_trace_id
-		WHERE st.status = 'running' AND st.tx_id IS NULL AND st.completion_trace_id IS NOT NULL
-		  AND t.process_id = ?`, processID)
-	if err != nil {
-		return nil, dbErr(err, "list orphan running steps for process")
-	}
-	return queryList(rows, "list orphan running steps for process", scanOrphanRunningStep)
-}
-
-// ResetStepAndRepark re-parks the step: it moves the completion trace's available funds back into
+// ResetTaskAndRepark re-parks the task: it moves the completion trace's available funds back into
 // the parent trace's locked position (the original park), deletes the empty completion trace,
-// clears completion_trace_id, and resets the step to waiting. This prevents double-completion minting.
-func (s *DB) ResetStepAndRepark(ctx context.Context, stepID string) error {
-	return s.withTx(ctx, "reset step and repark", func(tx *sql.Tx) error {
+// clears completion_trace_id, and resets the task to waiting. This prevents double-completion minting.
+func (s *DB) ResetTaskAndRepark(ctx context.Context, taskID string) error {
+	return s.withTx(ctx, "reset task and repark", func(tx *sql.Tx) error {
 		var price int64
 		var completionTraceID, parentTraceID *string
 		err := tx.QueryRowContext(ctx,
-			`SELECT price, completion_trace_id, parent_trace_id FROM steps WHERE id=? AND status='running' AND tx_id IS NULL`,
-			stepID,
+			`SELECT price, completion_trace_id, parent_trace_id FROM tasks WHERE id=? AND status='running' AND tx_id IS NULL`,
+			taskID,
 		).Scan(&price, &completionTraceID, &parentTraceID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // nothing to do
 		}
 		if err != nil {
-			return dbErr(err, "reset step and repark: read step")
+			return dbErr(err, "reset task and repark: read task")
 		}
 		if completionTraceID != nil && price > 0 && parentTraceID != nil {
 			// Verify the completion trace is truly empty before operating on it.
@@ -2203,7 +2171,7 @@ func (s *DB) ResetStepAndRepark(ctx context.Context, stepID string) error {
 			if err = tx.QueryRowContext(ctx,
 				`SELECT available, locked FROM traces WHERE id=?`, *completionTraceID,
 			).Scan(&traceAvailable, &traceLocked); err != nil {
-				return dbErr(err, "reset step and repark: read trace")
+				return dbErr(err, "reset task and repark: read trace")
 			}
 			if traceAvailable != price || traceLocked != 0 {
 				return kernel.ErrInvalidState.Wrap("completion trace is not empty; cannot re-park")
@@ -2219,7 +2187,7 @@ WITH RECURSIVE sub(id) AS (
 )
 SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 				*completionTraceID).Scan(&descTxCount); err != nil {
-				return dbErr(err, "reset step and repark: check descendant transactions")
+				return dbErr(err, "reset task and repark: check descendant transactions")
 			}
 			if descTxCount > 0 {
 				return kernel.ErrInvalidState.Wrap("completion trace has descendant transactions; cannot re-park")
@@ -2227,18 +2195,18 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 			// Move funds from completion trace's available back to parent trace's locked.
 			if _, err = tx.ExecContext(ctx,
 				`UPDATE traces SET available=available-? WHERE id=?`, price, *completionTraceID); err != nil {
-				return dbErr(err, "reset step and repark: drain completion trace")
+				return dbErr(err, "reset task and repark: drain completion trace")
 			}
 			if _, err = tx.ExecContext(ctx,
 				`UPDATE traces SET locked=locked+? WHERE id=?`, price, *parentTraceID); err != nil {
-				return dbErr(err, "reset step and repark: repark to parent trace")
+				return dbErr(err, "reset task and repark: repark to parent trace")
 			}
 		}
-		// The step's reference to its completion trace goes first: the row it names is deleted next,
+		// The task's reference to its completion trace goes first: the row it names is deleted next,
 		// and the foreign key on it is restrictive.
 		if _, err = tx.ExecContext(ctx,
-			`UPDATE steps SET status='waiting', completion_trace_id=NULL WHERE id=? AND status='running'`, stepID); err != nil {
-			return dbErr(err, "reset step and repark: reset step")
+			`UPDATE tasks SET status='waiting', completion_trace_id=NULL WHERE id=? AND status='running'`, taskID); err != nil {
+			return dbErr(err, "reset task and repark: reset task")
 		}
 		// The claim locked the completer's stake and transfer value on their own account; the trace
 		// that records them is about to go, so they are released here, by the helpers every failed
@@ -2251,46 +2219,40 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, `DELETE FROM traces WHERE id=?`, *completionTraceID); err != nil {
-				return dbErr(err, "reset step and repark: delete completion trace")
+				return dbErr(err, "reset task and repark: delete completion trace")
 			}
 		}
 		return nil
 	})
 }
 
-func (s *DB) ResetRunningSteps(ctx context.Context) error {
+func (s *DB) ResetRunningTasks(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE steps SET status='waiting' WHERE status='running' AND tx_id IS NULL`)
-	return dbErr(err, "reset running steps")
+		`UPDATE tasks SET status='waiting' WHERE status='running' AND tx_id IS NULL`)
+	return dbErr(err, "reset running tasks")
 }
 
-// ListStepsAwaitingCaller returns the waiting steps one counterparty may complete, oldest first —
-// the longest stranded are what an operator needs to see. Scoped in the query: ListSteps' visibility
-// predicate also matches every step inside a process the caller owns, so filtering it in Go after
-// the row cap could discard the whole page, and for a peer those are exactly the steps its own
+// ListTasksAwaitingCaller returns the waiting tasks one counterparty may complete, oldest first —
+// the longest stranded are what an operator needs to see. Scoped in the query: ListTasks' visibility
+// predicate also matches every task inside a process the caller owns, so filtering it in Go after
+// the row cap could discard the whole page, and for a peer those are exactly the tasks its own
 // inbound calls would crowd out (§13). remoteUserID narrows to one principal on that kernel; empty
-// returns every step the kernel may complete, its users' included, which is what an operator sees.
-func (s *DB) ListStepsAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*kernel.Step, error) {
+// returns every task the kernel may complete, its users' included, which is what an operator sees.
+func (s *DB) ListTasksAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*kernel.Task, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+stepCols+`
-		 FROM steps
+		`SELECT `+taskCols+`
+		 FROM tasks
 		 WHERE required_caller_user_id=? AND status='waiting'
 		   AND (?='' OR required_caller_remote_id=?)
 		 ORDER BY created_at ASC, id ASC LIMIT ?`,
 		requiredCallerUserID, remoteUserID, remoteUserID, limit)
 	if err != nil {
-		return nil, dbErr(err, "list steps awaiting caller")
+		return nil, dbErr(err, "list tasks awaiting caller")
 	}
-	return queryList(rows, "list steps awaiting caller", func(scan func(...any) error) (*kernel.Step, error) {
-		var step kernel.Step
-		if err := scanStep(&step, scan); err != nil {
-			return nil, err
-		}
-		return &step, nil
-	})
+	return queryList(rows, "list tasks awaiting caller", scanTask)
 }
 
 // nullStr converts an empty string to nil for nullable TEXT columns.
@@ -2374,14 +2336,14 @@ func refundCaller(ctx context.Context, tx *sql.Tx, kind, walletID, processID str
 		_, err := tx.ExecContext(ctx,
 			`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`, refund, gross, walletID)
 		return dbErr(err, op+": refund parent trace")
-	case kernel.CallerStep:
-		// BeginStepCall already released the parent trace lock. Return refund to the process.
+	case kernel.CallerTask:
+		// BeginTaskCall already released the parent trace lock. Return refund to the process.
 		if refund == 0 {
 			return nil
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE processes SET available=available+? WHERE id=?`, refund, processID)
-		return dbErr(err, op+": refund step to process")
+		return dbErr(err, op+": refund task to process")
 	}
 	return nil
 }
@@ -2396,7 +2358,7 @@ func refundCaller(ctx context.Context, tx *sql.Tx, kind, walletID, processID str
 // A refusal is a COMMITTED transaction — the record must persist — so the guard reports it with
 // a flag the commit returns as ErrSettlementDeferred after committing, never as an error inside
 // the transaction, which would roll the record back.
-func settleGuard(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, stepID string) (deferred bool, err error) {
+func settleGuard(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, taskID string) (deferred bool, err error) {
 	var inFlight int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=?
@@ -2406,12 +2368,12 @@ func settleGuard(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, stepI
 	if inFlight == 0 {
 		return false, nil
 	}
-	return true, recordOutcome(ctx, tx, ktx, stepID)
+	return true, recordOutcome(ctx, tx, ktx, taskID)
 }
 
-func recordOutcome(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, stepID string) error {
+func recordOutcome(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, taskID string) error {
 	b, _ := json.Marshal(kernel.TraceOutcome{Status: ktx.Status, Gross: ktx.Gross, Reason: ktx.Reason,
-		Args: ktx.ArgsJSON, Reply: ktx.ReplyJSON, EndedAt: ktx.EndedAt, StepID: stepID})
+		Args: ktx.ArgsJSON, Reply: ktx.ReplyJSON, EndedAt: ktx.EndedAt, TaskID: taskID})
 	_, err := tx.ExecContext(ctx, `UPDATE traces SET outcome_json=? WHERE id=?`, string(b), ktx.TraceID)
 	return dbErr(err, "record outcome")
 }
@@ -3924,7 +3886,7 @@ func (s *DB) ReadFederatedOutcome(ctx context.Context, counterparty, key string)
 }
 
 // ExecForTest runs a raw statement. It exists so tests can construct states the kernel's own API
-// deliberately cannot reach — notably breaking the step-park invariant to prove that a corrupted
+// deliberately cannot reach — notably breaking the task-park invariant to prove that a corrupted
 // ledger is reported as corruption rather than as a lost claim race. Not used in production.
 func (s *DB) ExecForTest(ctx context.Context, query string, args ...any) error {
 	_, err := s.db.ExecContext(ctx, query, args...)

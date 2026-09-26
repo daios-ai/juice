@@ -40,8 +40,8 @@ credentials. It interacts with Juice through four host functions:
 | Host function | Effect |
 |---|---|
 | `JuiceCall(action, args)` | call another action from this call's budget |
-| `JuiceStepCreate(partialArgs, requiredCaller, action)` | set work aside for a named party |
-| `JuiceStepComplete(stepID, input)` | complete a step this call created |
+| `JuiceTaskCreate(partialArgs, requiredCaller, action)` | set work aside for a named party |
+| `JuiceTaskComplete(taskID, input)` | complete a task this call created |
 | `JuiceLog(level, msg)` | write a log record against this call |
 
 A module can reach a web service by calling `sys/web` or a registered HTTP
@@ -153,9 +153,9 @@ the capability as an `Authorization: Bearer` token is rejected:
 {"code":"unauthenticated","error":"capability required"}
 ```
 
-The header also authorizes step creation and completion through
-`POST /v1/steps` and `POST /v1/steps/{id}/complete`, subject to the step rules.
-Completion is restricted to steps created by this trace and addressed to the
+The header also authorizes task creation and completion through
+`POST /v1/tasks` and `POST /v1/tasks/{id}/complete`, subject to the task rules.
+Completion is restricted to tasks created by this trace and addressed to the
 executing action's owner.
 
 The capability acts with the action owner's authority inside the current call.

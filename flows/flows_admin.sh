@@ -2,7 +2,7 @@
 # Sourced by flows_test.sh; built on flows/lib.sh (start_server, j/jj, make_user, assert_*).
 #
 # Dedupe note: user-facing CLI commands are HTTP clients, so `tx list` IS GET
-# /v1/transactions, `run` IS POST /v1/run, `step complete` IS POST /v1/steps/{id}/complete,
+# /v1/transactions, `run` IS POST /v1/run, `task complete` IS POST /v1/tasks/{id}/complete,
 # `user me` IS GET /v1/me. The old curl mirrors re-asserted state the CLI already exercised;
 # they are dropped. admin/* are HTTP clients too: they call /v1/admin/users|peers|kernel on the
 # same TCP API, gated by requireSuperuserMW, the noun they were given being the route itself.
@@ -196,16 +196,16 @@ flow_message() {
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
-    # alice sends sys/message to bob (price=0) → a waiting step addressed to bob.
-    local step_id
-    step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"Please review doc"}')" step_id)
-    assert_nonempty "message.step_created" "$step_id"
+    # alice sends sys/message to bob (price=0) → a waiting task addressed to bob.
+    local task_id
+    task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"Please review doc"}')" task_id)
+    assert_nonempty "message.task_created" "$task_id"
 
-    # bob sees the step and completes it.
-    assert_contains "message.bob_sees_step" "$step_id" "$(jj "$db" "$hb" step list)"
-    assert_json "message.step_waiting" "$(jj "$db" "$hb" step show "$step_id")" status waiting
-    assert_contains "message.bob_completes_step" tx_id "$(jj "$db" "$hb" step complete "$step_id" '{}')"
-    assert_json "message.step_done" "$(jj "$db" "$ha" step show "$step_id")" status done
+    # bob sees the task and completes it.
+    assert_contains "message.bob_sees_task" "$task_id" "$(jj "$db" "$hb" task list)"
+    assert_json "message.task_waiting" "$(jj "$db" "$hb" task show "$task_id")" status waiting
+    assert_contains "message.bob_completes_task" tx_id "$(jj "$db" "$hb" task complete "$task_id" '{}')"
+    assert_json "message.task_done" "$(jj "$db" "$ha" task show "$task_id")" status done
 
     # Missing 'to' and unknown recipient are both rejected.
     assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys@k/message '{"message":"hi"}'

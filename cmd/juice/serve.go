@@ -214,7 +214,7 @@ func runServer(name string) error {
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
 	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world)
 	// Every outbound contact records whether the peer answered (§13). Two integration points reach
-	// all of it: the adapter below (calls, resolves, steps, settlement) and the discovery pass
+	// all of it: the adapter below (calls, resolves, tasks, settlement) and the discovery pass
 	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
 	// nothing (§14).
 	recordContact := newContactRecorder(k.RecordKernelContact)
@@ -644,7 +644,7 @@ type server struct {
 // without a real network.
 type fedClient interface {
 	Gossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error)
-	Step(ctx context.Context, peerKey string, req fed.StepRequest) (fed.StepResponse, error)
+	Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
 	ListenAddrs() []string
 	Close() error
@@ -738,9 +738,9 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Post("/v1/transactions/{id}/rate", srv.rateTransaction)
 		r.Get("/v1/transactions/{id}/receipt-verification", srv.getReceiptVerification)
 
-		// Steps (reads are JWT-only; the POSTs accept a capability too — see below).
-		r.Get("/v1/steps", srv.listSteps)
-		r.Get("/v1/steps/{id}", srv.getStep)
+		// Tasks (reads are JWT-only; the POSTs accept a capability too — see below).
+		r.Get("/v1/tasks", srv.listTasks)
+		r.Get("/v1/tasks/{id}", srv.getTask)
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
@@ -763,10 +763,10 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Delete("/v1/grants", srv.deleteGrant)
 	})
 
-	// Composition surface (§9): step creation/completion accept a user JWT or a trace-scoped
+	// Composition surface (§9): task creation/completion accept a user JWT or a trace-scoped
 	// capability; /v1/call is the capability-only HTTP twin of juice.call (a subcall, no wallet path).
-	r.With(srv.authOrCapability).Post("/v1/steps", srv.postStep)
-	r.With(srv.authOrCapability).Post("/v1/steps/{id}/complete", srv.postCompleteStep)
+	r.With(srv.authOrCapability).Post("/v1/tasks", srv.postTask)
+	r.With(srv.authOrCapability).Post("/v1/tasks/{id}/complete", srv.postCompleteTask)
 	r.With(srv.capabilityOnly).Post("/v1/call", srv.postCall)
 
 	// Superuser supervision (money, access, federation trust, roster) — same TCP API, gated
@@ -966,7 +966,7 @@ func (s *server) capabilityOnly(next http.Handler) http.Handler {
 	})
 }
 
-// authOrCapability accepts either a capability (§9) or a user JWT — used by the step routes,
+// authOrCapability accepts either a capability (§9) or a user JWT — used by the task routes,
 // which a user or a composing endpoint may both drive.
 func (s *server) authOrCapability(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1325,18 +1325,18 @@ func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-// ---- Step handlers ----
+// ---- Task handlers ----
 
-func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
-	// ?peer= asks a peer which of its parked steps this caller may complete — the listing half of
-	// `step complete --peer`, under the same rule: an ordinary user asks as themselves and sees the
-	// steps addressed to them, the superuser asks as the whole kernel and sees all of them (§13).
+func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
+	// ?peer= asks a peer which of its parked tasks this caller may complete — the listing half of
+	// `task complete --peer`, under the same rule: an ordinary user asks as themselves and sees the
+	// tasks addressed to them, the superuser asks as the whole kernel and sees all of them (§13).
 	if peer := strings.TrimSpace(r.URL.Query().Get("peer")); peer != "" {
 		// A peer serves one bounded page of what it holds, under its own order (P8): there is
 		// nothing here for a filter or an offset to act on, so asking is an error, never silence.
 		for _, p := range []string{"process_id", "status", "limit", "offset"} {
 			if r.URL.Query().Get(p) != "" {
-				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the steps it holds", p))
+				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the tasks it holds", p))
 				return
 			}
 		}
@@ -1350,27 +1350,27 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 			writeOr(w, nil, err)
 			return
 		}
-		steps, err := s.kernel.PeerStepsAwaitingUs(r.Context(), peerKey, forUserID)
+		tasks, err := s.kernel.PeerTasksAwaitingUs(r.Context(), peerKey, forUserID)
 		if err == nil {
 			// The peer names our user by id, which routes; the user reads the address (D20).
 			names := s.kernel.NewNames()
-			for i, v := range steps.Steps {
+			for i, v := range tasks.Tasks {
 				if v.RequiredCaller != "" {
-					steps.Steps[i].RequiredCaller = names.Address(r.Context(), kernel.Principal{AccountID: v.RequiredCaller})
+					tasks.Tasks[i].RequiredCaller = names.Address(r.Context(), kernel.Principal{AccountID: v.RequiredCaller})
 				}
 			}
 		}
-		writeOr(w, steps, err)
+		writeOr(w, tasks, err)
 		return
 	}
 	limit, offset := listBounds(r)
-	views, err := listSteps(s.kernel, r.Context(), callerFrom(r),
+	views, err := listTasks(s.kernel, r.Context(), callerFrom(r),
 		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
 	writeOr(w, views, err)
 }
 
-func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, req createStepParams) (any, int, error) {
+func (s *server) postTask(w http.ResponseWriter, r *http.Request) {
+	handle(func(r *http.Request, req createTaskParams) (any, int, error) {
 		// A capability supplies the trace (the cap IS the trace, §9); a JWT caller supplies trace_id.
 		capTrace, capOwner, isCap := capFromContext(r)
 		callerID := callerFrom(r)
@@ -1391,17 +1391,17 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		if req.PartialArgs == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("partial_args is required")
 		}
-		view, err := createStep(s.kernel, r.Context(), callerID, req)
+		view, err := createTask(s.kernel, r.Context(), callerID, req)
 		return view, http.StatusCreated, err
 	})(w, r)
 }
 
-func (s *server) getStep(w http.ResponseWriter, r *http.Request) {
-	step, err := getStep(s.kernel, r.Context(), callerFrom(r), pathID(r))
-	writeOr(w, step, err)
+func (s *server) getTask(w http.ResponseWriter, r *http.Request) {
+	task, err := getTask(s.kernel, r.Context(), callerFrom(r), pathID(r))
+	writeOr(w, task, err)
 }
 
-func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
+func (s *server) postCompleteTask(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
 		Args *json.RawMessage `json:"args"`
 		Peer string           `json:"peer"`
@@ -1415,12 +1415,12 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 		// and it presents no session caller, which downstream reads as the kernel-level form. Checked
 		// before the branch, or an untrusted endpoint would dispatch abroad as the operator.
 		if isCap && req.Peer != "" {
-			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a step on a peer")
+			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a task on a peer")
 		}
-		// A peer-held step is completed over /juice/fed/step/1 (§13) — the same command, since a step
-		// is a step. Every caller completes as themselves: the home kernel attests their stable id,
-		// and whether they are its operator, and the serving kernel matches that against the step's
-		// addressing — a user completes the steps addressed to them, the operator those and the ones
+		// A peer-held task is completed over /juice/fed/task/1 (§13) — the same command, since a task
+		// is a task. Every caller completes as themselves: the home kernel attests their stable id,
+		// and whether they are its operator, and the serving kernel matches that against the task's
+		// addressing — a user completes the tasks addressed to them, the operator those and the ones
 		// addressed to the kernel itself.
 		if req.Peer != "" {
 			forUserID := callerFrom(r)
@@ -1428,17 +1428,17 @@ func (s *server) postCompleteStep(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, 0, err
 			}
-			body, err := s.kernel.CompletePeerStep(r.Context(), peerKey, pathID(r), *req.Args, forUserID)
+			body, err := s.kernel.CompletePeerTask(r.Context(), peerKey, pathID(r), *req.Args, forUserID)
 			return body, http.StatusOK, err
 		}
 		// Under a capability the caller is the executing action's owner AND the authority is the
-		// capability's own trace (§9): CompleteStepInTrace enforces both, so the cap completes only
-		// steps its own trace parked, never one living in another user's process.
+		// capability's own trace (§9): CompleteTaskInTrace enforces both, so the cap completes only
+		// tasks its own trace parked, never one living in another user's process.
 		if isCap {
-			reply, err := s.kernel.CompleteStepInTrace(r.Context(), capOwner, capTrace, pathID(r), *req.Args)
+			reply, err := s.kernel.CompleteTaskInTrace(r.Context(), capOwner, capTrace, pathID(r), *req.Args)
 			return reply, http.StatusOK, err
 		}
-		reply, err := s.kernel.CompleteStep(r.Context(), callerFrom(r), pathID(r), *req.Args)
+		reply, err := s.kernel.CompleteTask(r.Context(), callerFrom(r), pathID(r), *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }

@@ -177,10 +177,10 @@ $ juice --as bot@acme user transfer bob@acme 1 --external-key payout-2026-09-14-
 $ juice --as bot@acme user withdraw 5 --id wd-2026-09-14-001 --yes
 ```
 
-Step completion also prevents duplicate execution. A repeated local completion
-is refused after the step has been claimed or completed; read its record to
+Task completion also prevents duplicate execution. A repeated local completion
+is refused after the task has been claimed or completed; read its record to
 find the resulting transaction. A remote completion derives its retry key from
-the step and input, allowing the same request to recover its stored outcome.
+the task and input, allowing the same request to recover its stored outcome.
 
 ## Confirmation
 

@@ -506,7 +506,7 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolCall), t.handleCall)
 	t.host.SetStreamHandler(protocol.ID(ProtocolResolve), t.handleResolve)
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
-	t.host.SetStreamHandler(protocol.ID(ProtocolStep), t.handleStep)
+	t.host.SetStreamHandler(protocol.ID(ProtocolTask), t.handleTask)
 	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
 }
 
@@ -586,9 +586,9 @@ func (t *Transport) handleCall(s network.Stream) {
 	})
 }
 
-func (t *Transport) handleStep(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req StepRequest) any {
-		return t.cfg.Handlers.OnStep(ctx, key, req)
+func (t *Transport) handleTask(s network.Stream) {
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req TaskRequest) any {
+		return t.cfg.Handlers.OnTask(ctx, key, req)
 	})
 }
 
@@ -683,9 +683,9 @@ func (t *Transport) Call(ctx context.Context, peerKey string, req CallRequest) (
 	return roundTrip[CallRequest, CallResponse](ctx, t, peerKey, ProtocolCall, req)
 }
 
-// Step sends a step list/complete request to the peer (§13).
-func (t *Transport) Step(ctx context.Context, peerKey string, req StepRequest) (StepResponse, error) {
-	return roundTrip[StepRequest, StepResponse](ctx, t, peerKey, ProtocolStep, req)
+// Task sends a task list/complete request to the peer (§13).
+func (t *Transport) Task(ctx context.Context, peerKey string, req TaskRequest) (TaskResponse, error) {
+	return roundTrip[TaskRequest, TaskResponse](ctx, t, peerKey, ProtocolTask, req)
 }
 
 // Resolve fetches one action's signed manifest or one user's stable id+handle from the peer (§13).

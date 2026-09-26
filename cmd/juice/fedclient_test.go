@@ -24,10 +24,10 @@ type fakeFedCaller struct {
 	resolveResp fed.ResolveResponse
 	revealResp  fed.RevealResponse
 	resp        fed.CallResponse
-	stepResp    fed.StepResponse
+	taskResp    fed.TaskResponse
 	err         error
 	lastReq     fed.CallRequest
-	lastStep    fed.StepRequest
+	lastTask    fed.TaskRequest
 }
 
 func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (fed.CallResponse, error) {
@@ -43,9 +43,9 @@ func (f *fakeFedCaller) Reveal(_ context.Context, _ string, _ fed.RevealRequest)
 	return f.revealResp, f.err
 }
 
-func (f *fakeFedCaller) Step(_ context.Context, _ string, req fed.StepRequest) (fed.StepResponse, error) {
-	f.lastStep = req
-	return f.stepResp, f.err
+func (f *fakeFedCaller) Task(_ context.Context, _ string, req fed.TaskRequest) (fed.TaskResponse, error) {
+	f.lastTask = req
+	return f.taskResp, f.err
 }
 
 func TestExecuteFederationSuccess(t *testing.T) {

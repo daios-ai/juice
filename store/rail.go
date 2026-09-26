@@ -589,7 +589,7 @@ const owedSelect = `SELECT COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency
 
 // owedIsAdmitted selects the traces that are obligations at all: an inbound call this kernel
 // admitted under serving terms — it answers a request and dispatched none of its own (D19). A
-// peer-completed step answers a request too, but settles wholly here (P8) and is no obligation.
+// peer-completed task answers a request too, but settles wholly here (P8) and is no obligation.
 // The request's name is read from the receipt once the call committed and released its lock,
 // and from the lock before then: an obligation outlives the work, and a lock does not (P4, P10).
 const owedIsAdmitted = `t.idempotency_record_id IS NOT NULL AND t.idempotency_key IS NULL AND t.dispatch_json IS NOT NULL`

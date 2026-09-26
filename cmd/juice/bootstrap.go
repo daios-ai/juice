@@ -184,7 +184,7 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 		return err
 	}
 
-	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
+	// Recover interrupted calls and re-park crashed task completions (after signing key is set).
 	if err := k.Recover(ctx); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}

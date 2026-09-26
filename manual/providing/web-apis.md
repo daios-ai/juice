@@ -180,7 +180,7 @@ The `delegated_bearer` scheme uses a personal token supplied by the caller:
 
 A caller without the required grant is refused before charging and told which
 action to connect. The consent procedure is described in
-[Connecting an upstream account](../calling/consent-and-steps.html#connecting-an-upstream-account).
+[Connecting an upstream account](../calling/consent-and-tasks.html#connecting-an-upstream-account).
 
 Delegated actions are excluded from federation: the peer's kernel account
 cannot stand in for each remote user's upstream consent. Locally, each
@@ -197,5 +197,5 @@ caller sees that refusal from the provider, not from the kernel.
 
 OpenAPI import describes outbound calls to a service. To receive an event from
 that service, give the external system a Juice account through which it can
-run an action or complete a prepared step. See
-[External systems](steps.html#external-systems).
+run an action or complete a prepared task. See
+[External systems](tasks.html#external-systems).

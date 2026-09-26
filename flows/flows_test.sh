@@ -76,7 +76,7 @@ run_flows \
     flow_process_lifecycle flow_acl_public flow_successful_paid_call flow_http_verbs \
     flow_failed_call_refund flow_terms_changed_refused flow_input_schema_failure flow_output_schema_failure \
     flow_wasm_execution flow_contractor_subcall flow_contractor_failure \
-    flow_step_success flow_step_failure flow_step_restart flow_locked_funds_recovery \
+    flow_task_success flow_task_failure flow_task_restart flow_locked_funds_recovery \
     flow_rating \
     flow_pkce_auth flow_refresh_rotation flow_successful_receipt flow_failed_receipt \
     flow_lookup flow_chat flow_openapi_import_execute flow_openapi_changed_reimport \
@@ -86,7 +86,7 @@ run_flows \
     flow_fed_denial_underfunded flow_fed_disabled_action_rejection flow_fed_import_duty flow_fed_failed_action_refund \
     flow_fed_gossip_discovery flow_fed_evidence_reaches_buyer flow_fed_absent_action_rejection \
     flow_fed_discovery flow_fed_offline flow_fed_provider_crash_recovery flow_fed_peer_sync flow_fed_inspect_read_only \
-    flow_fed_step_complete flow_ticket flow_ticket_too_large flow_transfer \
+    flow_fed_task_complete flow_ticket flow_ticket_too_large flow_transfer \
     flow_compose_remote_child flow_compose_partial_refund flow_compose_through_kernel flow_compose_returns_home flow_compose_ticket flow_compose_underfunded flow_compose_inner_unreachable flow_compose_middle_cannot_stake flow_compose_middle_crash flow_compose_cycle \
     flow_transaction_access flow_list_projections flow_admin_supervision flow_native_orphan_purge flow_time flow_message flow_grant flow_grant_bearer
 exit $?

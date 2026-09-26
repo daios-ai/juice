@@ -19,7 +19,7 @@ the exit status is still nonzero.
 |---|---|---|---|
 | `unauthenticated` | 2 | 401 | No valid session, or the account is suspended. Check the credentials or refresh the session; contact the operator if suspension is reported. |
 | `unauthorized` | 3 | 403 | Authenticated, but not permitted. You are not the owner, the payer, or the named party. |
-| `not_found` | 4 | 404 | No such action, transaction, step or process — or you may not see it. A reference that names nothing and has no `index` child lands here. |
+| `not_found` | 4 | 404 | No such action, transaction, task or process — or you may not see it. A reference that names nothing and has no `index` child lands here. |
 | `invalid_input` | 5 | 422 | The request is malformed: a bad handle, a duplicate name, a non-positive amount. Nothing happened. |
 | `schema_violation` | 5 | 422 | Arguments did not match the action's input schema, or its output did not match the output schema. Input is checked before any charge. |
 | `insufficient_funds` | 6 | 402 | Not enough available balance. For a cross-kernel call you need the price **and** the stake. |
@@ -28,7 +28,7 @@ the exit status is still nonzero.
 | `peer_unreachable` | 9 | 502 | The client cannot reach a kernel, or a federated call provably never reached its peer and was fully refunded. Exit 9 also applies to an unreachable local server. `meta.kernel` names a registered server; `meta.peer` names a federation peer. |
 | `peer_unfunded` | 10 | 402 | The other kernel will not serve on credit: either it has lent your kernel as much as it allows, or its provider cannot fund the work. `meta.peer` names it. |
 | `terms_changed` | 11 | 409 | The pinned contract no longer matches. Nothing was charged; the message carries the current price and hash. |
-| `invalid_state` | 1 | 409 | The operation does not apply here: completing a step that is not waiting, using a model that is not configured, editing a cached remote action. |
+| `invalid_state` | 1 | 409 | The operation does not apply here: completing a task that is not waiting, using a model that is not configured, editing a cached remote action. |
 | `execution_failed` | 1 | 500 | The action ran and failed. What was not consumed is refunded. |
 | `rail_stopped` | 1 | 503 | Outgoing payments are halted. Deposits, execution and reads continue. The operator clears it. |
 | `internal` | 1 | 500 | A fault in the kernel. |
