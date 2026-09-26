@@ -573,7 +573,7 @@ func remedy(err error) string {
 		return "The peer declined to serve this call; nothing was charged."
 	case errors.Is(err, kernel.ErrTermsChanged):
 		if h := ke.Meta["quote_hash"]; h != "" {
-			return fmt.Sprintf("Nothing was charged. The price is now %s; pass --quote-hash %s to accept it.", ke.Meta["price"], h)
+			return fmt.Sprintf("Nothing was charged. The price is now %s; pass --quote-hash %s to accept it.", renderAmount(ke.Meta["price"]), h)
 		}
 	// A parked call: the money is reserved, not spent, and the process is the handle to follow it by.
 	case ke.Meta["process_id"] != "":
@@ -584,22 +584,23 @@ func remedy(err error) string {
 		return fmt.Sprintf("Your funds are reserved, not spent, on process %s. Follow it with: juice process show %s", id, id)
 	// It ran and failed: what it drew, and where the record of it is.
 	case ke.Meta["tx_id"] != "":
-		return fmt.Sprintf("Charged %s. The record is: juice tx show %s", renderCharge(ke.Meta["charge"]), ke.Meta["tx_id"])
+		return fmt.Sprintf("Charged %s. The record is: juice tx show %s", renderAmount(ke.Meta["charge"]), ke.Meta["tx_id"])
 	case errors.Is(err, kernel.ErrInternal):
 		return "This is a fault in juice. Re-run with --verbose for the detail behind it."
 	}
 	return ""
 }
 
-// renderCharge writes what a failed call drew the way every other amount is written. The unit is
-// this client's already-read record of the kernel it spoke to, so reporting a charge never costs a
-// request — and an unreadable one says the base-unit number rather than nothing.
-func renderCharge(raw string) string {
+// renderAmount writes an amount an error carries in base units the way every other amount is
+// written. The advice is said to a person on stderr, so it is in the world's unit whatever stdout
+// carries; the unit is this client's record of the kernel it spoke to, read once per invocation,
+// and an unreadable one says the base-unit number rather than nothing.
+func renderAmount(raw string) string {
 	amount, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		return raw
 	}
-	net, nerr := humanUnits(context.Background())
+	net, nerr := cli.network(context.Background())
 	if nerr != nil {
 		return raw
 	}

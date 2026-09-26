@@ -1726,7 +1726,9 @@ func runCmd() *cobra.Command {
 			}
 			// The unit is read before the call, never after: a /health that fails once the charge is
 			// committed must not turn a run that happened into an error (the rule units() states).
-			net, err := humanUnits(context.Background())
+			// Like every spending command's, it is read whatever stdout carries: the price is said to
+			// a person, on stderr or at the prompt, and --json and --quiet change only stdout.
+			net, err := cli.network(context.Background())
 			if err != nil {
 				return err
 			}

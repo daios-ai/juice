@@ -2090,6 +2090,27 @@ func TestTheAdviceOnAnErrorNamesCommandsThatExist(t *testing.T) {
 	}
 }
 
+// The advice after a failure is said to a person on stderr, so an amount in it is in the world's
+// unit whatever stdout carries: base units with no symbol read as a different, larger sum.
+func TestTheAdviceStatesAmountsInTheWorldsUnit(t *testing.T) {
+	stubKernel(t, 6, func(http.ResponseWriter, *http.Request) {})
+	old := flagJSON
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = old })
+	resetClient()
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&kernel.KernelError{Code: "execution_failed", Meta: map[string]string{"tx_id": "t-1", "charge": "500000"}}, "Charged 0.50 credits."},
+		{&kernel.KernelError{Code: "terms_changed", Meta: map[string]string{"quote_hash": "h", "price": "2000000"}}, "The price is now 2.00 credits;"},
+	} {
+		if hint := remedy(c.err); !strings.Contains(hint, c.want) {
+			t.Errorf("want %q in the advice:\n%s", c.want, hint)
+		}
+	}
+}
+
 // namedCommands pulls every `juice ...` the text tells the operator to run, as the words following
 // it: a flag, a dash, or a reference ends one, since nothing past that addresses a command.
 func namedCommands(hint string) [][]string {
@@ -2704,12 +2725,12 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 // a script has nobody to ask, and the pin is what guarantees the price it was quoted (U8, D20).
 func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
 	runs := 0
-	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
 			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob@k/echo"}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1500000})
 		default:
 			runs++
 			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"ok": true}})
@@ -2768,6 +2789,24 @@ func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
 			t.Errorf("the call ran %d times, want once", runs)
 		}
 	})
+	// --json and --quiet decide what stdout carries; the price is said to the person running the
+	// script, so it is in the world's unit whatever stdout carries.
+	for _, mode := range []*bool{&flagJSON, &flagQuiet} {
+		t.Run("a script is told the price in the world's unit", func(t *testing.T) {
+			atTerminal(t, false)
+			old := *mode
+			*mode = true
+			t.Cleanup(func() { *mode = old })
+			said := captureStderr(t, func() {
+				if _, err := execTestCmd(t, runCmd(), "bob/echo"); err != nil {
+					t.Errorf("an unattended run failed: %v", err)
+				}
+			})
+			if !strings.Contains(said, "bob/echo costs 1.50 credits.") {
+				t.Errorf("the price was not said in the world's unit:\n%s", said)
+			}
+		})
+	}
 	t.Run("--yes skips the question", func(t *testing.T) {
 		runs = 0
 		atTerminal(t, true)
