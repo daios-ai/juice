@@ -220,7 +220,7 @@ func revealFixture(t *testing.T, obligation, lottery int64, secret, status strin
 		peer: &Account{ID: "peer-1", KernelPublicKey: peerKey},
 		row: &Owed{
 			ID: "call-1", PeerUserID: "peer-1", UserID: "seller-1", TraceID: "tr-1", Settled: settled,
-			Terms:      *marshalServing(500, lottery, obligation, "0a0b", commitmentOf(secret), "call-1", peerKey),
+			Terms:      *marshalServing(500, lottery, obligation, "0a0b", commitmentOf(secret)),
 			Obligation: obligation, Status: status, CreatedAt: time.Now().UTC(),
 		},
 	}

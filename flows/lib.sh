@@ -68,7 +68,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # point belongs to the world (D23), and seed_world below writes it into this kernel's world file.
 write_config() {
     local db="$1"; shift
-    local fee_bps=0 script_timeout_ms=10000 kernel_handle="test-kernel" remote_retry_interval_seconds=60 discovery_interval_seconds=300
+    local fee_bps=0 script_timeout_ms=10000 kernel_handle="$KERNEL_NAME" remote_retry_interval_seconds=60 discovery_interval_seconds=300
     local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs=""
     local a
     for a in "$@"; do case "$a" in
@@ -167,8 +167,8 @@ ledger_in() {
 import sys, json
 me, tx = sys.argv[2], sys.argv[3]
 rows = json.loads(sys.argv[1] or '[]')
-print(sum(e['amount'] for e in rows if e.get('reason') == tx and e.get('to_handle') == me))" \
-        "$(jj "$1" "$2" user ledger --limit 100)" "$(strfield "$(jj "$1" "$2" user me)" handle)" "$3"
+print(sum(e['amount'] for e in rows if e.get('reason') == tx and e.get('to') == me))" \
+        "$(jj "$1" "$2" user ledger --limit 100)" "$(strfield "$(jj "$1" "$2" user me)" address)" "$3"
 }
 
 # inner_tx db home trace — the transaction of the call made beneath a trace.
@@ -201,6 +201,10 @@ start_server() {
     for a in "$@"; do case "$a" in seed=*) boot=${a#*=} ;; *) cfg+=("$a") ;; esac; done
     mkdir -p "$(dirname "$db")"
     write_config "$db" ${cfg[@]+"${cfg[@]}"}
+    # The name the kernel calls itself is the kernel segment of every address on it (D15): what a
+    # login is written with and what `kname` answers for this db.
+    KHANDLE["$db"]=$KERNEL_NAME
+    for a in "$@"; do case "$a" in kernel_handle=*) KHANDLE["$db"]=${a#*=} ;; esac; done
     seed_world "$db" "$boot"
     local log; log=$(server_log "$db")
     # Truncate here, in the parent, before the server is launched: the redirection below truncates
@@ -315,18 +319,21 @@ json.dump(d, open(path, "w"), indent=2)
 await_login() {
     local db="$1" home="$2" i
     for i in $(seq 20); do
-        know "$db" "$home" && j "$db" "$home" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
-        [ -n "$(strfield "$(jj "$db" "$home" user me)" handle)" ] && return 0
+        know "$db" "$home" && j "$db" "$home" auth login "sys@$(kname "$db")" --password sys-pass >/dev/null 2>&1
+        [ -n "$(strfield "$(jj "$db" "$home" user me)" address)" ] && return 0
         sleep 0.5
     done
     return 1
 }
 
-# know db home — register db's server with the client under one name, which is what a login names
-# after the @. Re-registering the same kernel at the same address is a no-op, so this is safe to
-# call before every login.
+# know db home — register db's server with the client. The record is named by what the kernel
+# calls itself, which is what a login names after the @. Re-registering the same kernel at the
+# same address is a no-op, so this is safe to call before every login.
+# kname db — that name, for writing addresses on db: `sys@$(kname "$db")`, `alice@$(kname "$db")/x`.
 KERNEL_NAME=k
-know() { j "$1" "$2" kernel add "$(url "$1")" "$KERNEL_NAME" >/dev/null 2>&1; }
+declare -A KHANDLE
+kname() { echo "${KHANDLE[$1]:-$KERNEL_NAME}"; }
+know() { j "$1" "$2" kernel add "$(url "$1")" >/dev/null 2>&1; }
 
 # url db — the base URL of db's server (for curl-based HTTP-only assertions).
 url() { echo "${SERVER_URL[$1]:-}"; }
@@ -431,8 +438,9 @@ pkce_verifier()  { python3 -c "import secrets;print(secrets.token_urlsafe(32))";
 pkce_challenge() { python3 -c "import sys,hashlib,base64;print(base64.urlsafe_b64encode(hashlib.sha256(sys.argv[1].encode()).digest()).rstrip(b'=').decode())" "$1"; }
 # pkce_code base handle password challenge — POST /v1/auth/authorize, return the auth code.
 pkce_code() {
+    local who="$2"; case "$who" in *@*) ;; *) who="$who@$KERNEL_NAME" ;; esac # a login is an address (D15)
     curl -sf -X POST "$1/v1/auth/authorize" -H 'Content-Type: application/json' \
-        -d "{\"handle\":\"$2\",\"password\":\"$3\",\"code_challenge\":\"$4\"}" 2>/dev/null \
+        -d "{\"handle\":\"$who\",\"password\":\"$3\",\"code_challenge\":\"$4\"}" 2>/dev/null \
     | python3 -c "import sys,json,urllib.parse as u; d=json.load(sys.stdin); print(u.parse_qs(u.urlparse(d['redirect']).query)['code'][0])" 2>/dev/null
 }
 # http_code method url [json] [token] — HTTP status of a request.
@@ -517,15 +525,15 @@ profile_set() { _ctx_py "$(juice_client_dir "$1")" "$2" "$3"; }
 make_admin() {
     start_server "$1" "$2" "${@:3}" || return 1
     know "$1" "$2"
-    j "$1" "$2" auth login "sys@$KERNEL_NAME" --password sys-pass >/dev/null 2>&1
+    j "$1" "$2" auth login "sys@$(kname "$1")" --password sys-pass >/dev/null 2>&1
 }
 # make_user db admin_home user_home handle [password]  — create handle (as sys) and log it
 # in under user_home. Default password is "userpass" so curl-based checks can reference it.
 make_user() {
     local db="$1" ah="$2" uh="$3" h="$4" pw="${5:-userpass}"
-    j "$db" "$ah" user create "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
+    j "$db" "$ah" user create "$h@$(kname "$db")" --password "$pw" >/dev/null 2>&1
     know "$db" "$uh"
-    j "$db" "$uh" auth login "$h@$KERNEL_NAME" --password "$pw" >/dev/null 2>&1
+    j "$db" "$uh" auth login "$h@$(kname "$db")" --password "$pw" >/dev/null 2>&1
 }
 # deposit db sys_home handle amount
 # newref — a distinct name for one payment. Every crossing names the payment it records, so two
@@ -544,7 +552,8 @@ units() { printf '%d.%06d\n' "$(( $1 / 1000000 ))" "$(( $1 % 1000000 ))"; }
 # caller does not give one (U3). A deposit that fails fails the flow: a test funded by accident
 # proves nothing about what it then measures.
 deposit() {
-    j "$1" "$2" admin user deposit "$3" "$(units "$4")" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1 \
+    local who="$3"; case "$who" in *@*) ;; *) who="$who@$(kname "$1")" ;; esac
+    j "$1" "$2" admin user deposit "$who" "$(units "$4")" --ref "${5:-flow-$RANDOM$RANDOM}" --yes >/dev/null 2>&1 \
         || fail "deposit" "could not credit $3 with $4"
 }
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.

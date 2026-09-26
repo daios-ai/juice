@@ -218,7 +218,7 @@ func TestEnsureSysLookupIdempotent(t *testing.T) {
 
 	// Create a superuser manually.
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "sys", Password: "pass",
+		Handle: "sys@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestEnsureSysLLMChatIdempotent(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "sys", Password: "pass",
+		Handle: "sys@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +318,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	k := newTestKernel(t)
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "sys", Password: "pass",
+		Handle: "sys@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -528,7 +528,7 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "sys", Password: "pass"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "sys@k", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,9 @@ func loginToken(k *kernel.Kernel, ctx context.Context, handle, password string) 
 // loginTokens is the canonical password→tokens path (§12): authorize with PKCE, then exchange the
 // code — the only token-issuing flow §14 defines. Credential errors surface from StartAuthCode.
 func loginTokens(k *kernel.Kernel, ctx context.Context, handle, password string) (access, refresh string, err error) {
+	if !strings.Contains(handle, "@") {
+		handle += "@" + kernel.TestOwnName // a login is an address (D15); a bare test handle is one on this kernel
+	}
 	verifier, err := kernel.GenerateCodeVerifier()
 	if err != nil {
 		return "", "", err
@@ -66,12 +69,12 @@ func TestPasswordMinLength(t *testing.T) {
 	k := newTestKernel(st)
 
 	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "shorty", Password: "short12", // 7 chars
+		Handle: "shorty@k", Password: "short12", // 7 chars
 	}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("CreateUser short password: got %v, want ErrInvalidInput", err)
 	}
 	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "longy", Password: "pass1234", // 8 chars
+		Handle: "longy@k", Password: "pass1234", // 8 chars
 	}); err != nil {
 		t.Errorf("CreateUser 8-char password: unexpected error %v", err)
 	}
@@ -181,7 +184,7 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "charlie",
+		Handle:   "charlie@k",
 		Password: "pw123",
 	})
 	if err != nil {
@@ -192,7 +195,7 @@ func TestStartAndExchangeAuthCode(t *testing.T) {
 	verifier, _ := kernel.GenerateCodeVerifier()
 	challenge := kernel.CodeChallenge(verifier)
 
-	redirect, err := k.StartAuthCode(ctx, "charlie", "pw123", challenge, "http://localhost:9999/cb")
+	redirect, err := k.StartAuthCode(ctx, "charlie@k", "pw123", challenge, "http://localhost:9999/cb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +243,7 @@ func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "dave",
+		Handle:   "dave@k",
 		Password: "pass",
 	})
 	if err != nil {
@@ -250,7 +253,7 @@ func TestExchangeAuthCodeWrongVerifier(t *testing.T) {
 	verifier, _ := kernel.GenerateCodeVerifier()
 	challenge := kernel.CodeChallenge(verifier)
 
-	redirect, _ := k.StartAuthCode(ctx, "dave", "pass", challenge, "")
+	redirect, _ := k.StartAuthCode(ctx, "dave@k", "pass", challenge, "")
 	var code string
 	for i := 0; i < len(redirect); i++ {
 		if i+5 <= len(redirect) && redirect[i:i+5] == "code=" {
@@ -271,7 +274,7 @@ func TestRefreshAccessToken(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "eve",
+		Handle:   "eve@k",
 		Password: "pass",
 	})
 	if err != nil {
@@ -309,20 +312,20 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	ctx := context.Background()
 
 	admin, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "sys", Password: "su-pass",
+		Handle: "sys@k", Password: "su-pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "suspended-auth", Password: "pass",
+		Handle: "suspended-auth@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	verifier, _ := kernel.GenerateCodeVerifier()
 	challenge := kernel.CodeChallenge(verifier)
-	redirect, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, "")
+	redirect, err := k.StartAuthCode(ctx, u.Handle+"@k", "pass", challenge, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +336,7 @@ func TestSuspendedUserCannotUseAuthFlows(t *testing.T) {
 	if err := k.SuspendUser(ctx, admin.ID, u.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.StartAuthCode(ctx, u.Handle, "pass", challenge, ""); !errors.Is(err, kernel.ErrUnauthenticated) {
+	if _, err := k.StartAuthCode(ctx, u.Handle+"@k", "pass", challenge, ""); !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Fatalf("StartAuthCode: got %v, want ErrUnauthenticated", err)
 	}
 	code := redirect[len("?code="):]
@@ -373,7 +376,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 	}
 
 	// Run: requireActiveUser rejects suspended subject.
-	_, err = k.Run(ctx, kernel.RunRequest{CallerID: u.ID, ActionRef: "any/nonexistent", Args: nil})
+	_, err = k.Run(ctx, kernel.RunRequest{CallerID: u.ID, ActionRef: "any@k/nonexistent", Args: nil})
 	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("Run: got %v, want ErrUnauthenticated", err)
 	}
@@ -427,7 +430,7 @@ func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "redir-user", Password: "pass",
+		Handle: "redir-user@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +438,7 @@ func TestExchangeAuthCodeRedirectURIMismatch(t *testing.T) {
 
 	verifier, _ := kernel.GenerateCodeVerifier()
 	challenge := kernel.CodeChallenge(verifier)
-	redirect, err := k.StartAuthCode(ctx, "redir-user", "pass", challenge, "http://legit.example.com/cb")
+	redirect, err := k.StartAuthCode(ctx, "redir-user@k", "pass", challenge, "http://legit.example.com/cb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +525,7 @@ func TestSeedPhraseRecovery(t *testing.T) {
 	}
 	recoveryPub := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "rec", Password: "origpass", RecoveryPublicKey: recoveryPub,
+		Handle: "rec@k", Password: "origpass", RecoveryPublicKey: recoveryPub,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -536,11 +539,11 @@ func TestSeedPhraseRecovery(t *testing.T) {
 	}
 
 	// Happy path: start, sign, complete -> password reset.
-	nonce, err := k.StartRecovery(ctx, "rec")
+	nonce, err := k.StartRecovery(ctx, "rec@k")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.CompleteRecovery(ctx, "rec", nonce, sign(priv, nonce), "newpass1"); err != nil {
+	if err := k.CompleteRecovery(ctx, "rec@k", nonce, sign(priv, nonce), "newpass1"); err != nil {
 		t.Fatalf("CompleteRecovery: %v", err)
 	}
 	if _, _, err := loginTokens(k, ctx, "rec", "origpass"); err == nil {
@@ -551,25 +554,25 @@ func TestSeedPhraseRecovery(t *testing.T) {
 	}
 
 	// The nonce is single-use: a replay fails.
-	if err := k.CompleteRecovery(ctx, "rec", nonce, sign(priv, nonce), "other123"); err == nil {
+	if err := k.CompleteRecovery(ctx, "rec@k", nonce, sign(priv, nonce), "other123"); err == nil {
 		t.Error("consumed nonce should not be reusable")
 	}
 
 	// A signature from the wrong key is rejected.
-	nonce2, err := k.StartRecovery(ctx, "rec")
+	nonce2, err := k.StartRecovery(ctx, "rec@k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, wrongPriv, _ := ed25519.GenerateKey(rand.Reader)
-	if err := k.CompleteRecovery(ctx, "rec", nonce2, sign(wrongPriv, nonce2), "hacked12"); !errors.Is(err, kernel.ErrUnauthorized) {
+	if err := k.CompleteRecovery(ctx, "rec@k", nonce2, sign(wrongPriv, nonce2), "hacked12"); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("wrong-key recovery: got %v, want ErrUnauthorized", err)
 	}
 
 	// An account with no recovery key enrolled cannot start recovery.
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "norec", Password: "password"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "norec@k", Password: "password"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.StartRecovery(ctx, "norec"); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.StartRecovery(ctx, "norec@k"); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("StartRecovery without a key: got %v, want ErrInvalidState", err)
 	}
 }

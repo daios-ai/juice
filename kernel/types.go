@@ -177,7 +177,7 @@ type Connection struct {
 // GrantView is the token-free read shape for GET /v1/me: the action reference, the scopes the
 // action requests (from its auth config), and when the grant was created.
 type GrantView struct {
-	Action      string    `json:"action"` // @owner/name
+	Action      string    `json:"action"` // owner@kernel/name
 	Scopes      any       `json:"scopes,omitempty"`
 	ProviderKey string    `json:"provider_key,omitempty"` // key of the backing Connection (§8); empty on unbackfilled legacy grants
 	CreatedAt   time.Time `json:"created_at"`
@@ -265,16 +265,27 @@ type StepReply struct {
 // Step-completion traces may have a ParentTraceID that crosses process boundaries.
 // Available tracks funds remaining after subcalls and step parks; zeroed at settlement.
 type Trace struct {
-	ID             string  `json:"id"`
-	ProcessID      string  `json:"process_id"`
-	ParentTraceID  *string `json:"parent_trace_id,omitempty"`
-	ActionOwnerID  string  `json:"action_owner_id"`
-	ActionID       string  `json:"action_id"`
-	CallerUserID   string  `json:"caller_user_id"`
+	ID            string  `json:"id"`
+	ProcessID     string  `json:"process_id"`
+	ParentTraceID *string `json:"parent_trace_id,omitempty"`
+	ActionOwnerID string  `json:"action_owner_id"`
+	ActionID      string  `json:"action_id"`
+	CallerUserID  string  `json:"caller_user_id"`
+	// CallerRemoteID/CallerHandle and TargetRemoteID/TargetHandle complete the caller's and the
+	// target's principal (D4) when the account stands for a user on a peer: the caller a buying
+	// kernel attested in its signed request, or the step completer it attested; the target a proxy
+	// row names as its remote owner. Set once, where the call enters the kernel, and copied onto
+	// the transaction by every settlement path. Empty for a local user or the peer kernel itself.
+	CallerRemoteID string  `json:"-"`
+	CallerHandle   string  `json:"-"`
+	TargetRemoteID string  `json:"-"`
+	TargetHandle   string  `json:"-"`
 	Available      int64   `json:"available"`
 	Locked         int64   `json:"locked"`
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
-	DispatchJSON   *string `json:"dispatch_json,omitempty"`
+	// DispatchJSON is what this trace sent across a kernel boundary, when it did (D19): outbound
+	// terms only. What it was admitted under lives on the admission record it answers.
+	DispatchJSON *string `json:"dispatch_json,omitempty"`
 	// IdempotencyRecordID is the inbound cross-kernel record this trace serves (§13), set only on a
 	// root call made on a peer's behalf. Whichever settlement resolves the trace completes that
 	// record, so a crashed or parked federated call never strands its requester.
@@ -304,14 +315,22 @@ type Trace struct {
 
 // Transaction records one attempted call. Immutable after creation.
 type Transaction struct {
-	ID                string          `json:"id"`
-	ProcessID         string          `json:"process_id"`
-	TraceID           string          `json:"trace_id"`
-	ParentTraceID     string          `json:"parent_trace_id"`
-	OwnerUserID       string          `json:"owner_user_id"`
-	CallerUserID      string          `json:"caller_user_id"`
-	TargetUserID      string          `json:"target_user_id"`
-	ActionID          string          `json:"action_id"`
+	ID            string `json:"id"`
+	ProcessID     string `json:"process_id"`
+	TraceID       string `json:"trace_id"`
+	ParentTraceID string `json:"parent_trace_id"`
+	OwnerUserID   string `json:"owner_user_id"`
+	CallerUserID  string `json:"caller_user_id"`
+	TargetUserID  string `json:"target_user_id"`
+	// The remote halves of the caller's and target's principal, copied from the trace at
+	// settlement (D4): the transaction outlives its trace, so it keeps its own.
+	CallerRemoteID string `json:"-"`
+	CallerHandle   string `json:"-"`
+	TargetRemoteID string `json:"-"`
+	TargetHandle   string `json:"-"`
+	ActionID       string `json:"action_id"`
+	// ActionName is the action's stored name at the time — for a proxy the folded form
+	// (JoinProxyName) — never rewritten (G3); readers render it through Names.
 	ActionName        string          `json:"action_name"`
 	RemoteActionID    string          `json:"remote_action_id,omitempty"` // remote action ID on the far kernel; empty for local calls
 	ArgsJSON          json.RawMessage `json:"args"`
@@ -331,6 +350,31 @@ type Transaction struct {
 	EvidenceEligible bool      `json:"-"`
 	StartedAt        time.Time `json:"started_at"`
 	EndedAt          time.Time `json:"ended_at"`
+}
+
+// Caller and Target are the transaction's parties as principals (D4).
+func (t *Transaction) Caller() Principal {
+	return Principal{AccountID: t.CallerUserID, RemoteID: t.CallerRemoteID, Handle: t.CallerHandle}
+}
+func (t *Transaction) Target() Principal {
+	return Principal{AccountID: t.TargetUserID, RemoteID: t.TargetRemoteID, Handle: t.TargetHandle}
+}
+
+// Caller and Target are the trace's parties as principals; a transaction copies them at settlement.
+func (t *Trace) Caller() Principal {
+	return Principal{AccountID: t.CallerUserID, RemoteID: t.CallerRemoteID, Handle: t.CallerHandle}
+}
+func (t *Trace) Target() Principal {
+	return Principal{AccountID: t.ActionOwnerID, RemoteID: t.TargetRemoteID, Handle: t.TargetHandle}
+}
+
+// RequiredCaller is who the step is parked for, as a principal.
+func (s *Step) RequiredCaller() Principal {
+	p := Principal{AccountID: s.RequiredCallerUserID, Handle: s.RequiredCallerHandle}
+	if s.RequiredCallerRemoteID != nil {
+		p.RemoteID = *s.RequiredCallerRemoteID
+	}
+	return p
 }
 
 // Stats tracks fixed performance and usage statistics for an action.

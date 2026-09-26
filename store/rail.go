@@ -578,17 +578,21 @@ var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unre
 // the rest of what the call was sold under (D19). Reading it from there rather than from the
 // execution lock is what lets the lock be released the moment the call commits: an obligation
 // outlives the work, and a lock does not (P4, P10).
-const owedSelect = `SELECT json_extract(t.dispatch_json,'$.idempotency_key'), t.caller_user_id,
+const owedSelect = `SELECT COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key, ''), t.caller_user_id,
        t.action_owner_id, t.id,
        t.dispatch_json, x.id IS NOT NULL, COALESCE(r.charge + r.premium, 0),
        t.owed_status, t.owed_amount, t.owed_tx_hash, t.owed_blockchain_address, t.created_at
   FROM traces t
   LEFT JOIN transactions x ON x.trace_id = t.id
-  LEFT JOIN receipts r ON r.trace_id = t.id`
+  LEFT JOIN receipts r ON r.trace_id = t.id
+  LEFT JOIN idempotency_records ir ON ir.id = t.idempotency_record_id`
 
 // owedIsAdmitted selects the traces that are obligations at all: an inbound call this kernel
-// admitted, which is exactly a trace carrying a frozen request.
-const owedIsAdmitted = `COALESCE(json_extract(t.dispatch_json,'$.idempotency_key'),'') <> ''`
+// admitted under serving terms — it answers a request and dispatched none of its own (D19). A
+// peer-completed step answers a request too, but settles wholly here (P8) and is no obligation.
+// The request's name is read from the receipt once the call committed and released its lock,
+// and from the lock before then: an obligation outlives the work, and a lock does not (P4, P10).
+const owedIsAdmitted = `t.idempotency_record_id IS NOT NULL AND t.idempotency_key IS NULL AND t.dispatch_json IS NOT NULL`
 
 func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 	var o kernel.Owed
@@ -605,7 +609,7 @@ func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 
 func (s *DB) ReadOwed(ctx context.Context, id, peerUserID string) (*kernel.Owed, error) {
 	o, err := scanOwed(s.db.QueryRowContext(ctx,
-		owedSelect+` WHERE `+owedIsAdmitted+` AND json_extract(t.dispatch_json,'$.idempotency_key')=? AND t.caller_user_id=?`, id, peerUserID).Scan)
+		owedSelect+` WHERE `+owedIsAdmitted+` AND COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key)=? AND t.caller_user_id=?`, id, peerUserID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -618,14 +622,15 @@ func (s *DB) ReadOwed(ctx context.Context, id, peerUserID string) (*kernel.Owed,
 // Every commit path calls it; a local call froze no serving terms and moves nothing.
 func correctExposureTx(ctx context.Context, tx *sql.Tx, traceID string, obligation int64) error {
 	var terms sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT dispatch_json FROM traces WHERE id=?`, traceID).Scan(&terms); err != nil {
+	var foreign bool
+	if err := tx.QueryRowContext(ctx, `SELECT dispatch_json, idempotency_record_id IS NOT NULL AND idempotency_key IS NULL AND dispatch_json IS NOT NULL
+		 FROM traces WHERE id=?`, traceID).Scan(&terms, &foreign); err != nil {
 		return dbErr(err, "correct exposure: read trace")
 	}
-	reserve, foreign := kernel.ServingReserve(nullStrPtr(terms))
 	if !foreign {
 		return nil
 	}
-	return moveExposure(ctx, tx, obligation-reserve)
+	return moveExposure(ctx, tx, obligation-kernel.ServingReserve(nullStrPtr(terms)))
 }
 
 func nullStrPtr(s sql.NullString) *string {

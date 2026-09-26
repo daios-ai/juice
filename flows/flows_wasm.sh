@@ -15,12 +15,12 @@ flow_wasm_execution() {
     local aid; aid=$(publish "$db" "$ha" echo --kind wasm --source "$dir/echo.wasm" --price "$(units 10)" --description "echo")
     assert_nonempty "wasm_execution.artifact_hash" "$(strfield "$(jj "$db" "$ha" action show "$aid")" artifact_hash)"
 
-    assert_nonempty "wasm_execution.echo_call_succeeds" "$(strfield "$(jj "$db" "$hb" run alice/echo '{"msg":"hello"}')" tx_id)"
+    assert_nonempty "wasm_execution.echo_call_succeeds" "$(strfield "$(jj "$db" "$hb" run alice@k/echo '{"msg":"hello"}')" tx_id)"
     assert_jnum "wasm_execution.echo_charged" "$(jj "$db" "$hb" user me)" available 190
 
     make_infinite_loop_wasm "$dir/loop.wasm"
     local lid; lid=$(publish "$db" "$ha" loop --kind wasm --source "$dir/loop.wasm" --price "$(units 10)" --description "loop")
-    assert_fails "wasm_execution.infinite_loop_timeout" "timeout\|timed\|execution" -- j "$db" "$hb" run alice/loop '{}'
+    assert_fails "wasm_execution.infinite_loop_timeout" "timeout\|timed\|execution" -- j "$db" "$hb" run alice@k/loop '{}'
     assert_jnum "wasm_execution.loop_refunded" "$(jj "$db" "$hb" user me)" available 190
 }
 
@@ -36,11 +36,11 @@ flow_contractor_subcall() {
 
     # bob's HTTP sub-target (price 50); alice's WASM contractor (price 50) sub-calls it.
     local sub; sub=$(publish "$db" "$hb" sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price "$(units 50)" --description "sub")
-    make_contractor_wasm "$dir/contractor.wasm" "bob/sub-target"
+    make_contractor_wasm "$dir/contractor.wasm" "bob@k/sub-target"
     local cid; cid=$(publish "$db" "$ha" contractor --kind wasm --source "$dir/contractor.wasm" --price "$(units 50)" --description "contractor")
 
     # carol funds the process with 50; the whole budget flows to bob via the sub-call.
-    assert_nonempty "contractor_subcall.call_succeeds" "$(strfield "$(jj "$db" "$hc" run alice/contractor '{}')" tx_id)"
+    assert_nonempty "contractor_subcall.call_succeeds" "$(strfield "$(jj "$db" "$hc" run alice@k/contractor '{}')" tx_id)"
     assert_jnum "contractor_subcall.caller_spent"  "$(jj "$db" "$hc" user me)" available 0
     assert_jnum "contractor_subcall.alice_untouched" "$(jj "$db" "$ha" user me)" available 0
     assert_jnum "contractor_subcall.bob_credited"  "$(jj "$db" "$hb" user me)" available 50
@@ -57,11 +57,11 @@ flow_contractor_failure() {
     deposit "$db" "$hs" carol 30   # < sub-call price 50
 
     local sub; sub=$(publish "$db" "$hb" sub-target --kind http --source "http://127.0.0.1:${bport}/sub" --price "$(units 50)" --description "sub")
-    make_contractor_wasm "$dir/contractor.wasm" "bob/sub-target"
+    make_contractor_wasm "$dir/contractor.wasm" "bob@k/sub-target"
     local cid; cid=$(publish "$db" "$ha" contractor --kind wasm --source "$dir/contractor.wasm" --price "$(units 50)" --description "contractor")
 
     # carol (30) < contractor price (50) → rejected at the funds check, nothing charged.
-    assert_fails "contractor_failure.error_returned" "insufficient\|balance\|funds\|credits\|costs" -- j "$db" "$hc" run alice/contractor '{}'
+    assert_fails "contractor_failure.error_returned" "insufficient\|balance\|funds\|credits\|costs" -- j "$db" "$hc" run alice@k/contractor '{}'
     assert_jnum "contractor_failure.caller_unchanged" "$(jj "$db" "$hc" user me)" available 30
     assert_jnum "contractor_failure.alice_unchanged"  "$(jj "$db" "$ha" user me)" available 0
 }
@@ -74,7 +74,7 @@ flow_step_success() {
     make_user "$db" "$hs" "$hb" bob
 
     # alice → bob message creates a waiting step (next_action=sys/sink, price 0).
-    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"review"}')" step_id)
+    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"review"}')" step_id)
     assert_nonempty "step_success.create_returns_id" "$step_id"
     assert_json "step_success.status_waiting" "$(jj "$db" "$ha" step show "$step_id")" status waiting
 
@@ -83,7 +83,7 @@ flow_step_success() {
     assert_eq "step_success.caller_sees_step" 1 "$(jj "$db" "$hb" step list | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s.get('id')=='$step_id'))" 2>/dev/null)"
     # The step carries owner_handle (the process owner / payer) — resolvable even to bob, who is the
     # required caller, not the owner. The step is the continuation that settles into alice's transaction.
-    assert_json "step_success.owner_handle_from_caller" "$(jj "$db" "$hb" step show "$step_id")" owner_handle alice
+    assert_json "step_success.owner_handle_from_caller" "$(jj "$db" "$hb" step show "$step_id")" owner alice@k
 
     # bob (required caller) completes it → done.
     local comp; comp=$(jj "$db" "$hb" step complete "$step_id" '{}')
@@ -101,12 +101,12 @@ flow_step_failure() {
     make_user "$db" "$hs" "$hc" carol
 
     # Completing an already-done step → ErrInvalidState.
-    local s1; s1=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"first"}')" step_id)
+    local s1; s1=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"first"}')" step_id)
     jj "$db" "$hb" step complete "$s1" '{}' >/dev/null 2>&1
     assert_fails "step_failure.double_complete_rejected" "invalid.state\|already\|not.*waiting" -- j "$db" "$hb" step complete "$s1" '{}'
 
     # Wrong caller (carol) completing bob's step → ErrUnauthorized.
-    local s2; s2=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"second"}')" step_id)
+    local s2; s2=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"second"}')" step_id)
     assert_fails "step_failure.wrong_caller_rejected" "unauthorized\|permission\|caller" -- j "$db" "$hc" step complete "$s2" '{}'
 }
 
@@ -117,7 +117,7 @@ flow_step_restart() {
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
-    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"restart"}')" step_id)
+    local step_id; step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"restart"}')" step_id)
     assert_json "step_restart.initial_waiting" "$(jj "$db" "$ha" step show "$step_id")" status waiting
 
     # Inject a crashed 'running' step (ClaimStep succeeded, CompleteStep never did) while the
@@ -134,7 +134,7 @@ flow_locked_funds_recovery() {
     echo "=== FLOW locked_funds_recovery ==="
     local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     make_admin "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
-    j "$db" "$hs" admin user deposit sys "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit sys@k "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # Inject (server stopped) an orphan process+trace: a root call for sys/tinygo/compile (price 5)
     # that crashed before settling — 5 parked in user.locked and process.locked, trace has
@@ -175,7 +175,7 @@ flow_rating() {
 
     local aid; aid=$(publish "$db" "$ha" rate-me --kind http --source "http://127.0.0.1:${bport}/rate" --price "$(units 10)" --description "rateable")
 
-    local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice/rate-me '{}')" tx_id)
+    local tx_id; tx_id=$(strfield "$(jj "$db" "$hb" run alice@k/rate-me '{}')" tx_id)
     # Unrated → rating field is null (strfield renders JSON null as Python None).
     assert_eq "rating.unrated_null" None "$(strfield "$(jj "$db" "$hb" tx show "$tx_id")" rating)"
 
@@ -210,15 +210,15 @@ flow_tinygo_compile() {
     local args; args=$(python3 -c 'import json,sys; print(json.dumps({"source": sys.argv[1]}))' "$src")
 
     # Compile a valid Handle; save the artifact to a file for registration.
-    jj "$db" "$ha" run sys/tinygo/compile "$args" > "$dir/compile.json"
+    jj "$db" "$ha" run sys@k/tinygo/compile "$args" > "$dir/compile.json"
     python3 -c "import json;open('$dir/doubler.b64','w').write(json.load(open('$dir/compile.json')).get('result',{}).get('artifact',''))" 2>/dev/null
     local status; status=$(python3 -c "import json;print(json.load(open('$dir/compile.json')).get('result',{}).get('status',''))" 2>/dev/null)
     assert_eq "tinygo_compile.compile_success" success "$status"
     assert_eq "tinygo_compile.artifact_bytes" yes "$([ -s "$dir/doubler.b64" ] && echo yes || echo no)"
 
     # Empty source → ErrInvalidInput (not charged); bad source → charged status=failure.
-    assert_fails "tinygo_compile.empty_source_rejected" "invalid.input\|required\|source" -- j "$db" "$ha" run sys/tinygo/compile '{"source":""}'
-    jj "$db" "$ha" run sys/tinygo/compile '{"source":"func Handle(in map[string]any) (map[string]any, error) { totally not go }"}' > "$dir/bad.json"
+    assert_fails "tinygo_compile.empty_source_rejected" "invalid.input\|required\|source" -- j "$db" "$ha" run sys@k/tinygo/compile '{"source":""}'
+    jj "$db" "$ha" run sys@k/tinygo/compile '{"source":"func Handle(in map[string]any) (map[string]any, error) { totally not go }"}' > "$dir/bad.json"
     assert_eq "tinygo_compile.bad_source_failure" failure "$(python3 -c "import json;print(json.load(open('$dir/bad.json')).get('result',{}).get('status',''))" 2>/dev/null)"
 
     # Register the compiled artifact as a wasm action and run it: doubles(21)=42.
@@ -229,7 +229,7 @@ flow_tinygo_compile() {
     assert_nonempty "tinygo_compile.register_artifact" "$act_id"
     j "$db" "$ha" action enable "$act_id" >/dev/null 2>&1
     j "$db" "$ha" action update "$act_id" --visibility public >/dev/null 2>&1
-    jj "$db" "$ha" run alice/doubler '{"n":21}' > "$dir/run.json"
+    jj "$db" "$ha" run alice@k/doubler '{"n":21}' > "$dir/run.json"
     local doubled; doubled=$(python3 -c "import json;print(json.load(open('$dir/run.json')).get('result',{}).get('doubled',''))" 2>/dev/null)
     assert_eq "tinygo_compile.run_compiled_action" 42 "${doubled%.*}"
 }

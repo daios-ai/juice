@@ -489,14 +489,15 @@ func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error 
 // PurgeStaleDiscovery evicts directory-only discovered kernels — those stale past cutoff and not
 // backed by a peer user row — with their whole discovery cache (§13 Retention). Peer-backed kernels
 // are left to PurgePeerCascade. One transaction; returns the count evicted.
-func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, error) {
+func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error) {
 	var evicted int
 	err := s.withTx(ctx, "purge stale discovery", func(tx *sql.Tx) error {
+		// This kernel's own row holds its name and no account, by design (D15): never a stale peer.
 		rows, err := tx.QueryContext(ctx,
 			`SELECT public_key FROM kernels
-			  WHERE updated_at <= ?
+			  WHERE updated_at <= ? AND public_key <> ?
 			    AND public_key NOT IN (SELECT kernel_public_key FROM accounts WHERE kernel_public_key IS NOT NULL)`,
-			timeToStr(cutoff))
+			timeToStr(cutoff), selfKey)
 		if err != nil {
 			return dbErr(err, "list stale discovery")
 		}
@@ -967,9 +968,11 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 	// revealed is written explicitly: the column defaults to 1 so the calls that predate the draw are
 	// never queued for a reveal they have no secret for, but every call made since owes one.
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,created_at)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?)`,
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,created_at,
+		                     caller_remote_id,caller_handle,target_remote_id,target_handle)
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?,?,?,?,?)`,
 		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedBlockchainAddress, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
+		t.CallerRemoteID, t.CallerHandle, t.TargetRemoteID, t.TargetHandle,
 	)
 	return dbErr(err, "insert trace")
 }
@@ -1095,13 +1098,15 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
-		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,evidence_eligible,started_at,ended_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,evidence_eligible,started_at,ended_at,
+		  caller_remote_id,caller_handle,target_remote_id,target_handle)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSignerKey),
 		ktx.EvidenceEligible, timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
+		ktx.CallerRemoteID, ktx.CallerHandle, ktx.TargetRemoteID, ktx.TargetHandle,
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
 	}
@@ -1812,14 +1817,15 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,created_at,outcome_json`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,created_at,outcome_json,caller_remote_id,caller_handle,target_remote_id,target_handle`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
 	var parentID, idempotencyKey, dispatchJSON, recordID, valueTo, outcome sql.NullString
 	var ticket, value sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &createdAt, &outcome)
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &createdAt, &outcome,
+		&t.CallerRemoteID, &t.CallerHandle, &t.TargetRemoteID, &t.TargetHandle)
 	if err != nil {
 		return err
 	}
@@ -1895,7 +1901,8 @@ func (s *DB) TraceHasTransaction(ctx context.Context, traceID string) (bool, err
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
-	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer_key,''),started_at,ended_at`
+	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer_key,''),started_at,ended_at,` +
+	`caller_remote_id,caller_handle,target_remote_id,target_handle`
 
 // scanTx scans one transaction row using the provided scan function.
 // scan must be called with exactly the destinations expected by txColumns.
@@ -1907,7 +1914,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName, &tx.RemoteActionID,
 		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON, &tx.RemoteSignerKey,
-		&startedAt, &endedAt); err != nil {
+		&startedAt, &endedAt, &tx.CallerRemoteID, &tx.CallerHandle, &tx.TargetRemoteID, &tx.TargetHandle); err != nil {
 		return tx, err
 	}
 	tx.ArgsJSON = strToRawJSON(argsJSON)

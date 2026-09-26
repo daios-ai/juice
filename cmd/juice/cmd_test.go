@@ -45,6 +45,9 @@ func newTestStore(t *testing.T) *store.DB {
 	return db
 }
 
+// testOwnName is what every test kernel calls itself, so a test address reads `alice@k`.
+const testOwnName = "k"
+
 // testConfig is the policy every test kernel starts from: the play network and the token secret
 // the test's environment names.
 func testConfig(secret string) kernel.Config {
@@ -73,6 +76,18 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	}
 	k := kernel.New(deps)
 	k.SetRail(rail.NewManual())
+	// Every test kernel calls itself `k` (D15): a name needs a key to be bound to, so a fixture
+	// that set none gets a fresh one — fresh, because two simulated kernels with one key would
+	// each take the other's users for their own.
+	ctx := context.Background()
+	if key, _ := k.GetConfig(ctx, configKeySigningPublic); key == "" {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		_ = k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+		_ = k.SetConfig(ctx, configKeySigningPrivate, base64.RawURLEncoding.EncodeToString(priv))
+	}
+	if err := k.BindOwnName(ctx, testOwnName); err != nil {
+		panic(err)
+	}
 	return k
 }
 
@@ -144,7 +159,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	origServer := flagServer
 	flagServer = ts.URL
 	t.Cleanup(func() { flagServer = origServer })
-	selectTestLogin(t, "tester@test", ts.URL)
+	selectTestLogin(t, "tester@k", ts.URL)
 
 	return &testEnv{db: db, k: k, dir: dir}
 }
@@ -231,7 +246,7 @@ func TestUserCreate(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "testuser",
+		Handle:   "testuser@k",
 		Password: "testpass",
 	})
 	if err != nil {
@@ -250,7 +265,7 @@ func TestUserReadByHandle(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "readtest",
+		Handle:   "readtest@k",
 		Password: "pass",
 	})
 	if err != nil {
@@ -270,7 +285,7 @@ func TestUserDuplicateHandleFails(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	req := kernel.CreateUserRequest{Handle: "dup", Password: "p"}
+	req := kernel.CreateUserRequest{Handle: "dup@k", Password: "p"}
 	if _, err := env.k.CreateUser(ctx, req); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +299,7 @@ func TestUserMe(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "meuser", Password: "pass",
+		Handle: "meuser@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +319,7 @@ func TestUserUpdateDescription(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "upddesc", Password: "pass",
+		Handle: "upddesc@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +348,7 @@ func TestUserUpdatePassword(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "updpass", Password: "oldpass",
+		Handle: "updpass@k", Password: "oldpass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -359,7 +374,7 @@ func TestUserUpdatePasswordWrongCurrent(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "wrongpass", Password: "correct",
+		Handle: "wrongpass@k", Password: "correct",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +397,7 @@ func TestUserUpdateNoFields(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "nofields", Password: "pass",
+		Handle: "nofields@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -433,7 +448,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "actowner", Password: "pass",
+		Handle: "actowner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -477,7 +492,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "priceowner", Password: "pass",
+		Handle: "priceowner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -520,7 +535,7 @@ func TestActionDelete(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "delowner", Password: "pass",
+		Handle: "delowner@k", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "to-delete",
@@ -539,10 +554,10 @@ func TestActionShowPrivate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "show-owner", Password: "pass",
+		Handle: "show-owner@k", Password: "pass",
 	})
 	stranger, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "show-stranger", Password: "pass",
+		Handle: "show-stranger@k", Password: "pass",
 	})
 	_ = stranger
 
@@ -575,7 +590,7 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "authowner", Password: "pass",
+		Handle: "authowner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -627,7 +642,7 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	ctx := context.Background()
 
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "wasmowner", Password: "pass",
+		Handle: "wasmowner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -665,7 +680,7 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "httpowner", Password: "pass",
+		Handle: "httpowner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -701,7 +716,7 @@ func TestActionImportOpenAPI(t *testing.T) {
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
 	_, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "cli-import-owner", Password: "pass",
+		Handle: "cli-import-owner@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -741,7 +756,7 @@ func TestActionTreeVerbsCLI(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "treeowner", Password: "pass"})
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "treeowner@k", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,10 +778,10 @@ func TestActionTreeVerbsCLI(t *testing.T) {
 	root, member, sibling := mk("mail"), mk("mail/send"), mk("mailer")
 
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, actionEnableCmd(), "treeowner/mail")
+		_, err := execTestCmd(t, actionEnableCmd(), "treeowner@k/mail")
 		return err
 	})
-	if !strings.Contains(out, "treeowner/mail/send") || strings.Contains(out, "treeowner/mailer") {
+	if !strings.Contains(out, "treeowner@k/mail/send") || strings.Contains(out, "treeowner@k/mailer") {
 		t.Errorf("enable must name the rows it touched and no others: %q", out)
 	}
 	for _, a := range []*kernel.Action{root, member} {
@@ -790,7 +805,7 @@ func TestActionTreeVerbsCLI(t *testing.T) {
 		t.Error("disable by id must not reach the rest of the tree")
 	}
 
-	if _, err := execTestCmd(t, actionDeleteCmd(), "treeowner/mail"); err != nil {
+	if _, err := execTestCmd(t, actionDeleteCmd(), "treeowner@k/mail"); err != nil {
 		t.Fatalf("delete tree: %v", err)
 	}
 	for _, a := range []*kernel.Action{root, member} {
@@ -808,7 +823,7 @@ func TestActionListActive(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "listowner", Password: "pass",
+		Handle: "listowner@k", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -843,7 +858,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "statsowner", Password: "p",
+		Handle: "statsowner@k", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
@@ -941,10 +956,10 @@ func TestProcessList(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "list-proc", Password: "p",
+		Handle: "list-proc@k", Password: "p",
 	})
 	other, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "list-proc-other", Password: "p",
+		Handle: "list-proc-other@k", Password: "p",
 	})
 
 	setupProcessCmd(t, env, owner.ID, 0)
@@ -970,7 +985,7 @@ func TestProcessNegativeFundsFails(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "negfund", Password: "p",
+		Handle: "negfund@k", Password: "p",
 	})
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
@@ -1090,7 +1105,7 @@ func TestServeCreateStep(t *testing.T) {
 	resp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "cs-create-caller",
+		"required_caller": "cs-create-caller@k",
 		"partial_args":    map[string]any{"preset": "val"},
 	}, ownerTok)
 	if resp.StatusCode != http.StatusCreated {
@@ -1129,7 +1144,7 @@ func TestServeListSteps(t *testing.T) {
 		r := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 			"trace_id":        traceID,
 			"action":          actionID,
-			"required_caller": "sl-steps-caller",
+			"required_caller": "sl-steps-caller@k",
 			"partial_args":    map[string]any{},
 		}, ownerTok)
 		if r.StatusCode != http.StatusCreated {
@@ -1197,7 +1212,7 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "page-cli", Password: "pass",
+		Handle: "page-cli@k", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1235,7 +1250,7 @@ func TestServeGetStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "gs-steps-caller",
+		"required_caller": "gs-steps-caller@k",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1294,7 +1309,7 @@ func TestServeCompleteStepMissingArgs(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "csmiss-caller",
+		"required_caller": "csmiss-caller@k",
 		"partial_args":    map[string]any{},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1331,7 +1346,7 @@ func TestServeCompleteStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "cs2-caller",
+		"required_caller": "cs2-caller@k",
 		"partial_args":    map[string]any{"from_partial": "A"},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -1374,7 +1389,7 @@ func TestStepCompleteFileArg(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "sc-caller", Password: "pass",
+		Handle: "sc-caller@k", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1397,7 +1412,7 @@ func TestTransactionListEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "txowner", Password: "p",
+		Handle: "txowner@k", Password: "p",
 	})
 
 	txs, err := env.k.ListTransactions(ctx, owner.ID, kernel.TxFilter{Limit: 10})
@@ -1414,7 +1429,7 @@ func TestTransactionRate(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "rateowner", Password: "p",
+		Handle: "rateowner@k", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID, Name: "rateable",
@@ -1436,7 +1451,7 @@ func TestTransactionRating(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "rater", Password: "p",
+		Handle: "rater@k", Password: "p",
 	})
 	p, _ := setupProcessCmd(t, env, owner.ID, 0)
 
@@ -1498,7 +1513,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	ctx := context.Background()
 
 	owner, _ := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "poorowner", Password: "p",
+		Handle: "poorowner@k", Password: "p",
 	})
 
 	// Description and schemas are what make the action activatable (§7); without them SetActive
@@ -1516,7 +1531,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = env.k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "poorowner/expensive", Args: map[string]any{}})
+	_, err = env.k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "poorowner@k/expensive", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInsufficientFunds) {
 		t.Errorf("a caller who cannot afford the price: got %v, want ErrInsufficientFunds", err)
 	}
@@ -1629,7 +1644,7 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 
 	t.Run("detail view prints the id", func(t *testing.T) {
 		out := captureStdout(t, func() error {
-			return emit([]byte(`{"id":"act-1","action":"bob/echo","price":10,"description":"d"}`), output{})
+			return emit([]byte(`{"id":"act-1","action":"bob@k/echo","price":10,"description":"d"}`), output{})
 		})
 		if out != "act-1\n" {
 			t.Errorf("emit --quiet = %q, want %q", out, "act-1\n")
@@ -1647,8 +1662,8 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 		var ids []string
 		stubServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "act-1", "action": "bob/echo", "price": 1},
-				{"id": "act-2", "action": "bob/other", "price": 2},
+				{"id": "act-1", "action": "bob@k/echo", "price": 1},
+				{"id": "act-2", "action": "bob@k/other", "price": 2},
 			})
 		})
 		out := captureStdout(t, func() error {
@@ -1670,14 +1685,15 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 // (what the HTTP API returns) carries — the CLI/HTTP parity invariant (§14). It also
 // checks that structured values are rendered as indented JSON.
 func TestPrintTextParity(t *testing.T) {
+	env := newTestEnv(t)
 	objects := []any{
-		enrichAction(&kernel.Kernel{}, &kernel.Action{
+		enrichAction(context.Background(), env.k, &kernel.Action{
 			ID: "a1", OwnerUserID: "u1", OwnerHandle: "alice", Name: "weather",
 			Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Price: 5,
 			Description:  "current weather",
 			InputSchema:  map[string]any{"type": "object"},
 			OutputSchema: map[string]any{"type": "object"},
-		}, newAccountCache(&kernel.Kernel{}, context.Background())),
+		}, env.k.NewNames()),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
 		&stepWithAction{Step: &kernel.Step{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
 	}
@@ -1700,11 +1716,11 @@ func TestPrintTextParity(t *testing.T) {
 	}
 
 	// Structured values must appear as indented JSON, not be dropped.
-	schemas, err := json.Marshal(enrichAction(&kernel.Kernel{}, &kernel.Action{
+	schemas, err := json.Marshal(enrichAction(context.Background(), env.k, &kernel.Action{
 		ID: "a1", Name: "x", Kind: kernel.KindHTTP,
 		InputSchema:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
 		OutputSchema: map[string]any{"type": "object"},
-	}, newAccountCache(&kernel.Kernel{}, context.Background())))
+	}, env.k.NewNames()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1742,7 +1758,7 @@ func TestCLIActionRatings(t *testing.T) {
 	}))
 	t.Cleanup(backend.Close)
 
-	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "rate-owner", Password: "pass"})
+	owner, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "rate-owner@k", Password: "pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1770,7 +1786,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reply, err := env.k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "rate-owner/svc", Args: map[string]any{}})
+	reply, err := env.k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "rate-owner@k/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -1784,7 +1800,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner/svc")
+		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner@k/svc")
 		return err
 	})
 	// The rating reads as the word the CLI prints, never the stored number: asserting on "1"
@@ -1803,7 +1819,7 @@ func TestCLIActionRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	anon := captureStdout(t, func() error {
-		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner/svc")
+		_, err := execTestCmd(t, actionRatingsCmd(), "rate-owner@k/svc")
 		return err
 	})
 	if !strings.Contains(anon, note) {
@@ -1826,7 +1842,7 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
 
-	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "app-cli-owner", Password: "pass"}); err != nil {
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "app-cli-owner@k", Password: "pass"}); err != nil {
 		t.Fatal(err)
 	}
 	tok, _ := loginTokenFor(env.k, ctx, "app-cli-owner", "pass")
@@ -1850,7 +1866,7 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	}
 
 	// The group answers to its own name, and so does the owner's root once one exists.
-	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner/mail"); err != nil {
+	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner@k/mail"); err != nil {
 		t.Errorf("action show on the group root: %v", err)
 	}
 	ownerID := actions[0].OwnerUserID
@@ -1860,7 +1876,7 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner"); err != nil {
+	if _, err := execTestCmd(t, actionShowCmd(), "app-cli-owner@k"); err != nil {
 		t.Errorf("action show on the owner root: %v", err)
 	}
 	// The same document under a second name is an independent application, and a second document
@@ -1983,7 +1999,7 @@ func TestTheFieldViewScalesOnlyTheFieldsItIsGiven(t *testing.T) {
 // writes money comes back the same way, while --json stays in the base units a program counts in.
 func TestMoneyIsShownTheWayItIsWritten(t *testing.T) {
 	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": "bob/echo", "price": 1500000})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": "bob@k/echo", "price": 1500000})
 	})
 	for _, c := range []struct {
 		name string
@@ -2258,7 +2274,7 @@ func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": "bob/echo", "price": 1500000}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": "bob@k/echo", "price": 1500000}})
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("JUICE_HOME", t.TempDir())
@@ -2294,7 +2310,7 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob/echo"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob@k/echo"}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
 		case r.URL.Path == "/v1/run":
@@ -2303,7 +2319,7 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 				w.WriteHeader(http.StatusForbidden)
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"error": "authorization required", "code": "grant_required",
-					"meta": map[string]string{"action": "bob/echo"}})
+					"meta": map[string]string{"action": "bob@k/echo"}})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"ok": true}})
@@ -2399,7 +2415,7 @@ func TestAVerbReadsOrWrites(t *testing.T) {
 func TestAdminRoutesNameTheirNoun(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "carol", Password: "password123"}); err != nil {
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "carol@k", Password: "password123"}); err != nil {
 		t.Fatal(err)
 	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -2407,7 +2423,7 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 	if _, err := env.k.BindPetname(ctx, key, "shop", true); err != nil {
 		t.Fatal(err)
 	}
-	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle + "@k", Password: "sys-pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2420,10 +2436,10 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 		name, method, path string
 		want               int
 	}{
-		{"a user under users", "POST", "/v1/admin/users/carol/suspend", http.StatusOK},
-		{"a peer under users", "POST", "/v1/admin/users/shop/suspend", http.StatusNotFound},
+		{"a user under users", "POST", "/v1/admin/users/carol@k/suspend", http.StatusOK},
+		{"a peer under users", "POST", "/v1/admin/users/shop/suspend", http.StatusUnprocessableEntity}, // a bare name is not an address
 		{"a peer under peers", "POST", "/v1/admin/peers/shop/suspend", http.StatusOK},
-		{"a user under peers", "POST", "/v1/admin/peers/carol/suspend", http.StatusNotFound},
+		{"a user under peers", "POST", "/v1/admin/peers/carol@k/suspend", http.StatusNotFound},
 		{"the old prefix answers nothing", "POST", "/control/users/carol/suspend", http.StatusNotFound},
 		{"nor does the old deposit", "POST", "/control/deposit", http.StatusNotFound},
 	} {
@@ -2436,11 +2452,11 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 	}
 	// What a verb changed is what it answers with, so an acknowledgement is worth reading and a
 	// caller needs no second request to see the result (API.md R5).
-	body, status := tcpDo(t, tok, "POST", "/v1/admin/users/carol/unsuspend", map[string]any{})
+	body, status := tcpDo(t, tok, "POST", "/v1/admin/users/carol@k/unsuspend", map[string]any{})
 	if status != http.StatusOK {
 		t.Fatalf("unsuspend: %d %s", status, body)
 	}
-	shown, _ := tcpDo(t, tok, "GET", "/v1/admin/users/carol", nil)
+	shown, _ := tcpDo(t, tok, "GET", "/v1/admin/users/carol@k", nil)
 	if string(body) != string(shown) {
 		t.Errorf("a change answers with something other than the account:\n changed %s\n shown   %s", body, shown)
 	}
@@ -2455,7 +2471,7 @@ func TestWithdrawalsPageByOffset(t *testing.T) {
 	if err := env.db.SetBlockchainAddress(ctx, u, "0xpayer", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle, Password: "sys-pass"})
+	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle + "@k", Password: "sys-pass"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2691,7 +2707,7 @@ func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob/echo"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob@k/echo"}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
 		default:

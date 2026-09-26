@@ -4,6 +4,7 @@ package native
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -19,13 +20,13 @@ func TestTransferValue(t *testing.T) {
 		wantErr bool
 		amount  int64
 	}{
-		{"ok", map[string]any{"target": "bob", "amount": float64(100)}, false, 100},
+		{"ok", map[string]any{"target": "bob@k", "amount": float64(100)}, false, 100},
 		{"missing target", map[string]any{"amount": float64(100)}, true, 0},
-		{"missing amount", map[string]any{"target": "bob"}, true, 0},
-		{"zero amount", map[string]any{"target": "bob", "amount": float64(0)}, true, 0},
-		{"negative amount", map[string]any{"target": "bob", "amount": float64(-5)}, true, 0},
-		{"fractional amount", map[string]any{"target": "bob", "amount": float64(1.5)}, true, 0},
-		{"non-numeric amount", map[string]any{"target": "bob", "amount": "100"}, true, 0},
+		{"missing amount", map[string]any{"target": "bob@k"}, true, 0},
+		{"zero amount", map[string]any{"target": "bob@k", "amount": float64(0)}, true, 0},
+		{"negative amount", map[string]any{"target": "bob@k", "amount": float64(-5)}, true, 0},
+		{"fractional amount", map[string]any{"target": "bob@k", "amount": float64(1.5)}, true, 0},
+		{"non-numeric amount", map[string]any{"target": "bob@k", "amount": "100"}, true, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -65,7 +66,7 @@ func TestTransferLocal(t *testing.T) {
 	alice := seedUserWithBalance(t, db, "alice", 1000)
 	bob := seedUserWithBalance(t, db, "bob", 0)
 
-	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "bob", "amount": float64(100)}})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "bob@k", "amount": float64(100)}})
 	if err != nil {
 		t.Fatalf("run sys/transfer: %v", err)
 	}
@@ -79,13 +80,17 @@ func TestTransferLocal(t *testing.T) {
 		t.Errorf("bob available: got %d, want 100", b.Available)
 	}
 
-	// A kernel-qualified target is rejected: value is local to one kernel, so there is no form of
-	// this call that names a beneficiary elsewhere (§13).
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrInvalidInput) {
+	// A beneficiary on another kernel is rejected: value is local to one kernel, so there is no form
+	// of this call that names one elsewhere (D18). The peer is a known one, so the refusal is the
+	// rule's and not an unknown name's.
+	if _, err := k.BindPetname(ctx, base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "other", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("kernel-qualified target: got %v, want ErrInvalidInput", err)
 	}
 	// Insufficient balance is rejected atomically (bob has 100, tries to send 200).
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "sys/transfer", Args: map[string]any{"target": "alice", "amount": float64(200)}}); err == nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "alice@k", "amount": float64(200)}}); err == nil {
 		t.Error("expected insufficient-funds rejection")
 	}
 	if a, _ := db.ReadUser(ctx, alice.ID); a.Available != 900 {

@@ -27,7 +27,7 @@ recipient. Its target is `sys/sink`, so completion acknowledges the work without
 performing a further service:
 
 ```
-$ juice run sys/message '{"to":"bob","message":"approve the order?"}'
+$ juice run sys@acme/message '{"to":"bob@acme","message":"approve the order?"}'
 sys/message costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "step_id": "b75366d1-…"
@@ -64,7 +64,7 @@ X-Juice-Capability: <the capability it was dispatched with>
 The command-line form identifies the trace whose budget funds the step:
 
 ```
-$ juice step create bob/approve --trace <trace-id> --required-caller bob \
+$ juice step create bob@acme/approve --trace <trace-id> --required-caller bob@acme \
     --partial-args '{"order":"42"}'
 ```
 

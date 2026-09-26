@@ -118,7 +118,7 @@ Recovery phrase (write this down; it is shown only once and cannot be recovered)
 Press Enter once you have written it down:
   available: 0.00 fUSD
   description:
-  handle: alice
+  address: alice@acme
   id: 5b984930-…
   locked: 0.00 fUSD
 ```
@@ -143,7 +143,7 @@ $ juice user me
   connections: []
   connectors: []
   description:
-  handle: alice
+  address: alice@acme
   id: 5b984930-…
   locked: 0.00 fUSD
 ```
@@ -153,7 +153,7 @@ built-in actions. It is free under the default configuration and returns the
 kernel's current time:
 
 ```
-$ juice run sys/time
+$ juice run sys@acme/time
 sys/time costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "iso": "2026-09-14T15:05:36Z",
@@ -182,14 +182,14 @@ instead requires a token payment, as described in
 $ juice auth login sys@acme
 Password:
 sys@acme
-$ juice admin user deposit alice 10 --ref demo-payment-1
+$ juice admin user deposit alice@acme 10 --ref demo-payment-1
 Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
   reason:
   created_at: 2026-09-14T15:05:37Z
   operator_handle: sys
-  from_handle: sys
-  to_handle: alice
+  from: sys@acme
+  to: alice@acme
 ```
 
 The reference prevents the same deposit from being credited twice if the command
@@ -232,7 +232,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: 6a9e04ce-…
-  owner_handle: bob
+  owner: bob@acme
   name: echo
   kind: http
   active: false
@@ -248,10 +248,10 @@ then choose `local` visibility so that Alice and other users of `acme` can call
 it:
 
 ```
-$ juice action enable bob/echo
+$ juice action enable bob@acme/echo
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
 enabled  bob/echo  0.50 fUSD  yes     private
-$ juice action update bob/echo --visibility local
+$ juice action update bob@acme/echo --visibility local
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
 updated  bob/echo  0.50 fUSD  yes     local
 ```
@@ -261,7 +261,7 @@ updated  bob/echo  0.50 fUSD  yes     local
 ```
 $ juice auth use alice@acme
 alice@acme
-$ juice run sys/lookup '{"query":"echo a message"}'
+$ juice run sys@acme/lookup '{"query":"echo a message"}'
 sys/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
@@ -289,7 +289,7 @@ base units: `500000` represents `0.50 fUSD`. Use the returned reference to
 send Bob's action a message:
 
 ```
-$ juice run bob/echo '{"msg":"hello"}'
+$ juice run bob@acme/echo '{"msg":"hello"}'
 bob/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": {
@@ -318,7 +318,7 @@ $ juice user me
 ```
 $ juice tx show e989c5e1-…
   id: e989c5e1-…
-  action_name: echo
+  action: bob@acme/echo
   args: { "msg": "hello" }
   result: { … }
   status: success
@@ -329,9 +329,9 @@ $ juice tx show e989c5e1-…
   started_at: 2026-09-14T15:05:54Z
   ended_at: 2026-09-14T15:05:54Z
   rating: null
-  owner_handle: alice
-  caller_handle: alice
-  target_handle: bob
+  owner: alice@acme
+  caller: alice@acme
+  target: bob@acme
 ```
 
 The transaction accounts for the 0.50 fUSD Alice paid: Bob receives `0.40`,
@@ -350,7 +350,7 @@ $ juice tx rate e989c5e1-… 1 --note "did what it said"
   note: did what it said
   created_at: 2026-09-14T15:06:11Z
   signature: Tl8Nz00hxO5v…
-$ juice action ratings bob/echo
+$ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T15:06:11Z  local  did what it said
 ```

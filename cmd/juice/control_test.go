@@ -68,12 +68,12 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	recipient, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "rcpt", Password: "pw",
+		Handle: "rcpt@k", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt/deposit",
+	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt@k/deposit",
 		map[string]any{"amount": 500, "ref": "test-payment"})
 	if status != http.StatusOK {
 		t.Fatalf("deposit status %d: %s", status, body)
@@ -88,7 +88,7 @@ func TestAdminDepositOverTCP(t *testing.T) {
 	// Recording the same payment again moves nothing and answers with the entry that recorded it —
 	// a reply, not a crash: the handler renders whatever the kernel returns, so the kernel must
 	// return something.
-	body2, status2 := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt/deposit",
+	body2, status2 := tcpDo(t, suTok, "POST", "/v1/admin/users/rcpt@k/deposit",
 		map[string]any{"amount": 500, "ref": "test-payment"})
 	if status2 != http.StatusOK {
 		t.Fatalf("replayed deposit: status %d: %s", status2, body2)
@@ -167,13 +167,13 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	bob, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "bob", Password: "pw",
+		Handle: "bob@k", Password: "pw",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/bob/rename",
-		map[string]any{"new_name": "bob-retired"})
+	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/bob@k/rename",
+		map[string]any{"new_name": "bob-retired@k"})
 	if status != http.StatusOK {
 		t.Fatalf("rename status %d: %s", status, body)
 	}
@@ -182,7 +182,7 @@ func TestAdminRenameOverTCP(t *testing.T) {
 	}
 	// The freed @bob is reusable by a distinct fresh account.
 	fresh, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "bob", Password: "pw",
+		Handle: "bob@k", Password: "pw",
 	})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
@@ -204,7 +204,7 @@ func TestAdminSuperuserGate(t *testing.T) {
 	}
 
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "regular", Password: "pw",
+		Handle: "regular@k", Password: "pw",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -227,11 +227,11 @@ func TestAdminSuperuserGate(t *testing.T) {
 func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
 	env := newTestEnv(t)
 	suTok := bootSuperuser(t, env)
-	u, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "shown", Password: "pw"})
+	u, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "shown@k", Password: "pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/admin/users", "/v1/admin/users/shown"} {
+	for _, path := range []string{"/v1/admin/users", "/v1/admin/users/shown@k"} {
 		body, status := tcpDo(t, suTok, "GET", path, nil)
 		if status != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", path, status, body)

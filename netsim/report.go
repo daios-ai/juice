@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -315,7 +316,11 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 	w("")
 
 	// ---- latency, by what the call had to cross.
-	classes := latencyByClass(readLog(n.Root))
+	homes := map[string]string{}
+	for _, k := range n.Kernels {
+		homes[k.Name] = k.Handle
+	}
+	classes := latencyByClass(readLog(n.Root), homes)
 	lat := map[string]any{}
 	latencyOK := len(classes) > 0
 	w("## Latency")
@@ -488,15 +493,17 @@ func evidenceLeaks(root string) (leaks, missing []string) {
 	return leaks, missing
 }
 
-// latencyByClass groups successful calls by whether they crossed a kernel boundary.
-func latencyByClass(recs []record) map[string][]int64 {
+// latencyByClass groups successful calls by whether they crossed a kernel boundary: every action
+// is addressed `owner@kernel/name` (D15), so a call crossed when the kernel it names is not the one
+// it ran on. homes maps a kernel's name to what it calls itself.
+func latencyByClass(recs []record, homes map[string]string) map[string][]int64 {
 	classes := map[string][]int64{}
 	for _, rec := range recs {
 		if rec.Exit != 0 || !strings.Contains(rec.Cmd, " run ") {
 			continue
 		}
 		class := "local"
-		if strings.Contains(rec.Cmd, "@") {
+		if m := regexp.MustCompile(` run (?:--json )?[A-Za-z0-9_.-]+@([A-Za-z0-9_.-]+)`).FindStringSubmatch(rec.Cmd); m != nil && m[1] != homes[rec.Kernel] {
 			class = "cross-kernel"
 		}
 		classes[class] = append(classes[class], rec.Ms)

@@ -961,7 +961,7 @@ func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
 	if err := k.SetActive(ctx, owner.ID, delegated.ID, true); err != nil {
 		t.Fatalf("reactivate delegated: %v", err)
 	}
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"/"+delegated.Name, "", "tok"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+delegated.Name, "", "tok"); err != nil {
 		t.Fatalf("AttachBearerGrants: %v", err)
 	}
 
@@ -1414,7 +1414,7 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 	if a, err := k.ResolveAction(ctx, proxy.ID); err != nil || a.ID != proxy.ID {
 		t.Errorf("raw id: want proxy, got (%v, %v)", a, err)
 	}
-	if _, err := k.ResolveAction(ctx, "mp-peer/mp-owner/act"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.ResolveAction(ctx, "mp-peer@k/mp-owner/act"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("legacy mount form must not resolve: want ErrNotFound, got %v", err)
 	}
 }
@@ -1443,16 +1443,16 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 		t.Errorf("import with owner_handle=@bob: want ErrInvalidInput, got %v", err)
 	}
 
-	if _, err := k.ResolveRequiredCaller(ctx, "@bob"); err == nil {
-		t.Error("ResolveRequiredCaller(@bob): want error, got nil")
+	if _, err := k.ResolvePrincipal(ctx, "@bob"); err == nil {
+		t.Error("ResolvePrincipal(@bob): want error, got nil")
 	}
 }
 
-// TestResolveRequiredCallerRefusesEmptyRemoteID: a peer that answers a user reference with an empty
+// TestResolvePrincipalRefusesEmptyRemoteID: a peer that answers a user reference with an empty
 // id is answering with no principal. Accepted, the step would be addressed to the peer kernel
 // itself — operator scope, decided by a remote reply — and the user it was meant for could never
 // complete it.
-func TestResolveRequiredCallerRefusesEmptyRemoteID(t *testing.T) {
+func TestResolvePrincipalRefusesEmptyRemoteID(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	setupSys(t, nil, st)
@@ -1463,11 +1463,11 @@ func TestResolveRequiredCallerRefusesEmptyRemoteID(t *testing.T) {
 	if _, err := k.EnsureKernelAccount(ctx, peerKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.ResolvePrincipal(ctx, "alice@"+peerKey); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("empty resolved id: want ErrInvalidInput, got %v", err)
 	}
 	fake.resolveUserID = "alice-id"
-	if rc, err := k.ResolveRequiredCaller(ctx, "alice@"+peerKey); err != nil || rc.RemoteID != "alice-id" {
+	if rc, err := k.ResolvePrincipal(ctx, "alice@"+peerKey); err != nil || rc.RemoteID != "alice-id" {
 		t.Fatalf("a resolved id addresses the principal: remote=%q err=%v", rc.RemoteID, err)
 	}
 }
@@ -1586,51 +1586,54 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	}
 }
 
-func TestStepAuthSignatureDomainDisjoint(t *testing.T) {
+func TestStepCompleteSignatureCoversTheUser(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	cp, recip, uid, sid, ts := "cpkey", "recipkey", "user-1", "step-1", "2026-07-31T00:00:00Z"
 
-	sig, err := testNet.SignStepAuthPayload(priv, cp, recip, uid, sid, ts, false)
+	sig, err := testNet.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash", uid, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, false, sig); err != nil {
-		t.Fatalf("valid attestation rejected: %v", err)
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err != nil {
+		t.Fatalf("valid completion rejected: %v", err)
 	}
-	// A different user_id must not verify against the same signature.
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, "other", sid, ts, false, sig); err == nil {
+	// The user, the operator scope and the absence of a user are each their own payload (P8).
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", "other", false, sig); err == nil {
 		t.Error("wrong user_id verified")
 	}
-	// Domain disjointness: step-complete and step_auth signatures never verify as each other.
-	csig, _ := testNet.SignStepPayload(priv, sid, cp, recip, "idem", ts, "ihash")
-	if err := testNet.VerifyStepAuthSignature(pubB64, cp, recip, uid, sid, ts, false, csig); err == nil {
-		t.Error("step-complete signature verified as step_auth")
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, true, sig); err == nil {
+		t.Error("a claimed operator scope verified under a signature that did not cover it")
 	}
-	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", sig); err == nil {
-		t.Error("step_auth signature verified as step-complete")
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", "", false, sig); err == nil {
+		t.Error("a user-signed completion verified as a kernel-level one")
+	}
+	// Domain disjointness: a step-list signature never verifies as a completion.
+	lsig, _ := testNet.SignStepListPayload(priv, cp, recip, ts, uid)
+	if err := testNet.VerifyStepSignature(pubB64, sid, cp, recip, "idem", ts, "ihash", uid, false, lsig); err == nil {
+		t.Error("step_list signature verified as step_complete")
 	}
 }
 
-func TestResolvePrincipal(t *testing.T) {
+func TestLocalPrincipal(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice", Password: "pw123"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice@k", Password: "pw123"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// By bare handle and by raw id resolve to the stable (id, handle).
+	// The inbound resolve question carries the handle bare (the request is addressed to this
+	// kernel) or the id; both answer the stable (id, handle).
 	for _, ref := range []string{"alice", u.ID} {
-		id, handle, err := k.ResolvePrincipal(ctx, ref)
+		id, handle, err := k.LocalPrincipal(ctx, ref)
 		if err != nil || id != u.ID || handle != "alice" {
-			t.Errorf("ResolvePrincipal(%q) = (%q,%q,%v), want (%q,alice,nil)", ref, id, handle, err, u.ID)
+			t.Errorf("LocalPrincipal(%q) = (%q,%q,%v), want (%q,alice,nil)", ref, id, handle, err, u.ID)
 		}
 	}
-	// A sigil-prefixed handle no longer resolves (handles are bare, §14), nor does an unknown ref.
 	for _, ref := range []string{"@alice", "nobody"} {
-		if _, _, err := k.ResolvePrincipal(ctx, ref); err == nil {
-			t.Errorf("ResolvePrincipal(%q): expected error", ref)
+		if _, _, err := k.LocalPrincipal(ctx, ref); err == nil {
+			t.Errorf("LocalPrincipal(%q): expected error", ref)
 		}
 	}
 }
@@ -2705,7 +2708,10 @@ func TestCrashRecoveryReleasesInboundLockForALocalAction(t *testing.T) {
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}})
 
 	owner := setupUser(t, st, "local-owner", 0)
-	peer := setupUser(t, st, "local-peer", 500)
+	peer, err := k.EnsureKernelAccount(ctx, testKernelKey(61))
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A LOCAL action — no remote proxy, so no dispatch payload is ever written.
 	action := setupLocalAction(t, st, owner.ID, "local-act", 0)
 
@@ -2950,14 +2956,14 @@ func TestHandleAndPetnameShareOneString(t *testing.T) {
 	ctx := context.Background()
 	setupSys(t, k, st)
 
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "minibox", Password: "password123"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "minibox@k", Password: "password123"}); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	key := testKernelKey(7)
 	if got, err := k.BindPetname(ctx, key, "minibox", true); err != nil || got != "minibox" {
 		t.Fatalf("petname bind alongside an identical handle: got %q, %v", got, err)
 	}
-	u, err := k.ResolveUser(ctx, "minibox")
+	u, err := k.ResolveLocalPrincipal(ctx, "minibox@k")
 	if err != nil || u.KernelPublicKey != "" {
 		t.Errorf("the user namespace must still resolve to the local user, got %v (%v)", u, err)
 	}
@@ -2979,7 +2985,7 @@ func TestRenameUserRejectsKernelAccountByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RenameUser(ctx, sys.ID, acct.ID, "newname"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, sys.ID, acct.ID, "newname@k"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("rename kernel account by id: want ErrInvalidInput, got %v", err)
 	}
 }
@@ -3094,18 +3100,18 @@ func TestResolvePrincipalRefusesNamelessAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.ResolvePrincipal(ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, _, err := k.LocalPrincipal(ctx, acct.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("kernel account by id: want ErrNotFound, got %v", err)
 	}
 	// A live local user still resolves, by handle and by id.
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "resolvable", Password: "password123"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "resolvable@k", Password: "password123"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, ref := range []string{"resolvable", u.ID} {
-		id, handle, err := k.ResolvePrincipal(ctx, ref)
+		id, handle, err := k.LocalPrincipal(ctx, ref)
 		if err != nil || id != u.ID || handle != "resolvable" {
-			t.Errorf("ResolvePrincipal(%q) = %s/%s (%v), want the live user", ref, id, handle, err)
+			t.Errorf("LocalPrincipal(%q) = %s/%s (%v), want the live user", ref, id, handle, err)
 		}
 	}
 }
@@ -3134,14 +3140,14 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 		t.Fatalf("a tombstone is neither a live user nor a peer, got %+v", tomb)
 	}
 
-	payer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "payer", Password: "password123"})
+	payer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "payer@k", Password: "password123"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.Deposit(ctx, sys.ID, payer.ID, 100, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RenameUser(ctx, sys.ID, tomb.ID, "resurrected"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, sys.ID, tomb.ID, "resurrected@k"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename a tombstone: want ErrInvalidInput, got %v", err)
 	}
 	if _, err := k.Transfer(ctx, payer.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
@@ -3160,8 +3166,9 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	if err := k.SuspendUser(ctx, sys.ID, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("suspend a tombstone: want ErrNotFound, got %v", err)
 	}
-	if _, err := k.ResolveRequiredCaller(ctx, tomb.ID); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("park a step on a tombstone: want ErrNotFound, got %v", err)
+	// A tombstone has no handle, so no address reaches it; an id is not an address either.
+	if _, err := k.ResolvePrincipal(ctx, tomb.ID); err == nil {
+		t.Error("park a step on a tombstone: want an error")
 	}
 }
 
@@ -3532,7 +3539,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 	}, ""); err != nil {
 		t.Fatalf("AccumulateGossip: %v", err)
 	}
-	buyer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "quote-buyer", Password: "password123"})
+	buyer, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "quote-buyer@k", Password: "password123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3759,10 +3766,13 @@ func TestRecoveryReceiptHashesTheArgumentsTheRecordKept(t *testing.T) {
 	ctx := context.Background()
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}})
 	owner := setupUser(t, st, "rec-owner", 0)
-	peer := setupUser(t, st, "rec-peer", 500)
+	peerKey := testKernelKey(62)
+	peer, err := k.EnsureKernelAccount(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	action := setupLocalAction(t, st, owner.ID, "rec-act", 0)
 
-	const peerKey = "rec-peer-kernel-key"
 	args := `{"msg":"kept"}`
 	rec := &kernel.IdempotencyRecord{
 		ID: uuid.New().String(), IdempotencyKey: "rec-key", CounterpartyUserID: peer.ID, ArgsJSON: args,
@@ -3772,9 +3782,9 @@ func TestRecoveryReceiptHashesTheArgumentsTheRecordKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: peer.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
-	// Admission froze which request this call answers, so the receipt recovery signs can name it
-	// even though the process that was executing is gone (P5).
-	terms := `{"nonce":"0a0b","idempotency_key":"rec-key","counterparty":"` + peerKey + `"}`
+	// The record the trace points to is which request this call answers, so the receipt recovery
+	// signs can name it even though the process that was executing is gone (P4, P5).
+	terms := `{"nonce":"0a0b"}`
 	tr := &kernel.Trace{
 		ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
 		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, DispatchJSON: &terms, CreatedAt: time.Now().UTC(),
@@ -3822,9 +3832,6 @@ func TestAPaidCallIsRefusedWhenThePeerCannotBePaid(t *testing.T) {
 	fr := newFakeRail()
 	k.SetRail(fr)
 	setupSys(t, k, st)
-	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
-		t.Fatal(err)
-	}
 	caller := setupUser(t, st, "buyer", 100000)
 
 	priced := &kernel.ActionManifest{

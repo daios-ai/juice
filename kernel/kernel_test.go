@@ -115,6 +115,7 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	}
 	k := kernel.New(deps)
 	k.SetRail(rail.NewManual())
+	k.BindOwnNameForTest(context.Background())
 	return k
 }
 
@@ -126,7 +127,7 @@ func mustResolve(t *testing.T, k *kernel.Kernel, ctx context.Context, ownerID, n
 	if err != nil {
 		t.Fatalf("read owner: %v", err)
 	}
-	a, err := k.ResolveAction(ctx, owner.Handle+"/"+name)
+	a, err := k.ResolveLocalAction(ctx, owner.Handle, name)
 	if err != nil {
 		t.Fatalf("resolve %s/%s: %v", owner.Handle, name, err)
 	}
@@ -778,7 +779,7 @@ func TestCreateUser(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "alice",
+		Handle:   "alice@k",
 		Password: "secret",
 	})
 	if err != nil {
@@ -815,7 +816,7 @@ func TestCreateUserRejectsSigilHandle(t *testing.T) {
 	ctx := context.Background()
 
 	// A bare handle is stored as-is (whitespace trimmed).
-	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "  carol  ", Password: "secret"})
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "  carol@k  ", Password: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +845,7 @@ func TestLogin(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "bob",
+		Handle:   "bob@k",
 		Password: "mypass",
 	})
 	if err != nil {
@@ -1341,20 +1342,20 @@ func TestRenameUser(t *testing.T) {
 	bob := setupUser(t, st, "bob", 0)
 
 	// Non-superuser cannot rename.
-	if _, err := k.RenameUser(ctx, regular.ID, bob.ID, "x"); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.RenameUser(ctx, regular.ID, bob.ID, "x@k"); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("non-superuser rename: got %v, want ErrUnauthorized", err)
 	}
 	// The superuser's own handle cannot be renamed (bound to config.superuser_handle).
-	if _, err := k.RenameUser(ctx, su.ID, su.ID, "root"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, su.ID, su.ID, "root@k"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename superuser: got %v, want ErrInvalidInput", err)
 	}
 	// A rename onto a handle another account already holds is rejected.
-	if _, err := k.RenameUser(ctx, su.ID, bob.ID, "regular"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.RenameUser(ctx, su.ID, bob.ID, "regular@k"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename onto taken handle: got %v, want ErrInvalidInput", err)
 	}
 
 	// Superuser renames bob aside, vacating @bob.
-	out, err := k.RenameUser(ctx, su.ID, bob.ID, "bob-retired")
+	out, err := k.RenameUser(ctx, su.ID, bob.ID, "bob-retired@k")
 	if err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -1365,7 +1366,7 @@ func TestRenameUser(t *testing.T) {
 		t.Errorf("new handle does not resolve to bob: %v", err)
 	}
 	// The freed @bob is reusable by a fresh account, which inherits nothing of bob's identity.
-	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "bob", Password: "password"})
+	fresh, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "bob@k", Password: "password"})
 	if err != nil {
 		t.Fatalf("reuse freed handle: %v", err)
 	}
@@ -1800,7 +1801,7 @@ func TestCallRequiresReceiptSigningBeforeExecution(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "no-receipt-owner/no-receipt", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "no-receipt-owner@k/no-receipt", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2026,7 +2027,7 @@ func TestTransactionViewAttachesRating(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -2386,6 +2387,7 @@ func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[str
 }
 
 type fakeFederationHTTP struct {
+	sentCaller      kernel.OutboundCall // what the last dispatch carried, caller included (P4)
 	result          map[string]any
 	receiptJSON     string
 	httpStatus      int  // 0 → 200 (kept so existing tests read as success)
@@ -2474,7 +2476,7 @@ func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.Reveal
 
 // stepStatus/stepBody/stepNotDispatched drive the outbound step protocol (§13); zero values make
 // every unrelated test see an unreachable peer, which no call path consults.
-func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID, _, _ string, _ bool) (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) CompletePeerStep(_ context.Context, _, _, _, _, _ string, input []byte, forUserID string, _ bool) (int, []byte, bool, error) {
 	f.stepInput, f.stepForUserID = string(input), forUserID
 	return f.stepReply()
 }
@@ -2501,9 +2503,11 @@ func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
-func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _, actionID, _, idempotencyKey, commitment string, lottery int64, _ map[string]any) (kernel.FederationResult, error) {
+func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _ string, call kernel.OutboundCall, _ map[string]any) (kernel.FederationResult, error) {
+	actionID, idempotencyKey, commitment, lottery := call.ActionID, call.IdempotencyKey, call.Commitment, call.Lottery
 	f.sentAction, f.sentIdempotencyKey = actionID, idempotencyKey
 	f.sentCommitment, f.sentLottery = commitment, lottery
+	f.sentCaller = call
 	if f.notDispatched {
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
@@ -2659,7 +2663,7 @@ func TestReadCallableAction(t *testing.T) {
 	}
 
 	t.Run("public action visible to any process owner", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "owner"+"/"+"pub-action", other.ID)
+		a, err := k.ReadCallableAction(ctx, "owner@k"+"/"+"pub-action", other.ID)
 		if err != nil {
 			t.Fatalf("expected public action to be callable by other: %v", err)
 		}
@@ -2669,7 +2673,7 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action visible only to its owner process", func(t *testing.T) {
-		a, err := k.ReadCallableAction(ctx, "owner"+"/"+"priv-action", owner.ID)
+		a, err := k.ReadCallableAction(ctx, "owner@k"+"/"+"priv-action", owner.ID)
 		if err != nil {
 			t.Fatalf("expected private action callable by own process: %v", err)
 		}
@@ -2679,14 +2683,14 @@ func TestReadCallableAction(t *testing.T) {
 	})
 
 	t.Run("private action not callable by foreign process", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "owner"+"/"+"priv-action", other.ID)
+		_, err := k.ReadCallableAction(ctx, "owner@k"+"/"+"priv-action", other.ID)
 		if err == nil {
 			t.Error("expected error: private action should not be callable by other process")
 		}
 	})
 
 	t.Run("unknown action returns not-found error", func(t *testing.T) {
-		_, err := k.ReadCallableAction(ctx, "owner"+"/"+"no-such-action", owner.ID)
+		_, err := k.ReadCallableAction(ctx, "owner@k"+"/"+"no-such-action", owner.ID)
 		if err == nil {
 			t.Error("expected error for missing action")
 		}
@@ -2710,7 +2714,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-schema/schema-guarded", Args: map[string]any{"wrong_field": "x"}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-schema@k/schema-guarded", Args: map[string]any{"wrong_field": "x"}})
 	if !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("bad args: got %v, want ErrSchemaViolation", err)
 	}
@@ -2743,7 +2747,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "bob-run-nokey/no-key", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "bob-run-nokey@k/no-key", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState, got %v", err)
 	}
@@ -2775,7 +2779,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-inactive/inactive-act", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-run-inactive@k/inactive-act", Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("expected ErrInvalidState for inactive action, got %v", err)
 	}
@@ -3363,12 +3367,12 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 
 	a := createDelegatedAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "@k/" + a.Name, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"/"+a.Name {
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"@k/"+a.Name {
 		t.Errorf("error does not carry structured action meta: %+v", err)
 	}
 	// No funds locked, no process created.
@@ -3422,15 +3426,15 @@ func TestCreateGrantListAndRevoke(t *testing.T) {
 	owner := setupUser(t, st, "grantsvc", 0)
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 
-	if err := grantVia(k, ctx, owner.ID, owner.Handle+"/"+a.Name, "refresh-xyz"); err != nil {
+	if err := grantVia(k, ctx, owner.ID, owner.Handle+"@k/"+a.Name, "refresh-xyz"); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	views, err := k.ListGrantViews(ctx, owner.ID)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("ListGrantViews: %v, n=%d", err, len(views))
 	}
-	if views[0].Action != owner.Handle+"/"+a.Name {
-		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"/"+a.Name)
+	if views[0].Action != owner.Handle+"@k/"+a.Name {
+		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"@k/"+a.Name)
 	}
 	if views[0].Scopes != "read" {
 		t.Errorf("view scopes = %v, want read", views[0].Scopes)
@@ -3452,7 +3456,7 @@ func TestCreateGrantListAndRevoke(t *testing.T) {
 		t.Errorf("join broken: connection key %q != grant key %q", conns[0].ProviderKey, views[0].ProviderKey)
 	}
 
-	if err := revokeVia(k, ctx, owner.ID, owner.Handle+"/"+a.Name); err != nil {
+	if err := revokeVia(k, ctx, owner.ID, owner.Handle+"@k/"+a.Name); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if views, _ := k.ListGrantViews(ctx, owner.ID); len(views) != 0 {
@@ -3471,7 +3475,7 @@ func TestDeactivatingUpdateRevokesGrants(t *testing.T) {
 	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 
 	mkGrant := func() {
-		if err := grantVia(k, ctx, owner.ID, owner.Handle+"/"+a.Name, "refresh"); err != nil {
+		if err := grantVia(k, ctx, owner.ID, owner.Handle+"@k/"+a.Name, "refresh"); err != nil {
 			t.Fatalf("grant: %v", err)
 		}
 	}
@@ -3633,12 +3637,12 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	owner := setupUser(t, st, "br-owner", 1000)
 	a := createBearerAction(t, k, owner.ID, "inbox", 100)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "/" + a.Name, Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: owner.Handle + "@k/" + a.Name, Args: map[string]any{}})
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"/"+a.Name {
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"@k/"+a.Name {
 		t.Errorf("error does not carry structured action meta: %+v", err)
 	}
 	if u, _ := k.ReadUser(ctx, owner.ID); u.Available != 1000 || u.Locked != 0 {
@@ -3659,15 +3663,15 @@ func TestAttachBearerGrant(t *testing.T) {
 	owner := setupUser(t, st, "br-attach", 0)
 	bearer := createBearerAction(t, k, owner.ID, "svc", 0)
 
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"/"+bearer.Name, "", "ghp_secret"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+bearer.Name, "", "ghp_secret"); err != nil {
 		t.Fatalf("AttachBearerGrants: %v", err)
 	}
 	views, err := k.ListGrantViews(ctx, owner.ID)
 	if err != nil || len(views) != 1 {
 		t.Fatalf("ListGrantViews: %v n=%d", err, len(views))
 	}
-	if views[0].Action != owner.Handle+"/"+bearer.Name {
-		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"/"+bearer.Name)
+	if views[0].Action != owner.Handle+"@k/"+bearer.Name {
+		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"@k/"+bearer.Name)
 	}
 	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "ghp_secret") {
 		t.Errorf("grant view leaked the token: %s", b)
@@ -3682,12 +3686,12 @@ func TestAttachBearerGrant(t *testing.T) {
 
 	// An oauth_delegated action cannot be connected with a raw token.
 	oauth := createDelegatedAction(t, k, owner.ID, "oauthsvc", 0)
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"/"+oauth.Name, "", "raw"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+oauth.Name, "", "raw"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("attach to oauth_delegated: got %v, want ErrNotFound", err)
 	}
 
 	// Revocation drops it (the oauth action never gained a grant).
-	if err := revokeVia(k, ctx, owner.ID, owner.Handle+"/"+bearer.Name); err != nil {
+	if err := revokeVia(k, ctx, owner.ID, owner.Handle+"@k/"+bearer.Name); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if views, _ := k.ListGrantViews(ctx, owner.ID); len(views) != 0 {
@@ -3832,7 +3836,7 @@ func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
 	}
 
 	// The consent plan for the malicious action reveals where the credential would actually go.
-	plan, err := k.ConsentPlan(ctx, victim.ID, "victim/evil")
+	plan, err := k.ConsentPlan(ctx, victim.ID, "victim@k/evil")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3856,7 +3860,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)
 	_ = createBearerAction(t, k, owner.ID, "chat/history", 0)
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "chatco/chat")
+	plan, err := k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3867,7 +3871,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Error("group should not be connected before consent")
 	}
 
-	grants, err := k.AttachBearerGrants(ctx, owner.ID, "chatco/chat", "", "ghp_x")
+	grants, err := k.AttachBearerGrants(ctx, owner.ID, "chatco@k/chat", "", "ghp_x")
 	if err != nil || len(grants) != 2 {
 		t.Fatalf("AttachBearerGrants: %v n=%d", err, len(grants))
 	}
@@ -3876,7 +3880,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Fatalf("connections = %+v, want one with two actions", conns)
 	}
 
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco/chat")
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
 	g := plan.Groups[0]
 	if !g.Connected || !g.Covered {
 		t.Error("group should be connected and covered after consent")
@@ -3892,7 +3896,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 	if _, err := k.CreateGrants(ctx, owner.ID, "bearer:provider.example", []string{react.ID}, "", ""); err != nil {
 		t.Fatalf("instant bearer grant: %v", err)
 	}
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco/chat")
+	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
 	if len(plan.Groups[0].Actions) != 3 {
 		t.Fatalf("expected 3 actions after adding react, got %d", len(plan.Groups[0].Actions))
 	}
@@ -3915,7 +3919,7 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 	a2 := createOAuthActionScopes(t, k, owner.ID, "g/write", "write")
 	const pk = "oauth:https://provider.example/token|cid|provider.example"
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "gco/g")
+	plan, err := k.ConsentPlan(ctx, owner.ID, "gco@k/g")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3955,19 +3959,19 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                              // bearer:provider.example
 	_ = createBearerActionSrc(t, k, owner.ID, "mail/inbox", "https://mail.example/api") // bearer:mail.example
 
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi/chat", "", "t1"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi@k/chat", "", "t1"); err != nil {
 		t.Fatalf("connect chat: %v", err)
 	}
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi/mail", "", "t2"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi@k/mail", "", "t2"); err != nil {
 		t.Fatalf("connect mail: %v", err)
 	}
 
 	// Disconnect chat by selector: chat grant gone, mail grant survives, both connections remain.
-	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "multi/chat")
+	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "multi@k/chat")
 	if err != nil || len(revoked) != 1 {
 		t.Fatalf("RevokeGrantsBySelector: %v n=%d", err, len(revoked))
 	}
-	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "multi/mail")
+	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "multi@k/mail")
 	if !mailPlan.Groups[0].Actions[0].Granted {
 		t.Error("mail grant should survive a chat-selector revoke")
 	}

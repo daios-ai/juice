@@ -57,17 +57,28 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 
 	// A call that stakes no ticket omits both new fields, so its canonical form — and this
 	// signature — are exactly what they were before the lottery existed.
-	sig, err := net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash, "", 0)
+	call := OutboundCall{ActionID: actionID, ExpectedContractHash: contract, IdempotencyKey: ikey}
+	sig, err := net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
 	check("fed_call", "7nvN8-uTEDnPSjjxUvSNBp-pfbUIgtKe3SvSRWv2hPCoELwhjoz_Z3TrRkde8c08qCyGnCy4HbZcUb2V7B-zCw", sig, err)
 
-	sig, err = net.SignFederationPayload(key, actionID, cp, recipient, contract, ikey, ts, argsHash, "cm-1", 100)
+	call.Commitment, call.Lottery = "cm-1", 100
+	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
 	check("fed_call_ticket", "0m14WxVaIc55g7LlT_qXVVaS9bS8dj8LewbnbAdivDoH_3XIjfT_aubuDv1p0yzgZimyXgKjbSrX4UL08yfjBQ", sig, err)
 
-	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash)
+	// The caller the buyer attests rides in the same payload (P4); a call for no user of the
+	// buyer's omits both fields, so the two forms above are what they were.
+	call.CallerUserID, call.CallerHandle = userID, "alice"
+	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
+	check("fed_call_caller", "vLBwQW1n2e916IxZ8diC0HF5QEPjDiKg4YqPGolxOps-TLcsSoC7HLzZPfNz6eN0SNi2oYSNFkFQFE4fQJybAQ", sig, err)
+
+	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, "", false)
 	check("step_complete", "pG89K-ofhZ8xs-ggsVRJ9eNGeOsTcTFQejYfyIboALe7WyHVjZl2qKEF2-Gk4YDCk8vL37QWlIHOwPXHkiueDA", sig, err)
 
-	sig, err = net.SignStepAuthPayload(key, cp, recipient, userID, stepID, ts, false)
-	check("step_auth", "qxmzAfhsS8m80NKP_DTapYAyso-wR_zxDYvOQtDqO9LJonZZOp1hlpj6oBycpfopKaitmgnKrsQfndJkYp2VDA", sig, err)
+	// A completion as a user signs the user into the same payload (P8), superuser or not.
+	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, userID, false)
+	check("step_complete_user", "3uQcDVr3B0YwOvabn-N6Fhc4sIYE86alF1gP2hlCVm3_vli1MILgX8hCoXY8qg-3B-etpYqn_W-5XGq2uYTzAA", sig, err)
+	sig, err = net.SignStepPayload(key, stepID, cp, recipient, ikey, ts, inputHash, userID, true)
+	check("step_complete_operator", "Q-WQR3iECOH4MqFUbIGUK-zEIcYPeQxvzMS9IZDrSRaWeJprfBuHsBMrzJo-iBFr0r8c2B6cRd70gbeHRe3aDA", sig, err)
 
 	sig, err = net.SignStepListPayload(key, cp, recipient, ts, "")
 	check("step_list", "hWP8ddJWQ4eDzSPL9T55CVoFzKhWOvlgiZpBfZtNQC1Z4BA1nhU0bFxDCXvrdDE0ZN8xUG-9xB0KOLo9vyjnCg", sig, err)

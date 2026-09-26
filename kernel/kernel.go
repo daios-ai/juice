@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daios-ai/juice/log"
@@ -82,37 +83,9 @@ type Kernel struct {
 	// railMu serializes outgoing rail work. juice-rail admits one operation in flight per signing
 	// key, and one signer per key, so the worker and an interactive withdrawal must not present two
 	// payments at once (D23).
-	railMu      sync.Mutex
-	lookupHost  func(context.Context, string) ([]string, error)
-	userHandles sync.Map // user ID → handle, cached for readable logging
-}
-
-// callerHandle returns a user's handle for logging, caching id→handle lookups.
-// Returns "" on error so callers can fall back to the raw id; handles are effectively
-// stable, so a never-invalidated cache only risks a cosmetic stale handle in logs.
-func (k *Kernel) callerHandle(ctx context.Context, id string) string {
-	if id == "" {
-		return ""
-	}
-	if v, ok := k.userHandles.Load(id); ok {
-		return v.(string)
-	}
-	u, err := k.store.ReadUser(ctx, id)
-	if err != nil || u == nil {
-		return ""
-	}
-	k.userHandles.Store(id, u.Handle)
-	return u.Handle
-}
-
-// ActionRef resolves an action id to its "@owner/name" reference, falling back to the bare name
-// or the id when the action or its owner handle can't be resolved.
-func (k *Kernel) ActionRef(ctx context.Context, actionID string) string {
-	a, err := k.store.ReadAction(ctx, actionID)
-	if err != nil || a == nil {
-		return actionID
-	}
-	return k.actionRefOf(ctx, a)
+	railMu     sync.Mutex
+	lookupHost func(context.Context, string) ([]string, error)
+	ownName    atomic.Value // string: this kernel's own name, bound at boot (D15)
 }
 
 // ProcessOwnerID returns a process's owner user id, unauthorized — a display resolver like
@@ -123,31 +96,6 @@ func (k *Kernel) ProcessOwnerID(ctx context.Context, processID string) string {
 		return ""
 	}
 	return p.OwnerUserID
-}
-
-// actionRefOf builds an action's reference for an already-read action (no redundant read);
-// ActionRef and callers that already hold the action share it. Grammar lives in FormatActionRef —
-// this only supplies the display owner it needs.
-func (k *Kernel) actionRefOf(ctx context.Context, a *Action) string {
-	cp := *a // display-only: never write the resolved owner back onto the caller's action
-	if cp.OwnerHandle == "" {
-		cp.OwnerHandle = k.displayOwner(ctx, a.OwnerUserID)
-	}
-	return FormatActionRef(&cp)
-}
-
-// displayOwner names an action's owner for output (§14): a local user's handle, else — for a
-// kernel account, which holds no handle by design — its kernel's petname, falling back to the raw
-// key. Empty only when the row is gone.
-func (k *Kernel) displayOwner(ctx context.Context, ownerID string) string {
-	if h := k.callerHandle(ctx, ownerID); h != "" {
-		return h
-	}
-	u, err := k.store.ReadUser(ctx, ownerID)
-	if err != nil || u == nil || u.KernelPublicKey == "" {
-		return ""
-	}
-	return k.KernelName(ctx, u.KernelPublicKey)
 }
 
 // ownerKernelKey returns the key of the kernel an action is served from, empty for a local one. Only
@@ -412,7 +360,7 @@ func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Act
 }
 
 // ListGrantViews returns the caller's grants as token-free views for GET /v1/me, resolving each
-// action to @owner/name and surfacing the scopes its auth config requests.
+// action to its address and surfacing the scopes its auth config requests.
 func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantView, error) {
 	grants, err := k.store.ListGrantsByUser(ctx, callerID)
 	if err != nil {
@@ -432,7 +380,7 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 	for _, g := range grants {
 		v := &GrantView{Action: g.ActionID, ProviderKey: connKey[g.ConnectionID], CreatedAt: g.CreatedAt}
 		if a, err := k.store.ReadAction(ctx, g.ActionID); err == nil && a != nil {
-			v.Action = k.actionRefOf(ctx, a)
+			v.Action = k.ActionAddress(ctx, a)
 			if auth, err := k.openAuthInput(a); err == nil && auth != nil {
 				v.Scopes = auth.Config["scopes"]
 			}
@@ -580,15 +528,27 @@ func unionScopes(existingJSON string, requested []string) (string, bool) {
 	return string(b), covered
 }
 
-// ParseGrantSelector splits a consent selector into bare owner handle and path (§8). A selector is
-// owner or owner/path; a trailing "/*" aliases the whole-owner form.
-func ParseGrantSelector(sel string) (ownerHandle, path string, err error) {
-	sel = strings.TrimSuffix(strings.TrimSpace(sel), "/*")
-	owner, path, _ := strings.Cut(sel, "/")
-	if owner == "" || strings.Contains(owner, "@") {
-		return "", "", ErrInvalidInput.Wrap("selector must be owner or owner/path (bare handle, no @)")
+// selectorOwner reads a consent selector or mutation target — `owner@kernel`, `owner@kernel/path`,
+// a trailing "/*" aliasing the whole-owner form (D10) — to the owner it names here and the path
+// beneath them. Consents and mutations reach this kernel's own actions only, so another kernel's
+// address is refused rather than resolved.
+func (k *Kernel) selectorOwner(ctx context.Context, sel string) (owner *Account, path string, err error) {
+	a, err := ParseAddress(strings.TrimSuffix(strings.TrimSpace(sel), "/*"))
+	if err != nil {
+		return nil, "", err
 	}
-	return owner, path, nil
+	kr, err := k.ResolveKernel(ctx, a.Kernel)
+	if err != nil {
+		return nil, "", err
+	}
+	if !kr.Local {
+		return nil, "", ErrInvalidInput.Wrapf("%s is on another kernel; only actions of %s can be named here", a.String(), k.OwnName(ctx))
+	}
+	owner, err = k.store.ReadUserByHandle(ctx, a.Handle)
+	if err != nil || owner == nil {
+		return nil, "", ErrNotFound.Wrap("owner not found")
+	}
+	return owner, a.Name, nil
 }
 
 // selectorPathMatches implements path-segment matching (§8): the empty path matches all of an
@@ -670,13 +630,9 @@ const gossipEvidencePageSize = 100
 // provider (§8). It applies the CanCall gate (§4) exactly as a single grant does, and reports how
 // many name-matched actions were skipped for needing no login (non-delegated) or being uncallable.
 func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matches []delegatedMatch, skippedLoginless, skippedUncallable int, ownerID string, err error) {
-	ownerHandle, path, err := ParseGrantSelector(sel)
+	owner, path, err := k.selectorOwner(ctx, sel)
 	if err != nil {
 		return nil, 0, 0, "", err
-	}
-	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
-	if err != nil {
-		return nil, 0, 0, "", ErrNotFound.Wrap("selector owner not found")
 	}
 	ownerID = owner.ID
 	caller, _ := k.store.ReadUser(ctx, callerID)
@@ -792,7 +748,7 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 			if _, gerr := k.store.ReadGrant(ctx, callerID, m.action.ID); gerr == nil {
 				granted = true
 			}
-			grp.Actions = append(grp.Actions, ConsentAction{ActionID: m.action.ID, Action: k.actionRefOf(ctx, m.action), Granted: granted})
+			grp.Actions = append(grp.Actions, ConsentAction{ActionID: m.action.ID, Action: k.ActionAddress(ctx, m.action), Granted: granted})
 		}
 		plan.Groups = append(plan.Groups, grp)
 	}
@@ -914,13 +870,9 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel strin
 	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
 		return nil, err
 	}
-	ownerHandle, path, err := ParseGrantSelector(sel)
+	owner, path, err := k.selectorOwner(ctx, sel)
 	if err != nil {
 		return nil, err
-	}
-	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
-	if err != nil {
-		return nil, ErrNotFound.Wrap("selector owner not found")
 	}
 	grants, err := k.store.ListGrantsByUser(ctx, callerID)
 	if err != nil {
@@ -933,7 +885,7 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel strin
 			continue
 		}
 		if derr := k.store.DeleteGrant(ctx, callerID, g.ActionID); derr == nil {
-			revoked = append(revoked, k.actionRefOf(ctx, a))
+			revoked = append(revoked, k.ActionAddress(ctx, a))
 		}
 	}
 	if len(revoked) == 0 {
@@ -956,7 +908,7 @@ func (k *Kernel) RevokeConnection(ctx context.Context, callerID, providerKey str
 	var refs []string
 	for _, g := range grants {
 		if g.ConnectionID == conn.ID {
-			refs = append(refs, k.ActionRef(ctx, g.ActionID))
+			refs = append(refs, k.ActionAddressByID(ctx, g.ActionID))
 		}
 	}
 	if err := k.store.DeleteConnectionCascade(ctx, conn.ID); err != nil {
@@ -1023,7 +975,7 @@ func NormalizeHandle(h string) string {
 }
 
 // ValidateHandle rejects empty handles and handles containing @ or /, enforcing the invariant
-// that owner/name and owner@kernel/name references are unambiguous (handles ≡ hostnames: bare,
+// that handle@kernel and owner@kernel/name addresses are unambiguous (handles ≡ hostnames: bare,
 // no @ or /). A valid handle is ≥1 non-sigil character after NormalizeHandle trims whitespace.
 // Exported because a kernel's own nickname is held to the same rule: peers apply it to what they
 // hear in gossip, so the name an operator is asked for at first boot must satisfy it here too.
@@ -1049,11 +1001,14 @@ func ValidateHandle(handle string) error {
 func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Account, error) {
 	start := time.Now()
 	logger := k.log.With(ctx)
-	req.Handle = NormalizeHandle(req.Handle)
-	logger.Info("user.create.start", "handle", req.Handle)
-	if err := ValidateHandle(req.Handle); err != nil {
+	// The account is named by its address, handle@<this kernel>: the handle is what is stored,
+	// the kernel segment is what says it is being made here (D15).
+	handle, err := k.LocalHandle(ctx, req.Handle)
+	if err != nil {
 		return nil, err
 	}
+	req.Handle = handle
+	logger.Info("user.create.start", "handle", req.Handle)
 	if err := validatePassword(req.Password); err != nil {
 		return nil, err
 	}
@@ -1208,8 +1163,8 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return nil, err
 	}
-	newHandle = NormalizeHandle(newHandle)
-	if err := ValidateHandle(newHandle); err != nil {
+	newHandle, err := k.LocalHandle(ctx, newHandle)
+	if err != nil {
 		return nil, err
 	}
 	target, err := k.store.ReadUser(ctx, targetID)
@@ -1233,9 +1188,6 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 		return nil, err
 	}
 	target.Handle = newHandle
-	// The id→handle cache backs displayOwner, so a stale entry would keep rendering the vacated
-	// handle in references callers run against.
-	k.userHandles.Delete(targetID)
 	k.log.With(ctx).Info("user.renamed", "user_id", targetID, "handle", newHandle)
 	return target, nil
 }
@@ -2116,21 +2068,11 @@ func (k *Kernel) checkMutable(ctx context.Context, callerID string, a *Action) e
 	return k.requireAdmin(ctx, callerID, a)
 }
 
-// splitOwnerPath splits a mutation target into bare owner handle and path. It is the consent
-// selector's split without the trailing-"/*" alias, which belongs to grants alone (§8).
-func splitOwnerPath(target string) (ownerHandle, path string, err error) {
-	owner, path, _ := strings.Cut(strings.TrimSpace(target), "/")
-	if owner == "" || strings.Contains(owner, "@") {
-		return "", "", ErrInvalidInput.Wrap("target must be an action id or owner/path (bare handle, no @)")
-	}
-	return owner, path, nil
-}
-
 // resolveTarget resolves a mutation target to the actions it names (§14). The two shapes are
 // disjoint, so the target says which it is without a flag: a raw id names exactly that row, and
-// owner/path names the action at that path together with every action beneath it, by the same
-// segment boundary consent selectors use — "bob/mail" reaches "bob/mail/send" and never
-// "bob/mailer". One command therefore addresses one action or a whole application. The result is
+// owner@kernel/path names the action at that path together with every action beneath it, by the
+// same segment boundary consent selectors use — "bob@k/mail" reaches "bob@k/mail/send" and never
+// "bob@k/mailer". One command therefore addresses one action or a whole application. The result is
 // ordered by name so a partial failure stops at a predictable place.
 func (k *Kernel) resolveTarget(ctx context.Context, callerID, target string) ([]*Action, error) {
 	target = strings.TrimSpace(target)
@@ -2147,13 +2089,9 @@ func (k *Kernel) resolveTarget(ctx context.Context, callerID, target string) ([]
 		}
 		return []*Action{a}, nil
 	}
-	ownerHandle, path, err := splitOwnerPath(target)
+	owner, path, err := k.selectorOwner(ctx, target)
 	if err != nil {
 		return nil, err
-	}
-	owner, err := k.store.ReadUserByHandle(ctx, NormalizeHandle(ownerHandle))
-	if err != nil || owner == nil {
-		return nil, ErrNotFound.Wrap("action not found")
 	}
 	// Enumerating another owner's rows is refused before the listing, so a subtree target can never
 	// report what a stranger owns; the per-row gate then re-checks each row it touches.
@@ -2444,8 +2382,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 				return nil, nerr
 			}
 		}
-		servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment,
-			buyer.IdempotencyKey, caller.KernelPublicKey)
+		servingTerms = marshalServing(k.econ.RemoteBPS, buyer.Lottery, dmax, nonce, buyer.Commitment)
 		if seller.Available < lockPrice {
 			// This kernel serves foreign work from the provider's own balance (D14), and this
 			// provider cannot cover this call. The buyer abroad is told only that we declined; the
@@ -2472,8 +2409,13 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
 		CallerUserID:  caller.ID,
-		CreatedAt:     now,
+		// The caller as a principal (D4): the buyer's own user, as the buyer signed it, beneath the
+		// buyer's account; empty for a user here. Set once, here, for every settlement path.
+		CallerRemoteID: buyer.CallerUserID,
+		CallerHandle:   buyer.CallerHandle,
+		CreatedAt:      now,
 	}
+	t.TargetRemoteID, t.TargetHandle = targetPrincipal(action)
 	// Snapshot the TransferEffect on the trace so every settlement path releases the locked value
 	// config-independently (§13): the amount locked from C and the beneficiary it is delivered to.
 	// Both zero on a non-transfer call.
@@ -2486,16 +2428,17 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	if idempotencyRecordID != "" {
 		t.IdempotencyRecordID = &idempotencyRecordID
 	}
-	if action.Kind == KindRemoteProxy {
-		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS); err != nil {
-			return nil, err
-		}
-	}
 	// The terms this call is sold at ride on the trace, written by the same transaction that reserves
 	// the exposure for it — so a crash between admission and settlement leaves the debt, the exposure
-	// and the receipt's own arithmetic all recoverable from the one record (P10, D19).
+	// and the receipt's own arithmetic all recoverable from the one record (P10, D19). Written
+	// before any dispatch, which prepareDispatch then refuses over it: a served call never asks a peer.
 	if servingTerms != nil {
 		t.DispatchJSON, t.OwedBlockchainAddress = servingTerms, buyer.BlockchainAddress
+	}
+	if action.Kind == KindRemoteProxy {
+		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS, caller); err != nil {
+			return nil, err
+		}
 	}
 	if err := k.store.BeginRun(ctx, p, t, owner.ID, lockPrice, reserve, limit); err != nil {
 		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
@@ -2771,8 +2714,8 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil {
 		if tr.IdempotencyKey != nil {
 			v.TicketID = *tr.IdempotencyKey
-		} else if served, _ := ServingRequest(tr.DispatchJSON); served != "" {
-			v.TicketID = served
+		} else if r, rerr := k.store.ReadReceiptByTxID(ctx, tx.ID); rerr == nil && r != nil && r.IdempotencyKey != "" {
+			v.TicketID = r.IdempotencyKey // the receipt names the request the call answered (P5)
 		}
 	}
 	return v
@@ -2886,11 +2829,10 @@ type LookupRequest struct {
 // all-in local price either way: Action.price for a local or already-resolved action, and the
 // indicative catalog price for a discovered one (§13) — the latter re-quoted at resolve.
 type LookupResult struct {
-	Action      *Action
-	OwnerHandle string
-	Discovered  *DiscoveryDoc
-	Price       int64
-	Score       float32
+	Action     *Action
+	Discovered *DiscoveryDoc
+	Price      int64
+	Score      float32
 	// QuoteHash is the §4-precondition-7 pin over the terms actually shown (Price included),
 	// computed here for both kinds of hit so no caller rebuilds the tuple and drifts.
 	QuoteHash string
@@ -3034,7 +2976,6 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		caller, _ = k.store.ReadUser(ctx, req.CallerID)
 	}
 	out := make([]*LookupResult, 0, rr.limit)
-	ownerHandles := map[string]string{}
 	// Hosting kernels, read once per distinct key across the page (hits cluster on few kernels).
 	hosts := map[string]*RemoteKernel{}
 	hostOf := func(publicKey string) *RemoteKernel {
@@ -3076,17 +3017,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if err != nil || !canCall(caller, a) {
 			continue
 		}
-		// The store's join already carries the current handle; only fill the case it cannot — a
-		// resolved proxy owned by a kernel account, which holds no handle and would otherwise render
-		// empty (§14 R8). Overwriting unconditionally would serve displayOwner's log-oriented cache
-		// as a reference callers must be able to run.
-		if a.OwnerHandle == "" {
-			if _, cached := ownerHandles[a.OwnerUserID]; !cached {
-				ownerHandles[a.OwnerUserID] = k.displayOwner(ctx, a.OwnerUserID)
-			}
-			a.OwnerHandle = ownerHandles[a.OwnerUserID]
-		}
-		out = append(out, &LookupResult{Action: a, OwnerHandle: a.OwnerHandle, Price: a.Price, Score: float32(r.score),
+		out = append(out, &LookupResult{Action: a, Price: a.Price, Score: float32(r.score),
 			QuoteHash: QuoteHash(a), Host: hostOf(k.ownerKernelKey(ctx, a))})
 	}
 	return out, nil
@@ -3138,7 +3069,7 @@ func (k *Kernel) indexForLookup(ctx context.Context, a *Action) {
 
 // lookupText assembles an action's lexical-index text: owner handle, name, description, and the
 // property names + descriptions from its input/output schemas (§3 requires those descriptions to be
-// sufficient for lookup). The owner handle is included because an action's real name is @owner/name.
+// sufficient for lookup). The owner handle is included because an action's real name is owner@kernel/name.
 // Unknown schema shapes simply contribute nothing.
 func lookupText(a *Action) string {
 	var b strings.Builder

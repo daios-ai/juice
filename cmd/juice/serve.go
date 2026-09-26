@@ -309,7 +309,7 @@ func runServer(name string) error {
 	// It runs on every boot, so a kernel that comes back on another port is followed rather than
 	// left stale — the record is keyed by the kernel's key, and moving an address keeps its logins.
 	// After the server is answering, since registering reads /health like any other client would.
-	registerSelf(context.Background(), globalCfg.KernelHandle, ln.Addr().String(), logger)
+	registerSelf(context.Background(), ln.Addr().String(), logger)
 
 	// server.ready is emitted only after a successful bind — the harness waits on this line, and
 	// it is the last thing an operator sees at first boot, so it says what answered and nothing
@@ -317,7 +317,7 @@ func runServer(name string) error {
 	// The federation addresses are reported by /health and by `admin kernel show`, so the line
 	// stays short; the peer id inside them is this same key in libp2p's spelling (D15, §14).
 	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	logger.Info("server.ready", "handle", globalCfg.KernelHandle, "network", world.Name,
+	logger.Info("server.ready", "handle", k.OwnName(context.Background()), "network", world.Name,
 		"addr", ln.Addr().String(), "public_key", pubKey)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -671,7 +671,7 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 	net := s.kernel.Network()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              "ok",
-		"handle":              globalCfg.KernelHandle,
+		"handle":              s.kernel.OwnName(r.Context()),
 		"public_key":          pub,
 		"network":             net.Name,
 		"network_fingerprint": net.Fingerprint,
@@ -1066,7 +1066,7 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		// Authentication is required by the dial, not by resolution: a kernel-qualified reference
 		// reaches a peer, so only a local caller may ask for one. A local reference is a store read
 		// and stays open, which is what keeps a public action's ratings anonymously readable (§11).
-		if caller == "" && kernel.KernelQualified(ref) {
+		if caller == "" && s.kernel.IsRemoteRef(r.Context(), ref) {
 			writeErr(w, kernel.ErrUnauthenticated.Wrap("a kernel-qualified reference requires authentication"))
 			return
 		}
@@ -1351,6 +1351,15 @@ func (s *server) listSteps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		steps, err := s.kernel.PeerStepsAwaitingUs(r.Context(), peerKey, forUserID)
+		if err == nil {
+			// The peer names our user by id, which routes; the user reads the address (D20).
+			names := s.kernel.NewNames()
+			for i, v := range steps.Steps {
+				if v.RequiredCaller != "" {
+					steps.Steps[i].RequiredCaller = names.Address(r.Context(), kernel.Principal{AccountID: v.RequiredCaller})
+				}
+			}
+		}
 		writeOr(w, steps, err)
 		return
 	}
@@ -1382,7 +1391,6 @@ func (s *server) postStep(w http.ResponseWriter, r *http.Request) {
 		if req.PartialArgs == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("partial_args is required")
 		}
-		req.RequiredCaller = kernel.NormalizeHandle(req.RequiredCaller)
 		view, err := createStep(s.kernel, r.Context(), callerID, req)
 		return view, http.StatusCreated, err
 	})(w, r)
@@ -1477,7 +1485,7 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 		Reason      string `json:"reason"`
 		ExternalKey string `json:"external_key"`
 	}) (any, int, error) {
-		recipient, err := s.kernel.ResolveUser(r.Context(), body.Recipient)
+		recipient, err := s.kernel.ResolveLocalPrincipal(r.Context(), body.Recipient)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1485,7 +1493,7 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, 0, err
 		}
-		return enrichLedger(e, newAccountCache(s.kernel, r.Context())), http.StatusOK, nil
+		return enrichLedger(r.Context(), e, s.kernel.NewNames()), http.StatusOK, nil
 	})(w, r)
 }
 
@@ -1505,10 +1513,10 @@ func (s *server) putBlockchainAddress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	uc := newAccountCache(s.kernel, r.Context())
+	names := s.kernel.NewNames()
 	views := make([]*ledgerView, 0, len(attributed))
 	for _, e := range attributed {
-		views = append(views, enrichLedger(e, uc))
+		views = append(views, enrichLedger(r.Context(), e, names))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"address": u.BlockchainAddress, "attributed": views})
 }
@@ -1549,10 +1557,10 @@ func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	uc := newAccountCache(s.kernel, r.Context())
+	names := s.kernel.NewNames()
 	views := make([]*ledgerView, len(entries))
 	for i, e := range entries {
-		views[i] = enrichLedger(e, uc)
+		views[i] = enrichLedger(r.Context(), e, names)
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -1606,7 +1614,7 @@ func (s *server) postGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteGrant revokes by selector (grants only) or by account (connection + cascade), §8. A full
-// owner/name is the degenerate single-action selector, so there is one spelling per intent.
+// owner@kernel/name is the degenerate single-action selector, so there is one spelling per intent.
 func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if account := q.Get("account"); account != "" {
@@ -1720,7 +1728,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 // is this machine's own way in, not an announcement of where others reach it. A name already held
 // by a different kernel is left alone and said so — the operator chose that name for that kernel
 // (D15, D20). Nothing here can stop a kernel from serving, so every failure is a line, not an error.
-func registerSelf(ctx context.Context, name, bound string, logger *log.Logger) {
+func registerSelf(ctx context.Context, bound string, logger *log.Logger) {
 	host, port, err := net.SplitHostPort(bound)
 	if err != nil {
 		return
@@ -1728,8 +1736,8 @@ func registerSelf(ctx context.Context, name, bound string, logger *log.Logger) {
 	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
 		host = "127.0.0.1"
 	}
-	if _, _, outcome, err := registerKernel(ctx, name, "http://"+net.JoinHostPort(host, port)); err != nil {
-		logger.With(ctx).Info("client.self_register_skipped", "kernel", name, "error", err.Error())
+	if name, _, outcome, err := registerKernel(ctx, "http://"+net.JoinHostPort(host, port)); err != nil {
+		logger.With(ctx).Info("client.self_register_skipped", "error", err.Error())
 	} else if outcome != "already known" {
 		logger.With(ctx).Info("client.self_registered", "kernel", name, "outcome", outcome)
 	}

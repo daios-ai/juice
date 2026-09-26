@@ -15,7 +15,7 @@ func Message() Spec {
 		Name:        "message",
 		Description: "Sends a message to another platform user and creates a Step they must acknowledge",
 		InputSchema: obj(map[string]any{
-			"to":      str("Recipient handle"),
+			"to":      str("Recipient, as handle@kernel"),
 			"message": str("Message body"),
 		}, "to", "message"),
 		OutputSchema: obj(map[string]any{"step_id": str("ID of the created step")}),
@@ -37,14 +37,14 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 		return nil, kernel.ErrInvalidInput.Wrap("message requires message")
 	}
 
-	// `to` may be a local handle or a remote user@kernel (§13): resolve to the routing account, plus
-	// the completer's stable remote id and display handle (both empty for a local recipient).
-	recipient, err := k.ResolveRequiredCaller(ctx, to)
+	// `to` is an address, here or on a peer: resolved to the account that routes the step, plus the
+	// completer's stable remote id and handle when they are on a peer.
+	recipient, err := k.ResolvePrincipal(ctx, to)
 	if err != nil {
 		return nil, kernel.ErrInvalidInput.Wrapf("to %q not found", to)
 	}
 
-	sink, err := k.ReadCallableAction(ctx, kernel.SuperuserHandle+"/sink", callerID)
+	sink, err := k.ReadCallableAction(ctx, kernel.SuperuserHandle+"@"+k.OwnName(ctx)+"/sink", callerID)
 	if err != nil {
 		return nil, kernel.ErrInvalidState.Wrap("sys/sink not available")
 	}

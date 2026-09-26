@@ -35,27 +35,23 @@ func init() {
 
 // kernelAddCmd registers a kernel by dialling it, and is also how a kernel that has moved is
 // repointed: a key is what says which kernel this is, so the same key at a new address is the same
-// kernel and keeps its logins. The name is the client's own label, defaulting to the nickname the
-// kernel advertises — the name an operator has already seen is the one they will type — but a
-// nickname is a label rather than proof, so a name held by another key is not taken.
+// kernel and keeps its logins. The record is named by the name the kernel calls itself (D15): that
+// is the kernel segment of every address the server resolves — `sys@NAME/lookup`, `alice@NAME` —
+// so a client-chosen label would be a second name for the same kernel in daily use.
 func kernelAddCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "add URL [NAME]",
+		Use:   "add URL",
 		Short: "Register a kernel this client can talk to, or follow one that has moved",
-		Long: "Register the kernel answering at URL, under NAME. Without NAME it is registered under the " +
-			"nickname the kernel advertises. Adding does not log in and does not select anything: " +
-			"`juice auth login USER@NAME` does that.\n\n" +
-			"Adding a kernel already known under that name succeeds: the same kernel at the same " +
-			"address changes nothing, and one that has moved has its address updated and keeps its " +
-			"logins. A different kernel under a name already taken is refused; give it another name, " +
-			"or `juice kernel forget NAME` first, which also removes that name's logins.",
-		Args: cobra.RangeArgs(1, 2),
+		Long: "Register the kernel answering at URL, under the name it calls itself. Adding does not log in " +
+			"and does not select anything: `juice auth login USER@NAME` does that.\n\n" +
+			"Adding a kernel already known succeeds: the same kernel at the same address changes nothing, " +
+			"one that has moved has its address updated and keeps its logins, and one that has renamed " +
+			"itself is re-recorded under its new name with its logins. A different kernel answering to a " +
+			"name already taken is refused; `juice kernel forget NAME` first, which also removes that " +
+			"name's logins, or have one of the two kernels renamed.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			name := ""
-			if len(args) == 2 {
-				name = args[1]
-			}
-			name, k, outcome, err := registerKernel(context.Background(), name, args[0])
+			name, k, outcome, err := registerKernel(context.Background(), args[0])
 			if err != nil {
 				return err
 			}
@@ -188,15 +184,13 @@ func kernelForgetCmd() *cobra.Command {
 // registerKernel records a kernel after the server at that address has answered as itself, and
 // returns what it did: added, already known, or moved. Nothing is written until the server has
 // answered, so a name that cannot be dialled keeps whatever it meant before.
-func registerKernel(ctx context.Context, name, url string) (string, *kernelRec, string, error) {
+func registerKernel(ctx context.Context, url string) (string, *kernelRec, string, error) {
 	url = strings.TrimRight(strings.TrimSpace(url), "/")
 	h, err := cli.health(ctx, url)
 	if err != nil {
 		return "", nil, "", err
 	}
-	if name == "" {
-		name = h.Handle
-	}
+	name := h.Handle
 	if err := validateLocalName("kernel", name); err != nil {
 		return "", nil, "", err
 	}
@@ -218,6 +212,9 @@ func registerKernel(ctx context.Context, name, url string) (string, *kernelRec, 
 		// keeping two records that drift apart and split its logins between them (D15). Safe now —
 		// the destination is either free or this same kernel.
 		if held, at := recordOfKey(cfg, h.PublicKey); held != nil && at != name {
+			if conflict := sameKernel(at, held, h); conflict != nil {
+				return false, conflict
+			}
 			renameKernelRecord(cfg, at, name)
 			existing = cfg.Kernels[name]
 			outcome = "renamed; existing logins kept"
@@ -455,7 +452,7 @@ func (c *client) loginPKCE(password string) error {
 
 	ctx := context.Background()
 	if _, err := authPost(ctx, c.base, "/v1/auth/authorize", map[string]string{
-		"handle":                c.login.Handle,
+		"handle":                c.login.String(),
 		"password":              password,
 		"code_challenge":        challenge,
 		"code_challenge_method": "S256",
@@ -716,7 +713,7 @@ func recoverCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			handle := l.Handle
+			handle := l.String()
 			if phrase == "" {
 				p, err := promptMnemonic("Recovery phrase: ")
 				if err != nil {

@@ -24,7 +24,7 @@ $ juice tx show 116fd3a6-…
   trace_id: 29dde7d6-…
   parent_trace_id:
   action_id: bb7fe1a8-…
-  action_name: echo
+  action: bob@acme/echo
   args: { "msg": "hello" }
   result: { … }
   status: success
@@ -36,14 +36,15 @@ $ juice tx show 116fd3a6-…
   started_at: 2026-09-14T12:05:10Z
   ended_at: 2026-09-14T12:05:10Z
   rating: null
-  owner_handle: alice
-  caller_handle: alice
-  target_handle: bob
+  owner: alice@acme
+  caller: alice@acme
+  target: bob@acme
 ```
 
-The three handle fields distinguish the participants. `owner_handle` names the
-owner of the process that funded the work; `caller_handle` names the immediate
-requester; and `target_handle` names the action's owner. For a call you start
+The three party fields distinguish the participants, each an address. `owner` names the
+owner of the process that funded the work; `caller` names the immediate
+requester; and `target` names the action's owner. A caller on another kernel is
+named there too, as `handle@kernel`, because the call carried who made it. For a call you start
 with `run`, you are both process owner and requester. If that action calls
 another, the original process owner stays the same, while the requester of the
 child call is the composing action's owner.
@@ -158,7 +159,7 @@ or withdrawn and has no effect on the payment. Readers who can see the action
 can also see its ratings, without the payer's identity:
 
 ```
-$ juice action ratings bob/echo
+$ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said
 ```

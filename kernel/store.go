@@ -62,7 +62,21 @@ type GrantStore interface {
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
 // resolves peerPublicKey to a live path (direct / hole-punched / relayed).
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerPublicKey string, call OutboundCall, args map[string]any) (FederationResult, error)
+}
+
+// OutboundCall is what a buying kernel signs into one cross-kernel call (P4): the action by its
+// stable id on the seller, the contract it pins, the call's own name, the ticket's terms, and the
+// buyer's own user the call is made for — its stable id here and its handle — empty when the
+// immediate caller is not one of this kernel's users, since a kernel attests only its own.
+type OutboundCall struct {
+	ActionID             string
+	ExpectedContractHash string
+	IdempotencyKey       string
+	Commitment           string
+	Lottery              int64
+	CallerUserID         string
+	CallerHandle         string
 }
 
 // TicketRevealer carries one signed reveal to a peer over /juice/fed/settle/1 (P10): how a draw came
@@ -88,7 +102,7 @@ type RemoteResolver interface {
 // notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
 type StepCaller interface {
 	CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
-		input []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (status int, body []byte, notDispatched bool, err error)
+		input []byte, forUserID string, userSuperuser bool) (status int, body []byte, notDispatched bool, err error)
 	ListPeerSteps(ctx context.Context, peerKey, timestamp, signature, forUserID string) (status int, body []byte, notDispatched bool, err error)
 }
 
@@ -638,8 +652,8 @@ type Store interface {
 	// directory — a discovered_kernels row (with its discovery_docs, FTS mirror, and evidence) whose
 	// updated_at is at or before cutoff and which is NOT backed by a peer user row (§13 Retention).
 	// Peer-backed kernels are governed by PurgePeerCascade instead, so this never touches a kernel
-	// this one trades with. Returns the number of kernels evicted.
-	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time) (int, error)
+	// this one trades with, and never this kernel's own row (D15). Returns the number evicted.
+	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error)
 	// DeactivateImportedIfHash deactivates a remote_proxy action only while its contract hash still
 	// matches expectedHash (§13 rule C: hash-conditional so a stale dispatch's late rejection cannot
 	// deactivate a re-resolved row). A no-op when the row is absent or its hash has changed.

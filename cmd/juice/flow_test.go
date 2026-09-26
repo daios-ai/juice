@@ -162,7 +162,7 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          actionID,
-		"required_caller": "wh-webhook-sys",
+		"required_caller": "wh-webhook-sys@k",
 		"partial_args":    map[string]any{"purchase_id": "abc123"},
 	}, ownerTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -196,11 +196,11 @@ func TestFlow_WebhookCompleteStep(t *testing.T) {
 	}
 	var tx struct {
 		kernel.Transaction
-		CallerHandle string `json:"caller_handle"`
+		Caller string `json:"caller"`
 	}
 	decodeResponse(t, txResp, &tx)
-	if tx.CallerHandle != "wh-webhook-sys" {
-		t.Errorf("tx caller_handle: got %s, want @wh-webhook-sys (webhook)", tx.CallerHandle)
+	if tx.Caller != "wh-webhook-sys@k" {
+		t.Errorf("tx caller: got %s, want wh-webhook-sys@k (webhook)", tx.Caller)
 	}
 	if tx.Status != kernel.TxSuccess {
 		t.Errorf("tx status: got %s, want success", tx.Status)
@@ -227,7 +227,7 @@ func TestFlow_ReconcileNetAmounts(t *testing.T) {
 	// Run 3 times.
 	const runs = 3
 	for i := 0; i < runs; i++ {
-		r := runAction(t, srv, callerTok, "rec-owner/rec-action", map[string]any{})
+		r := runAction(t, srv, callerTok, "rec-owner@k/rec-action", map[string]any{})
 		if r.TxID == "" {
 			t.Fatalf("run %d: expected tx_id", i)
 		}
@@ -237,7 +237,7 @@ func TestFlow_ReconcileNetAmounts(t *testing.T) {
 	ownerTxs := getTxList(t, srv, ownerTok)
 	var sumNet int64
 	for _, tx := range ownerTxs {
-		if tx["action_name"] == "rec-action" && tx["status"] == "success" {
+		if tx["action"] == "rec-owner@k/rec-action" && tx["status"] == "success" {
 			sumNet += int64(tx["net"].(float64))
 		}
 	}
@@ -327,7 +327,7 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 
 	// Run the action — backend should receive the Authorization header.
 	runResult := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "auth-owner/secured-action",
+		"action": "auth-owner@k/secured-action",
 		"args":   map[string]any{},
 	}, callerTok)
 	if runResult.StatusCode != http.StatusOK {
@@ -399,7 +399,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	stepResp := httpDo(t, srv, "POST", "/v1/steps", map[string]any{
 		"trace_id":        traceID,
 		"action":          aAction.ID,
-		"required_caller": "3p-caller",
+		"required_caller": "3p-caller@k",
 		"partial_args":    map[string]any{},
 	}, pTok)
 	if stepResp.StatusCode != http.StatusCreated {
@@ -436,14 +436,14 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		}
 		var tx map[string]any
 		decodeResponse(t, r, &tx)
-		if tx["owner_handle"] != "3p-owner" {
-			t.Errorf("tx.owner_handle: got %v, want @3p-owner", tx["owner_handle"])
+		if tx["owner"] != "3p-owner@k" {
+			t.Errorf("tx.owner: got %v, want 3p-owner@k", tx["owner"])
 		}
-		if tx["caller_handle"] != "3p-caller" {
-			t.Errorf("tx.caller_handle: got %v, want @3p-caller", tx["caller_handle"])
+		if tx["caller"] != "3p-caller@k" {
+			t.Errorf("tx.caller: got %v, want 3p-caller@k", tx["caller"])
 		}
-		if tx["target_handle"] != "3p-provider" {
-			t.Errorf("tx.target_handle: got %v, want @3p-provider", tx["target_handle"])
+		if tx["target"] != "3p-provider@k" {
+			t.Errorf("tx.target: got %v, want 3p-provider@k", tx["target"])
 		}
 		// The raw party UUIDs are no longer exposed (a user is addressed by @handle, §14).
 		if _, ok := tx["owner_user_id"]; ok {
@@ -484,12 +484,12 @@ func TestFlow_AccountSelfService(t *testing.T) {
 	}
 
 	// Old password rejected.
-	if status, _ := httpLogin(t, srv, "self-user", "pass"); status == http.StatusOK {
+	if status, _ := httpLogin(t, srv, "self-user@k", "pass"); status == http.StatusOK {
 		t.Error("old password should be rejected")
 	}
 
 	// New password accepted.
-	if status, _ := httpLogin(t, srv, "self-user", "changed123"); status != http.StatusOK {
+	if status, _ := httpLogin(t, srv, "self-user@k", "changed123"); status != http.StatusOK {
 		t.Errorf("new password login: expected 200, got %d", status)
 	}
 }

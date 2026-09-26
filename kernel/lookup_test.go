@@ -73,8 +73,8 @@ func TestLookupRanking(t *testing.T) {
 		if r.Score < 0 {
 			t.Errorf("score should be non-negative: %f", r.Score)
 		}
-		if r.OwnerHandle != "alice" {
-			t.Errorf("expected owner handle @alice, got %q", r.OwnerHandle)
+		if r.Action.OwnerHandle != "alice" {
+			t.Errorf("expected owner handle alice, got %q", r.Action.OwnerHandle)
 		}
 		if r.Action.Description == "" {
 			t.Errorf("expected non-empty description for %s", r.Action.Name)
@@ -393,7 +393,7 @@ func TestLookupRendersCurrentHandleAfterRename(t *testing.T) {
 	if _, err := k.Lookup(ctx, kernel.LookupRequest{Query: "echo text", Limit: 10}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RenameUser(ctx, sys.ID, owner.ID, "rename-after"); err != nil {
+	if _, err := k.RenameUser(ctx, sys.ID, owner.ID, "rename-after@k"); err != nil {
 		t.Fatalf("RenameUser: %v", err)
 	}
 
@@ -403,8 +403,8 @@ func TestLookupRendersCurrentHandleAfterRename(t *testing.T) {
 	}
 	for _, r := range results {
 		if r.Action != nil && r.Action.ID == a.ID {
-			if r.OwnerHandle != "rename-after" {
-				t.Fatalf("lookup rendered the stale handle %q; the reference would not resolve", r.OwnerHandle)
+			if r.Action.OwnerHandle != "rename-after" {
+				t.Fatalf("lookup rendered the stale handle %q; the reference would not resolve", r.Action.OwnerHandle)
 			}
 			return
 		}

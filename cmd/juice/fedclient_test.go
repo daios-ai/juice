@@ -54,12 +54,12 @@ func TestExecuteFederationSuccess(t *testing.T) {
 		Body:   []byte(`{"result":{"ok":true},"receipt":{"id":"r1","status":"success"}}`),
 	}}
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	signer := func(action, cp, recipient, chash, ikey, argsHash, commitment string, lottery int64) (string, string, error) {
+	signer := func(_ kernel.OutboundCall, _, _, _ string) (string, string, error) {
 		return "sig", "ts", nil
 	}
 	fr, err := executeFederationOverTransport(context.Background(), fc, signer,
 		base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
-		"peerkey", "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", "chash", "key-123", "", 0, "", "", map[string]any{})
+		"peerkey", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-123"}, "", "", map[string]any{})
 	if err != nil {
 		t.Fatalf("executeFederationOverTransport: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestExecuteFederationSuccess(t *testing.T) {
 func TestExecuteFederationNon200(t *testing.T) {
 	// A non-200 with no parseable receipt → no receipt, status propagated (caller stays pending).
 	fc := &fakeFedCaller{resp: fed.CallResponse{Status: 500, Body: []byte(`error`)}}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", "chash", "key-x", "", 0, "", "", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-x"}, "", "", map[string]any{})
 	if err != nil {
 		t.Fatalf("executeFederationOverTransport: unexpected error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestExecuteFederationNon200(t *testing.T) {
 // A plain (post-connect) error is NOT NotDispatched: the request may have executed remotely.
 func TestExecuteFederationTransportError(t *testing.T) {
 	fc := &fakeFedCaller{err: fmt.Errorf("unreachable")}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", "chash", "key-y", "", 0, "", "", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-y"}, "", "", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestExecuteFederationTransportError(t *testing.T) {
 // dispatch can fail fast (§13). The nil-transport executor is the same provably-never-sent case.
 func TestExecuteFederationNotDispatched(t *testing.T) {
 	fc := &fakeFedCaller{err: fmt.Errorf("%w: cannot resolve", fed.ErrNotDispatched)}
-	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", "chash", "key-z", "", 0, "", "", map[string]any{})
+	fr, err := executeFederationOverTransport(context.Background(), fc, nil, "local", "peer", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-z"}, "", "", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestExecuteFederationNotDispatched(t *testing.T) {
 
 	// nil transport → provably never sent.
 	e := &fedAdapter{}
-	fr2, err := e.ExecuteFederation(context.Background(), "peer", "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", "chash", "key-w", "", 0, map[string]any{})
+	fr2, err := e.ExecuteFederation(context.Background(), "peer", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-w"}, map[string]any{})
 	if err != nil {
 		t.Fatalf("nil-transport ExecuteFederation: %v", err)
 	}

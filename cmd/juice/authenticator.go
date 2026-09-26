@@ -43,13 +43,13 @@ type authenticator struct {
 	grants     kernel.GrantStore
 	allowLocal bool
 	timeout    time.Duration
-	refFn      func(context.Context, string) string // actionID → @owner/name; wired after bootstrap
+	refFn      func(context.Context, string) string // actionID → address; wired after bootstrap
 
 	mu    sync.Mutex
 	cache map[string]cachedToken
 }
 
-// actionRef gives grant-required errors the same qualified @owner/name the kernel emits.
+// actionRef gives grant-required errors the same address the kernel emits.
 func (e *authenticator) actionRef(ctx context.Context, action *kernel.Action) string {
 	if e.refFn != nil {
 		return e.refFn(ctx, action.ID)

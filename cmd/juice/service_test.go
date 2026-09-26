@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -21,44 +20,37 @@ func TestResolveHandle(t *testing.T) {
 	ctx := context.Background()
 
 	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "svc-bob", Password: "pass",
+		Handle: "svc-bob@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := k.ResolveUser(ctx, "svc-bob")
+	got, err := k.ResolveLocalPrincipal(ctx, "svc-bob@k")
 	if err != nil {
-		t.Fatalf("resolveHandle(@svc-bob): %v", err)
+		t.Fatalf("ResolveLocalPrincipal(svc-bob@k): %v", err)
 	}
 	if got.ID != u.ID {
 		t.Errorf("got ID %q, want %q", got.ID, u.ID)
 	}
-
-	// Without @ prefix is also accepted.
-	got2, err := k.ResolveUser(ctx, "svc-bob")
-	if err != nil {
-		t.Fatalf("resolveHandle(svc-bob): %v", err)
+	// A bare handle is not an address (D15).
+	if _, err := k.ResolveLocalPrincipal(ctx, "svc-bob"); err == nil {
+		t.Error("a bare handle must be refused")
 	}
-	if got2.ID != u.ID {
-		t.Errorf("without @: got ID %q, want %q", got2.ID, u.ID)
-	}
-
-	_, err = k.ResolveUser(ctx, "nobody-svc")
-	if err == nil {
+	if _, err := k.ResolveLocalPrincipal(ctx, "nobody-svc@k"); err == nil {
 		t.Error("expected error for missing handle")
 	}
 
-	// A peer is resolvable by its base64url public key (the global name), not only its @handle.
+	// A peer is resolvable by its base64url public key (the global name) in the kernel position.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
 	peer, err := k.EnsureKernelAccount(ctx, keyB64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	byKey, err := k.ResolveUser(ctx, keyB64)
-	if err != nil || byKey.ID != peer.ID {
-		t.Errorf("resolveHandle(key): got %v (err %v), want peer %q", byKey, err, peer.ID)
+	kr, err := k.ResolveKernel(ctx, keyB64)
+	if err != nil || kr.Local || kr.Account == nil || kr.Account.ID != peer.ID {
+		t.Errorf("ResolveKernel(key): got %+v (err %v), want peer %q", kr, err, peer.ID)
 	}
 }
 
@@ -72,7 +64,7 @@ func TestResolveActionRef(t *testing.T) {
 	actID, _ := createStepAction(t, srv, backend.URL, ownerTok, "svc-alice", "svc-greet")
 
 	// Resolve by @owner/name.
-	got, err := k.ResolveAction(ctx, "svc-alice/svc-greet")
+	got, err := k.ResolveAction(ctx, "svc-alice@k/svc-greet")
 	if err != nil {
 		t.Fatalf("resolveActionRef(@svc-alice/svc-greet): %v", err)
 	}
@@ -81,7 +73,7 @@ func TestResolveActionRef(t *testing.T) {
 	}
 
 	// Resolve by owner/name without the leading "@".
-	got1b, err := k.ResolveAction(ctx, "svc-alice/svc-greet")
+	got1b, err := k.ResolveAction(ctx, "svc-alice@k/svc-greet")
 	if err != nil {
 		t.Fatalf("resolveActionRef(svc-alice/svc-greet): %v", err)
 	}
@@ -99,21 +91,21 @@ func TestResolveActionRef(t *testing.T) {
 	}
 
 	// Bad @owner/name returns error.
-	_, err = k.ResolveAction(ctx, "nobody-svc/nope")
+	_, err = k.ResolveAction(ctx, "nobody-svc@k/nope")
 	if err == nil {
 		t.Error("expected error for missing owner")
 	}
 }
 
 func TestUserView(t *testing.T) {
-	u := &kernel.Account{
-		ID:        "u1",
-		Handle:    "x",
-		Available: 100,
-		Locked:    50,
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "x@k", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	m := userView(u)
-	for _, key := range []string{"id", "handle", "description", "available", "locked"} {
+	m := userView(ctx, k, u)
+	for _, key := range []string{"id", "address", "description", "available", "locked"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("userView missing key %q", key)
 		}
@@ -121,20 +113,26 @@ func TestUserView(t *testing.T) {
 	if len(m) != 5 {
 		t.Errorf("userView: expected 5 keys, got %d", len(m))
 	}
-	if m["id"] != "u1" || m["handle"] != "x" {
-		t.Error("userView: unexpected values")
+	if m["id"] != u.ID || m["address"] != "x@k" {
+		t.Errorf("userView: unexpected values %v", m)
 	}
 }
 
 func TestEnrichStep(t *testing.T) {
-	step := &kernel.Step{ID: "s1"}
-	action := &kernel.Action{OwnerHandle: "alice", Name: "greet"}
-
-	// No parent trace and not waiting, so neither the ref resolver nor the peer check is dialed
-	// (nil kernel is safe here).
-	v := enrichStep(nil, context.Background(), step, action, newAccountCache(nil, context.Background()))
-	if v.Action != "alice/greet" {
-		t.Errorf("enrichStep: Action = %q, want @alice/greet", v.Action)
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	alice, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice@k", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := &kernel.Action{OwnerUserID: alice.ID, OwnerHandle: "alice", Name: "greet"}
+	step := &kernel.Step{ID: "s1", RequiredCallerUserID: alice.ID}
+	v := enrichStep(k, ctx, step, action, k.NewNames())
+	if v.Action != "alice@k/greet" {
+		t.Errorf("enrichStep: Action = %q, want alice@k/greet", v.Action)
+	}
+	if v.RequiredCaller != "alice@k" {
+		t.Errorf("enrichStep: RequiredCaller = %q, want alice@k", v.RequiredCaller)
 	}
 	if v.CreatedBy != "" {
 		t.Errorf("enrichStep: CreatedBy = %q, want empty for a nil parent trace", v.CreatedBy)
@@ -150,43 +148,50 @@ func TestEnrichStep(t *testing.T) {
 		t.Errorf("enrichStep: AllowedInput = %v, want nil for a non-waiting step", v.AllowedInput)
 	}
 
-	// Nil action → empty action field; a waiting step to a peer caller flags waiting_on_peer and
-	// resolves the required-caller handle from the (pre-seeded) cache.
-	peerStep := &kernel.Step{ID: "s2", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1"}
-	uc := newAccountCache(nil, context.Background())
-	uc.m["peer1"] = &kernel.Account{Handle: "peer", KernelPublicKey: "pk"}
-	v2 := enrichStep(nil, context.Background(), peerStep, nil, uc)
+	// Nil action → empty action field; a waiting step addressed to a peer kernel flags
+	// waiting_on_peer and names the kernel bare — a user always carries `@`, a kernel never does.
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peer, err := k.EnsureKernelAccount(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.BindPetname(ctx, peerKey, "peer", true); err != nil {
+		t.Fatal(err)
+	}
+	peerStep := &kernel.Step{ID: "s2", Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
+	v2 := enrichStep(k, ctx, peerStep, nil, k.NewNames())
 	if v2.Action != "" {
 		t.Errorf("enrichStep(nil action): Action = %q, want empty", v2.Action)
 	}
 	if !v2.WaitingOnPeer {
 		t.Error("enrichStep: WaitingOnPeer should be true")
 	}
-	if v2.RequiredCallerHandle != "peer" {
-		t.Errorf("enrichStep: RequiredCallerHandle = %q, want @peer", v2.RequiredCallerHandle)
+	if v2.RequiredCaller != "peer" {
+		t.Errorf("enrichStep: RequiredCaller = %q, want peer", v2.RequiredCaller)
 	}
 
 	// A step parked for a principal on a peer names that principal beneath the peer's local name.
 	// The handle it went by when the step was made is display; the stable id underneath is what
 	// authorises the completion, so a rename there leaves the step addressed and only this stales.
 	remoteID := "u-9f2c"
-	named := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+	named := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID,
 		RequiredCallerRemoteID: &remoteID, RequiredCallerHandle: "bob"}
-	if got := enrichStep(nil, context.Background(), named, nil, uc).RequiredCallerHandle; got != "bob@peer" {
-		t.Errorf("enrichStep: RequiredCallerHandle = %q, want bob@peer", got)
+	if got := enrichStep(k, ctx, named, nil, k.NewNames()).RequiredCaller; got != "bob@peer" {
+		t.Errorf("enrichStep: RequiredCaller = %q, want bob@peer", got)
 	}
 	// A row parked before the handle was kept still renders, by the id it does hold.
-	unnamed := &kernel.Step{ID: "s4", Status: kernel.StepWaiting, RequiredCallerUserID: "peer1",
+	unnamed := &kernel.Step{ID: "s4", Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID,
 		RequiredCallerRemoteID: &remoteID}
-	if got := enrichStep(nil, context.Background(), unnamed, nil, uc).RequiredCallerHandle; got != "u-9f2c@peer" {
-		t.Errorf("enrichStep(no handle): RequiredCallerHandle = %q, want u-9f2c@peer", got)
+	if got := enrichStep(k, ctx, unnamed, nil, k.NewNames()).RequiredCaller; got != "u-9f2c@peer" {
+		t.Errorf("enrichStep(no handle): RequiredCaller = %q, want u-9f2c@peer", got)
 	}
 
 	// A waiting step carries allowed_input = input_schema \ keys(partial_args): the target's declared
 	// property `units` is exposed for completion, while the pre-bound `city` is dropped. This lets a
 	// required caller who cannot read a private target action still see what to submit.
 	schemaAction := &kernel.Action{
-		OwnerHandle: "alice", Name: "weather",
+		OwnerUserID: alice.ID, OwnerHandle: "alice", Name: "weather",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -196,44 +201,44 @@ func TestEnrichStep(t *testing.T) {
 			"required": []any{"city", "units"},
 		},
 	}
-	waiting := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: "u9", PartialArgs: json.RawMessage(`{"city":"NYC"}`)}
-	uc3 := newAccountCache(nil, context.Background())
-	uc3.m["u9"] = &kernel.Account{Handle: "carol"} // seeded so the peer check doesn't dial the nil kernel
-	v3 := enrichStep(nil, context.Background(), waiting, schemaAction, uc3)
+	waiting := &kernel.Step{ID: "s3", Status: kernel.StepWaiting, RequiredCallerUserID: alice.ID, PartialArgs: json.RawMessage(`{"city":"NYC"}`)}
+	v3 := enrichStep(k, ctx, waiting, schemaAction, k.NewNames())
 	props, ok := v3.AllowedInput["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("enrichStep: AllowedInput has no properties: %v", v3.AllowedInput)
 	}
 	if _, bound := props["city"]; bound {
-		t.Error("enrichStep: AllowedInput should not expose the pre-bound key `city`")
+		t.Error("enrichStep: pre-bound city must not be offered for completion")
 	}
-	if _, open := props["units"]; !open {
-		t.Error("enrichStep: AllowedInput should expose the unbound key `units`")
+	if _, free := props["units"]; !free {
+		t.Error("enrichStep: units must be offered for completion")
 	}
 }
 
 func TestEnrichProcess(t *testing.T) {
-	p := &kernel.Process{ID: "p1", Status: kernel.ProcessOpen}
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	owner, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "owner@k", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &kernel.Process{ID: "p1", Status: kernel.ProcessOpen, OwnerUserID: owner.ID}
 	when := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 
-	uc := newAccountCache(nil, context.Background())
-	uc.m["owner1"] = &kernel.Account{Handle: "owner"}
-	p.OwnerUserID = "owner1"
-
 	// Not awaiting: no entry in the since map.
-	v := enrichProcess(p, map[string]time.Time{}, uc)
+	v := enrichProcess(ctx, p, map[string]time.Time{}, k.NewNames())
 	if v.AwaitingReceipt || v.AwaitingReceiptSince != nil {
 		t.Errorf("expected not awaiting, got %+v", v)
 	}
 	if v.ID != "p1" {
 		t.Errorf("embedded Process.ID = %q, want p1", v.ID)
 	}
-	if v.OwnerHandle != "owner" {
-		t.Errorf("owner_handle = %q, want @owner", v.OwnerHandle)
+	if v.Owner != "owner@k" {
+		t.Errorf("owner = %q, want owner@k", v.Owner)
 	}
 
 	// Awaiting: since map carries this process → flag + timestamp surface.
-	v2 := enrichProcess(p, map[string]time.Time{"p1": when}, uc)
+	v2 := enrichProcess(ctx, p, map[string]time.Time{"p1": when}, k.NewNames())
 	if !v2.AwaitingReceipt || v2.AwaitingReceiptSince == nil || !v2.AwaitingReceiptSince.Equal(when) {
 		t.Errorf("expected awaiting since %v, got %+v", when, v2)
 	}
@@ -242,16 +247,21 @@ func TestEnrichProcess(t *testing.T) {
 func TestEnrichAction(t *testing.T) {
 	k := newTestKernel(t)
 	ctx := context.Background()
-	uc := newAccountCache(k, ctx)
-
-	a := &kernel.Action{ID: "a1", OwnerHandle: "bob", Name: "ping"}
-	r := enrichAction(k, a, uc)
-	if r.ActionRef != "bob/ping" {
-		t.Errorf("enrichAction: ActionRef = %q, want bob/ping", r.ActionRef)
+	if err := k.BindOwnName(ctx, testOwnName); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "bob@k", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &kernel.Action{ID: "a1", OwnerUserID: bob.ID, OwnerHandle: "bob", Name: "ping"}
+	r := enrichAction(ctx, k, a, k.NewNames())
+	if r.ActionRef != "bob@k/ping" {
+		t.Errorf("enrichAction: ActionRef = %q, want bob@k/ping", r.ActionRef)
 	}
 
-	// A remote proxy is owned by a kernel account, which holds no handle: its ref is qualified by
-	// the peer's mount alias, and owner_handle is never empty (§14 R8).
+	// A remote proxy is owned by a kernel account: its address is the remote owner's, beneath the
+	// peer's local name.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.ObserveKernel(ctx, key, "provider", ""); err != nil {
@@ -265,21 +275,18 @@ func TestEnrichAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxy := &kernel.Action{ID: "a2", OwnerUserID: mount.ID, Name: "bob/greet", Kind: kernel.KindRemoteProxy}
-	r2 := enrichAction(k, proxy, uc)
+	r2 := enrichAction(ctx, k, proxy, k.NewNames())
 	if r2.ActionRef != "bob@provider/greet" {
 		t.Errorf("proxy ActionRef = %q, want bob@provider/greet", r2.ActionRef)
-	}
-	if r2.OwnerHandle != "provider" {
-		t.Errorf("proxy owner_handle = %q, want provider (never empty)", r2.OwnerHandle)
 	}
 	// The response is built from a copy, so enrichment never writes display state back onto the row.
 	if proxy.OwnerHandle != "" {
 		t.Errorf("enrichAction mutated the caller's action: owner_handle = %q", proxy.OwnerHandle)
 	}
-
-	// Name-less action still yields no ref.
-	if got := enrichAction(k, &kernel.Action{ID: "a3"}, uc).ActionRef; got != "" {
-		t.Errorf("enrichAction(no name): ActionRef = %q, want empty", got)
+	// owner_handle is not a response field: the address names the owner.
+	b, _ := json.Marshal(r2)
+	if strings.Contains(string(b), `"owner_handle"`) {
+		t.Errorf("owner_handle leaked into the response: %s", b)
 	}
 }
 
@@ -288,11 +295,12 @@ func TestEnrichAction(t *testing.T) {
 // which is authored text and a documented read path (§9).
 func TestEnrichActionOmitsEncodedHTTPSource(t *testing.T) {
 	k := newTestKernel(t)
-	uc := newAccountCache(k, context.Background())
+	ctx := context.Background()
+	names := k.NewNames()
 
 	src := `{"method":"GET","base_url":"https://api.example.com","path":"/v1/ping"}`
 	httpAction := &kernel.Action{ID: "h1", OwnerHandle: "bob", Name: "ping", Kind: kernel.KindHTTP, Source: src}
-	r := enrichAction(k, httpAction, uc)
+	r := enrichAction(ctx, k, httpAction, names)
 	if r.Source != "" {
 		t.Errorf("http read still carries the encoded source: %q", r.Source)
 	}
@@ -304,14 +312,14 @@ func TestEnrichActionOmitsEncodedHTTPSource(t *testing.T) {
 	}
 
 	wasm := &kernel.Action{ID: "w1", OwnerHandle: "bob", Name: "calc", Kind: kernel.KindWasm, Source: "package main"}
-	if got := enrichAction(k, wasm, uc); got.Source != "package main" {
+	if got := enrichAction(ctx, k, wasm, names); got.Source != "package main" {
 		t.Errorf("wasm source = %q, want it preserved on a detail read", got.Source)
 	}
 
 	// The kind decides the read shape, not whether the stored source parses: a row too malformed to
 	// decompose is exactly the one that must not fall back to serving the encoded blob.
 	broken := &kernel.Action{ID: "h2", OwnerHandle: "bob", Name: "bad", Kind: kernel.KindHTTP, Source: "not json"}
-	if got := enrichAction(k, broken, uc); got.Source != "" || got.HTTP != nil {
+	if got := enrichAction(ctx, k, broken, names); got.Source != "" || got.HTTP != nil {
 		t.Errorf("malformed http row: source = %q, http = %+v; want neither served", got.Source, got.HTTP)
 	}
 }
@@ -329,10 +337,10 @@ func TestGetMe(t *testing.T) {
 	if view["id"] != id {
 		t.Errorf("getMe: id = %v, want %s", view["id"], id)
 	}
-	if view["handle"] != "svc-me" {
-		t.Errorf("getMe: handle = %v, want @svc-me", view["handle"])
+	if view["address"] != "svc-me@k" {
+		t.Errorf("getMe: address = %v, want svc-me@k", view["address"])
 	}
-	for _, key := range []string{"id", "handle", "description", "available", "locked"} {
+	for _, key := range []string{"id", "address", "description", "available", "locked"} {
 		if _, ok := view[key]; !ok {
 			t.Errorf("getMe: missing key %q", key)
 		}
@@ -358,8 +366,8 @@ func TestCreateAction_ServiceEnrichment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createAction: %v", err)
 	}
-	if a.ActionRef != "svc-ca/svc-make" {
-		t.Errorf("ActionRef = %q, want @svc-ca/svc-make", a.ActionRef)
+	if a.ActionRef != "svc-ca@k/svc-make" {
+		t.Errorf("ActionRef = %q, want svc-ca@k/svc-make", a.ActionRef)
 	}
 	if a.ID == "" {
 		t.Error("ID should not be empty")
@@ -384,8 +392,8 @@ func TestGetAction_EnrichesRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getAction: %v", err)
 	}
-	if got.ActionRef != "svc-ga/svc-lookup" {
-		t.Errorf("getAction ActionRef = %q, want @svc-ga/svc-lookup", got.ActionRef)
+	if got.ActionRef != "svc-ga@k/svc-lookup" {
+		t.Errorf("getAction ActionRef = %q, want svc-ga@k/svc-lookup", got.ActionRef)
 	}
 }
 
@@ -479,7 +487,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	}
 
 	// Filter by owner handle.
-	byOwner, err := listPublicActions(k, ctx, "", "svc-lpa", "", false, 50, 0)
+	byOwner, err := listPublicActions(k, ctx, "", "svc-lpa@k", "", false, 50, 0)
 	if err != nil {
 		t.Fatalf("listPublicActions by owner: %v", err)
 	}
@@ -514,8 +522,8 @@ func TestListSteps_Enriched(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	_, err := createStep(k, ctx, ownerID, createStepParams{
-		TraceID: traceID, ActionRef: "svc-ls/svc-ls-action",
-		RequiredCaller: "svc-ls-hook", PartialArgs: json.RawMessage(`{}`),
+		TraceID: traceID, ActionRef: "svc-ls@k/svc-ls-action",
+		RequiredCaller: "svc-ls-hook@k", PartialArgs: json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep: %v", err)
@@ -528,11 +536,11 @@ func TestListSteps_Enriched(t *testing.T) {
 	if len(steps) == 0 {
 		t.Fatal("expected at least one step")
 	}
-	if steps[0].Action != "svc-ls/svc-ls-action" {
-		t.Errorf("listSteps: action field = %q, want @svc-ls/svc-ls-action", steps[0].Action)
+	if steps[0].Action != "svc-ls@k/svc-ls-action" {
+		t.Errorf("listSteps: action field = %q, want svc-ls@k/svc-ls-action", steps[0].Action)
 	}
-	if steps[0].OwnerHandle != "svc-ls" {
-		t.Errorf("listSteps: owner_handle = %q, want @svc-ls (the process owner)", steps[0].OwnerHandle)
+	if steps[0].Owner != "svc-ls@k" {
+		t.Errorf("listSteps: owner = %q, want svc-ls@k (the process owner)", steps[0].Owner)
 	}
 }
 
@@ -551,8 +559,8 @@ func TestGetStep_Enriched(t *testing.T) {
 	traceID := setupTraceForProcess(t, db, p.ID)
 
 	view, err := createStep(k, ctx, ownerID, createStepParams{
-		TraceID: traceID, ActionRef: "svc-gs/svc-gs-action",
-		RequiredCaller: "svc-gs-hook", PartialArgs: json.RawMessage(`{}`),
+		TraceID: traceID, ActionRef: "svc-gs@k/svc-gs-action",
+		RequiredCaller: "svc-gs-hook@k", PartialArgs: json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep: %v", err)
@@ -562,14 +570,14 @@ func TestGetStep_Enriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getStep: %v", err)
 	}
-	if got.Action != "svc-gs/svc-gs-action" {
-		t.Errorf("getStep action = %q, want @svc-gs/svc-gs-action", got.Action)
+	if got.Action != "svc-gs@k/svc-gs-action" {
+		t.Errorf("getStep action = %q, want svc-gs@k/svc-gs-action", got.Action)
 	}
 	if got.ID != view.ID {
 		t.Errorf("getStep ID = %q, want %q", got.ID, view.ID)
 	}
-	if got.OwnerHandle != "svc-gs" {
-		t.Errorf("getStep owner_handle = %q, want @svc-gs (the process owner)", got.OwnerHandle)
+	if got.Owner != "svc-gs@k" {
+		t.Errorf("getStep owner = %q, want svc-gs@k (the process owner)", got.Owner)
 	}
 	// The required caller is not the owner, yet must still see the owner_handle — the resolver
 	// is unauthorized, so a non-owner viewer of the step gets the owner without a process-read.
@@ -577,8 +585,8 @@ func TestGetStep_Enriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getStep as required caller: %v", err)
 	}
-	if asHook.OwnerHandle != "svc-gs" {
-		t.Errorf("getStep(required caller) owner_handle = %q, want @svc-gs", asHook.OwnerHandle)
+	if asHook.Owner != "svc-gs@k" {
+		t.Errorf("getStep(required caller) owner_handle = %q, want @svc-gs", asHook.Owner)
 	}
 }
 
@@ -599,15 +607,15 @@ func TestCreateStep_SharedBehavior(t *testing.T) {
 	// Create step by @owner/name.
 	view, err := createStep(k, ctx, ownerID, createStepParams{
 		TraceID:        traceID,
-		ActionRef:      "svc-step-owner/svc-notify",
-		RequiredCaller: "svc-webhook",
+		ActionRef:      "svc-step-owner@k/svc-notify",
+		RequiredCaller: "svc-webhook@k",
 		PartialArgs:    json.RawMessage(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("createStep by @owner/name: %v", err)
 	}
-	if view.Action != "svc-step-owner/svc-notify" {
-		t.Errorf("action field: got %q, want %q", view.Action, "svc-step-owner/svc-notify")
+	if view.Action != "svc-step-owner@k/svc-notify" {
+		t.Errorf("action field: got %q, want %q", view.Action, "svc-step-owner@k/svc-notify")
 	}
 	if view.Step.ActionID != actID {
 		t.Errorf("next_action_id: got %q, want %q", view.Step.ActionID, actID)
@@ -619,7 +627,7 @@ func TestCreateStep_SharedBehavior(t *testing.T) {
 	view2, err := createStep(k, ctx, ownerID, createStepParams{
 		TraceID:        traceID2,
 		ActionRef:      actID,
-		RequiredCaller: "svc-webhook",
+		RequiredCaller: "svc-webhook@k",
 		PartialArgs:    json.RawMessage(`{}`),
 	})
 	if err != nil {
@@ -680,50 +688,60 @@ func TestManualHTTPActionRoundTrip(t *testing.T) {
 	}
 }
 
-// userCache.handle returns the @handle, falling back to the raw id only when the user row is gone
-// (a purged peer, §13), and empty for an empty id.
-func TestUserCacheHandleFallback(t *testing.T) {
-	uc := newAccountCache(nil, context.Background())
-	uc.m["u1"] = &kernel.Account{Handle: "alice"}
-	uc.m["gone"] = nil // cached miss (purged/unknown) → fall back to the id
-	if got := uc.reference("u1"); got != "alice" {
-		t.Errorf("handle(u1) = %q, want @alice", got)
+// Names.Address names a user by address, falls back to the raw id only when the account row is
+// gone (a purged peer, §13), and is empty for an empty id.
+func TestNamesAddressFallback(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice@k", Password: "password"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := uc.reference("gone"); got != "gone" {
-		t.Errorf("handle(gone) = %q, want raw-id fallback", got)
+	names := k.NewNames()
+	if got := names.Address(ctx, kernel.Principal{AccountID: u.ID}); got != "alice@k" {
+		t.Errorf("Address(alice) = %q, want alice@k", got)
 	}
-	if got := uc.reference(""); got != "" {
-		t.Errorf("handle(empty) = %q, want empty", got)
+	if got := names.Address(ctx, kernel.Principal{AccountID: "gone"}); got != "gone" {
+		t.Errorf("Address(gone) = %q, want raw-id fallback", got)
+	}
+	if got := names.Address(ctx, kernel.Principal{}); got != "" {
+		t.Errorf("Address(empty) = %q, want empty", got)
 	}
 }
 
-// enrichTx resolves the three party handles and — critically — the raw *_user_id UUIDs must not
-// survive to the JSON (the omitempty-shadow drop, where a plain json:"-" would fail).
+// enrichTx names the three parties and the action by address and — critically — the raw *_user_id
+// UUIDs and the stored action_name must not survive to the JSON (the omitempty-shadow drop, where a
+// plain json:"-" would fail).
 func TestEnrichTxDropsUUIDs(t *testing.T) {
+	_, k, _ := newTestHTTPServerFull(t)
+	ctx := context.Background()
+	ids := map[string]string{}
+	for _, h := range []string{"owner", "caller", "target"} {
+		u, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: h + "@k", Password: "password"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[h] = u.ID
+	}
 	tv := &kernel.TransactionView{Transaction: &kernel.Transaction{
-		ID: "tx1", OwnerUserID: "o", CallerUserID: "c", TargetUserID: "t",
+		ID: "tx1", OwnerUserID: ids["owner"], CallerUserID: ids["caller"], TargetUserID: ids["target"], ActionName: "ping",
 	}}
-	uc := newAccountCache(nil, context.Background())
-	uc.m["o"] = &kernel.Account{Handle: "owner"}
-	uc.m["c"] = &kernel.Account{Handle: "caller"}
-	uc.m["t"] = &kernel.Account{Handle: "target"}
-
-	v := enrichTx(tv, uc)
-	if v.OwnerHandle != "owner" || v.CallerHandle != "caller" || v.TargetHandle != "target" {
-		t.Fatalf("handles: %q/%q/%q", v.OwnerHandle, v.CallerHandle, v.TargetHandle)
+	v := enrichTx(ctx, tv, k.NewNames())
+	if v.Owner != "owner@k" || v.Caller != "caller@k" || v.Target != "target@k" || v.Action != "target@k/ping" {
+		t.Fatalf("parties: %q/%q/%q action %q", v.Owner, v.Caller, v.Target, v.Action)
 	}
 	b, _ := json.Marshal(v)
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"owner_user_id", "caller_user_id", "target_user_id"} {
+	for _, k := range []string{"owner_user_id", "caller_user_id", "target_user_id", "action_name"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("%s must be dropped from tx JSON, got %v", k, m[k])
 		}
 	}
-	if m["owner_handle"] != "owner" || m["id"] != "tx1" {
-		t.Errorf("expected owner_handle=@owner and id=tx1, got %v / %v", m["owner_handle"], m["id"])
+	if m["owner"] != "owner@k" || m["id"] != "tx1" {
+		t.Errorf("expected owner=owner@k and id=tx1, got %v / %v", m["owner"], m["id"])
 	}
 }
 
@@ -778,7 +796,7 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 
-	local, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "shared", Password: "password123"})
+	local, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "shared@k", Password: "password123"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,13 +817,14 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 		name, ident, noun string
 		wantAcct, wantKey string
 	}{
-		{"a handle under users", "shared", "user", local.ID, ""},
+		{"an address under users", "shared@k", "user", local.ID, ""},
 		{"a petname under peers", "kernelonly", "peer", "", key},
 		{"a raw key under peers", key, "peer", "", key},
-		{"a petname under users", "kernelonly", "user", "", ""},
+		{"a petname under users", "kernelonly@k", "user", "", ""},
 		{"a raw key under users", key, "user", "", ""},
 		{"one name, two namespaces: the noun decides", "shared", "peer", "", key2},
-		{"a name that is neither", "nobody", "user", "", ""},
+		{"a name that is neither", "nobody@k", "user", "", ""},
+		{"this kernel's own name is not a peer", "k", "peer", "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			acct, gotKey, err := resolveTarget(k, ctx, c.ident, c.noun)
@@ -840,14 +859,13 @@ func TestAccountCacheReferenceRendersKernels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uc := newAccountCache(k, ctx)
-	if got := uc.reference(acct.ID); got != key {
+	if got := k.Address(ctx, kernel.Principal{AccountID: acct.ID}); got != key {
 		t.Errorf("unbound kernel account rendered %q, want its key %s", got, key)
 	}
 	if _, err := k.BindPetname(ctx, key, "named-peer", true); err != nil {
 		t.Fatal(err)
 	}
-	if got := newAccountCache(k, ctx).reference(acct.ID); got != "named-peer" {
+	if got := k.Address(ctx, kernel.Principal{AccountID: acct.ID}); got != "named-peer" {
 		t.Errorf("bound kernel account rendered %q, want its petname", got)
 	}
 }
@@ -865,8 +883,9 @@ func TestATargetIsNeverATombstone(t *testing.T) {
 	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveTarget(k, ctx, acct.ID, "user"); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("tombstone id: want ErrNotFound, got %v", err)
+	// A tombstone has no handle, so no address reaches it, and an id is not an address.
+	if _, _, err := resolveTarget(k, ctx, acct.ID, "user"); err == nil {
+		t.Error("tombstone id: want an error")
 	}
 }
 
@@ -893,7 +912,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 
 	tv := &txView{TransactionView: &kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t",
 		ArgsJSON: json.RawMessage(`{"big":1}`), ReplyJSON: json.RawMessage(`{"big":2}`),
-		RemoteReceiptJSON: `{"charge":1}`}}, OwnerHandle: "bob"}
+		RemoteReceiptJSON: `{"charge":1}`}}, Owner: "bob@k"}
 	txDetail, _ := json.Marshal(tv)
 	txList, _ := json.Marshal(txSummary{txView: *tv})
 	for _, key := range []string{`"args"`, `"result"`} {
@@ -905,7 +924,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 		}
 	}
 	// The receipt is evidence, not payload, and stays on the row; the handle stays, the id does not.
-	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner_handle":"bob"`) {
+	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner":"bob@k"`) {
 		t.Error("the transaction list row lost its receipt or its handle")
 	}
 	if strings.Contains(string(txList), `"owner_user_id"`) {
@@ -917,7 +936,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 	if err := json.Unmarshal([]byte("["+string(txList)+"]"), &back); err != nil {
 		t.Fatalf("the CLI cannot decode a list row: %v", err)
 	}
-	if len(back) != 1 || back[0].ID != "t" || back[0].OwnerHandle != "bob" {
+	if len(back) != 1 || back[0].ID != "t" || back[0].Owner != "bob@k" {
 		t.Errorf("the row did not survive the CLI round-trip: %+v", back)
 	}
 	var actions []actionSummary

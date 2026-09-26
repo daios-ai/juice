@@ -178,8 +178,11 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 	}
 	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
 
-	// Persist the kernel handle so GetGossip serves it from the DB.
-	_ = k.SetConfig(ctx, "kernel_handle", globalCfg.KernelHandle)
+	// The kernel's own name is a petname on its own key (D15): what its users are addressed by,
+	// what gossip and /health say, and what no peer can be given.
+	if err := k.BindOwnName(ctx, globalCfg.KernelHandle); err != nil {
+		return err
+	}
 
 	// Recover interrupted calls and re-park crashed step completions (after signing key is set).
 	if err := k.Recover(ctx); err != nil {

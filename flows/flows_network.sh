@@ -41,7 +41,7 @@ flow_network_reachability() {
     start_server "$db" "$hm" kernel_handle=net-node seed="$boot" discovery_interval_seconds=5 || {
         fail "net.boot" "kernel did not start"; return; }
     know "$db" "$hm"
-    j "$db" "$hm" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    j "$db" "$hm" auth login sys@net-node --password sys-pass >/dev/null 2>&1
 
     # Self-identity is reachable and announced.
     local mykey; mykey=$(kernel_key "$db" "$hm")

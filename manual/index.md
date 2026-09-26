@@ -144,10 +144,10 @@ a question, the example includes both the question and the answer. Long
 identifiers, keys, signatures, and omitted portions of output are abbreviated
 with `…`; use the complete values returned by your own kernel.
 
-A login is written as an account handle followed by the client's name for its
-kernel, as in `alice@acme`. An action on the current kernel is written as
-`owner/name`, for example `bob/echo`. A remote action adds its kernel after the
-owner's handle: `bob@weather/forecast`. The [identity chapter](calling/identity.html)
+Every user is written as an address, the handle followed by the kernel's name, as in
+`alice@acme`; a login is that address. Every action is written the same way,
+`owner@kernel/name`: `bob@acme/echo` on the kernel called acme, `bob@weather/forecast`
+on the kernel this one calls weather. The [identity chapter](calling/identity.html)
 explains how these names are assigned and resolved.
 
 Most examples use the `play` network, whose display unit is fUSD. The

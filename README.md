@@ -123,10 +123,10 @@ knows — each one's address, public key and network — and one file per *login
 
 A kernel you serve yourself is registered by `serve` as it starts, under the name it
 serves as, so nothing has to be copied from its log. A kernel somebody else runs is
-registered once, by address:
+registered once, by address, under the name it calls itself — say `work`:
 
 ```bash
-./juice kernel add https://their.example work   # register somebody else's under "work"
+./juice kernel add https://their.example        # register somebody else's, as "work"
 ./juice user create alice@work                  # create an account on it
 ./juice auth login alice@work                   # log in, and act as alice@work
 ./juice kernel list                             # the kernels known, and which is in use
@@ -160,9 +160,9 @@ by the fact that witnesses it, and then move freely between local users:
 
 ```bash
 ./juice auth login sys@work
-./juice admin user deposit alice 1000 --ref wire-8823   # operator only
+./juice admin user deposit alice@work 1000 --ref wire-8823   # operator only
 ./juice auth use alice@work
-./juice user transfer bob 250      # alice pays bob directly, no fee
+./juice user transfer bob@work 250      # alice pays bob directly, no fee
 ./juice user ledger                # deposits, withdrawals, transfers, and settlement postings
 ```
 
@@ -203,8 +203,8 @@ disabled and private, so nothing is callable by accident:
 ./juice action create echo --kind http --source https://httpbin.org/post --price 5 \
   --description "Echo a message" \
   --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}}}'
-./juice action enable alice/echo
-./juice run alice/echo '{"msg":"hello"}'
+./juice action enable alice@work/echo
+./juice run alice@work/echo '{"msg":"hello"}'
 ```
 
 `run` debits exactly the price, executes, and settles. Invalid input is rejected
@@ -214,7 +214,7 @@ the result:
 ```bash
 ./juice tx show <tx-id>
 ./juice tx rate <tx-id> 1 --note "did what it said"
-./juice action ratings alice/echo    # public track record: value, note, date
+./juice action ratings alice@work/echo    # public track record: value, note, date
 ./juice action stats alice/echo      # uses, successes, latency
 ```
 
@@ -222,7 +222,7 @@ Only the payer can rate, once, and ratings are immutable — they are the market
 public evidence about the action.
 
 Three visibility levels control the audience, each widened deliberately by the owner
-(`action update alice/echo --visibility public`): `private` (owner only), `local`
+(`action update alice@work/echo --visibility public`): `private` (owner only), `local`
 (users of this kernel), `public` (everyone, including other kernels). Changing an action's terms never surprises a buyer: a call pinned to
 terms that changed is refused and re-quoted, never silently repriced.
 
@@ -239,7 +239,7 @@ no filesystem, network, or token access. Write the handler in Go and compile it 
 kernel:
 
 ```bash
-./juice run sys/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
+./juice run sys@work/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
   | jq -r .result.artifact | base64 -d > pipeline.wasm
 ./juice action create pipeline --kind wasm --artifact pipeline.wasm --price 100
 ```
@@ -255,12 +255,12 @@ at `<name>/index`:
 
 ```bash
 ./juice action import weather https://api.example.com/openapi.json
-./juice action enable alice/weather      # enables the whole subtree
-./juice run alice/weather/forecast '{"city":"Lisbon"}'
+./juice action enable alice@work/weather      # enables the whole subtree
+./juice run alice@work/weather/forecast '{"city":"Lisbon"}'
 ```
 
 Re-running the import reconciles a changed document without losing history or the
-terms you set; `action disable alice/weather` and `action delete alice/weather`
+terms you set; `action disable alice@work/weather` and `action delete alice@work/weather`
 switch off or remove the application with the ordinary verbs.
 
 Upstream credentials attach per action and never surface anywhere — not in inputs,
@@ -269,10 +269,10 @@ OAuth client-credentials, JWT-bearer) serve APIs where the owner holds one key. 
 multi-user APIs, each caller connects their **own** upstream account once:
 
 ```bash
-./juice user connect alice/mail            # browser consent (OAuth), or:
-./juice user connect alice/mail --token KEY   # or a personal API key
+./juice user connect alice@work/mail            # browser consent (OAuth), or:
+./juice user connect alice@work/mail --token KEY   # or a personal API key
 ./juice user me                            # lists connections, never tokens
-./juice user disconnect alice/mail
+./juice user disconnect alice@work/mail
 ```
 
 One consent covers the whole directory of actions it names. A call that needs a
@@ -285,7 +285,7 @@ An action can park a **step**: a prepaid continuation addressed to one named par
 The money is already reserved, so completing it needs no further funds:
 
 ```bash
-./juice run sys/message '{"to":"bob","message":"approve the order?"}'
+./juice run sys@work/message '{"to":"bob@work","message":"approve the order?"}'
 ./juice step list                    # bob sees work addressed to him
 ./juice step complete <step-id> '{}'
 ./juice process list                 # a parked step keeps its process open
@@ -299,7 +299,7 @@ machinery. Suspended work survives restarts.
 ## Search, and letting agents choose
 
 ```bash
-./juice run sys/lookup '{"query":"translate text to german"}'
+./juice run sys@work/lookup '{"query":"translate text to german"}'
 ```
 
 Lookup searches descriptions lexically and semantically and returns ranked candidates
@@ -338,9 +338,9 @@ and trust verbs:
 
 ```bash
 ./juice admin user list                # all local accounts
-./juice admin user deposit carol 500 --ref wire-4471  # credit against a payment received
+./juice admin user deposit carol@work 500 --ref wire-4471  # credit against a payment received
 ./juice admin kernel deposits          # payments held for a sender nobody has registered
-./juice admin user suspend carol       # one reversible lever, humans and kernels alike
+./juice admin user suspend carol@work       # one reversible lever, humans and kernels alike
 ./juice admin peer rename k-3f8a2c9d weather-farm # give a peer a memorable local name
 ./juice admin peer list                # counterparties and discovered kernels, last seen
 ./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
@@ -366,7 +366,7 @@ The ones you are most likely to touch:
 
 | Key | Purpose |
 |---|---|
-| `kernel_handle` | The nickname this kernel reports |
+| `kernel_handle` | This kernel's own name: the kernel segment of every address on it (`alice@acme`) |
 | `listen_addr` | Where this kernel answers clients (default `:4040`) |
 | `fed_listen_addrs` | Where this kernel answers peers; empty binds the standard port 31313, and a second kernel on the same machine needs its own |
 | `fee_bps` | Kernel fee on each provider's margin (default `2000` = 20%) |

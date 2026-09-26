@@ -12,7 +12,7 @@ flow_rail_onboard() {
     # The selling kernel serves strangers on credit, which is what makes the first call possible
     # without anyone prefunding anything (U29). Serving is funded by the seller's own money.
     _fed_setup "$dir" || { fail "rail_onboard.setup" "setup failed"; return; }
-    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys@kernel-r "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" alice)
     make_user "$FED_DBL" "$FED_HL" "$ha" alice
 
@@ -23,15 +23,15 @@ flow_rail_onboard() {
     assert_not_contains "rail_onboard.no_address_here" "0x" "$how"
 
     # Every crossing names the payment it records: without one, a repeated command would mint money.
-    assert_fails "rail_onboard.ref_required" "ref\|payment" -- j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)"
+    assert_fails "rail_onboard.ref_required" "ref\|payment" -- j "$FED_DBL" "$FED_HL" admin user deposit alice@kernel-l "$(units 500)"
     local ref="invoice-77"
-    j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice@kernel-l "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.funded" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # Recording the same payment again moves money once.
-    j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit alice@kernel-l "$(units 500)" --ref "$ref" --yes >/dev/null 2>&1
     assert_jnum "rail_onboard.recorded_once" "$(jj "$FED_DBL" "$ha" user me)" available 500
     # The same payment on other terms is a different intention and is refused.
-    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin user deposit alice "$(units 900)" --ref "$ref" --yes
+    assert_fails "rail_onboard.same_ref_other_amount" "" -- j "$FED_DBL" "$FED_HL" admin user deposit alice@kernel-l "$(units 900)" --ref "$ref" --yes
     # Nothing is waiting on the operator: every payment so far had an owner.
     assert_not_contains "rail_onboard.nothing_held" "$ref" "$(j "$FED_DBL" "$FED_HL" admin kernel deposits)"
 
@@ -50,7 +50,7 @@ flow_rail_withdraw() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "rail_withdraw.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
-    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice@k "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # No prompt without a terminal: agents are first-class.
     local out; out=$(j "$db" "$ha" user withdraw "$(units 200)" --yes)
@@ -91,8 +91,8 @@ flow_rail_settlement() {
     local lkey="$FED_LKEY"
 
     local rid; rid=$(publish "$FED_DBR" "$FED_HR" paid --kind http --source "http://127.0.0.1:$FED_BPORT" --description "paid" --price "$(units 10)")
-    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
-    j "$FED_DBL" "$FED_HL" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys@kernel-r "$(units 5000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit sys@kernel-l "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local before seller; before=$(balance_of "$FED_DBL" "$FED_HL"); seller=$(balance_of "$FED_DBR" "$FED_HR")
 
     assert_nonempty "rail_settlement.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
@@ -105,7 +105,7 @@ flow_rail_settlement() {
     # The buyer pays and then tells the seller which payment settles it. On a world with no
     # addresses that signed reveal IS the payment, so the seller's books close against it with
     # nobody recording anything: no operator acts anywhere in this flow.
-    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action_name sys/paid)")" ticket_id)
+    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$FED_HL" tx show "$(find_id "$(jj "$FED_DBL" "$FED_HL" tx list)" action sys@kernel-r/paid)")" ticket_id)
     assert_nonempty "rail_settlement.names_its_ticket" "$ticket"
     await_eq "rail_settlement.nothing_owed" 0 owed_count "$FED_DBR" "$FED_HR" "$lkey"
 
@@ -132,14 +132,14 @@ flow_rail_isolation() {
 
     start_server "$dbr" "$hr" kernel_handle=kernel-r discovery_interval_seconds=2 || { fail "rail_isolation.boot_r" "no start"; return; }
     know "$dbr" "$hr"
-    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    j "$dbr" "$hr" auth login sys@kernel-r --password sys-pass >/dev/null 2>&1
     local boot; boot=$(kernel_fed_addr "$dbr" "$hr")
     start_server "$dbl" "$hl" kernel_handle=kernel-l seed="$boot" discovery_interval_seconds=2 \
         || { fail "rail_isolation.boot_l" "no start"; return; }
     know "$dbr" "$hr"
-    j "$dbr" "$hr" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    j "$dbr" "$hr" auth login sys@kernel-r --password sys-pass >/dev/null 2>&1
     know "$dbl" "$hl"
-    j "$dbl" "$hl" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    j "$dbl" "$hl" auth login sys@kernel-l --password sys-pass >/dev/null 2>&1
 
     # Each kernel reports its own network, so an operator can see which one they are on.
     assert_contains "rail_isolation.r_network" "play" "$(j "$dbr" "$hr" kernel health)"
@@ -208,13 +208,13 @@ flow_rail_profile() {
     start_server "$hb" "$hc" kernel_handle=kernel-b || { fail "rail_profile.boot_b" "no start"; return; }
 
     # Registering a kernel records its key and its network, and selects nothing.
-    HOME="$hc" "$JUICE" kernel add "$(url "$dba")" ka >/dev/null 2>&1 || { fail "rail_profile.pin" "add failed"; return; }
+    HOME="$hc" "$JUICE" kernel add "$(url "$dba")" >/dev/null 2>&1 || { fail "rail_profile.pin" "add failed"; return; }
     assert_nonempty "rail_profile.pinned_key" "$(HOME="$hc" "$JUICE" --json kernel list | grep -o '"public_key": "[^"]*"' | head -1)"
-    assert_contains "rail_profile.lists" "ka" "$(HOME="$hc" "$JUICE" kernel list)"
-    HOME="$hc" "$JUICE" auth login sys@ka --password sys-pass >/dev/null 2>&1
-    assert_json "rail_profile.logged_in" "$(HOME="$hc" "$JUICE" --json user me)" handle sys
-    assert_contains "rail_profile.login_listed" "sys@ka" "$(HOME="$hc" "$JUICE" auth list)"
-    assert_json "rail_profile.as_override" "$(JUICE_AS=sys@ka HOME="$hc" "$JUICE" --json user me)" handle sys
+    assert_contains "rail_profile.lists" "kernel-a" "$(HOME="$hc" "$JUICE" kernel list)"
+    HOME="$hc" "$JUICE" auth login sys@kernel-a --password sys-pass >/dev/null 2>&1
+    assert_json "rail_profile.logged_in" "$(HOME="$hc" "$JUICE" --json user me)" address sys@kernel-a
+    assert_contains "rail_profile.login_listed" "sys@kernel-a" "$(HOME="$hc" "$JUICE" auth list)"
+    assert_json "rail_profile.as_override" "$(JUICE_AS=sys@kernel-a HOME="$hc" "$JUICE" --json user me)" address sys@kernel-a
 
     # A login this client does not hold is refused rather than falling back to the one it does.
     assert_fails "rail_profile.as_unknown_refused" "no kernel\|USER@KERNEL\|not logged in" -- \
@@ -227,9 +227,9 @@ flow_rail_profile() {
 
     # A record that no longer names the kernel it pinned refuses to switch rather than guessing.
     profile_set "$hc" public_key "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    assert_fails "rail_profile.key_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@ka
+    assert_fails "rail_profile.key_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@kernel-a
     profile_set "$hc" world_fingerprint "0000000000000000000000000000000000000000000000000000000000000000"
-    assert_fails "rail_profile.digest_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@ka
+    assert_fails "rail_profile.digest_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@kernel-a
 }
 
 # Earning and spending, across a restart (acceptance 4): A funds a buyer, the buyer pays B, A and B
@@ -248,21 +248,21 @@ flow_rail_economic_loop() {
     start_server "$dbc" "$hc" kernel_handle=kernel-c seed="$FED_BOOT" discovery_interval_seconds=2 \
         || { fail "rail_economic_loop.boot_c" "no start"; return; }
     know "$dbc" "$hc"
-    j "$dbc" "$hc" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+    j "$dbc" "$hc" auth login sys@kernel-c --password sys-pass >/dev/null 2>&1
     local ckey; ckey=$(kernel_key "$dbc" "$hc")
     publish "$dbc" "$hc" tooling --kind http --source "http://127.0.0.1:$FED_BPORT" --description "tooling" --price "$(units 20)" >/dev/null 2>&1
-    j "$dbc" "$hc" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$dbc" "$hc" admin user deposit sys@kernel-c "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # B sells, funding its own work; A's buyer pays for it.
     publish "$FED_DBR" "$FED_HR" service --kind http --source "http://127.0.0.1:$FED_BPORT" --description "a service" --price "$(units 200)" >/dev/null 2>&1
-    j "$FED_DBR" "$FED_HR" admin user deposit sys "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" admin user deposit sys@kernel-r "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     local ha; ha=$(home "$dir" buyer)
     make_user "$FED_DBL" "$FED_HL" "$ha" buyer
-    j "$FED_DBL" "$FED_HL" admin user deposit buyer "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$FED_DBL" "$FED_HL" admin user deposit buyer@kernel-l "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_nonempty "rail_economic_loop.buyer_pays_b" "$(strfield "$(jj "$FED_DBL" "$ha" run sys@kernel-r/service '{}')" tx_id)"
 
     # A owes B for the work, and pays it without anyone being asked: B's books clear on A's reveal.
-    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$(find_id "$(jj "$FED_DBL" "$ha" tx list)" action_name sys/service)")" ticket_id)
+    local ticket; ticket=$(strfield "$(jj "$FED_DBL" "$ha" tx show "$(find_id "$(jj "$FED_DBL" "$ha" tx list)" action sys@kernel-r/service)")" ticket_id)
     assert_nonempty "rail_economic_loop.names_its_ticket" "$ticket"
     await_eq "rail_economic_loop.b_books_clear" 0 owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY"
 
@@ -325,27 +325,27 @@ flow_two_kernels() {
     assert_ne "two_kernels.separate_addresses" "$(url "$dba")" "$(url "$dbb")"
 
     # One client, two kernels, one login on each. Each login reaches its own.
-    HOME="$hc" "$JUICE" kernel add "$(url "$dba")" alpha >/dev/null 2>&1
-    HOME="$hc" "$JUICE" auth login sys@alpha --password sys-pass >/dev/null 2>&1
-    HOME="$hc" "$JUICE" kernel add "$(url "$dbb")" beta >/dev/null 2>&1
-    HOME="$hc" "$JUICE" auth login sys@beta --password sys-pass >/dev/null 2>&1
+    HOME="$hc" "$JUICE" kernel add "$(url "$dba")" >/dev/null 2>&1
+    HOME="$hc" "$JUICE" auth login sys@kernel-alpha --password sys-pass >/dev/null 2>&1
+    HOME="$hc" "$JUICE" kernel add "$(url "$dbb")" >/dev/null 2>&1
+    HOME="$hc" "$JUICE" auth login sys@kernel-beta --password sys-pass >/dev/null 2>&1
 
     local ka kb
-    ka=$(strfield "$(JUICE_AS=sys@alpha HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
-    kb=$(strfield "$(JUICE_AS=sys@beta  HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
+    ka=$(strfield "$(JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
+    kb=$(strfield "$(JUICE_AS=sys@kernel-beta  HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
     assert_nonempty "two_kernels.alpha_key" "$ka"
     assert_ne "two_kernels.distinct_identities" "$ka" "$kb"
     assert_json "two_kernels.alpha_handle" \
-        "$(JUICE_AS=sys@alpha HOME="$hc" "$JUICE" --json admin kernel show)" handle kernel-alpha
+        "$(JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" --json admin kernel show)" handle kernel-alpha
     assert_json "two_kernels.beta_handle" \
-        "$(JUICE_AS=sys@beta HOME="$hc" "$JUICE" --json admin kernel show)" handle kernel-beta
+        "$(JUICE_AS=sys@kernel-beta HOME="$hc" "$JUICE" --json admin kernel show)" handle kernel-beta
 
     # Money is the kernel's own: a deposit on one is invisible on the other.
-    JUICE_AS=sys@alpha HOME="$hc" "$JUICE" user create onlyhere@alpha --password userpass >/dev/null 2>&1
+    JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" user create onlyhere@kernel-alpha --password userpass >/dev/null 2>&1
     assert_contains "two_kernels.local_account" "onlyhere" \
-        "$(JUICE_AS=sys@alpha HOME="$hc" "$JUICE" admin user list)"
+        "$(JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" admin user list)"
     assert_not_contains "two_kernels.not_on_the_other" "onlyhere" \
-        "$(JUICE_AS=sys@beta HOME="$hc" "$JUICE" admin user list)"
+        "$(JUICE_AS=sys@kernel-beta HOME="$hc" "$JUICE" admin user list)"
 }
 
 # A kernel is created once, and what it can never revise is asked for rather than defaulted: the
@@ -453,7 +453,7 @@ flow_money_reads_as_money() {
     assert_contains "money.identity_names_the_unit" "$SYMBOL" "$(j "$db" "$hs" admin kernel show)"
 
     # An irreversible movement is confirmed, and a script that has not said --yes moves nothing.
-    assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys "$(units 10)"
+    assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys@k "$(units 10)"
     assert_jnum "money.nothing_moved" "$(jj "$db" "$ha" user me)" available 500
 }
 
@@ -482,11 +482,11 @@ flow_one_output_policy() {
     assert_contains "output.quiet_list" "$aid" "$(q "$db" "$ha" action list --all)"
     # A user is named by its handle here, never by a raw account id (D20), so that is what pipes on.
     assert_contains "output.quiet_admin_list" "alice" "$(q "$db" "$hs" admin user list)"
-    assert_eq "output.quiet_admin_show" "alice" "$(q "$db" "$hs" admin user show alice)"
+    assert_eq "output.quiet_admin_show" "alice@k" "$(q "$db" "$hs" admin user show alice@k)"
     # A verb that changes a roster entry answers with what it changed, so --quiet names it and
     # --json is the same document `show` returns.
-    assert_eq "output.quiet_names_what_it_changed" "alice" "$(q "$db" "$hs" admin user suspend alice)"
-    assert_json "output.change_answers_with_the_account" "$(jj "$db" "$hs" admin user unsuspend alice)" handle alice
+    assert_eq "output.quiet_names_what_it_changed" "alice@k" "$(q "$db" "$hs" admin user suspend alice@k)"
+    assert_json "output.change_answers_with_the_account" "$(jj "$db" "$hs" admin user unsuspend alice@k)" address alice@k
     assert_eq "output.quiet_says_nothing_of_no_resource" "" "$(q "$db" "$ha" process end no-such-process 2>/dev/null)"
 
     # A client-local list obeys the same rule, though no server is asked.
@@ -499,8 +499,8 @@ flow_one_output_policy() {
     assert_contains "output.operator_waiting_list_shows_the_unit" "Work delivered" "$(j "$db" "$hs" admin kernel deposits)"
 
     # The commands that write this client's own records answer the same way as the rest.
-    assert_contains "output.quiet_names_the_kernel_added" "$KERNEL_NAME" "$(q "$db" "$ha" kernel add "${SERVER_URL[$db]}" "$KERNEL_NAME")"
-    assert_nonempty "output.json_names_the_kernel_added" "$(strfield "$(jj "$db" "$ha" kernel add "${SERVER_URL[$db]}" "$KERNEL_NAME")" outcome)"
+    assert_contains "output.quiet_names_the_kernel_added" "$KERNEL_NAME" "$(q "$db" "$ha" kernel add "${SERVER_URL[$db]}")"
+    assert_nonempty "output.json_names_the_kernel_added" "$(strfield "$(jj "$db" "$ha" kernel add "${SERVER_URL[$db]}")" outcome)"
 
     # --json is what the server sent, so a field the CLI does not print is still carried. The
     # network fingerprint is read here before an operator believes any other number.

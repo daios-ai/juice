@@ -542,7 +542,7 @@ const sellerCapital = 100000
 func (s *simNode) user(t *testing.T, handle string, funds int64) *kernel.Account {
 	t.Helper()
 	ctx := context.Background()
-	u, err := s.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: handle, Password: "userpass"})
+	u, err := s.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: handle + "@" + testOwnName, Password: "userpass"})
 	if err != nil {
 		t.Fatalf("%s: create user %s: %v", s.name, handle, err)
 	}
@@ -617,12 +617,13 @@ func (s *simNode) owedBy(t *testing.T, peerKey string) *kernel.Owed {
 	if err != nil || acct == nil {
 		return nil
 	}
-	// The obligation is named by the call the seller admitted, which lives on that call's trace —
-	// the execution lock is long gone by the time the money is owed (P4, P10).
+	// The obligation is named by the call the seller admitted: once committed, by the receipt that
+	// names the request it answered — the execution lock is long gone by the time the money is
+	// owed (P4, P10).
 	var id string
 	if err := s.db.QueryRowForTest(ctx,
-		`SELECT json_extract(dispatch_json,'$.idempotency_key') FROM traces
-		  WHERE caller_user_id=? AND COALESCE(json_extract(dispatch_json,'$.idempotency_key'),'') <> '' LIMIT 1`,
+		`SELECT r.idempotency_key FROM receipts r JOIN traces t ON t.id = r.trace_id
+		  WHERE t.caller_user_id=? AND r.idempotency_key <> '' LIMIT 1`,
 		acct.ID, &id); err != nil || id == "" {
 		return nil
 	}

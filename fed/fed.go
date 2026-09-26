@@ -83,7 +83,9 @@ type CallRequest struct {
 	Lottery              int64  `json:"lottery,omitempty"`            // the ticket face value this call is dispatched under (P10)
 	BlockchainAddress    string `json:"blockchain_address,omitempty"` // where a winning ticket will be paid from, proven by the rail key
 	BlockchainProof      string `json:"blockchain_proof,omitempty"`   // that address's own signature over the caller's key (D23)
-	// Signature is Ed25519 over JCS({action,args_hash,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
+	CallerUserID         string `json:"caller_user_id,omitempty"`     // the buyer's own user the call is made for: their stable id there (P4)
+	CallerHandle         string `json:"caller_handle,omitempty"`      // and the handle they go by, so the seller records who called
+	// Signature is Ed25519 over JCS({action,args_hash,caller_handle,caller_user_id,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
 	// to a third kernel (§13, matching the step protocol).
@@ -99,17 +101,15 @@ type CallResponse = Response
 // "list" enumerates the waiting steps this peer is the required caller of, "complete" resumes one.
 // Input carries the exact bytes the caller hashed and signed, so input_hash matches byte-for-byte.
 type StepRequest struct {
-	Kind            string          `json:"kind"`                       // "list" | "complete"
-	Counterparty    string          `json:"counterparty"`               // caller's base64url Ed25519 public key
-	Timestamp       string          `json:"timestamp"`                  // RFC3339
-	Signature       string          `json:"signature"`                  // Ed25519 over the kind's canonical payload
-	StepID          string          `json:"step_id,omitempty"`          // complete only
-	IdempotencyKey  string          `json:"idempotency_key,omitempty"`  // complete only
-	Input           json.RawMessage `json:"input,omitempty"`            // complete only; exact request bytes
-	ForUserID       string          `json:"for_user_id,omitempty"`      // list/complete: the acting user's stable id on the requesting kernel (§13)
-	UserAttestation string          `json:"user_attestation,omitempty"` // complete: home-kernel step_auth signature over that id
-	UserTimestamp   string          `json:"user_timestamp,omitempty"`   // complete: attestation timestamp (own freshness window)
-	UserSuperuser   bool            `json:"user_superuser,omitempty"`   // complete: the home kernel attests this user is its operator, the scope a kernel-addressed step demands
+	Kind           string          `json:"kind"`                      // "list" | "complete"
+	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
+	Timestamp      string          `json:"timestamp"`                 // RFC3339
+	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
+	StepID         string          `json:"step_id,omitempty"`         // complete only
+	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
+	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
+	ForUserID      string          `json:"for_user_id,omitempty"`     // list/complete: the acting user's stable id on the requesting kernel, signed into the payload (P8)
+	UserSuperuser  bool            `json:"user_superuser,omitempty"`  // complete: the home kernel's word that this user is its operator, the scope a kernel-addressed step demands
 }
 
 // StepResponse carries a step list or completion result. Unlike a call, a step completion parks

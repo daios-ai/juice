@@ -55,12 +55,12 @@ On the manual `play` rail, credit an account by recording a deposit and its
 external reference:
 
 ```
-$ juice admin user deposit alice 10 --ref demo-payment-1
+$ juice admin user deposit alice@acme 10 --ref demo-payment-1
 Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
   operator_handle: sys
-  from_handle: sys
-  to_handle: alice
+  from: sys@acme
+  to: alice@acme
 ```
 
 The `--ref` value identifies the payment in your records. Repeating the same
@@ -96,8 +96,8 @@ its records intact. Separate user and peer commands identify the kind of account
 being moderated:
 
 ```
-$ juice admin user suspend carol
-$ juice admin user unsuspend carol
+$ juice admin user suspend carol@acme
+$ juice admin user unsuspend carol@acme
 $ juice admin peer suspend beta-kernel
 $ juice admin peer unsuspend beta-kernel
 ```
@@ -109,8 +109,8 @@ kernel from recording observations of its reachability.
 
 ```
 $ juice admin user list
-$ juice admin user show carol
-$ juice admin user rename carol carolyn
+$ juice admin user show carol@acme
+$ juice admin user rename carol@acme carolyn@acme
 ```
 
 The operator can rename a user through the dedicated rename command. The

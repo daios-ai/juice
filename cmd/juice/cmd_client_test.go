@@ -36,12 +36,12 @@ func TestKernelAddNamesAndPinsWithoutSelecting(t *testing.T) {
 		t.Errorf("adding a kernel selected %q", cfg.Current)
 	}
 
-	// A name of the operator's own is taken as given.
-	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL, "work"); err != nil {
-		t.Fatalf("add under a name: %v", err)
+	// Adding it again changes nothing: the name is the kernel's own, not a choice made here.
+	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL); err != nil {
+		t.Fatalf("add again: %v", err)
 	}
-	if loadClientConfig().Kernels["work"] == nil {
-		t.Error("the given name was not used")
+	if got := loadClientConfig().Kernels; len(got) != 1 || got["k"] == nil {
+		t.Errorf("a second add changed the records: %+v", got)
 	}
 }
 
@@ -51,12 +51,12 @@ func TestKernelAddNamesAndPinsWithoutSelecting(t *testing.T) {
 func TestKernelAddIsIdempotentButNotACoup(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "DIGEST-A", "play")
-	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL, "work"); err != nil {
+	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL); err != nil {
 		t.Fatal(err)
 	}
-	recordLogin(t, "alice@work", srv.URL, "KEY-A")
+	recordLogin(t, "alice@k", srv.URL, "KEY-A")
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, kernelAddCmd(), srv.URL, "work")
+		_, err := execTestCmd(t, kernelAddCmd(), srv.URL)
 		return err
 	})
 	if !strings.Contains(out, "already known") {
@@ -68,7 +68,7 @@ func TestKernelAddIsIdempotentButNotACoup(t *testing.T) {
 	if _, err := execTestCmd(t, kernelAddCmd(), other.URL, "work"); err == nil {
 		t.Fatal("another kernel took a name already held")
 	}
-	if got := loadClientConfig().Kernels["work"]; got.PublicKey != "KEY-A" {
+	if got := loadClientConfig().Kernels["k"]; got.PublicKey != "KEY-A" {
 		t.Errorf("the refused add changed the record: %+v", got)
 	}
 
@@ -79,10 +79,10 @@ func TestKernelAddIsIdempotentButNotACoup(t *testing.T) {
 	}
 	moved := healthServer(t, "KEY-A", "DIGEST-A", "play")
 	resetHealthCache()
-	if _, err := execTestCmd(t, kernelAddCmd(), moved.URL, "work"); err != nil {
+	if _, err := execTestCmd(t, kernelAddCmd(), moved.URL); err != nil {
 		t.Fatalf("a kernel that moved was refused its own name: %v", err)
 	}
-	if got := loadClientConfig().Kernels["work"]; got.Endpoint != moved.URL {
+	if got := loadClientConfig().Kernels["k"]; got.Endpoint != moved.URL {
 		t.Errorf("the new address was not recorded: %+v", got)
 	}
 	if tok, err := loadToken(); err != nil || tok != "SECRET" {
@@ -94,21 +94,21 @@ func TestKernelAddIsIdempotentButNotACoup(t *testing.T) {
 // that could be sent to it, and is not left selected on it. Nothing of the kernel's own is touched.
 func TestKernelForgetTakesTheLoginsWithIt(t *testing.T) {
 	clientHomeFor(t)
-	recordLogin(t, "alice@work", "http://kernel:4040", "KEY")
+	recordLogin(t, "alice@k", "http://kernel:4040", "KEY")
 	if err := saveToken("SECRET"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := execTestCmd(t, kernelForgetCmd(), "work", "--yes"); err != nil {
+	if _, err := execTestCmd(t, kernelForgetCmd(), "k", "--yes"); err != nil {
 		t.Fatalf("forget: %v", err)
 	}
 	cfg := loadClientConfig()
-	if cfg.Kernels["work"] != nil {
+	if cfg.Kernels["k"] != nil {
 		t.Error("the record survived")
 	}
 	if cfg.Current != "" {
 		t.Errorf("still selected: %q", cfg.Current)
 	}
-	if _, err := os.Stat(credPath(t, "alice@work")); !os.IsNotExist(err) {
+	if _, err := os.Stat(credPath(t, "alice@k")); !os.IsNotExist(err) {
 		t.Errorf("the credential survived: %v", err)
 	}
 	if _, err := execTestCmd(t, kernelForgetCmd(), "work", "--yes"); err == nil {
@@ -121,7 +121,7 @@ func TestKernelForgetTakesTheLoginsWithIt(t *testing.T) {
 func TestKernelListMarksWhereYouAre(t *testing.T) {
 	clientHomeFor(t)
 	cfg := loadClientConfig()
-	cfg.Kernels["work"] = &kernelRec{Endpoint: "http://work:4040", PublicKey: "KEY-W", Network: "play"}
+	cfg.Kernels["k"] = &kernelRec{Endpoint: "http://work:4040", PublicKey: "KEY-W", Network: "play"}
 	cfg.Kernels["lab"] = &kernelRec{Endpoint: "http://lab:4040", PublicKey: "KEY-L", Network: "test"}
 	cfg.Current = "alice@lab"
 	if err := saveClientConfig(cfg); err != nil {
@@ -153,11 +153,11 @@ func TestKernelListMarksWhereYouAre(t *testing.T) {
 func TestKernelHealthNeedsNoLogin(t *testing.T) {
 	clientHomeFor(t)
 	srv := healthServer(t, "KEY-A", "DIGEST-A", "play")
-	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL, "work"); err != nil {
+	if _, err := execTestCmd(t, kernelAddCmd(), srv.URL); err != nil {
 		t.Fatal(err)
 	}
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, kernelHealthCmd(), "work")
+		_, err := execTestCmd(t, kernelHealthCmd(), "k")
 		return err
 	})
 	if !strings.Contains(out, "network play") {
@@ -176,6 +176,9 @@ func loginTokenFor(k *kernel.Kernel, ctx context.Context, handle, password strin
 
 // loginTokensFor drives the canonical PKCE flow (§12): authorize, then exchange the code.
 func loginTokensFor(k *kernel.Kernel, ctx context.Context, handle, password string) (access, refresh string, err error) {
+	if !strings.Contains(handle, "@") {
+		handle += "@" + testOwnName // a login is an address (D15); a bare test handle is one on this kernel
+	}
 	verifier, err := kernel.GenerateCodeVerifier()
 	if err != nil {
 		return "", "", err
@@ -309,7 +312,7 @@ func TestAuthLoginLogout(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "clitest",
+		Handle:   "clitest@k",
 		Password: "clipass",
 	})
 	if err != nil {
@@ -345,7 +348,7 @@ func TestAuthWrongPassword(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle:   "wrongpass",
+		Handle:   "wrongpass@k",
 		Password: "correct",
 	})
 	if err != nil {
@@ -361,7 +364,7 @@ func TestRevokeRefreshToken(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{
-		Handle: "revoke-user", Password: "pass",
+		Handle: "revoke-user@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -397,25 +400,25 @@ func TestRevokeRefreshToken(t *testing.T) {
 func TestLoginSelectsAndLogoutUnselects(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
-	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice", Password: "alicepass"}); err != nil {
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "alice@k", Password: "alicepass"}); err != nil {
 		t.Fatal(err)
 	}
-	// newTestEnv selects tester@test; the kernel record is what `kernel add` would have written.
-	if _, err := execTestCmd(t, loginCmd(), "alice@test", "--password", "alicepass"); err != nil {
+	// newTestEnv selects tester@k; the kernel record is what `kernel add` would have written.
+	if _, err := execTestCmd(t, loginCmd(), "alice@k", "--password", "alicepass"); err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if got := loadClientConfig().Current; got != "alice@test" {
+	if got := loadClientConfig().Current; got != "alice@k" {
 		t.Fatalf("login did not select what it authenticated: %q", got)
 	}
 	if tok, err := loadToken(); err != nil || tok == "" {
 		t.Fatalf("no session stored: %q %v", tok, err)
 	}
-	if c := readCredentials(login{Handle: "alice", Kernel: "test"}); c.PrincipalID == "" {
+	if c := readCredentials(login{Handle: "alice", Kernel: "k"}); c.PrincipalID == "" {
 		t.Error("the login did not record which account it holds")
 	}
 
 	// A login this client does not hold cannot be switched to, and a password is not asked for.
-	if _, err := execTestCmd(t, authUseCmd(), "bob@test"); err == nil {
+	if _, err := execTestCmd(t, authUseCmd(), "bob@k"); err == nil {
 		t.Error("switching to a login not held was accepted")
 	}
 

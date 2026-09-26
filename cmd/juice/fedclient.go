@@ -92,13 +92,13 @@ func (c *fedAdapter) contacted(ctx context.Context, peerKey string, outcome cont
 }
 
 // signerFunc signs a federation request with the platform key, returning (signature, timestamp).
-type signerFunc = func(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash, commitment string, lottery int64) (sig, ts string, err error)
+type signerFunc = func(call kernel.OutboundCall, counterparty, recipient, argsHash string) (sig, ts string, err error)
 
 // ExecuteFederation sends a cross-kernel call over the libp2p federation transport (§13),
 // addressing the peer by its Ed25519 public key. The routing (peer key, action id) that used
 // to live in a URL is now explicit arguments. A missing transport, or a transport error,
 // returns a zero FederationResult so the kernel keeps the call pending for retry.
-func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, args map[string]any) (kernel.FederationResult, error) {
+func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey string, call kernel.OutboundCall, args map[string]any) (kernel.FederationResult, error) {
 	if c.transport == nil {
 		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
 		return kernel.FederationResult{NotDispatched: true}, nil
@@ -108,7 +108,7 @@ func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey, actio
 		addr, proof = c.blockchainIdentity(ctx)
 	}
 	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
-		peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment, lottery, addr, proof, args)
+		peerPublicKey, call, addr, proof, args)
 	c.contacted(ctx, peerPublicKey, contactFromResult(fr))
 	return fr, err
 }
@@ -135,11 +135,11 @@ const (
 // kernel hands over signed scalars; this builds the wire request, dispatches it, and reports the
 // raw status/body plus the never-dispatched proof — no Juice semantics are applied here.
 func (c *fedAdapter) CompletePeerStep(ctx context.Context, peerKey, timestamp, signature, stepID, idempotencyKey string,
-	input []byte, forUserID, userAttestation, userTimestamp string, userSuperuser bool) (int, []byte, bool, error) {
+	input []byte, forUserID string, userSuperuser bool) (int, []byte, bool, error) {
 	return c.step(ctx, peerKey, fedStepCompleteTimeout, fed.StepRequest{
 		Kind: "complete", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
 		StepID: stepID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-		ForUserID: forUserID, UserAttestation: userAttestation, UserTimestamp: userTimestamp, UserSuperuser: userSuperuser,
+		ForUserID: forUserID, UserSuperuser: userSuperuser,
 	})
 }
 
@@ -239,7 +239,7 @@ func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref s
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
 // request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
 func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey, actionID, expectedContractHash, idempotencyKey, commitment string, lottery int64, blockchainAddress, blockchainProof string, args map[string]any) (kernel.FederationResult, error) {
+	localPubKey, peerPublicKey string, call kernel.OutboundCall, blockchainAddress, blockchainProof string, args map[string]any) (kernel.FederationResult, error) {
 
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -247,18 +247,20 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	}
 	argsHash := sha256HexBytes(body)
 	req := fed.CallRequest{
-		Action:               actionID,
+		Action:               call.ActionID,
 		Counterparty:         localPubKey,
-		ExpectedContractHash: expectedContractHash,
-		IdempotencyKey:       idempotencyKey,
-		Commitment:           commitment,
-		Lottery:              lottery,
+		ExpectedContractHash: call.ExpectedContractHash,
+		IdempotencyKey:       call.IdempotencyKey,
+		Commitment:           call.Commitment,
+		Lottery:              call.Lottery,
 		BlockchainAddress:    blockchainAddress,
 		BlockchainProof:      blockchainProof,
+		CallerUserID:         call.CallerUserID,
+		CallerHandle:         call.CallerHandle,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {
-		if sig, ts, serr := signerFn(actionID, localPubKey, peerPublicKey, expectedContractHash, idempotencyKey, argsHash, commitment, lottery); serr == nil {
+		if sig, ts, serr := signerFn(call, localPubKey, peerPublicKey, argsHash); serr == nil {
 			req.Signature = sig
 			req.Timestamp = ts
 		}

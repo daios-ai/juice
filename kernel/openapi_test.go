@@ -153,7 +153,7 @@ func TestImportOpenAPIGroupRoot(t *testing.T) {
 	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "http://api.example.com/openapi.json", []byte(appOpenAPISpec), nil); err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	root, err := k.ResolveAction(ctx, "acme/mail")
+	root, err := k.ResolveAction(ctx, "acme@k/mail")
 	if err != nil {
 		t.Fatalf("resolve acme/mail: %v", err)
 	}

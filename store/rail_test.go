@@ -559,7 +559,7 @@ func admitFrom(t *testing.T, db *DB, seller, peer *kernel.Account, id, payer str
 	}
 	// Admission freezes the request the call answers alongside its terms, which is where the
 	// obligation takes its name from (D19, P10).
-	terms := fmt.Sprintf(`{"reserve":%d,"nonce":"0a0b","commitment":"cm","lottery":1000,"idempotency_key":%q,"counterparty":"peer-key"}`, dmax, id)
+	terms := fmt.Sprintf(`{"reserve":%d,"nonce":"0a0b","commitment":"cm","lottery":1000}`, dmax)
 	p := newProcess(seller.ID)
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: seller.ID, ActionID: "a",
 		CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, DispatchJSON: &terms, OwedBlockchainAddress: payer, CreatedAt: now}
@@ -579,7 +579,8 @@ func settle(t *testing.T, db *DB, seller *kernel.Account, c foreignCall, charge 
 		CallerUserID: c.tr.CallerUserID, TargetUserID: seller.ID, ActionID: "a", Status: kernel.TxSuccess,
 		Gross: charge, Net: charge, StartedAt: now, EndedAt: now}
 	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: seller.ID, TxID: tx.ID, TraceID: c.tr.ID,
-		ActionID: "a", Status: kernel.TxSuccess, Gross: charge, Net: charge, Charge: charge, Nonce: "0a0b", CreatedAt: now}
+		ActionID: "a", Status: kernel.TxSuccess, Gross: charge, Net: charge, Charge: charge, Nonce: "0a0b", CreatedAt: now,
+		IdempotencyKey: c.rec.IdempotencyKey, Counterparty: "kbuyerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
 	// A settlement's taxable is what the row holds (D2), and the commit says so: what this call
 	// charges less than its allocation is what settled children consumed, simulated here.
 	if _, err := db.db.ExecContext(ctx, `UPDATE traces SET available=? WHERE id=?`, charge, c.tr.ID); err != nil {

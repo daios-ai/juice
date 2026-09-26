@@ -106,10 +106,10 @@ units, while the HTTP API and action arguments and results use integer base
 units. On the shipped networks, one display unit contains 1,000,000 base units:
 
 ```
-$ juice user transfer bob 1.5           # display units
+$ juice user transfer bob@acme 1.5           # display units
 ```
 ```
-POST /v1/run {"action":"sys/transfer","args":{"target":"bob","amount":1500000}}
+POST /v1/run {"action":"sys/transfer","args":{"target":"bob@acme","amount":1500000}}
 ```
 
 Both examples deliver the same amount, although `sys/transfer` may also have
@@ -173,7 +173,7 @@ the request, then reuse it with the same terms if a retry is needed. The kernel
 returns the existing movement rather than creating a second one.
 
 ```
-$ juice --as bot@acme user transfer bob 1 --external-key payout-2026-09-14-001 --yes
+$ juice --as bot@acme user transfer bob@acme 1 --external-key payout-2026-09-14-001 --yes
 $ juice --as bot@acme user withdraw 5 --id wd-2026-09-14-001 --yes
 ```
 
@@ -188,7 +188,7 @@ Transfers and withdrawals require confirmation. Without a terminal or explicit
 confirmation, the client refuses to act:
 
 ```
-$ juice user transfer bob 1
+$ juice user transfer bob@acme 1
 error: re-run with --yes to confirm (no terminal to ask on)
 ```
 

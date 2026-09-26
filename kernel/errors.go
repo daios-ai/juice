@@ -159,7 +159,7 @@ var (
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
-// Meta["action"], so every mint site is identical and clients always get a qualified @owner/name.
+// Meta["action"], so every mint site is identical and clients always get the address, owner@kernel/name.
 func GrantRequiredError(ref string) error {
 	return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
 }

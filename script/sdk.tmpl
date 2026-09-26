@@ -81,7 +81,7 @@ func _unpack(packed uint64) []byte {
 	return unsafe.Slice((*byte)(unsafe.Pointer(uintptr(outPtr))), int(outLen))
 }
 
-// JuiceCall calls the action at @owner/name with JSON args and returns the JSON reply.
+// JuiceCall calls the action at owner@kernel/name with JSON args and returns the JSON reply.
 func JuiceCall(action string, args []byte) ([]byte, error) {
 	aPtr, aLen := _strPtrLen(action)
 	argPtr, argLen := _ptrLen(args)
@@ -94,7 +94,7 @@ func JuiceCall(action string, args []byte) ([]byte, error) {
 
 // JuiceStepCreate creates a waiting step bound to the current process and trace,
 // returning the new step id. partialArgs is JSON; requiredCaller is the allowed
-// completer as an @handle (or id) and actionID is the onward action as @owner/name
+// completer as handle@kernel and actionID is the onward action as owner@kernel/name
 // (or id) — resolved kernel-side just like JuiceCall.
 func JuiceStepCreate(partialArgs []byte, requiredCaller, actionID string) string {
 	pPtr, pLen := _ptrLen(partialArgs)

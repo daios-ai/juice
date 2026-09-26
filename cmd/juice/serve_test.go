@@ -127,6 +127,9 @@ func setupTraceForProcess(t *testing.T, db *store.DB, processID string) string {
 // makeUser creates a user and returns (userID, accessToken).
 func makeUser(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
+	if !strings.Contains(handle, "@") {
+		handle += "@" + testOwnName
+	}
 	u, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
 		Handle: handle, Password: "pass",
 	})
@@ -222,7 +225,7 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, id
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
 	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	sig, err := testNet.SignFederationPayload(priv, action, cp, ownKey, "", idempKey, ts, argsHash, "", 0)
+	sig, err := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: action, ExpectedContractHash: "", IdempotencyKey: idempKey, Commitment: "", Lottery: 0}, cp, ownKey, ts, argsHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +277,8 @@ func TestServeHealth(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Errorf("status = %q, want ok", body["status"])
 	}
-	if body["handle"] != "kernel-test" {
-		t.Errorf("handle = %q, want @kernel-test", body["handle"])
+	if body["handle"] != testOwnName {
+		t.Errorf("handle = %q, want the kernel's own name %q", body["handle"], testOwnName)
 	}
 	if body["public_key"] == "" {
 		t.Error("public_key should be present in the health banner")
@@ -338,7 +341,7 @@ func TestServeCreateUser(t *testing.T) {
 	defer srv.Close()
 
 	resp := httpDo(t, srv, "POST", "/v1/users", map[string]any{
-		"handle": "http-alice", "email": "alice@example.com", "password": "testpass",
+		"handle": "http-alice@k", "email": "alice@example.com", "password": "testpass",
 	}, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
@@ -352,8 +355,8 @@ func TestServeCreateUser(t *testing.T) {
 	if _, ok := body["password_hash"]; ok {
 		t.Error("response must not contain password_hash")
 	}
-	if body["handle"] != "http-alice" {
-		t.Errorf("response handle: got %v", body["handle"])
+	if body["address"] != "http-alice@k" {
+		t.Errorf("response address: got %v", body["address"])
 	}
 }
 
@@ -361,6 +364,9 @@ func TestServeCreateUser(t *testing.T) {
 // status a caller should assert plus the access token. Credential rejection surfaces at the
 // authorize leg, so a bad password yields that leg's status and an empty token.
 func httpLogin(t *testing.T, srv *httptest.Server, handle, password string) (int, string) {
+	if !strings.Contains(handle, "@") {
+		handle += "@" + testOwnName // a login is an address (D15)
+	}
 	t.Helper()
 	verifier := strings.Repeat("v", 43)
 	h := sha256.Sum256([]byte(verifier))
@@ -391,7 +397,7 @@ func TestServeAuthToken(t *testing.T) {
 	defer srv.Close()
 
 	_, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "http-bob", Password: "pass",
+		Handle: "http-bob@k", Password: "pass",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +424,7 @@ func TestServePKCEFlow(t *testing.T) {
 
 	// Step 1: authorize.
 	resp := httpDo(t, srv, "POST", "/v1/auth/authorize", map[string]any{
-		"handle":         "pkce-user",
+		"handle":         "pkce-user@k",
 		"password":       "pass",
 		"code_challenge": challenge,
 	}, "")
@@ -502,8 +508,8 @@ func TestServeCreateAndGetAction(t *testing.T) {
 		t.Error("expected action with ID")
 	}
 	// The owner is identified by @handle (owner_handle / action=@owner/name), never the raw UUID.
-	if action.OwnerHandle != "srv-actowner" || action.ActionRef != "srv-actowner/"+action.Name {
-		t.Errorf("action owner: got handle=%q ref=%q, want @srv-actowner", action.OwnerHandle, action.ActionRef)
+	if action.ActionRef != "srv-actowner@k/"+action.Name {
+		t.Errorf("action owner: got ref=%q, want srv-actowner@k/%s", action.ActionRef, action.Name)
 	}
 	if action.OwnerUserID != "" {
 		t.Error("action response should not expose owner_user_id")
@@ -898,7 +904,7 @@ func TestServeCall(t *testing.T) {
 
 	// Make the call via /v1/run (new API — price=0, caller needs no credits).
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "call-owner/answer",
+		"action": "call-owner@k/answer",
 		"args":   map[string]any{},
 	}, callerTok)
 	if callResp.StatusCode != http.StatusOK {
@@ -923,7 +929,7 @@ func TestServeRunRejectsAbsentArgs(t *testing.T) {
 
 	// Absent args field must be rejected (ErrInvalidInput = 422), not silently treated as {}.
 	resp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "run-args-user/nonexistent",
+		"action": "run-args-user@k/nonexistent",
 	}, tok)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
@@ -970,7 +976,7 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "tx-owner/tx-action", "args": map[string]any{},
+		"action": "tx-owner@k/tx-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1027,7 +1033,7 @@ func TestServeRateTransaction(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "rate-owner/rate-action", "args": map[string]any{},
+		"action": "rate-owner@k/rate-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1081,7 +1087,7 @@ func TestServeListActionRatings(t *testing.T) {
 	httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": action.ID, "visibility": "public"}, ownerTok).Body.Close()
 
 	call := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "list-ratings-owner/list-ratings-action", "args": map[string]any{},
+		"action": "list-ratings-owner@k/list-ratings-action", "args": map[string]any{},
 	}, callerTok)
 	var callReply kernel.CallReply
 	decodeResponse(t, call, &callReply)
@@ -1191,7 +1197,7 @@ func TestServeActionReadCarriesItsOwnExperience(t *testing.T) {
 
 	// Make one call to generate stats.
 	httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "stats-owner/stats-action", "args": map[string]any{},
+		"action": "stats-owner@k/stats-action", "args": map[string]any{},
 	}, callerTok).Body.Close()
 
 	// What this kernel itself saw is part of the action's record, read where the action is read
@@ -1221,7 +1227,7 @@ func TestServeActionReadCarriesItsOwnExperience(t *testing.T) {
 
 	// Reading the same action by reference is the same read: one detail path, or two callers would
 	// be shown different things about one action (U39).
-	byRef := httpDo(t, srv, "GET", "/v1/actions?ref="+url.QueryEscape("stats-owner/stats-action"), nil, ownerTok)
+	byRef := httpDo(t, srv, "GET", "/v1/actions?ref="+url.QueryEscape("stats-owner@k/stats-action"), nil, ownerTok)
 	var rows []struct {
 		Evidence *struct {
 			LocalExperience *kernel.Stats `json:"local_experience"`
@@ -1320,7 +1326,7 @@ func TestServeLogout(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
 	authResp := httpDo(t, srv, "POST", "/v1/auth/authorize", map[string]any{
-		"handle": "logout-user", "password": "pass", "code_challenge": challenge,
+		"handle": "logout-user@k", "password": "pass", "code_challenge": challenge,
 	}, "")
 	var authResult map[string]string
 	decodeResponse(t, authResp, &authResult)
@@ -1362,7 +1368,7 @@ func TestRateLimitLogin(t *testing.T) {
 	logger := log.Discard()
 	k := newKernel(cfg, kernel.Dependencies{Store: db})
 	if _, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{
-		Handle: "rlu", Password: "pass",
+		Handle: "rlu@k", Password: "pass",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1375,7 +1381,7 @@ func TestRateLimitLogin(t *testing.T) {
 	ts := httptest.NewServer(r)
 	defer ts.Close()
 
-	body := map[string]any{"handle": "rlu", "password": "pass"}
+	body := map[string]any{"handle": "rlu@k", "password": "pass"}
 
 	// httptest requests originate from loopback. A genuine local client (no X-Forwarded-For) is
 	// exempt from rate limiting, so a burst well past the limit never 429s.
@@ -1410,7 +1416,7 @@ func TestServeRequestIDHeader(t *testing.T) {
 	defer srv.Close()
 
 	resp := httpDo(t, srv, "POST", "/v1/users", map[string]any{
-		"handle": "ridtest", "email": "rid@example.com", "password": "p",
+		"handle": "ridtest@k", "email": "rid@example.com", "password": "p",
 	}, "")
 	defer resp.Body.Close()
 	if resp.Header.Get("X-Request-ID") == "" {
@@ -1432,8 +1438,8 @@ func TestServeGetMe(t *testing.T) {
 	var got map[string]any
 	decodeResponse(t, resp, &got)
 
-	if got["handle"] != "metest" {
-		t.Errorf("handle: got %v, want @metest", got["handle"])
+	if got["address"] != "metest@k" {
+		t.Errorf("address: got %v, want metest@k", got["address"])
 	}
 	if _, ok := got["description"]; !ok {
 		t.Errorf("description key missing from /v1/me")
@@ -1644,6 +1650,23 @@ func TestFederationCall(t *testing.T) {
 	if resp4.StatusCode != http.StatusNotFound {
 		t.Errorf("empty action: expected 404, got %d", resp4.StatusCode)
 	}
+
+	// The caller is one principal (P4): a validly signed request naming half of one is refused
+	// with a signed rejection before anything runs, and nothing is recorded under the half name.
+	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	for i, half := range []kernel.BuyerTerms{{CallerUserID: "u-1"}, {CallerHandle: "alice"}} {
+		ts, key := time.Now().UTC().Format(time.RFC3339), fmt.Sprintf("idem-half-%d", i)
+		sig, err := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, IdempotencyKey: key,
+			CallerUserID: half.CallerUserID, CallerHandle: half.CallerHandle}, cp, ownKey, ts, sha256HexBytes([]byte("{}")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, body, err := handleFederationCall(k, ctx, cp, "", ts, key, a.ID, sig, half, []byte("{}"))
+		if err != nil || status != http.StatusUnprocessableEntity || body["receipt"] == nil {
+			t.Errorf("half caller %+v: got %d %v %v; want a signed 422 rejection", half, status, body, err)
+		}
+	}
 }
 
 // TestFederationCallResolvesByStableID: the inbound wire reference is this kernel's stable action
@@ -1687,7 +1710,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 	}
 
 	// The owner renames: a handle-addressed dispatch would now resolve to nothing and park forever.
-	if _, err := k.RenameUser(ctx, sys.ID, ownerID, "provider2"); err != nil {
+	if _, err := k.RenameUser(ctx, sys.ID, ownerID, "provider2@k"); err != nil {
 		t.Fatal(err)
 	}
 	resp := fedCall(t, k, priv, a.ID, "idem-stable-1", map[string]any{})
@@ -1816,21 +1839,31 @@ func TestWaitingOnPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	uc := newAccountCache(k, ctx)
+	names := k.NewNames()
 	peerStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID}
-	pv := enrichStep(k, ctx, peerStep, nil, uc)
+	pv := enrichStep(k, ctx, peerStep, nil, names)
 	if !pv.WaitingOnPeer {
 		t.Error("step addressed to a peer should be waiting_on_peer")
 	}
-	if pv.RequiredCallerHandle != "peer-caller" {
-		t.Errorf("required_caller_handle: got %q, want peer-caller", pv.RequiredCallerHandle)
+	// A step addressed to the peer kernel itself names the kernel, bare: a user always carries `@`.
+	if pv.RequiredCaller != "peer-caller" {
+		t.Errorf("required_caller: got %q, want peer-caller", pv.RequiredCaller)
+	}
+	rid := "alice-remote-id"
+	userStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: peer.ID, RequiredCallerRemoteID: &rid, RequiredCallerHandle: "alice"}
+	if got := enrichStep(k, ctx, userStep, nil, names).RequiredCaller; got != "alice@peer-caller" {
+		t.Errorf("a step addressed to a user on the peer: got %q, want alice@peer-caller", got)
 	}
 	localStep := &kernel.Step{Status: kernel.StepWaiting, RequiredCallerUserID: localID}
-	if enrichStep(k, ctx, localStep, nil, uc).WaitingOnPeer {
+	lv := enrichStep(k, ctx, localStep, nil, names)
+	if lv.WaitingOnPeer {
 		t.Error("step addressed to a local user should not be waiting_on_peer")
 	}
+	if !strings.HasSuffix(lv.RequiredCaller, "@"+testOwnName) {
+		t.Errorf("a local user is addressed on this kernel: got %q", lv.RequiredCaller)
+	}
 	doneStep := &kernel.Step{Status: kernel.StepDone, RequiredCallerUserID: peer.ID}
-	if enrichStep(k, ctx, doneStep, nil, uc).WaitingOnPeer {
+	if enrichStep(k, ctx, doneStep, nil, names).WaitingOnPeer {
 		t.Error("a non-waiting step should never be waiting_on_peer")
 	}
 }
@@ -2222,7 +2255,7 @@ func TestServeImportOpenAPI(t *testing.T) {
 	if err := json.Unmarshal(shape["created"], &rows); err != nil || len(rows) != 1 {
 		t.Fatalf("expected 1 created action, got %v (%v)", len(rows), err)
 	}
-	for _, key := range []string{"action", "owner_handle", "http"} {
+	for _, key := range []string{"action", "http"} {
 		if _, ok := rows[0][key]; !ok {
 			t.Errorf("created row lacks %q: %s", key, shape["created"])
 		}
@@ -2284,7 +2317,7 @@ func TestServeActionTargets(t *testing.T) {
 	}
 	root, member, sibling := mk("mail"), mk("mail/send"), mk("mailer")
 
-	en := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": "targetowner/mail"}, tok)
+	en := httpDo(t, srv, "POST", "/v1/actions/enable", map[string]any{"target": "targetowner@k/mail"}, tok)
 	defer en.Body.Close()
 	if en.StatusCode != http.StatusOK {
 		t.Fatalf("enable subtree: got %d", en.StatusCode)
@@ -2301,7 +2334,7 @@ func TestServeActionTargets(t *testing.T) {
 	}
 
 	// A uniform field applies to the whole subtree.
-	up := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner/mail", "visibility": "local"}, tok)
+	up := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner@k/mail", "visibility": "local"}, tok)
 	defer up.Body.Close()
 	if up.StatusCode != http.StatusOK {
 		t.Fatalf("subtree visibility: got %d", up.StatusCode)
@@ -2314,7 +2347,7 @@ func TestServeActionTargets(t *testing.T) {
 	}
 
 	// A row-specific field needs a target that names one row.
-	bad := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner/mail", "description": "one only"}, tok)
+	bad := httpDo(t, srv, "PUT", "/v1/actions", map[string]any{"target": "targetowner@k/mail", "description": "one only"}, tok)
 	defer bad.Body.Close()
 	if bad.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("description over a subtree: got %d, want 422", bad.StatusCode)
@@ -2326,13 +2359,13 @@ func TestServeActionTargets(t *testing.T) {
 	}
 
 	// A target naming nothing is a miss, not an empty success.
-	none := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": "targetowner/nothing"}, tok)
+	none := httpDo(t, srv, "POST", "/v1/actions/disable", map[string]any{"target": "targetowner@k/nothing"}, tok)
 	defer none.Body.Close()
 	if none.StatusCode != http.StatusNotFound {
 		t.Errorf("unmatched target: got %d, want 404", none.StatusCode)
 	}
 
-	del := httpDo(t, srv, "DELETE", "/v1/actions?target=targetowner/mail", nil, tok)
+	del := httpDo(t, srv, "DELETE", "/v1/actions?target=targetowner@k/mail", nil, tok)
 	defer del.Body.Close()
 	if del.StatusCode != http.StatusOK {
 		t.Fatalf("delete subtree: got %d", del.StatusCode)
@@ -2567,7 +2600,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
 	chashKey := uuid.New().String()
-	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "stale-hash", chashKey, ts, argsHash, "", 0)
+	sig, _ := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, ExpectedContractHash: "stale-hash", IdempotencyKey: chashKey, Commitment: "", Lottery: 0}, cp, ownKey, ts, argsHash)
 	status, respBody, err := handleFederationCall(k, ctx, cp, "stale-hash", ts, chashKey, a.ID, sig, kernel.BuyerTerms{}, body)
 	if err != nil {
 		t.Fatalf("handleFederationCall: %v", err)
@@ -2614,7 +2647,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
-	sig, _ := testNet.SignFederationPayload(priv, a.ID, cp, ownKey, "", "idem-hash-1", ts, signedHash, "", 0)
+	sig, _ := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, ExpectedContractHash: "", IdempotencyKey: "idem-hash-1", Commitment: "", Lottery: 0}, cp, ownKey, ts, signedHash)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -2649,7 +2682,7 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	callResp := httpDo(t, srv, "POST", "/v1/run", map[string]any{
-		"action": "sys/vrr-http", "args": map[string]any{},
+		"action": "sys@k/vrr-http", "args": map[string]any{},
 	}, tok)
 	if callResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(callResp.Body)
@@ -2698,6 +2731,31 @@ func TestServeListStepsPeerRefusesFilters(t *testing.T) {
 	}
 }
 
+// peerStepLister is a peer that holds one canned page of steps; the listing is all it answers.
+type peerStepLister struct {
+	kernel.FederationClient
+	body string
+}
+
+func (p peerStepLister) ListPeerSteps(context.Context, string, string, string, string) (int, []byte, bool, error) {
+	return http.StatusOK, []byte(p.body), false, nil
+}
+
+// A peer names the user a step waits for by that user's id here, which routes; the user reads the
+// step list with the id rendered as their address (D20), never as the raw id.
+func TestServeListStepsPeerRendersRequiredCaller(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	id, tok := makeUser(t, k, "peer-list-me")
+	k.SetFederation(peerStepLister{body: `{"steps":[{"id":"s-1","required_caller":"` + id + `","price":0,"created_at":"2026-01-01T00:00:00Z"}]}`})
+	resp := httpDo(t, srv, "GET", "/v1/steps?peer="+base64.RawURLEncoding.EncodeToString(make([]byte, 32)), nil, tok)
+	var list kernel.PeerStepList
+	decodeResponse(t, resp, &list)
+	if len(list.Steps) != 1 || list.Steps[0].RequiredCaller != "peer-list-me@"+testOwnName {
+		t.Fatalf("peer step list = %+v; want required_caller peer-list-me@%s", list, testOwnName)
+	}
+}
+
 func TestServeListActionsOwnerAuth(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
@@ -2716,7 +2774,7 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 	}
 
 	// Without token: owner's private action not visible.
-	resp := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner", nil, "")
+	resp := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner@k", nil, "")
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 		t.Fatalf("unauthenticated list: expected 200, got %d", resp.StatusCode)
@@ -2728,7 +2786,7 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 	}
 
 	// With owner token: private action is visible.
-	resp2 := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner", nil, ownerTok)
+	resp2 := httpDo(t, srv, "GET", "/v1/actions?owner=la-auth-owner@k", nil, ownerTok)
 	if resp2.StatusCode != http.StatusOK {
 		resp2.Body.Close()
 		t.Fatalf("authenticated list: expected 200, got %d", resp2.StatusCode)
@@ -2782,11 +2840,11 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 	decodeResponse(t, cr, &action)
 
 	// Anonymous listing of @alice's actions excludes the private one; @sys sees it.
-	anon := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice", nil, ""))
+	anon := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice@k", nil, ""))
 	if len(anon) != 0 {
 		t.Errorf("anonymous should see 0 of @alice's actions, got %d", len(anon))
 	}
-	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice", nil, sysTok))
+	asSys := decodeActions(t, httpDo(t, srv, "GET", "/v1/actions?owner=alice@k", nil, sysTok))
 	if len(asSys) != 1 {
 		t.Errorf("sys should see @alice's private action, got %d", len(asSys))
 	}
@@ -3188,9 +3246,9 @@ func TestGrantRoutesRequireAuth(t *testing.T) {
 		body         any
 	}{
 		{"GET", "/v1/grants/plan?selector=@x", nil},
-		{"POST", "/v1/grants/start", map[string]any{"selector": "x/y"}},
+		{"POST", "/v1/grants/start", map[string]any{"selector": "x@k/y"}},
 		{"POST", "/v1/grants/complete", map[string]any{"state": "s"}},
-		{"POST", "/v1/grants", map[string]any{"selector": "x/y", "token": "t"}},
+		{"POST", "/v1/grants", map[string]any{"selector": "x@k/y", "token": "t"}},
 		{"DELETE", "/v1/grants?selector=@x/y", nil},
 		{"DELETE", "/v1/grants?account=bearer:x", nil},
 	}
@@ -3270,9 +3328,9 @@ func TestServeActionsRefMode(t *testing.T) {
 
 	// A group and an owner root both resolve to the index answering there.
 	for query, want := range map[string]string{
-		"ref=" + url.QueryEscape(ownerHandle+"/mail"): idxID,
-		"ref=" + url.QueryEscape(ownerHandle):         rootID,
-		"ref=" + idxID:                                idxID,
+		"ref=" + url.QueryEscape(ownerHandle+"@k/mail"): idxID,
+		"ref=" + url.QueryEscape(ownerHandle+"@k"):      rootID,
+		"ref=" + idxID: idxID,
 	} {
 		code, out := get(query, tok)
 		if code != http.StatusOK || len(out) != 1 || out[0].ID != want {
@@ -3286,25 +3344,25 @@ func TestServeActionsRefMode(t *testing.T) {
 	if code, _ := get("ref="+url.QueryEscape("someone@"+strings.Repeat("A", 43)+"/mail"), ""); code != http.StatusUnauthorized {
 		t.Errorf("anonymous kernel-qualified ref: got %d, want 401", code)
 	}
-	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/mail"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != idxID {
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"@k/mail"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != idxID {
 		t.Errorf("anonymous local ref on a public action: got code=%d %+v", code, out)
 	}
 	// Action names carry no character restriction, so an @ inside a NAME is still a local
 	// reference: only the head before the first / qualifies a kernel.
 	atID := mk("mail@home")
-	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/mail@home"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != atID {
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"@k/mail@home"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != atID {
 		t.Errorf("anonymous local ref whose name contains @: got code=%d %+v", code, out)
 	}
 	// Reference mode and the flat filters are different questions and never combine.
-	if code, _ := get("ref="+url.QueryEscape(ownerHandle+"/mail")+"&name=mail/index", tok); code != http.StatusUnprocessableEntity {
+	if code, _ := get("ref="+url.QueryEscape(ownerHandle+"@k/mail")+"&name=mail/index", tok); code != http.StatusUnprocessableEntity {
 		t.Errorf("ref+name: got %d, want 422", code)
 	}
 	// A miss is an empty list, like every other filter on this endpoint.
-	if code, out := get("ref="+url.QueryEscape(ownerHandle+"/absent"), tok); code != http.StatusOK || len(out) != 0 {
+	if code, out := get("ref="+url.QueryEscape(ownerHandle+"@k/absent"), tok); code != http.StatusOK || len(out) != 0 {
 		t.Errorf("miss: got code=%d %+v, want an empty list", code, out)
 	}
 	// The flat filters stay exact: ?name= names a row, and never resolves a group.
-	if code, out := get("name=mail&owner="+ownerHandle, tok); code != http.StatusOK || len(out) != 0 {
+	if code, out := get("name=mail&owner="+ownerHandle+"@k", tok); code != http.StatusOK || len(out) != 0 {
 		t.Errorf("name filter must stay exact: got code=%d %+v", code, out)
 	}
 }
@@ -3450,7 +3508,7 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registerSelf(context.Background(), "acme", net.JoinHostPort("0.0.0.0", port), logger)
+	registerSelf(context.Background(), net.JoinHostPort("0.0.0.0", port), logger)
 
 	k := loadClientConfig().Kernels["acme"]
 	if k == nil {
@@ -3870,7 +3928,7 @@ func TestServeOptionalReadsRefuseFailedCredentials(t *testing.T) {
 		{"expired", "Bearer " + expired, false, http.StatusUnauthorized},
 		{"suspended", "Bearer " + suspended, false, http.StatusUnauthorized},
 	}
-	for _, path := range []string{"/v1/actions?ref=sys/lookup", "/v1/actions?owner=sys&all=1", "/v1/actions/" + lookup.ID + "/ratings"} {
+	for _, path := range []string{"/v1/actions?ref=sys@k/lookup", "/v1/actions?owner=sys@k&all=1", "/v1/actions/" + lookup.ID + "/ratings"} {
 		for _, c := range cases {
 			req, _ := http.NewRequest("GET", srv.URL+path, nil)
 			if !c.absent {

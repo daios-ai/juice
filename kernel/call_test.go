@@ -113,7 +113,7 @@ func TestSubCostNotIncrementedOnFailedSubCall(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &failingSubCallExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &failingSubCallExec{targetUser: "bob", targetAction: "inner"}
 	cfg := testConfig()
 	cfg.FeeRecipientID = feeUser.ID
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
@@ -220,7 +220,7 @@ func TestCallPrivateDenied(t *testing.T) {
 	setupAction(t, st, bob.ID, "private", 0)
 
 	// Alice (not the owner) tries to run bob's private action via Run, which enforces CanCall.
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/private", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob@k/private", Args: map[string]any{}})
 	if err == nil {
 		t.Error("expected call denial for private action owned by another user")
 	}
@@ -297,7 +297,7 @@ func TestCallPrivateActionOwnerOnly(t *testing.T) {
 	}
 
 	// Alice (not the owner) cannot run bob's private action. Validated by Run → beginRun.
-	_, err = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/priv", Args: map[string]any{}})
+	_, err = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob@k/priv", Args: map[string]any{}})
 	if err == nil {
 		t.Error("non-owner should not be able to call private action")
 	}
@@ -316,7 +316,7 @@ func TestCallInactiveActionBlocked(t *testing.T) {
 	})
 
 	// Run enforces CanCall (which requires active=true) in beginRun.
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/inactive", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/inactive", Args: map[string]any{}})
 	if err == nil {
 		t.Error("inactive action should be blocked regardless of public flag")
 	}
@@ -338,7 +338,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	})
 
 	// Callable before suspension.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob@k/svc", Args: map[string]any{}}); err != nil {
 		t.Fatalf("action should be callable before owner suspension: %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.SuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob@k/svc", Args: map[string]any{}}); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("suspended owner's action should fail with ErrInvalidState, got %v", err)
 	}
 
@@ -354,7 +354,7 @@ func TestCallSuspendedOwnerActionBlocked(t *testing.T) {
 	if err := st.UnsuspendUser(ctx, bob.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob/svc", Args: map[string]any{}}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "bob@k/svc", Args: map[string]any{}}); err != nil {
 		t.Fatalf("unsuspend should restore callability: %v", err)
 	}
 }
@@ -367,7 +367,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	alice := setupUser(t, st, "alice", 50)
 	_ = setupAction(t, st, alice.ID, "expensive", 200)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/expensive", Args: map[string]any{}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/expensive", Args: map[string]any{}})
 	if err == nil {
 		t.Error("expected insufficient funds error")
 	}
@@ -735,7 +735,7 @@ func TestCallInputSchemaRejection(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	// Use Run, which enforces input schema validation in beginRun.
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/strict", Args: map[string]any{"wrong_field": "value"}})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/strict", Args: map[string]any{"wrong_field": "value"}})
 	if !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Errorf("missing required field: got %v, want ErrSchemaViolation", err)
 	}
@@ -875,7 +875,7 @@ func TestWasmHostCallPrivateActionDenied(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outerAction)
 
-	exec := &hostCallExec{targetUser: bob.ID, targetAction: "private"}
+	exec := &hostCallExec{targetUser: "bob", targetAction: "private"}
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, alice.ID, outerAction)
 
@@ -912,7 +912,7 @@ func TestSubcallProviderPrivateHelper(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, composite)
 
-	exec := &subcallExec{targetUser: alice.ID, targetAction: "helper"}
+	exec := &subcallExec{targetUser: "alice", targetAction: "helper"}
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, bob.ID, composite)
 
@@ -947,7 +947,7 @@ func TestSubcallConfusedDeputyDenied(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, composite)
 
-	exec := &subcallExec{targetUser: bob.ID, targetAction: "secret"}
+	exec := &subcallExec{targetUser: "bob", targetAction: "secret"}
 	k := newTestKernelWithScripts(st, exec)
 	_, tr := beginTestRun(t, st, bob.ID, composite)
 
@@ -989,7 +989,7 @@ func (c *subcallExec) Compile(_ context.Context, src []byte) ([]byte, string, er
 
 func (c *subcallExec) Execute(ctx context.Context, src []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
 	if string(src) == "outer" {
-		result, err := host.Call(ctx, c.targetUser+"/"+c.targetAction, []byte(`{}`))
+		result, err := host.Call(ctx, c.targetUser+"@"+kernel.TestOwnName+"/"+c.targetAction, []byte(`{}`))
 		if err != nil {
 			return nil, err
 		}
@@ -1021,7 +1021,7 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: "bob", targetAction: "inner"}
 	cfg := testConfig()
 	cfg.FeeRecipientID = feeUser.ID
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Scripts: exec})
@@ -1066,7 +1066,7 @@ func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: "bob", targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	// Fund only enough for outer, not inner.
@@ -1110,7 +1110,7 @@ func TestProcessFundedSubCallTraceHasSameProcess(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, outer)
 
-	exec := &subcallExec{targetUser: bob.ID, targetAction: "inner"}
+	exec := &subcallExec{targetUser: "bob", targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	p, tr := beginTestRun(t, st, alice.ID, outer)
@@ -1321,7 +1321,7 @@ func TestCallCrossProcessParentTraceRejectedForOwner(t *testing.T) {
 	_ = st.CreateAction(ctx, a)
 
 	// Run a call to get a trace from a completed (auto-closed) process.
-	otherReply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice/svc", Args: map[string]any{}})
+	otherReply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/svc", Args: map[string]any{}})
 	if err != nil {
 		t.Fatalf("setup call in otherP: %v", err)
 	}
@@ -1749,44 +1749,6 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	}
 }
 
-func TestParseActionRef(t *testing.T) {
-	cases := []struct {
-		input      string
-		wantOwner  string
-		wantKernel string
-		wantName   string
-		wantErr    bool
-	}{
-		{"alice/greet", "alice", "", "greet", false},                 // bare local
-		{"alice/greet/subname", "alice", "", "greet/subname", false}, // names may contain /
-		{"sys/llm/chat", "sys", "", "llm/chat", false},               // multi-segment native
-		{"bob@acme/foo", "bob", "acme", "foo", false},                // kernel-qualified
-		{"@alice/greet", "", "", "", true},                           // sigil-prefixed owner rejected (§14)
-		{"acme/alice/foo", "acme", "", "alice/foo", false},           // owner with a slashed action name
-		{"bob@/foo", "", "", "", true},                               // empty kernel
-		{"bob/", "", "", "", true},                                   // empty name
-		{"alice", "", "", "", true},                                  // missing /
-		{"/greet", "", "", "", true},                                 // empty owner
-		{"", "", "", "", true},                                       // empty string
-	}
-	for _, c := range cases {
-		r, err := kernel.ParseActionRef(c.input)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("ParseActionRef(%q): expected error, got %+v", c.input, r)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("ParseActionRef(%q): unexpected error: %v", c.input, err)
-			continue
-		}
-		if r.Owner != c.wantOwner || r.Kernel != c.wantKernel || r.Name != c.wantName {
-			t.Errorf("ParseActionRef(%q): got %+v, want owner=%q kernel=%q name=%q", c.input, r, c.wantOwner, c.wantKernel, c.wantName)
-		}
-	}
-}
-
 // subcallThenFailExec settles a subcall (inner) and then fails, leaving a settled descendant.
 type subcallThenFailExec struct {
 	targetUser   string
@@ -1799,7 +1761,7 @@ func (c *subcallThenFailExec) Compile(_ context.Context, src []byte) ([]byte, st
 
 func (c *subcallThenFailExec) Execute(ctx context.Context, src []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
 	if string(src) == "outer" {
-		if _, err := host.Call(ctx, c.targetUser+"/"+c.targetAction, []byte(`{}`)); err != nil {
+		if _, err := host.Call(ctx, c.targetUser+"@"+kernel.TestOwnName+"/"+c.targetAction, []byte(`{}`)); err != nil {
 			return nil, err
 		}
 		return nil, errors.New("outer fails after settling inner")
@@ -1834,7 +1796,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exec := &subcallThenFailExec{targetUser: provider.ID, targetAction: "inner"}
+	exec := &subcallThenFailExec{targetUser: "provider", targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
 	reply, err := k.RunFederated(ctx, caller.ID, mustResolve(t, k, ctx, owner.ID, "outer"), map[string]any{}, "", kernel.BuyerTerms{})
@@ -1867,7 +1829,7 @@ func TestResolveAction(t *testing.T) {
 	bob := setupUser(t, st, "bob", 0)
 	a := setupAction(t, st, bob.ID, "greet", 0)
 
-	for _, ref := range []string{"bob/greet", "bob/greet", a.ID} {
+	for _, ref := range []string{"bob@k/greet", a.ID} {
 		got, err := k.ResolveAction(ctx, ref)
 		if err != nil {
 			t.Fatalf("ResolveAction(%q): %v", ref, err)
@@ -1877,7 +1839,7 @@ func TestResolveAction(t *testing.T) {
 		}
 	}
 
-	if _, err := k.ResolveAction(ctx, "bob/missing"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.ResolveAction(ctx, "bob@k/missing"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("ResolveAction(missing): want ErrNotFound, got %v", err)
 	}
 	if _, err := k.ResolveAction(ctx, uuid.New().String()); !errors.Is(err, kernel.ErrNotFound) {
@@ -1885,53 +1847,35 @@ func TestResolveAction(t *testing.T) {
 	}
 }
 
-func TestResolveUser(t *testing.T) {
+func TestResolveLocalPrincipal(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 
 	alice := setupUser(t, st, "alice", 0)
-	// A key account, to exercise public-key resolution.
+	// A peer named like a user: the two namespaces never meet (D15).
 	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	if err := st.UpsertKernel(ctx, pub, "peer", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	peer := &kernel.Account{
-		ID:              uuid.New().String(),
-		KernelPublicKey: pub,
-		CreatedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}
-	if err := st.CreateUser(ctx, peer); err != nil {
+	if _, err := k.BindPetname(ctx, pub, "peer", true); err != nil {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
-		ident string
-		want  string
-	}{
-		{"alice", alice.ID},
-		{"alice", alice.ID},
-		{alice.ID, alice.ID},
-		{pub, peer.ID},
+	got, err := k.ResolveLocalPrincipal(ctx, "alice@k")
+	if err != nil || got.ID != alice.ID {
+		t.Fatalf("ResolveLocalPrincipal(alice@k): got %v, %v", got, err)
 	}
-	for _, c := range cases {
-		got, err := k.ResolveUser(ctx, c.ident)
-		if err != nil {
-			t.Fatalf("ResolveUser(%q): %v", c.ident, err)
-		}
-		if got.ID != c.want {
-			t.Errorf("ResolveUser(%q): got %s, want %s", c.ident, got.ID, c.want)
+	// The address may name this kernel by its key as well as by its name.
+	if got, err := k.ResolveLocalPrincipal(ctx, "alice@"+k.SelfKeyForTest(ctx)); err != nil || got.ID != alice.ID {
+		t.Errorf("ResolveLocalPrincipal(alice@<own key>): got %v, %v", got, err)
+	}
+	// A bare handle is not an address, an id is not one either, and a peer's name is not a user.
+	for _, bad := range []string{"alice", alice.ID, "peer@k", "nobody@k"} {
+		if _, err := k.ResolveLocalPrincipal(ctx, bad); err == nil {
+			t.Errorf("ResolveLocalPrincipal(%q): want an error", bad)
 		}
 	}
-
-	if _, err := k.ResolveUser(ctx, "nobody"); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("ResolveUser(missing): want ErrNotFound, got %v", err)
-	}
-	// A kernel's petname lives in the OTHER namespace (§13): it never resolves as a user, which is
-	// what lets a local user and a kernel share the same bare name.
-	if _, err := k.ResolveUser(ctx, "peer"); !errors.Is(err, kernel.ErrNotFound) {
-		t.Errorf("ResolveUser(petname): want ErrNotFound, got %v", err)
+	// A user on another kernel is refused here rather than dialled.
+	if _, err := k.ResolveLocalPrincipal(ctx, "alice@peer"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("ResolveLocalPrincipal(alice@peer): want ErrInvalidInput, got %v", err)
 	}
 }
 
@@ -1980,7 +1924,7 @@ func TestHostStepCreateResolvesNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exec := &stepCreateHostExec{requiredCaller: "bob", action: "bob/approve"}
+	exec := &stepCreateHostExec{requiredCaller: "bob@k", action: "bob@k/approve"}
 	k := newTestKernelWithScripts(st, exec)
 
 	_, tr := beginTestRun(t, st, alice.ID, orch)
@@ -2045,7 +1989,7 @@ func TestHostStepCompleteIsTraceConfined(t *testing.T) {
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
 	exec := &stepCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, kernel.RequiredCaller{UserID: mallory.ID})
+	step, err := k.CreateStep(ctx, victimTrace.ID, target.ID, nil, kernel.Principal{AccountID: mallory.ID})
 	if err != nil {
 		t.Fatalf("CreateStep: %v", err)
 	}
@@ -2189,7 +2133,7 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}, QuoteHash: stale})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote@k/svc", Args: map[string]any{}, QuoteHash: stale})
 	if !errors.Is(err, kernel.ErrTermsChanged) {
 		t.Fatalf("stale pin: got %v, want ErrTermsChanged", err)
 	}
@@ -2211,10 +2155,10 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 	}
 
 	// The buyer re-reads and accepts the new terms; and an unpinned run is unaffected.
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}, QuoteHash: kernel.QuoteHash(a)}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote@k/svc", Args: map[string]any{}, QuoteHash: kernel.QuoteHash(a)}); err != nil {
 		t.Errorf("a matching pin must run normally: %v", err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote/svc", Args: map[string]any{}}); err != nil {
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-quote@k/svc", Args: map[string]any{}}); err != nil {
 		t.Errorf("an omitted pin must leave behaviour unchanged: %v", err)
 	}
 }
@@ -2267,7 +2211,7 @@ func TestQuotePinOrderedAfterVisibility(t *testing.T) {
 	}
 	_ = st.CreateAction(ctx, a)
 
-	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "alice-order/secret", Args: map[string]any{}, QuoteHash: "any-guess"})
+	_, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "alice-order@k/secret", Args: map[string]any{}, QuoteHash: "any-guess"})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("a private action must refuse on visibility, never disclose terms: got %v", err)
 	}
@@ -2283,7 +2227,7 @@ func TestQuotePinOrderedAfterVisibility(t *testing.T) {
 	if err := st.UpdateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	_, err = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-order/secret", Args: map[string]any{}, QuoteHash: stale})
+	_, err = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice-order@k/secret", Args: map[string]any{}, QuoteHash: stale})
 	if !errors.Is(err, kernel.ErrTermsChanged) {
 		t.Fatalf("a schema change under a stale pin must report changed terms, got %v", err)
 	}
@@ -2346,11 +2290,11 @@ func TestResolveActionIndexFallback(t *testing.T) {
 
 	// Depth zero, one, and two: the group is named, the index answers.
 	for ref, want := range map[string]string{
-		"bob":            root.ID,
-		"bob/index":      root.ID,
-		"bob/mail":       mailIndex.ID,
-		"bob/mail/eu":    deep.ID,
-		"bob/mail/index": mailIndex.ID,
+		"bob@k":            root.ID,
+		"bob@k/index":      root.ID,
+		"bob@k/mail":       mailIndex.ID,
+		"bob@k/mail/eu":    deep.ID,
+		"bob@k/mail/index": mailIndex.ID,
 	} {
 		got, err := k.ResolveAction(ctx, ref)
 		if err != nil {
@@ -2363,7 +2307,7 @@ func TestResolveActionIndexFallback(t *testing.T) {
 
 	// An exact action always wins over the index child of the same path.
 	exact := setupAction(t, st, bob.ID, "mail", 0)
-	got, err := k.ResolveAction(ctx, "bob/mail")
+	got, err := k.ResolveAction(ctx, "bob@k/mail")
 	if err != nil {
 		t.Fatalf("ResolveAction(bob/mail): %v", err)
 	}
@@ -2372,7 +2316,7 @@ func TestResolveActionIndexFallback(t *testing.T) {
 	}
 
 	// A miss names what the caller wrote, never the candidate the resolver tried.
-	_, err = k.ResolveAction(ctx, "bob/absent")
+	_, err = k.ResolveAction(ctx, "bob@k/absent")
 	if !errors.Is(err, kernel.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
@@ -2408,7 +2352,7 @@ func TestReadCallableActionIndexFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := k.ReadCallableAction(ctx, "acme/mail", caller.ID)
+	got, err := k.ReadCallableAction(ctx, "acme@k/mail", caller.ID)
 	if err != nil {
 		t.Fatalf("ReadCallableAction(acme, mail): %v", err)
 	}
@@ -2423,7 +2367,7 @@ func TestReadCallableActionIndexFallback(t *testing.T) {
 	if err := st.UpdateAction(ctx, priv); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.ReadCallableAction(ctx, "acme/mail", caller.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := k.ReadCallableAction(ctx, "acme@k/mail", caller.ID); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("want ErrUnauthorized for the exact private action, got %v", err)
 	}
 }

@@ -135,7 +135,11 @@ func VerifyCodeChallenge(verifier, challenge string) bool {
 
 // authenticateLocal verifies handle+password and returns the account. A key-only account has an
 // empty password hash, which CheckPassword rejects, so it can never obtain a token by this path.
-func (k *Kernel) authenticateLocal(ctx context.Context, handle, password string) (*Account, error) {
+func (k *Kernel) authenticateLocal(ctx context.Context, addr, password string) (*Account, error) {
+	handle, err := k.LocalHandle(ctx, addr)
+	if err != nil {
+		return nil, ErrUnauthenticated.Wrap(err.Error())
+	}
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil || !CheckPassword(password, u.PasswordHash) {
 		return nil, ErrUnauthenticated.Wrap("wrong user name or password")
@@ -280,7 +284,11 @@ func (n Network) RecoveryChallengeSigningBytes(nonce string) ([]byte, error) {
 // StartRecovery issues a single-use nonce for a password-recovery attempt. The account must have a
 // recovery key enrolled (§12); otherwise recovery is unavailable. The nonce is stored with a short
 // TTL and returned to the client, which signs it with the seed-phrase-derived key.
-func (k *Kernel) StartRecovery(ctx context.Context, handle string) (string, error) {
+func (k *Kernel) StartRecovery(ctx context.Context, addr string) (string, error) {
+	handle, err := k.LocalHandle(ctx, addr)
+	if err != nil {
+		return "", err
+	}
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil {
 		return "", err
@@ -302,8 +310,12 @@ func (k *Kernel) StartRecovery(ctx context.Context, handle string) (string, erro
 // CompleteRecovery consumes the nonce, verifies the client's signature against the account's stored
 // recovery key, and resets the password. It bypasses the current-password check (the whole point is
 // that the user has lost it). The nonce is consumed first, so a failed or replayed attempt burns it.
-func (k *Kernel) CompleteRecovery(ctx context.Context, handle, nonce, signatureB64, newPassword string) error {
+func (k *Kernel) CompleteRecovery(ctx context.Context, addr, nonce, signatureB64, newPassword string) error {
 	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	handle, err := k.LocalHandle(ctx, addr)
+	if err != nil {
 		return err
 	}
 	u, err := k.store.ReadUserByHandle(ctx, handle)

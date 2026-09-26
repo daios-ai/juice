@@ -63,7 +63,7 @@ func TestUserDisconnectCLI(t *testing.T) {
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "grant-cli")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
-	plan, err := env.k.ConsentPlan(ctx, uid, "grant-cli/inbox")
+	plan, err := env.k.ConsentPlan(ctx, uid, "grant-cli@k/inbox")
 	if err != nil || len(plan.Groups) != 1 {
 		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
 	}
@@ -74,7 +74,7 @@ func TestUserDisconnectCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := execTestCmd(t, userDisconnectCmd(), "grant-cli/inbox"); err != nil {
+	if _, err := execTestCmd(t, userDisconnectCmd(), "grant-cli@k/inbox"); err != nil {
 		t.Fatalf("user disconnect: %v", err)
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
@@ -91,7 +91,7 @@ func TestDeleteGrantsHasOneSpelling(t *testing.T) {
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "grant-alias")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
-	plan, err := env.k.ConsentPlan(ctx, uid, "grant-alias/inbox")
+	plan, err := env.k.ConsentPlan(ctx, uid, "grant-alias@k/inbox")
 	if err != nil || len(plan.Groups) != 1 {
 		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
 	}
@@ -102,7 +102,7 @@ func TestDeleteGrantsHasOneSpelling(t *testing.T) {
 	srv := httptest.NewServer(mountFullRouter(&server{kernel: env.k, log: log.Discard()}))
 	t.Cleanup(srv.Close)
 
-	resp := httpDo(t, srv, "DELETE", "/v1/grants?action=grant-alias/inbox", nil, tok)
+	resp := httpDo(t, srv, "DELETE", "/v1/grants?action=grant-alias@k/inbox", nil, tok)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("the legacy ?action= alias must not revoke: status = %d, want 422 (invalid_input)", resp.StatusCode)
@@ -111,7 +111,7 @@ func TestDeleteGrantsHasOneSpelling(t *testing.T) {
 		t.Fatalf("the grant must survive a request naming no selector: %d", len(views))
 	}
 	// The canonical spelling still works.
-	ok := httpDo(t, srv, "DELETE", "/v1/grants?selector=grant-alias/inbox", nil, tok)
+	ok := httpDo(t, srv, "DELETE", "/v1/grants?selector=grant-alias@k/inbox", nil, tok)
 	defer ok.Body.Close()
 	if ok.StatusCode != http.StatusOK {
 		t.Fatalf("selector revoke: status = %d, want 200", ok.StatusCode)
@@ -155,7 +155,7 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 	old := flagJSON
 	flagJSON = true
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, userConnectCmd(), "chatcli/chat", "--token", "ghp_x")
+		_, err := execTestCmd(t, userConnectCmd(), "chatcli@k/chat", "--token", "ghp_x")
 		return err
 	})
 	flagJSON = old
@@ -171,7 +171,7 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 	}
 
 	// Disconnect by selector removes both grants; the connection remains (now unused).
-	if _, err := execTestCmd(t, userDisconnectCmd(), "chatcli/chat"); err != nil {
+	if _, err := execTestCmd(t, userDisconnectCmd(), "chatcli@k/chat"); err != nil {
 		t.Fatalf("user disconnect: %v", err)
 	}
 	if views, _ := env.k.ListGrantViews(ctx, uid); len(views) != 0 {
@@ -191,11 +191,11 @@ func TestRunGrantRequiredNonTTY(t *testing.T) {
 	if err := saveToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	_, err := execTestCmd(t, runCmd(), "run-grant/inbox", "{}")
+	_, err := execTestCmd(t, runCmd(), "run-grant@k/inbox", "{}")
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
-	if grantActionRef(err, "fallback") != "run-grant/inbox" {
+	if grantActionRef(err, "fallback") != "run-grant@k/inbox" {
 		t.Errorf("grantActionRef did not recover the action from meta: %q", grantActionRef(err, "fallback"))
 	}
 }

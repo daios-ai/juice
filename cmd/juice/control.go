@@ -67,7 +67,7 @@ func listBounds(r *http.Request) (limit, offset int) {
 func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	users, err := s.kernel.ListUsers(r.Context(), limit, offset)
-	writeOr(w, accountViews(users), err)
+	writeOr(w, accountViews(r.Context(), s.kernel.NewNames(), users), err)
 }
 
 // rosterView is one roster target as every verb on it answers: reading it, and each act that
@@ -75,7 +75,7 @@ func (s *server) ctlListUsers(w http.ResponseWriter, r *http.Request) {
 // which is what makes an acknowledgement worth reading (API.md R5).
 func (s *server) rosterView(ctx context.Context, acct *kernel.Account, key string) any {
 	if key == "" {
-		return accountView{Account: acct}
+		return accountView1(ctx, s.kernel.NewNames(), acct)
 	}
 	// A kernel target renders one flat record: its naming state, plus what it owes us when it has
 	// traded here. A peer account holds no balance of its own (P10), so none is shown.
@@ -188,7 +188,7 @@ func (s *server) ctlDeposit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, enrichLedger(e, newAccountCache(s.kernel, r.Context())))
+	writeJSON(w, http.StatusOK, enrichLedger(r.Context(), e, s.kernel.NewNames()))
 }
 
 // ctlListDeposits shows what this kernel is waiting on, in one list: money that has arrived whose
@@ -274,7 +274,7 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 				resp["petname"] = "" // unbound: KernelName falls back to the key
 			}
 			resp["about"] = g.About
-			resp["actions"] = s.kernel.PeerCatalog(g.ActionManifests)
+			resp["actions"] = s.kernel.PeerCatalog(ctx, peerKey, g.ActionManifests)
 			resp["source"] = "live"
 			// Kernel-level ask: the operator sees every step this kernel may complete, its users'
 			// included, which is the only place a peer-held step is visible to them (§13).
@@ -308,30 +308,21 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// resolvePeerKey maps an @handle / key / id reference to a peer's public key, rejecting a local
-// account that is not a federation peer. Shared by the peer commands.
+// resolvePeerKey maps a petname or key to a peer's public key, refusing this kernel's own name.
+// Shared by the peer commands. A key nobody knows is a stranger's (inspecting or addressing a peer
+// before it is known locally) — the transport reports it unreachable if it is not real.
 func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, error) {
 	if ident == "" {
-		return "", kernel.ErrInvalidInput.Wrap("a peer handle or public key is required")
+		return "", kernel.ErrInvalidInput.Wrap("a peer name or public key is required")
 	}
-	// Kernel namespace first: a petname or raw key names a kernel directly, with or without an
-	// account here (§13). Only then fall back to the account namespace, to reject a local user.
-	if key, _, err := s.kernel.ResolveKernelKey(ctx, ident); err == nil {
-		return key, nil
+	kr, err := s.kernel.ResolveKernel(ctx, ident)
+	if err != nil {
+		return "", kernel.ErrNotFound.Wrapf("no peer %q; peers are named by petname or public key", ident)
 	}
-	if u, err := s.kernel.ResolveUser(ctx, ident); err == nil {
-		if u.KernelPublicKey == "" {
-			return "", kernel.ErrInvalidInput.Wrapf("%q is a local user, not a federation peer", ident)
-		}
-		return u.KernelPublicKey, nil
+	if kr.Local {
+		return "", kernel.ErrInvalidInput.Wrapf("%q is this kernel, not a peer", ident)
 	}
-	// An unresolvable identifier with public-key shape is a raw stranger key (inspecting or addressing
-	// a peer before it is known locally) — the transport reports it unreachable if it is not real.
-	// Anything else is simply an unknown peer (§14 productions: a bare handle never means a key).
-	if kernel.IsPublicKey(ident) {
-		return ident, nil
-	}
-	return "", kernel.ErrNotFound.Wrapf("no peer %q", ident)
+	return kr.Key, nil
 }
 
 // ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen
@@ -340,7 +331,7 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
-	handle := globalCfg.KernelHandle
+	handle := s.kernel.OwnName(ctx)
 	var about string
 	if sys, err := s.kernel.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {
 		about = sys.Description

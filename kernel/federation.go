@@ -99,15 +99,10 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 	if amount < 1 {
 		return nil, ErrInvalidInput.Wrap("transfer amount must be a positive integer")
 	}
-	if strings.Contains(ref, "@") {
-		return nil, ErrInvalidInput.Wrap("value transfer is local to a kernel; the target must be a bare local handle")
-	}
-	benef, err := k.ResolveUser(ctx, ref)
-	if err != nil || benef == nil {
-		return nil, ErrNotFound.Wrapf("transfer beneficiary %q not found", ref)
-	}
-	if !benef.IsLiveUser() {
-		return nil, ErrInvalidInput.Wrap("transfer beneficiary must be a local user account")
+	// Value is local to a kernel (D18): the beneficiary is a live user here, never a peer.
+	benef, err := k.ResolveLocalPrincipal(ctx, ref)
+	if err != nil {
+		return nil, err
 	}
 	if benef.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
@@ -140,32 +135,31 @@ type dispatchPayload struct {
 	// draw with the values the peer was committed to, not with whatever the config now says.
 	Secret  string `json:"secret,omitempty"`
 	Lottery int64  `json:"lottery,omitempty"`
+	// CallerUserID and CallerHandle name the user of this kernel the call was sent for, as the
+	// signed request carried them (P4): frozen so a retry after a restart or a rename presents the
+	// same request. Empty when the immediate caller is not one of this kernel's own users.
+	CallerUserID string `json:"caller_user_id,omitempty"`
+	CallerHandle string `json:"caller_handle,omitempty"`
 	// ServingBPS and Nonce are the other direction: what this kernel admitted a foreign call under —
 	// the markup it quoted and its own half of the draw, minted before the buyer's secret is known.
 	// They are frozen for the same reason and read back the same way, so a settlement that rebuilds
 	// the call from nothing — crash recovery, forced closure — signs the receipt the buyer was
-	// promised. The two sets are disjoint: a trace is either buying or selling, never both, so
-	// ServingBPS is 0 on a dispatch and RemoteBPS is 0 on an admission.
+	// promised. A served call never dispatches from its own trace (P6), which prepareDispatch
+	// enforces, so the two sets never meet on one record. The request an admitted call answers is
+	// not here: it is the admission record the trace points to (P4).
 	ServingBPS int64  `json:"serving_bps,omitempty"`
 	Nonce      string `json:"nonce,omitempty"`
 	// Commitment is the buyer's hash of its own secret, and Reserve the most the call could owe —
 	// what admission counted against the credit limit, corrected at commit to what was charged.
 	Commitment string `json:"commitment,omitempty"`
 	Reserve    int64  `json:"reserve,omitempty"`
-	// IdempotencyKey and Counterparty are the admitted call's own name and the buyer that sent it,
-	// frozen here for the reason the nonce is: every path that signs this kernel's receipt —
-	// settlement, crash recovery, forced closure — must bind the receipt to the request it answers,
-	// and only the trace survives to tell it which request that was (P4, P5).
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-	Counterparty   string `json:"counterparty,omitempty"`
 }
 
-// marshalServing freezes what an inbound foreign call was admitted under, on the same trace record
-// that freezes an outbound one's terms (D19). With the reveal fields the trace itself carries, this
-// is the whole of the seller's ticket: there is no second record to keep in step with it.
-func marshalServing(remoteBPS, lottery, reserve int64, nonce, commitment, idempotencyKey, counterparty string) *string {
+// marshalServing freezes what an inbound foreign call was admitted under (D19). With the reveal
+// fields the trace itself carries, this is the whole of the seller's ticket.
+func marshalServing(remoteBPS, lottery, reserve int64, nonce, commitment string) *string {
 	b, _ := json.Marshal(dispatchPayload{ServingBPS: remoteBPS, Lottery: lottery, Reserve: reserve,
-		Nonce: nonce, Commitment: commitment, IdempotencyKey: idempotencyKey, Counterparty: counterparty})
+		Nonce: nonce, Commitment: commitment})
 	out := string(b)
 	return &out
 }
@@ -260,10 +254,11 @@ func (s *pricedStore) ListAllActions(ctx context.Context, limit, offset int) ([]
 }
 
 // marshalDispatch serializes a dispatchPayload and returns a pointer suitable for Trace.DispatchJSON.
-func marshalDispatch(args map[string]any, stepID string, mp, gross int64, contractHash string, remoteBPS, importBPS int64, secret string, lottery int64) *string {
+func marshalDispatch(args map[string]any, stepID string, mp, gross int64, contractHash string, remoteBPS, importBPS int64, secret string, lottery int64, caller Principal) *string {
 	b, _ := json.Marshal(dispatchPayload{
 		Args: args, StepID: stepID, RemotePrice: mp, Gross: gross, ContractHash: contractHash,
 		RemoteBPS: remoteBPS, ImportBPS: importBPS, Secret: secret, Lottery: lottery,
+		CallerUserID: caller.RemoteID, CallerHandle: caller.Handle,
 	})
 	s := string(b)
 	return &s
@@ -294,23 +289,29 @@ func ServingTerms(dispatchJSON *string) (remoteBPS, lottery int64, nonce string)
 	return d.ServingBPS, d.Lottery, d.Nonce
 }
 
-// ServingRequest reads back which request a foreign call answers: the buyer's own name for it and
-// the buyer kernel that sent it, frozen at admission. Every path that signs this kernel's receipt
-// binds them into it, so the receipt answers one request and no other (P4, P5).
-func ServingRequest(dispatchJSON *string) (idempotencyKey, counterparty string) {
-	d := dispatched(dispatchJSON)
-	return d.IdempotencyKey, d.Counterparty
+// servedRequest reads which request a trace answers — the buyer's own name for it and the buyer
+// kernel that sent it — from the admission record the trace points to (P4). Empty for a trace that
+// answers no peer. A trace that names a record nobody can read fails closed: every path that signs
+// this kernel's receipt binds these into it, and an unbound receipt would answer no request (P5).
+func (k *Kernel) servedRequest(ctx context.Context, t *Trace) (idempotencyKey, counterparty string, err error) {
+	if t.IdempotencyRecordID == nil {
+		return "", "", nil
+	}
+	rec, err := k.store.ReadIdempotencyRecordByID(ctx, *t.IdempotencyRecordID)
+	if err != nil {
+		return "", "", ErrInternal.Wrapf("the request this call answers cannot be read: %v", err)
+	}
+	buyer, err := k.store.ReadUser(ctx, rec.CounterpartyUserID)
+	if err != nil || buyer == nil || buyer.KernelPublicKey == "" {
+		return "", "", ErrInternal.Wrap("the kernel this call answers cannot be read")
+	}
+	return rec.IdempotencyKey, buyer.KernelPublicKey, nil
 }
 
-// ServingReserve is what a foreign call's admission counted against the credit limit, and whether
-// the trace is a foreign call at all — which is told by the buyer it answers, since every admitted
-// call records one and no local call does. A free foreign call reserves nothing and is still
-// foreign: its exposure correction moves zero, which is the right answer rather than an omitted
-// one.
-func ServingReserve(dispatchJSON *string) (reserve int64, foreign bool) {
-	d := dispatched(dispatchJSON)
-	return d.Reserve, d.Counterparty != ""
-}
+// ServingReserve is what a foreign call's admission counted against the credit limit. Whether a
+// trace is an admitted call at all is a fact of the trace, not of this record: it answers a request
+// (idempotency_record_id) under serving terms and dispatched none of its own (D19).
+func ServingReserve(dispatchJSON *string) int64 { return dispatched(dispatchJSON).Reserve }
 
 // PeerStepView is what a remote peer may see of a step parked for it: the request, not the
 // requester. Deliberately NOT the local step view — that one carries the creating action's name,
@@ -324,7 +325,7 @@ type PeerStepView struct {
 	// RequiredCaller names which principal on the RECEIVING kernel the step is addressed to, when
 	// it is addressed to one of its users rather than to the kernel itself. It is that kernel's own
 	// id, so it discloses nothing of the parking kernel: it lets the receiver route the step to the
-	// user who may complete it, which completion already demands (step_auth).
+	// user who may complete it, which the signed completion names (P8).
 	RequiredCaller string          `json:"required_caller,omitempty"`
 	PartialArgs    json.RawMessage `json:"partial_args,omitempty"`
 	AllowedInput   map[string]any  `json:"allowed_input,omitempty"`
@@ -379,7 +380,6 @@ const (
 	sigDomainFedCall         = "fed_call"
 	sigDomainStepComplete    = "step_complete"
 	sigDomainStepList        = "step_list"
-	sigDomainStepAuth        = "step_auth"
 	sigDomainReveal          = "reveal"
 	sigDomainCapability      = "capability"
 	sigDomainRecovery        = "recovery"
@@ -1000,7 +1000,11 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	// it. Never-dispatched fail-fast lives solely in Call (§6). The contract hash is the one the
 	// dispatch froze, not the row's current one: the proxy may have been re-resolved while this
 	// call was in doubt, and a retry must present the terms the buyer authorised (§8).
-	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, action.RemoteActionID, dispatch.ContractHash, *trace.IdempotencyKey, commitmentOf(dispatch.Secret), dispatch.Lottery, dispatch.Args)
+	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, OutboundCall{
+		ActionID: action.RemoteActionID, ExpectedContractHash: dispatch.ContractHash, IdempotencyKey: *trace.IdempotencyKey,
+		Commitment: commitmentOf(dispatch.Secret), Lottery: dispatch.Lottery,
+		CallerUserID: dispatch.CallerUserID, CallerHandle: dispatch.CallerHandle,
+	}, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
@@ -1018,18 +1022,18 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 
 // SignFederation signs a federation payload with the platform key and returns
 // (signature, timestamp). Returns an error if the signing key is not configured.
-func (k *Kernel) SignFederation(action, counterparty, recipient, expectedContractHash, idempotencyKey, argsHash, commitment string, lottery int64) (sig, ts string, err error) {
+func (k *Kernel) SignFederation(c OutboundCall, counterparty, recipient, argsHash string) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignFederationPayload(k.cfg.SigningKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, ts, argsHash, commitment, lottery)
+	sig, err = k.cfg.Network.SignFederationPayload(k.cfg.SigningKey, c, counterparty, recipient, ts, argsHash)
 	return
 }
 
 // SignStep signs a step-completion payload with the platform key and returns
 // (signature, timestamp). recipient is the peer being addressed. Returns an error if the signing
 // key is not configured.
-func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, inputHash string) (sig, ts string, err error) {
+func (k *Kernel) SignStep(stepID, counterparty, recipient, idempotencyKey, inputHash, userID string, superuser bool) (sig, ts string, err error) {
 	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash)
+	sig, err = k.cfg.Network.SignStepPayload(k.cfg.SigningKey, stepID, counterparty, recipient, idempotencyKey, ts, inputHash, userID, superuser)
 	return
 }
 
@@ -1132,28 +1136,21 @@ func (k *Kernel) PeerStepsAwaitingUs(ctx context.Context, peerKey, forUserID str
 
 // completePeerStepRaw signs and dispatches one completion under an ALREADY-DERIVED idempotency key:
 // a retry must present the key its first attempt used, so the key is an argument, never re-derived
-// here. forUserID, when non-empty, attaches the home-kernel step_auth attestation naming that stable
-// local id, so a remote-user-addressed step is completed as that specific user (§13); empty is a
-// kernel-level completion for a kernel-addressed step.
+// here. forUserID, when non-empty, is the completing user's stable id here, signed into the request
+// with whether they are this kernel's operator (P8) — the same home-kernel attestation an inbound
+// call carries for its caller; empty is a kernel-level completion for a kernel-addressed step.
 func (k *Kernel) completePeerStepRaw(ctx context.Context, peerKey, stepID string, input []byte, inputHash, idempotencyKey, forUserID string) (map[string]any, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
 	self := k.selfKey(ctx)
-	sig, ts, err := k.SignStep(stepID, self, peerKey, idempotencyKey, inputHash)
+	superuser := forUserID != "" && k.IsSuperuser(ctx, forUserID)
+	sig, ts, err := k.SignStep(stepID, self, peerKey, idempotencyKey, inputHash, forUserID, superuser)
 	if err != nil {
 		return nil, err
 	}
-	var attestation, attestTS string
-	superuser := false
-	if forUserID != "" {
-		superuser = k.IsSuperuser(ctx, forUserID)
-		if attestation, attestTS, err = k.SignStepAuth(self, peerKey, forUserID, stepID, superuser); err != nil {
-			return nil, err
-		}
-	}
 	status, body, notDispatched, err := k.fedClient.CompletePeerStep(ctx, peerKey, ts, sig, stepID,
-		idempotencyKey, input, forUserID, attestation, attestTS, superuser)
+		idempotencyKey, input, forUserID, superuser)
 	return stepReply(status, body, notDispatched, err, peerKey)
 }
 
@@ -1171,102 +1168,6 @@ func (k *Kernel) CompletePeerStep(ctx context.Context, peerKey, stepID string, r
 }
 
 // ---- Peer operations ----
-
-// ResolveKernelKey maps a kernel qualifier (from an owner@kernel/name reference) to the kernel's
-// public key and, when one exists locally, its account. Resolution order is strictly: a bound local
-// petname → a raw base64url key → not found. A kernel's self-asserted nickname NEVER resolves a
-// reference (§13), so no kernel can capture a name by gossiping a label first. The account may be
-// nil for a key with no financial relationship here yet.
-func (k *Kernel) ResolveKernelKey(ctx context.Context, ident string) (peerKey string, mount *Account, err error) {
-	ident = strings.TrimSpace(ident)
-	if rk, err := k.store.ReadKernelByPetname(ctx, ident); err == nil && rk != nil {
-		acct, _ := k.store.ReadAccountByKernelKey(ctx, rk.PublicKey) // nil until money is involved
-		return rk.PublicKey, acct, nil
-	}
-	if looksLikeKey(ident) {
-		acct, _ := k.store.ReadAccountByKernelKey(ctx, ident)
-		return ident, acct, nil
-	}
-	return "", nil, ErrNotFound.Wrapf("kernel %q is not a known petname or key", ident)
-}
-
-// ResolveRequiredCaller resolves a step's required-caller reference (§10, §13). A bare/local ref
-// returns (localUserID, ""). A kernel-qualified ref user@kernel returns (peer proxy userID, stable
-// remote user_id): the proxy user is the local accounting/routing account, the remote id addresses
-// the completer beneath its mutable handle, so completion demands a step_auth attestation naming it.
-// A raw-key qualifier is mounted on demand (best-effort alias); the remote user is resolved to its
-// stable id over /juice/fed/resolve/1.
-// RequiredCaller is who a step is parked for: the local account that funds and routes it, and, when
-// that account is a peer, the principal on that peer — its stable id, which authorises completion,
-// and the handle it went by when the step was made, which only ever displays it. The two travelled
-// as separate strings that had to agree; one value carries them and the display name for free.
-type RequiredCaller struct {
-	UserID   string // local account: the user, or the peer's proxy account
-	RemoteID string // the completer's stable id on that peer (P8); empty when local
-	Handle   string // that principal's handle when the step was made; display only, may go stale
-}
-
-func (k *Kernel) ResolveRequiredCaller(ctx context.Context, ref string) (rc RequiredCaller, err error) {
-	ref = strings.TrimSpace(ref)
-	owner, kernelAlias, hasKernel := strings.Cut(ref, "@")
-	if !hasKernel {
-		u, uerr := k.ResolveUser(ctx, ref)
-		if uerr != nil || !u.IsLive() {
-			// A tombstone resolves but can never complete: the step would park its price forever.
-			return rc, ErrNotFound.Wrapf("required caller %q not found", ref)
-		}
-		return RequiredCaller{UserID: u.ID}, nil
-	}
-	// A sigil-prefixed "@bob" cuts to an empty owner; reject it rather than treat it as a
-	// kernel-qualified ref with no owner (handles are bare, §14).
-	if owner == "" || kernelAlias == "" {
-		return rc, ErrInvalidInput.Wrapf("required caller %q must be owner@kernel", ref)
-	}
-	peerKey, mount, kerr := k.ResolveKernelKey(ctx, kernelAlias)
-	if kerr != nil {
-		return rc, kerr
-	}
-	resolver := k.fedClient
-	if resolver == nil {
-		return rc, ErrNotFound.Wrap("remote resolution unavailable")
-	}
-	remoteUserID, remoteHandle, rerr := resolver.ResolveRemoteUser(ctx, peerKey, owner)
-	if rerr != nil {
-		return rc, rerr
-	}
-	// An empty id is not a principal. Accepted, it would address the step to the peer kernel
-	// itself — operator scope, decided by a remote reply — and strand the user it was meant for.
-	if remoteUserID == "" {
-		return rc, ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
-	}
-	// First meaningful use (§13): a verified remote-user resolve is our own outbound act, so a
-	// petname is bound here too — on the petname being unbound, not on the account being absent
-	// (see lazyResolveRemote). Best-effort — a missing name never blocks the step.
-	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
-		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
-	}
-	if mount == nil {
-		if mount, err = k.EnsureKernelAccount(ctx, peerKey); err != nil {
-			return rc, err
-		}
-	}
-	return RequiredCaller{UserID: mount.ID, RemoteID: remoteUserID, Handle: NormalizeHandle(remoteHandle)}, nil
-}
-
-// ResolvePrincipal resolves a user reference (bare handle or id) to its stable id and current
-// handle, for the open /juice/fed/resolve/1 protocol (§13): the caller's home kernel maps a
-// friendly `owner@kernel` to the underlying PrincipalID beneath the name. Only a live
-// (non-suspended) account resolves; ids are addresses, not secrets.
-func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
-	u, err := k.ResolveUser(ctx, ref)
-	// A live local user has a handle. A kernel account has none, and a purged peer's tombstone has
-	// neither handle nor key (§13 Retention) — resolving either would answer a peer with a nameless
-	// principal, so an id that lands on one is not found.
-	if err != nil || u == nil || u.SuspendedAt != nil || u.Handle == "" {
-		return "", "", ErrNotFound.Wrapf("user %s not found", ref)
-	}
-	return u.ID, u.Handle, nil
-}
 
 // The three kernel lifecycle operations (§13). They are deliberately separate: observation must not
 // name or fund a kernel, naming must not open a billing relationship, and an inbound call or a
@@ -1328,6 +1229,9 @@ func (k *Kernel) EnsureKernelAccount(ctx context.Context, publicKey string) (*Ac
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return nil, err
 	}
+	if publicKey == k.selfKey(ctx) {
+		return nil, ErrInvalidInput.Wrap("a kernel holds no account with itself")
+	}
 	if existing, err := k.store.ReadAccountByKernelKey(ctx, publicKey); err == nil && existing != nil {
 		return existing, nil
 	}
@@ -1374,7 +1278,42 @@ func (k *Kernel) RenameKernel(ctx context.Context, operatorID, publicKey, petnam
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return "", err
 	}
+	if publicKey == k.selfKey(ctx) {
+		return "", ErrInvalidInput.Wrap("that is this kernel; its name is kernel_handle in its config.json")
+	}
 	return k.BindPetname(ctx, publicKey, petname, true)
+}
+
+// OwnName is what this kernel calls itself: a petname bound to its own key, so a user here is
+// `handle@<own name>` and the one resolver reads it back (D15). Bound at every boot by BindOwnName;
+// read from the row otherwise, so a kernel opened without a boot still names itself.
+func (k *Kernel) OwnName(ctx context.Context) string {
+	if v := k.ownName.Load(); v != nil {
+		return v.(string)
+	}
+	if rk, err := k.store.ReadKernel(ctx, k.selfKey(ctx)); err == nil && rk != nil && rk.Petname != "" {
+		return rk.Petname
+	}
+	return ""
+}
+
+// BindOwnName binds this kernel's own name at boot, exactly: the petname index then keeps every
+// peer off it, and an auto-bound peer that arrives with the same nickname is suffixed away from it.
+// A peer already holding the name is a refusal with the remedy in it — the operator renames the
+// peer or the kernel — because a boot that silently took another name would rename every user here.
+func (k *Kernel) BindOwnName(ctx context.Context, name string) error {
+	self := k.selfKey(ctx)
+	if self == "" {
+		return ErrInvalidState.Wrap("signing key not configured")
+	}
+	if _, err := k.BindPetname(ctx, self, name, true); err != nil {
+		if errors.Is(err, ErrInvalidInput) {
+			return ErrInvalidState.Wrapf("a peer is already named %q here; rename it with `juice admin peer rename %s NEW`, or give this kernel another name in its config.json", name, name)
+		}
+		return err
+	}
+	k.ownName.Store(name)
+	return nil
 }
 
 // KernelName renders a kernel for a human: its bound petname, else its public key. It is the one
@@ -1463,9 +1402,9 @@ func (k *Kernel) DiscoveryCandidates(ctx context.Context, directory []string) []
 		}
 	}
 	out := make([]string, 0, len(lastSeen))
-	self := k.ourKeyB64()
+	self, configured := k.ourKeyB64(), k.selfKey(ctx)
 	for key := range lastSeen {
-		if key != "" && key != self {
+		if key != "" && key != self && key != configured {
 			out = append(out, key)
 		}
 	}
@@ -1790,7 +1729,7 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	}
 	// Evict directory-only discovered kernels stale past the same horizon, so the discovery cache
 	// stays bounded on a busy network (peer-backed kernels are handled by the loop above).
-	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff); derr != nil {
+	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.selfKey(ctx)); derr != nil {
 		logger.Error("discovery.purge.failed", "error", derr)
 	} else if evicted > 0 {
 		logger.Info("discovery.purged", "kernels", evicted)
@@ -1814,7 +1753,7 @@ const catalogPageSize = 100
 // requester already holds it.
 func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipResponse, error) {
 	ourKey := k.ourKeyB64()
-	handle, _ := k.store.GetConfig(ctx, "kernel_handle")
+	handle := k.OwnName(ctx)
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
 	sys, _ := k.store.ReadUserByHandle(ctx, "sys")
@@ -2005,7 +1944,7 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 // re-quotes authoritatively before money moves (§13).
 type PeerAction struct {
 	ActionID     string         `json:"action_id"`
-	Name         string         `json:"name"`
+	Name         string         `json:"name"` // the action's address, owner@<the peer's name here>/name
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema,omitempty"`
 	OutputSchema map[string]any `json:"output_schema,omitempty"`
@@ -2024,8 +1963,9 @@ func (k *Kernel) indicativePrice(serving int64) (int64, bool) {
 // rather than one call switching on a nil slice: a live peer that exports nothing legitimately sends
 // no manifests, and an emptiness test would silently answer that with stale cache under source
 // "live". The source is the caller's knowledge, so the caller names it.
-func (k *Kernel) PeerCatalog(manifests []*ActionManifest) []*PeerAction {
+func (k *Kernel) PeerCatalog(ctx context.Context, publicKey string, manifests []*ActionManifest) []*PeerAction {
 	out := make([]*PeerAction, 0, len(manifests))
+	host := k.KernelName(ctx, publicKey)
 	for _, m := range manifests {
 		serving, err := k.econ.ServingPrice(m.Price, m.RemoteBPS)
 		if err != nil {
@@ -2035,8 +1975,8 @@ func (k *Kernel) PeerCatalog(manifests []*ActionManifest) []*PeerAction {
 		if !ok {
 			continue
 		}
-		out = append(out, &PeerAction{ActionID: m.ActionID, Name: m.Name, Description: m.Description,
-			InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
+		out = append(out, &PeerAction{ActionID: m.ActionID, Name: Address{Handle: m.OwnerHandle, Kernel: host, Name: m.Name}.String(),
+			Description: m.Description, InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
 	}
 	return out
 }
@@ -2050,12 +1990,13 @@ func (k *Kernel) PeerCatalogCached(ctx context.Context, publicKey string) ([]*Pe
 		return nil, err
 	}
 	out := make([]*PeerAction, 0, len(docs))
+	host := k.KernelName(ctx, publicKey)
 	for _, d := range docs {
 		price, ok := k.indicativePrice(d.ServingPrice)
 		if !ok {
 			continue
 		}
-		out = append(out, &PeerAction{ActionID: d.ActionID, Name: d.Name, Description: d.Description,
+		out = append(out, &PeerAction{ActionID: d.ActionID, Name: Address{Handle: d.Handle, Kernel: host, Name: d.Name}.String(), Description: d.Description,
 			InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price, Indicative: true})
 	}
 	return out, nil
@@ -2435,10 +2376,10 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	if m.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
-	// For a key-addressed proxy, Source holds only the remote action ref (@owner/name).
+	// Source holds the remote action as owner/name, the same fold the row name carries.
 	// The peer is identified by remoteUser.KernelPublicKey; the federation transport resolves that
 	// key to a live path and supplies this kernel's own key as the signed counterparty (§13).
-	source := m.OwnerHandle + "/" + m.Name
+	source := JoinProxyName(m.OwnerHandle, m.Name)
 
 	existingByKey := map[string]*Action{}
 	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
@@ -2446,9 +2387,9 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	}
 
 	contentHash := remoteManifestHash(m)
-	// Owner-qualified (rendered remoteowner@mount/name) so same-named actions from different owners
-	// on the peer don't collide.
-	name := NormalizeHandle(m.OwnerHandle) + "/" + m.Name
+	// Stored folded (SplitProxyName), so same-named actions from different owners on the peer
+	// don't collide under the one account that holds them.
+	name := JoinProxyName(NormalizeHandle(m.OwnerHandle), m.Name)
 	// Proxy price is the two-step markup (§13): sr = mp + ceil(mp·remote_bps/10000) is the
 	// serving-kernel markup (a signed manifest field) and the cross-kernel obligation ceiling;
 	// q = sr + ceil(sr·import_bps/10000) adds the origin's locally-retained import fee, so the local
@@ -2657,9 +2598,15 @@ func (n Network) VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) er
 // key-set, and its signature domain (§12) keeps it from verifying as any other payload. JCS orders
 // keys canonically, so these produce byte-identical bytes to the maps they replaced — pinned by the
 // golden fixtures in sigfixture_test.go. Adding a payload is one struct plus one domain constant.
+// fedCallPayload is what a buying kernel signs over an inbound call (P4). CallerUserID and
+// CallerHandle name the buyer's own user the call is made for — the home kernel's attestation of
+// who called, as step_list already carries one for who asks — omitted when the immediate caller is
+// not one of its users.
 type fedCallPayload struct {
 	Action               string `json:"action"`
 	ArgsHash             string `json:"args_hash"`
+	CallerHandle         string `json:"caller_handle,omitempty"`
+	CallerUserID         string `json:"caller_user_id,omitempty"`
 	Commitment           string `json:"commitment,omitempty"`
 	Counterparty         string `json:"counterparty"`
 	ExpectedContractHash string `json:"expected_contract_hash"`
@@ -2669,27 +2616,19 @@ type fedCallPayload struct {
 	Timestamp            string `json:"timestamp"`
 }
 
+// stepCompletePayload is what a home kernel signs to complete a peer's step (P8). UserID is the
+// completing user's stable id here and Superuser the home kernel's word that this user is its
+// operator — the scope a step addressed to the kernel itself demands. Both omitted for a
+// kernel-level completion, whose canonical bytes are therefore unchanged.
 type stepCompletePayload struct {
 	Counterparty   string `json:"counterparty"`
 	IdempotencyKey string `json:"idempotency_key"`
 	InputHash      string `json:"input_hash"`
 	Recipient      string `json:"recipient"`
 	StepID         string `json:"step_id"`
+	Superuser      bool   `json:"superuser,omitempty"`
 	Timestamp      string `json:"timestamp"`
-}
-
-// stepAuthPayload is the home kernel's attestation that its authenticated local user authorized
-// completing a step (§13). No "scope" key: the sigDomainStepAuth prefix provides the separation.
-type stepAuthPayload struct {
-	Counterparty string `json:"counterparty"`
-	Recipient    string `json:"recipient"`
-	StepID       string `json:"step_id"`
-	Timestamp    string `json:"timestamp"`
-	UserID       string `json:"user_id"`
-	// Superuser is the home kernel's word that this user is its operator: the scope a step
-	// addressed to the kernel itself demands, which nothing else could tell the serving side.
-	// Omitted when false, so an ordinary user's attestation is byte-identical to before.
-	Superuser bool `json:"superuser,omitempty"`
+	UserID         string `json:"user_id,omitempty"`
 }
 
 // stepListPayload asks a peer which of its parked steps this kernel may complete. UserID names one
@@ -2715,67 +2654,43 @@ func (n Network) verifyPeer(pubKeyB64, domain string, payload any, sigB64 string
 	return n.verify(pub, domain, payload, sigB64)
 }
 
+func fedCallPayloadOf(c OutboundCall, counterparty, recipient, timestamp, argsHash string) fedCallPayload {
+	return fedCallPayload{Action: c.ActionID, ArgsHash: argsHash, CallerHandle: c.CallerHandle,
+		CallerUserID: c.CallerUserID, Commitment: c.Commitment, Counterparty: counterparty,
+		ExpectedContractHash: c.ExpectedContractHash, IdempotencyKey: c.IdempotencyKey,
+		Lottery: c.Lottery, Recipient: recipient, Timestamp: timestamp}
+}
+
 // VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
-func (n Network) VerifyFederationSignature(pubKeyB64, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, commitment string, lottery int64, sigB64 string) error {
-	p := fedCallPayload{Action: action, ArgsHash: argsHash, Commitment: commitment,
-		Counterparty: counterparty, ExpectedContractHash: expectedContractHash,
-		IdempotencyKey: idempotencyKey, Lottery: lottery, Recipient: recipient, Timestamp: timestamp}
-	if err := n.verifyPeer(pubKeyB64, sigDomainFedCall, p, sigB64); err != nil {
+func (n Network) VerifyFederationSignature(pubKeyB64 string, c OutboundCall, counterparty, recipient, timestamp, argsHash, sigB64 string) error {
+	if err := n.verifyPeer(pubKeyB64, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
 }
 
 // SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func (n Network) SignFederationPayload(key ed25519.PrivateKey, action, counterparty, recipient, expectedContractHash, idempotencyKey, timestamp, argsHash, commitment string, lottery int64) (string, error) {
-	return n.sign(key, sigDomainFedCall, fedCallPayload{Action: action, ArgsHash: argsHash,
-		Commitment: commitment, Counterparty: counterparty, ExpectedContractHash: expectedContractHash,
-		IdempotencyKey: idempotencyKey, Lottery: lottery, Recipient: recipient, Timestamp: timestamp})
+func (n Network) SignFederationPayload(key ed25519.PrivateKey, c OutboundCall, counterparty, recipient, timestamp, argsHash string) (string, error) {
+	return n.sign(key, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash))
 }
 
 // SignStepPayload creates a base64url Ed25519 signature over the canonical step-completion payload
 // — a key-set disjoint from every other signed Juice payload (§12, §13).
-func (n Network) SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash string) (string, error) {
+func (n Network) SignStepPayload(key ed25519.PrivateKey, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
 	return n.sign(key, sigDomainStepComplete, stepCompletePayload{Counterparty: counterparty,
 		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
-		StepID: stepID, Timestamp: timestamp})
+		StepID: stepID, Superuser: superuser, Timestamp: timestamp, UserID: userID})
 }
 
 // VerifyStepSignature verifies an Ed25519 signature over the canonical step-completion payload.
 // recipient must be the verifying kernel's own public key.
-func (n Network) VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, sigB64 string) error {
+func (n Network) VerifyStepSignature(pubKeyB64, stepID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
 	p := stepCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
-		InputHash: inputHash, Recipient: recipient, StepID: stepID, Timestamp: timestamp}
+		InputHash: inputHash, Recipient: recipient, StepID: stepID, Superuser: superuser, Timestamp: timestamp, UserID: userID}
 	if err := n.verifyPeer(pubKeyB64, sigDomainStepComplete, p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("step signature is invalid")
 	}
 	return nil
-}
-
-// SignStepAuthPayload signs the home-kernel attestation that its authenticated local user (userID)
-// authorized completing step stepID (§13). recipient binds it to the serving kernel, closing
-// cross-kernel replay.
-func (n Network) SignStepAuthPayload(key ed25519.PrivateKey, counterparty, recipient, userID, stepID, timestamp string, superuser bool) (string, error) {
-	return n.sign(key, sigDomainStepAuth, stepAuthPayload{Counterparty: counterparty,
-		Recipient: recipient, StepID: stepID, Timestamp: timestamp, UserID: userID, Superuser: superuser})
-}
-
-// VerifyStepAuthSignature verifies the attestation. recipient must be the verifying kernel's own key.
-func (n Network) VerifyStepAuthSignature(pubKeyB64, counterparty, recipient, userID, stepID, timestamp string, superuser bool, sigB64 string) error {
-	p := stepAuthPayload{Counterparty: counterparty, Recipient: recipient, StepID: stepID,
-		Timestamp: timestamp, UserID: userID, Superuser: superuser}
-	if err := n.verifyPeer(pubKeyB64, sigDomainStepAuth, p, sigB64); err != nil {
-		return ErrUnauthenticated.Wrap("step attestation is invalid")
-	}
-	return nil
-}
-
-// SignStepAuth stamps the current time and signs the step_auth attestation with this kernel's
-// platform key. counterparty is this kernel's own key; recipient is the serving peer's key.
-func (k *Kernel) SignStepAuth(counterparty, recipient, userID, stepID string, superuser bool) (sig, ts string, err error) {
-	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignStepAuthPayload(k.cfg.SigningKey, counterparty, recipient, userID, stepID, ts, superuser)
-	return
 }
 
 // SignStepListPayload creates a base64url Ed25519 signature over the canonical step-list payload.

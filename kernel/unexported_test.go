@@ -564,24 +564,7 @@ func TestConnectionKeyDerivation(t *testing.T) {
 	}
 }
 
-func TestSelectorParsingAndSegmentMatch(t *testing.T) {
-	cases := []struct{ sel, owner, path string }{
-		{"tom", "tom", ""},
-		{"tom/brief", "tom", "brief"},
-		{"tom/brief/eu", "tom", "brief/eu"},
-		{"tom/*", "tom", ""},
-		{"tom/brief/*", "tom", "brief"},
-		{"tom/brief", "tom", "brief"},
-	}
-	for _, c := range cases {
-		o, p, err := ParseGrantSelector(c.sel)
-		if err != nil || o != c.owner || p != c.path {
-			t.Errorf("ParseGrantSelector(%q) = (%q,%q,%v), want (%q,%q,nil)", c.sel, o, p, err, c.owner, c.path)
-		}
-	}
-	if _, _, err := ParseGrantSelector("@"); err == nil {
-		t.Error("bare @ should be rejected")
-	}
+func TestSelectorSegmentMatch(t *testing.T) {
 	// Segment matching: brief matches brief and brief/x, never briefing.
 	if !selectorPathMatches("brief", "brief") || !selectorPathMatches("brief", "brief/eu") {
 		t.Error("segment match should accept exact and sub-path")
@@ -987,7 +970,7 @@ func TestAFreeDispatchCarriesNoTicketTerms(t *testing.T) {
 		t := t
 		a := &Action{OwnerUserID: "seller", Price: price}
 		tr := &Trace{}
-		if err := k.prepareDispatch(context.Background(), tr, a, nil, "", price, 0); err != nil {
+		if err := k.prepareDispatch(context.Background(), tr, a, nil, "", price, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		d := dispatched(tr.DispatchJSON)

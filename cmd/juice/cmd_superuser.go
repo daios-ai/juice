@@ -64,8 +64,8 @@ type roster struct {
 }
 
 var rosters = map[string]roster{
-	"user": {noun: "user", target: "USER", id: "handle", named: "a user's handle, as `admin user list` shows it",
-		renamed: "NEW_NAME becomes the account's handle, and the old handle is freed"},
+	"user": {noun: "user", target: "USER", id: "address", named: "a user's address, handle@kernel, as `admin user list` shows it",
+		renamed: "NEW_NAME is the new address, handle@kernel on this kernel; the old handle is freed"},
 	"peer": {noun: "peer", target: "PEER", id: "public_key", named: "a peer kernel's petname or public key, as `admin peer list` shows it",
 		renamed: "NEW_NAME becomes the peer's petname — the local name your commands use for it"},
 }
@@ -111,7 +111,7 @@ func rosterCmds(noun string) []*cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			body := map[string]any{"new_name": args[1]}
 			return cli.emit("POST", path(args[0], "/rename"), body, output{id: r.id, human: func([]byte) error {
-				fmt.Printf("%s renamed to %s.\n", args[0], kernel.NormalizeHandle(args[1]))
+				fmt.Printf("%s renamed to %s.\n", args[0], strings.TrimSpace(args[1]))
 				return nil
 			}})
 		},
@@ -255,8 +255,8 @@ func adminUserListCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "handle", human: list(
-				column{"ACCOUNT", text("handle")},
+			return cli.emit("GET", "/v1/admin/users?"+q.Encode(), nil, output{id: "address", human: list(
+				column{"ACCOUNT", text("address")},
 				column{"STATUS", func(row json.RawMessage) string {
 					if strField(row, "suspended_at") != "" {
 						return "suspended"

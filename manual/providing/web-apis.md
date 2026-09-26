@@ -59,7 +59,7 @@ Imported actions begin inactive and private. Enable them using their shared
 path, then set the visibility required for their intended audience:
 
 ```
-$ juice action enable bob/greeter
+$ juice action enable bob@acme/greeter
 CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
 enabled  bob/greeter/greet  0.50 fUSD  yes     private
 enabled  bob/greeter/index  0.00 fUSD  yes     private
@@ -94,7 +94,7 @@ the application. This is optional; without it, callers name individual
 operations directly.
 
 ```
-$ juice action show bob/greeter
+$ juice action show bob@acme/greeter
   id: 31004d30-…
   name: greeter/index
   kind: http
@@ -138,8 +138,8 @@ Because an application shares a path, the ordinary action commands can disable
 or retire all of its operations together:
 
 ```
-$ juice action disable bob/greeter
-$ juice action delete bob/greeter
+$ juice action disable bob@acme/greeter
+$ juice action delete bob@acme/greeter
 ```
 
 Retirement preserves the application's historical records, as it does for an

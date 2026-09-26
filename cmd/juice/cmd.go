@@ -78,7 +78,7 @@ func prepareSourceArtifact(source, artifact string) (srcData, artData string, er
 	return srcData, artData, nil
 }
 
-// directorySelector turns an action ref (@owner/name) into the selector that connects its whole
+// directorySelector turns an action address (owner@kernel/name) into the selector that connects its whole
 // directory in one gesture (§8): drop the last name segment when the name has ≥2 segments, else the
 // ref itself. So @a/mail/send → @a/mail, and @a/send → @a/send.
 func directorySelector(ref string) string {
@@ -494,7 +494,7 @@ func userCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			user := l.Handle
+			user := l.String()
 			if password == "" {
 				p, err := promptNewPassword("Password: ")
 				if err != nil {
@@ -626,8 +626,8 @@ func userLedgerCmd() *cobra.Command {
 			return cli.emitCtx(ctx, "GET", "/v1/ledger?"+q.Encode(), nil, output{human: list(
 				column{"WHEN", text("created_at")},
 				column{"AMOUNT", money("amount", net)},
-				column{"FROM", party("from_handle")},
-				column{"TO", party("to_handle")},
+				column{"FROM", party("from")},
+				column{"TO", party("to")},
 				column{"WHY", text("reason")},
 			)})
 		},
@@ -639,7 +639,7 @@ func userLedgerCmd() *cobra.Command {
 // meView is the caller's own record, the only place a client reads its own id and payout address.
 type meView struct {
 	ID                string `json:"id"`
-	Handle            string `json:"handle"`
+	Address           string `json:"address"`
 	BlockchainAddress string `json:"blockchain_address"`
 	Available         int64  `json:"available"`
 }
@@ -861,8 +861,8 @@ func priceIn(price string) (int64, error) {
 
 // Shared placeholder definitions for the action commands' help.
 const (
-	actionPathHelp = "ACTION is an action id or owner/name; owner/path also matches every action beneath that path (bob/mail covers bob/mail/send, never bob/mailer)."
-	actionRefHelp  = "ACTION is owner/name on this kernel, owner@kernel/name on a peer (kernel = its local name or public key), or a raw action id."
+	actionPathHelp = "ACTION is an action id or owner@kernel/name; owner@kernel/path also matches every action beneath that path (bob@acme/mail covers bob/mail/send, never bob/mailer)."
+	actionRefHelp  = "ACTION is an address, owner@kernel/name, or a raw action id. kernel is the kernel's name as this kernel knows it — its own name for its own actions, a peer's local name or public key for a peer's."
 )
 
 func actionCreateCmd() *cobra.Command {
@@ -1173,7 +1173,7 @@ func actionListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include inactive and private actions (a superuser sees every owner's)")
-	cmd.Flags().StringVar(&owner, "owner", "", "Only actions owned by this handle")
+	cmd.Flags().StringVar(&owner, "owner", "", "Only actions owned by this user, handle@kernel")
 	cmd.Flags().StringVar(&name, "name", "", "Only actions with this name")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
@@ -1494,7 +1494,7 @@ func stepCreateCmd() *cobra.Command {
 			}
 			body := createStepParams{
 				TraceID:        traceID,
-				ActionRef:      args[0], // owner/name or id; the server resolves it
+				ActionRef:      args[0], // an address or id; the server resolves it
 				RequiredCaller: requiredCaller,
 				PartialArgs:    pa,
 			}
@@ -1502,7 +1502,7 @@ func stepCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the step (required)")
-	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step (required)")
+	cmd.Flags().StringVar(&requiredCaller, "required-caller", "", "User who must complete the step, handle@kernel, here or on a peer (required)")
 	cmd.Flags().StringVar(&partialArgs, "partial-args", "", "Partial args as JSON object")
 	_ = cmd.MarkFlagRequired("trace")
 	_ = cmd.MarkFlagRequired("required-caller")
@@ -1563,18 +1563,13 @@ func stepListCmd() *cobra.Command {
 				column{"STATUS", text("status")},
 				column{"CREATED BY", text("created_by")},
 				column{"COMPLETES", text("action")},
-				column{"CALLER", func(row json.RawMessage) string {
-					if strField(row, "waiting_on_peer") == "true" {
-						return strField(row, "required_caller_handle") + " (on a peer)"
-					}
-					return strField(row, "required_caller_handle")
-				}},
+				column{"CALLER", text("required_caller")},
 			)})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
-	cmd.Flags().StringVar(&peer, "peer", "", "List steps this peer (handle or key) is holding for you, over federation")
+	cmd.Flags().StringVar(&peer, "peer", "", "List steps this peer (its local name or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1613,7 +1608,7 @@ func stepCompleteCmd() *cobra.Command {
 			return cli.emit("POST", "/v1/steps/"+args[0]+"/complete", body, output{id: "tx_id"})
 		},
 	}
-	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (handle or key), over federation")
+	cmd.Flags().StringVar(&peer, "peer", "", "Complete a step held by this peer (its local name or key), over federation")
 	return cmd
 }
 
@@ -1646,7 +1641,7 @@ func txListCmd() *cobra.Command {
 			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: list(
 				column{"TRANSACTION", text("id")},
 				column{"STARTED", text("started_at")},
-				column{"ACTION", text("action_name")},
+				column{"ACTION", text("action")},
 				column{"STATUS", text("status")},
 				// What the call drew, which is what it locked less what came back: a failed call
 				// refunds all of it unless work beneath it was already delivered (P5, U13).

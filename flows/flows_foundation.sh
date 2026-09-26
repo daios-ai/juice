@@ -14,7 +14,7 @@ flow_bootstrap() {
     know "$db" "$hs"
     j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
 
-    assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" handle sys
+    assert_json "bootstrap.sys_user" "$(jj "$db" "$hs" user me)" address sys@k
 
     local acts; acts=$(jj "$db" "$hs" action list)
     assert_eq "bootstrap.lookup_registered"  yes "$(has_action "$acts" lookup)"
@@ -24,7 +24,7 @@ flow_bootstrap() {
     stop_server "$db"
     start_server "$db" "$hs" || { fail "bootstrap.idempotent" "second boot failed"; return; }
     ok "bootstrap.idempotent"
-    assert_json "bootstrap.state_preserved" "$(jj "$db" "$hs" user me)" handle sys
+    assert_json "bootstrap.state_preserved" "$(jj "$db" "$hs" user me)" address sys@k
 
     # HTTP-only: the authorize→exchange token path (§12), driven raw rather than through the CLI.
     local tok; tok=$(token "$(url "$db")" sys sys-pass)
@@ -43,7 +43,7 @@ flow_signup_errors() {
 
     # A taken handle is the caller's conflict, not an internal fault, and the body must not carry
     # the schema: the UI keys on `code`, never on message text.
-    local dup='{"handle":"alice","password":"userpass"}' body
+    local dup='{"handle":"alice@k","password":"userpass"}' body
     assert_status "signup_errors.duplicate_handle_status" 422 POST "$base/v1/users" "$dup"
     body=$(http_body POST "$base/v1/users" "$dup")
     assert_json         "signup_errors.duplicate_handle_code" "$body" code invalid_input
@@ -51,7 +51,7 @@ flow_signup_errors() {
     assert_not_contains "signup_errors.no_table_leak"      "accounts."  "$body"
 
     assert_status "signup_errors.bad_handle"      422 POST "$base/v1/users" '{"handle":"a/b","password":"userpass"}'
-    assert_status "signup_errors.short_password"  422 POST "$base/v1/users" '{"handle":"carol","password":"x"}'
+    assert_status "signup_errors.short_password"  422 POST "$base/v1/users" '{"handle":"carol@k","password":"x"}'
 
     # The same contract on a second caller-supplied unique key: (owner, name) on actions.
     local tok; tok=$(token "$base" alice userpass)
@@ -69,13 +69,13 @@ flow_local_auth() {
     make_admin "$db" "$hs" || { fail "local_auth.boot" "server did not start"; return; }
 
     assert_nonempty "local_auth.token_stored" "$(profile_get "$hs" token)"
-    assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" handle sys
+    assert_json "local_auth.me_succeeds" "$(jj "$db" "$hs" user me)" address sys@k
 
     # Refresh is automatic on a 401 (no standalone command): drop the access token, and the next
     # authenticated call transparently refreshes and rotates the refresh token.
     local old_rt; old_rt=$(profile_get "$hs" refresh_token)
     profile_set "$hs" token ""
-    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" handle sys
+    assert_json "local_auth.me_after_refresh" "$(jj "$db" "$hs" user me)" address sys@k
     local new_rt; new_rt=$(profile_get "$hs" refresh_token)
     assert_ne "local_auth.refresh_rotates_token" "$old_rt" "$new_rt"
 
@@ -92,12 +92,12 @@ flow_local_auth() {
     # local natives instead of being told they do not exist.
     profile_set "$hs" token 'stale.access.token'
     local rt_before; rt_before=$(profile_get "$hs" refresh_token)
-    assert_json "local_auth.stale_read_refreshes" "$(jj "$db" "$hs" action show sys/lookup)" name lookup
+    assert_json "local_auth.stale_read_refreshes" "$(jj "$db" "$hs" action show sys@k/lookup)" name lookup
     assert_ne "local_auth.stale_read_rotated" "$rt_before" "$(profile_get "$hs" refresh_token)"
     assert_contains "local_auth.http_read_invalid_rejected" "unauthenticated" \
-        "$(curl -s -H "Authorization: Bearer bad.token.here" "$(url "$db")/v1/actions?ref=sys/lookup" 2>/dev/null)"
+        "$(curl -s -H "Authorization: Bearer bad.token.here" "$(url "$db")/v1/actions?ref=sys@k/lookup" 2>/dev/null)"
     assert_eq "local_auth.http_read_anonymous" "[]" \
-        "$(curl -s "$(url "$db")/v1/actions?ref=sys/lookup" 2>/dev/null)"
+        "$(curl -s "$(url "$db")/v1/actions?ref=sys@k/lookup" 2>/dev/null)"
 
     j "$db" "$hs" auth logout >/dev/null 2>&1
     assert_eq "local_auth.logout_removes_token" "" "$(profile_get "$hs" token)"
@@ -114,15 +114,15 @@ flow_suspension() {
     make_admin "$db" "$hs" || { fail "suspension.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" handle alice
+    assert_json "suspension.alice_active" "$(jj "$db" "$ha" user me)" address alice@k
 
-    j "$db" "$hs" admin user suspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user suspend alice@k >/dev/null 2>&1
     assert_fails "suspension.suspended_rejected" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
     # Data preserved: sys can still see alice.
-    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin user show alice)" handle alice
+    assert_json "suspension.data_preserved" "$(jj "$db" "$hs" admin user show alice@k)" address alice@k
 
-    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
-    assert_json "suspension.unsuspend_restores" "$(jj "$db" "$ha" user me)" handle alice
+    j "$db" "$hs" admin user unsuspend alice@k >/dev/null 2>&1
+    assert_json "suspension.unsuspend_restores" "$(jj "$db" "$ha" user me)" address alice@k
 }
 
 flow_deposits() {
@@ -133,12 +133,12 @@ flow_deposits() {
     make_user "$db" "$hs" "$hb" bob
 
     assert_jnum "deposits.initial_zero" "$(jj "$db" "$ha" user me)" available 0
-    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice@k "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.balance_updated" "$(jj "$db" "$ha" user me)" available 500
-    j "$db" "$hs" admin user deposit alice "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice@k "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
     assert_jnum "deposits.accumulates" "$(jj "$db" "$ha" user me)" available 700
 
-    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin user deposit alice "$(units 10)"
+    assert_fails "deposits.non_sys_rejected" "unauthorized\|superuser\|error" -- j "$db" "$hb" admin user deposit alice@k "$(units 10)"
     assert_jnum "deposits.other_user_unaffected" "$(jj "$db" "$hb" user me)" available 0
 }
 
@@ -148,10 +148,10 @@ flow_transfers() {
     make_admin "$db" "$hs" || { fail "transfers.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin user deposit alice "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
+    j "$db" "$hs" admin user deposit alice@k "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
 
     # Alice transfers 200 to bob by handle; balances move by exactly the amount.
-    j "$db" "$ha" user transfer bob "$(units 200)" --reason gift --yes >/dev/null 2>&1
+    j "$db" "$ha" user transfer bob@k "$(units 200)" --reason gift --yes >/dev/null 2>&1
     assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available 300
     assert_jnum "transfers.recipient_credited" "$(jj "$db" "$hb" user me)" available 200
 
@@ -164,8 +164,8 @@ flow_transfers() {
         "$(jj "$db" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
     # Over-balance and self transfers are rejected; balance unchanged.
-    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob "$(units 100000)" --yes
-    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice "$(units 10)" --yes
+    assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob@k "$(units 100000)" --yes
+    assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice@k "$(units 10)" --yes
     assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available 300
 }
 
@@ -209,9 +209,9 @@ flow_action_lifecycle() {
     bport=$(backend_port); start_backend "$bport" 200 '{"answer":42}'
     local tid tx_id
     tid=$(publish "$db" "$ha" callable --kind http --source "http://127.0.0.1:${bport}/call" --description "tx test" --price "$(units 0)")
-    tx_id=$(strfield "$(jj "$db" "$hb" run alice/callable '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$hb" run alice@k/callable '{}')" tx_id)
     j "$db" "$ha" action delete "$tid" >/dev/null 2>&1
-    assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action_name callable
+    assert_json "action_lifecycle.action_name_in_tx_after_delete" "$(jj "$db" "$hb" tx show "$tx_id")" action alice@k/callable
 }
 
 flow_action_owner_visibility() {
@@ -227,9 +227,9 @@ flow_action_owner_visibility() {
     # (Raw HTTP: exercises the auth-conditional ?owner= visibility the CLI abstracts over.)
     local base; base=$(url "$db")
     assert_eq "action_owner_visibility.unauthenticated_zero" 0 \
-        "$(list_len "$(curl -sf "$base/v1/actions?owner=alice" 2>/dev/null)")"
+        "$(list_len "$(curl -sf "$base/v1/actions?owner=alice@k" 2>/dev/null)")"
     local tok; tok=$(token "$base" alice userpass)
-    local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=alice" 2>/dev/null)")
+    local n; n=$(list_len "$(curl -sf -H "Authorization: Bearer $tok" "$base/v1/actions?owner=alice@k" 2>/dev/null)")
     assert_eq "action_owner_visibility.owner_sees_private" yes "$([ "${n:-0}" -ge 1 ] && echo yes || echo no)"
 }
 
@@ -263,5 +263,5 @@ flow_recovery() {
     assert_fails "recovery.old_password_rejected" "invalid\|error\|unauth" -- j "$db" "$uh" auth login "recuser@$KERNEL_NAME" --password origpass
     know "$db" "$uh"
     j "$db" "$uh" auth login recuser@$KERNEL_NAME --password newpass1 >/dev/null 2>&1
-    assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" handle recuser
+    assert_json "recovery.new_password_works" "$(jj "$db" "$uh" user me)" address recuser@k
 }

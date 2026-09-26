@@ -89,6 +89,8 @@ func newTraceFailureTx(trace *Trace, process *Process, action *Action, gross int
 	return &Transaction{
 		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
 		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
+		CallerRemoteID: trace.CallerRemoteID, CallerHandle: trace.CallerHandle,
+		TargetRemoteID: trace.TargetRemoteID, TargetHandle: trace.TargetHandle,
 		ActionID: trace.ActionID, ActionName: action.Name, Status: TxFailure, Gross: gross,
 		StartedAt: trace.CreatedAt, EndedAt: now,
 	}
@@ -125,6 +127,8 @@ func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) 
 	ktx := &Transaction{
 		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
 		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
+		CallerRemoteID: trace.CallerRemoteID, CallerHandle: trace.CallerHandle,
+		TargetRemoteID: trace.TargetRemoteID, TargetHandle: trace.TargetHandle,
 		ActionID: trace.ActionID, ActionName: action.Name, Status: o.Status, Reason: o.Reason,
 		Gross: gross, StartedAt: trace.CreatedAt, EndedAt: o.EndedAt,
 		ArgsJSON: o.Args, ReplyJSON: o.Reply,
@@ -161,7 +165,10 @@ func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) 
 	net, fee := k.econ.Fee(fresh.Available)
 	ktx.Net, ktx.Fee = net, fee
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
-	sale := sold(trace)
+	sale, err := k.sold(ctx, trace)
+	if err != nil {
+		return err
+	}
 	k.markEvidenceEligible(ctx, action, ktx)
 	receipt, err := k.buildReceipt(ktx, ktx.Gross, k.econ.Premium(ktx.Gross, sale.RemoteBPS), trace.Value, trace.ValueTo, sale)
 	if err != nil {
@@ -194,7 +201,7 @@ func (k *Kernel) recoverTrace(ctx context.Context, _ *log.Logger, trace *Trace, 
 // CreateStep creates a new waiting step. The step records a future Call that a designated caller can resume.
 // The creating authority is derived from Trace(traceID).action_owner_id (implicit for in-execution creation).
 // For external creation (POST /v1/steps) the service layer must enforce precondition-4 before calling this.
-func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller RequiredCaller) (*Step, error) {
+func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller Principal) (*Step, error) {
 	if traceID == "" {
 		return nil, ErrInvalidInput.Wrap("trace_id is required")
 	}
@@ -228,7 +235,7 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 		return nil, ErrUnauthorized.Wrap("creator cannot call action")
 	}
 	// The required caller must resolve to a real account so the step is completable (§10).
-	rc, err := k.store.ReadUser(ctx, caller.UserID)
+	rc, err := k.store.ReadUser(ctx, caller.AccountID)
 	if err != nil {
 		return nil, ErrNotFound.Wrap("required caller not found")
 	}
@@ -251,7 +258,7 @@ func (k *Kernel) CreateStep(ctx context.Context, traceID, actionID string, parti
 	step := &Step{
 		ID:                     uuid.New().String(),
 		ParentTraceID:          &traceID,
-		RequiredCallerUserID:   caller.UserID,
+		RequiredCallerUserID:   caller.AccountID,
 		RequiredCallerRemoteID: remoteID,
 		RequiredCallerHandle:   caller.Handle,
 		ActionID:               actionID,
@@ -323,7 +330,7 @@ func (k *Kernel) ListStepsAwaitingCaller(ctx context.Context, callerID, remoteUs
 //	                                      the step stays running for RetryPendingRemoteDispatches
 //	otherwise (reply == nil)              rejected before anything settled; the step is waiting again
 func (k *Kernel) CompleteStep(ctx context.Context, callerID, stepID string, input json.RawMessage) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, "", "", servedRequest{})
+	return k.completeStep(ctx, callerID, stepID, input, "", "", peerCompleter{})
 }
 
 // CompleteStepInTrace resumes a step from inside a running execution — a WASM juice.step_complete or
@@ -335,23 +342,22 @@ func (k *Kernel) CompleteStepInTrace(ctx context.Context, callerID, traceID, ste
 	if traceID == "" {
 		return nil, ErrUnauthorized.Wrap("in-execution completion requires an authorizing trace")
 	}
-	return k.completeStep(ctx, callerID, stepID, input, "", traceID, servedRequest{})
+	return k.completeStep(ctx, callerID, stepID, input, "", traceID, peerCompleter{})
 }
 
 // CompleteStepFederated resumes a step on behalf of a peer, threading the inbound cross-kernel
 // idempotency record (§13) so the commit that settles the call completes that record atomically —
 // including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
 // RunFederated, which does the same for an inbound call.
-func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, idempotencyKey, counterparty string) (*StepReply, error) {
-	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID, "", servedRequest{idempotencyKey, counterparty})
+func (k *Kernel) CompleteStepFederated(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, forUserID string, superuser bool) (*StepReply, error) {
+	return k.completeStep(ctx, callerID, stepID, input, idempotencyRecordID, "", peerCompleter{UserID: forUserID, Superuser: superuser})
 }
 
-// servedRequest is the inbound request a completion answers, carried to the trace so the receipt
-// it produces names it — the same binding an admitted call records (P4, P5). Empty for a local
-// completion, which answers no peer.
-type servedRequest struct {
-	IdempotencyKey string
-	Counterparty   string
+// peerCompleter is who on the peer completed a step, as its home kernel signed it (P8): the user's
+// stable id there, or its operator for a kernel-addressed step. Zero for a local completion.
+type peerCompleter struct {
+	UserID    string
+	Superuser bool
 }
 
 // StepRemoteRequiredCaller returns a step's required remote-caller id (nil = a local/kernel-level
@@ -364,7 +370,7 @@ func (k *Kernel) StepRemoteRequiredCaller(ctx context.Context, stepID string) (*
 	return step.RequiredCallerRemoteID, nil
 }
 
-func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, served servedRequest) (*StepReply, error) {
+func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, completer peerCompleter) (*StepReply, error) {
 	caller, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
@@ -467,19 +473,31 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
+	stepTrace.TargetRemoteID, stepTrace.TargetHandle = targetPrincipal(action)
+	// The completer as a principal (D4): a user on the peer, attested by its home kernel and already
+	// matched to the step's addressing — the handle is the one the step was made for; its operator
+	// completing a kernel-addressed step is that kernel's `sys`; nothing beyond the account
+	// otherwise, which is the completer here or the peer kernel itself.
+	switch {
+	case completer.UserID == "":
+	case step.RequiredCallerRemoteID != nil && *step.RequiredCallerRemoteID == completer.UserID:
+		stepTrace.CallerRemoteID, stepTrace.CallerHandle = completer.UserID, step.RequiredCallerHandle
+	case completer.Superuser:
+		stepTrace.CallerRemoteID, stepTrace.CallerHandle = completer.UserID, SuperuserHandle
+	default:
+		stepTrace.CallerRemoteID = completer.UserID
+	}
 	if eff != nil {
 		// No PremiumBPS snapshot: the completer pays no execution premium either, since the step's price
 		// was creator-parked rather than funded across the wire.
 		stepTrace.Value, stepTrace.ValueTo = eff.Amount, eff.Dest
 	}
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
-	// releases it, for every action kind rather than only remote proxies, and the request it
-	// answers rides with it so the receipt can name it.
+	// releases it, for every action kind rather than only remote proxies — and it is where the
+	// receipt reads the request it answers (P4), so the trace's dispatch record stays free for the
+	// proxy dispatch below.
 	if idempotencyRecordID != "" {
 		stepTrace.IdempotencyRecordID = &idempotencyRecordID
-	}
-	if served.IdempotencyKey != "" {
-		stepTrace.DispatchJSON = marshalServing(0, 0, 0, "", "", served.IdempotencyKey, served.Counterparty)
 	}
 	// For remote-proxy actions, generate and persist the idempotency key and dispatch
 	// payload atomically with the trace creation. BeginStepCall passes these through
@@ -496,7 +514,7 @@ func (k *Kernel) completeStep(ctx context.Context, callerID, stepID string, inpu
 		if step.ImportBPS != nil {
 			ibps = *step.ImportBPS
 		}
-		if err := k.prepareDispatch(ctx, stepTrace, action, args, stepID, step.Price, ibps); err != nil {
+		if err := k.prepareDispatch(ctx, stepTrace, action, args, stepID, step.Price, ibps, caller); err != nil {
 			return nil, err
 		}
 	}

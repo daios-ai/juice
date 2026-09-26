@@ -22,11 +22,11 @@ If a required consent is absent, the call is rejected before charging and
 identifies what you need to connect:
 
 ```
-$ juice run bob/mail '{"body":"hi"}'
+$ juice run bob@acme/mail '{"body":"hi"}'
 bob/mail costs 0.00 fUSD. Run it? [y/N] y
 
 Authorize with:
-  juice user connect bob/mail
+  juice user connect bob@acme/mail
 error: grant required for bob/mail
 ```
 
@@ -34,7 +34,7 @@ The connection procedure depends on the authentication scheme configured for
 the action. With OAuth, start the consent flow using:
 
 ```
-$ juice user connect bob/mail
+$ juice user connect bob@acme/mail
 ```
 
 The command prints a URL where you can authorize access at the upstream
@@ -45,7 +45,7 @@ without a browser.
 For an action configured to use a personal token, supply the token directly:
 
 ```
-$ juice user connect bob/mail --token ghp_…
+$ juice user connect bob@acme/mail --token ghp_…
 Connected bob/mail.
 ```
 
@@ -87,7 +87,7 @@ kernel also excludes credentials from call inputs, outputs, logs, and receipts.
 To revoke access for a selection of actions, use:
 
 ```
-$ juice user disconnect bob/mail
+$ juice user disconnect bob@acme/mail
   revoked: [
     "bob/mail"
   ]
@@ -116,7 +116,7 @@ Use `step list` and `step show` to inspect the work addressed to you:
 ```
 $ juice step list
 STEP        STATUS   CREATED BY   COMPLETES  CALLER
-b75366d1-…  waiting  sys/message  sys/sink   bob
+b75366d1-…  waiting  sys@acme/message  sys@acme/sink   bob@acme
 $ juice step show b75366d1-…
   id: b75366d1-…
   partial_args: {
@@ -125,10 +125,10 @@ $ juice step show b75366d1-…
   price: 0.00 fUSD
   status: waiting
   created_at: 2026-09-14T12:05:35Z
-  action: sys/sink
-  created_by: sys/message
-  owner_handle: alice
-  required_caller_handle: bob
+  action: sys@acme/sink
+  created_by: sys@acme/message
+  owner: alice@acme
+  required_caller: bob@acme
   allowed_input: {
     "type": "object"
   }
@@ -136,7 +136,7 @@ $ juice step show b75366d1-…
 
 The `created_by` field identifies the action that created the step, while
 `action` identifies the service that will execute when you complete it.
-`owner_handle` names the process owner funding the work. Read `partial_args`
+`owner` names the process owner funding the work. Read `partial_args`
 for the information already supplied and `allowed_input` for the schema of
 the remaining input:
 

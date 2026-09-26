@@ -16,8 +16,9 @@ keeps clusters apart from users. Only the terms are ours.
 - **Kernel** — one server: its database and signing key, rail key, configuration and lock, in one
   directory named for the world it serves. One installation runs one kernel per world.
 - **Account** — a principal on one kernel. `sys` is one account per kernel.
-- **Login** — one account at one kernel, written `handle@kernel`, holding that session's access and
-  refresh tokens. What every program names, and what says both who a command acts as and where.
+- **Login** — one account at one kernel, written `handle@kernel` — the account's address, the kernel
+  segment being the name the kernel calls itself — holding that session's access and refresh tokens.
+  What every program names, and what says both who a command acts as and where.
 - **Component** — a program in the installation: the interface, an agent, a service, the command
   line.
 
@@ -113,7 +114,7 @@ Commands:
 
 | Command | Effect |
 |---|---|
-| `juice kernel add URL [NAME]` | register the kernel answering there, under its advertised nickname unless NAME is given; selects nothing. The same key on the same network at a new address is that kernel having moved: the address is updated and its logins are kept; any other answer is refused |
+| `juice kernel add URL` | register the kernel answering there, under the name it calls itself; selects nothing. The same key on the same network at a new address is that kernel having moved: the address is updated and its logins are kept; any other answer is refused |
 | `juice kernel list` | the kernels known, marking the one in use |
 | `juice kernel forget NAME` | drop the record and those logins' credentials |
 | `juice auth login USER@KERNEL` | authenticate there, and act as that login |

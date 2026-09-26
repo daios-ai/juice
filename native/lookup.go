@@ -19,7 +19,7 @@ func Lookup() Spec {
 		OutputSchema: obj(map[string]any{
 			"results": arrayOf(obj(map[string]any{
 				"action_id":              str("Unique action identifier"),
-				"action":                 str("Action reference as owner/name"),
+				"action":                 str("Action address as owner@kernel/name"),
 				"description":            str("Human-readable description of the action"),
 				"price":                  integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
 				"score":                  num("Relevance score between 0 and 1"),
@@ -69,6 +69,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		return nil, err
 	}
 	items := make([]any, len(results))
+	names := k.NewNames()
 	for i, r := range results {
 		// A discovered hit (§13) renders its STABLE identity — the remote action id and a
 		// kernel-qualified reference — so selecting it resolves from the home kernel; a local hit
@@ -85,11 +86,11 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		var record *kernel.ActionRecord
 		if d := r.Discovered; d != nil {
 			actionID, description, in, out = d.ActionID, d.Description, d.InputSchema, d.OutputSchema
-			ref = d.Handle + "@" + k.KernelName(ctx, d.KernelPublicKey) + "/" + d.Name
+			ref = kernel.Address{Handle: d.Handle, Kernel: k.KernelName(ctx, d.KernelPublicKey), Name: d.Name}.String()
 			observedAt = d.ObservedAt.UTC().Format(time.RFC3339)
 			record = k.DiscoveredRecord(ctx, d)
 		} else {
-			actionID, ref, description, in, out = r.Action.ID, kernel.FormatActionRef(r.Action), r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
+			actionID, ref, description, in, out = r.Action.ID, names.Action(ctx, r.Action), r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
 			if r.Action.Kind == kernel.KindRemoteProxy {
 				observedAt = r.Action.UpdatedAt.UTC().Format(time.RFC3339)
 			}

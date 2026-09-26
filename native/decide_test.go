@@ -40,14 +40,20 @@ var (
 		return nil, kernel.ErrNotFound.Wrap("no remote resolve in test")
 	}
 
+	// remoteStub stands in for the kernel's own answer: an address on a kernel other than `k`.
+	remoteStub = func(_ context.Context, ref string) bool {
+		a, err := kernel.ParseAddress(ref)
+		return err == nil && a.Kernel != "k"
+	}
+
 	validDecideArgs = map[string]any{
 		"messages": []any{map[string]any{"role": "user", "content": "find something"}},
-		"actions":  []any{"sys/lookup"},
+		"actions":  []any{"sys@k/lookup"},
 	}
 )
 
 func TestExecuteDecide_NilChatter(t *testing.T) {
-	_, err := executeDecide(context.Background(), validDecideArgs, nil, lookupOK, resolveStub, "")
+	_, err := executeDecide(context.Background(), validDecideArgs, nil, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState, got %v", err)
 	}
@@ -56,7 +62,7 @@ func TestExecuteDecide_NilChatter(t *testing.T) {
 func TestExecuteDecide_MissingMessages(t *testing.T) {
 	_, err := executeDecide(context.Background(), map[string]any{
 		"actions": validDecideArgs["actions"],
-	}, &stubDecideChatter{}, lookupOK, resolveStub, "")
+	}, &stubDecideChatter{}, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -65,7 +71,7 @@ func TestExecuteDecide_MissingMessages(t *testing.T) {
 func TestExecuteDecide_MissingActions(t *testing.T) {
 	_, err := executeDecide(context.Background(), map[string]any{
 		"messages": validDecideArgs["messages"],
-	}, &stubDecideChatter{}, lookupOK, resolveStub, "")
+	}, &stubDecideChatter{}, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -81,7 +87,7 @@ func TestExecuteDecide_InvalidActionRef(t *testing.T) {
 	_, err := executeDecide(context.Background(), map[string]any{
 		"messages": validDecideArgs["messages"],
 		"actions":  []any{"@sigil/greet"},
-	}, &stubDecideChatter{}, lookupBad, resolveStub, "")
+	}, &stubDecideChatter{}, lookupBad, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput, got %v", err)
 	}
@@ -91,14 +97,14 @@ func TestExecuteDecide_UnknownAction(t *testing.T) {
 	lookupErr := func(_ context.Context, _, _ string) (*kernel.Action, error) {
 		return nil, kernel.ErrNotFound.Wrap("action not found")
 	}
-	_, err := executeDecide(context.Background(), validDecideArgs, &stubDecideChatter{}, lookupErr, resolveStub, "")
+	_, err := executeDecide(context.Background(), validDecideArgs, &stubDecideChatter{}, lookupErr, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
 func TestExecuteDecide_NoSelection(t *testing.T) {
-	_, err := executeDecide(context.Background(), validDecideArgs, &stubDecideChatter{call: nil}, lookupOK, resolveStub, "")
+	_, err := executeDecide(context.Background(), validDecideArgs, &stubDecideChatter{call: nil}, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrExecutionFailed) {
 		t.Errorf("expected ErrExecutionFailed, got %v", err)
 	}
@@ -106,7 +112,7 @@ func TestExecuteDecide_NoSelection(t *testing.T) {
 
 func TestExecuteDecide_UnknownActionReturned(t *testing.T) {
 	chatter := &stubDecideChatter{call: &kernel.ToolCall{Action: "sys/unknown", Args: map[string]any{"query": "x"}}}
-	_, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, "")
+	_, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrExecutionFailed) {
 		t.Errorf("expected ErrExecutionFailed, got %v", err)
 	}
@@ -114,10 +120,10 @@ func TestExecuteDecide_UnknownActionReturned(t *testing.T) {
 
 func TestExecuteDecide_BadArgsReturned(t *testing.T) {
 	chatter := &stubDecideChatter{call: &kernel.ToolCall{
-		Action: "sys/lookup",
+		Action: "sys@k/lookup",
 		Args:   map[string]any{"query": 123}, // should be string
 	}}
-	_, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, "")
+	_, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, remoteStub, "")
 	if !errors.Is(err, kernel.ErrExecutionFailed) {
 		t.Errorf("expected ErrExecutionFailed, got %v", err)
 	}
@@ -125,14 +131,14 @@ func TestExecuteDecide_BadArgsReturned(t *testing.T) {
 
 func TestExecuteDecide_Success(t *testing.T) {
 	chatter := &stubDecideChatter{call: &kernel.ToolCall{
-		Action: "sys/lookup",
+		Action: "sys@k/lookup",
 		Args:   map[string]any{"query": "test"},
 	}}
-	result, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, "")
+	result, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, remoteStub, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result["action"] != "sys/lookup" {
+	if result["action"] != "sys@k/lookup" {
 		t.Errorf("unexpected action: %v", result["action"])
 	}
 	args, ok := result["args"].(map[string]any)
@@ -146,10 +152,10 @@ func TestExecuteDecide_Success(t *testing.T) {
 
 func TestExecuteDecide_MessageIncluded(t *testing.T) {
 	chatter := &stubDecideChatter{
-		call: &kernel.ToolCall{Action: "sys/lookup", Args: map[string]any{"query": "x"}},
+		call: &kernel.ToolCall{Action: "sys@k/lookup", Args: map[string]any{"query": "x"}},
 		msg:  &kernel.ChatMessage{Role: "assistant", Content: "I'll look that up"},
 	}
-	result, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, "")
+	result, err := executeDecide(context.Background(), validDecideArgs, chatter, lookupOK, resolveStub, remoteStub, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,24 +171,24 @@ func TestExecuteDecide_ToolTurn(t *testing.T) {
 			map[string]any{"role": "user", "content": "find something"},
 			map[string]any{
 				"role": "assistant",
-				"tool": map[string]any{"action": "sys/lookup", "args": map[string]any{"query": "x"}},
+				"tool": map[string]any{"action": "sys@k/lookup", "args": map[string]any{"query": "x"}},
 			},
 			map[string]any{
 				"role": "tool",
-				"tool": map[string]any{"action": "sys/lookup", "result": map[string]any{"results": []any{}}},
+				"tool": map[string]any{"action": "sys@k/lookup", "result": map[string]any{"results": []any{}}},
 			},
 		},
-		"actions": []any{"sys/lookup"},
+		"actions": []any{"sys@k/lookup"},
 	}
 	chatter := &stubDecideChatter{call: &kernel.ToolCall{
-		Action: "sys/lookup",
+		Action: "sys@k/lookup",
 		Args:   map[string]any{"query": "refined"},
 	}}
-	result, err := executeDecide(context.Background(), args, chatter, lookupOK, resolveStub, "")
+	result, err := executeDecide(context.Background(), args, chatter, lookupOK, resolveStub, remoteStub, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result["action"] != "sys/lookup" {
+	if result["action"] != "sys@k/lookup" {
 		t.Errorf("unexpected action: %v", result["action"])
 	}
 }
@@ -205,7 +211,7 @@ func TestExecuteDecide_RootCandidates(t *testing.T) {
 	if _, err := executeDecide(context.Background(), map[string]any{
 		"messages": validDecideArgs["messages"],
 		"actions":  []any{"bob", "carol@kernelkey/mail"},
-	}, chatter, lookupRoot, resolveRoot, ""); err != nil {
+	}, chatter, lookupRoot, resolveRoot, remoteStub, ""); err != nil {
 		t.Fatalf("root candidates: %v", err)
 	}
 	if len(seenLocal) != 1 || seenLocal[0] != "bob" {

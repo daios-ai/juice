@@ -38,12 +38,15 @@ type Spec struct {
 type Host interface {
 	Lookup(ctx context.Context, req kernel.LookupRequest) ([]*kernel.LookupResult, error)
 	KernelName(ctx context.Context, publicKey string) string
+	OwnName(ctx context.Context) string
+	NewNames() *kernel.Names
 	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)
+	IsRemoteRef(ctx context.Context, ref string) bool
 	ReadCallableAction(ctx context.Context, ref, callerID string) (*kernel.Action, error)
-	ResolveRequiredCaller(ctx context.Context, ref string) (kernel.RequiredCaller, error)
+	ResolvePrincipal(ctx context.Context, ref string) (kernel.Principal, error)
 	ActionRecord(ctx context.Context, a *kernel.Action) *kernel.ActionRecord
 	DiscoveredRecord(ctx context.Context, d *kernel.DiscoveryDoc) *kernel.ActionRecord
-	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.RequiredCaller) (*kernel.Step, error)
+	CreateStep(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.Principal) (*kernel.Step, error)
 }
 
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a

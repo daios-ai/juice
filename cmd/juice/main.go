@@ -431,7 +431,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	// The §9 authenticator shares the box (to open sealed auth configs and grant tokens)
 	// and reads/rotates grants through the store (§8).
 	httpExec.auth = newAuthenticator(box, db, cfg.AllowLocalSources, cfg.ScriptTimeout)
-	httpExec.auth.refFn = k.ActionRef // qualified @owner/name in grant-required errors
+	httpExec.auth.refFn = k.ActionAddressByID // the action's address in grant-required errors
 
 	// Register the platform stdlib. Each native declares its own contract (native.Spec), so this
 	// wiring names adapters only — never a schema or description. Must happen on every kernel open,

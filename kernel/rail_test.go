@@ -188,11 +188,6 @@ func railFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *fakeRail, *kernel
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard()})
 	fr := newFakeRail()
 	k.SetRail(fr)
-	// A registration signature names this kernel, so the fixture needs the identity a real boot
-	// would have written.
-	if err := st.SetConfig(context.Background(), "signing_public_key", "test-kernel-key"); err != nil {
-		t.Fatal(err)
-	}
 	return k, st, fr, sys
 }
 
@@ -522,7 +517,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: sellerID, Status: kernel.ProcessOpen, CreatedAt: now}
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: sellerID, ActionID: "a",
 		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedBlockchainAddress: from, CreatedAt: now,
-		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm", id, "peer-key")}
+		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm")}
 	// The execution itself is free here so the seller's balance stays what each test set it to; the
 	// obligation is read off the receipt's charge, which is what the buyer owes.
 	if err := st.BeginRun(ctx, p, tr, sellerID, 0, amount, amount*100); err != nil {
@@ -531,7 +526,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	tx := &kernel.Transaction{ID: uuid.NewString(), ProcessID: p.ID, TraceID: tr.ID, OwnerUserID: sellerID,
 		CallerUserID: peerID, TargetUserID: sellerID, ActionID: "a", Status: kernel.TxSuccess,
 		StartedAt: now, EndedAt: now}
-	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: sellerID, TxID: tx.ID, TraceID: tr.ID,
+	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: sellerID, TxID: tx.ID, TraceID: tr.ID, IdempotencyKey: id, Counterparty: "peer",
 		ActionID: "a", Status: kernel.TxSuccess, Charge: amount, Nonce: "0a0b", CreatedAt: now}
 	if err := st.CommitCall(ctx, tx, receipt, tr.ID, p.ID, kernel.CallerProcess, sellerID, "", 0, 0, nil, rec.ID, ""); err != nil {
 		t.Fatal(err)
@@ -833,9 +828,6 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
 	k.SetRail(newFakeRail())
 	ctx := context.Background()
-	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
-		t.Fatal(err)
-	}
 	peer := peerWithAddress(t, k, st, "kpeerDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "0xcreditor")
 	buyer := setupUser(t, st, "buyer", 0)
 
@@ -914,9 +906,6 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	fr.stall = true // the payment is submitted but not yet final
 	k.SetRail(fr)
 	ctx := context.Background()
-	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
-		t.Fatal(err)
-	}
 	peer := peerWithAddress(t, k, st, "kpeerEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", "0xcreditor")
 	buyer := setupUser(t, st, "buyer", 0)
 	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 100, "", "earn"); err != nil {
@@ -1117,7 +1106,11 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	}
 	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
 	// that would reject an empty address if asked.
-	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "free"), map[string]any{}, "", kernel.BuyerTerms{}); err != nil {
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: "free-1", CounterpartyUserID: peer.ID, CreatedAt: time.Now().UTC()}
+	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "free"), map[string]any{}, rec.ID, kernel.BuyerTerms{IdempotencyKey: "free-1"}); err != nil {
 		t.Fatalf("a free call must not need a payer: %v", err)
 	}
 	// It records which request it answers, as every admitted call does, and no ticket: there is
@@ -1132,10 +1125,11 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	if withTicket != 0 {
 		t.Error("a call that owes nothing froze ticket terms")
 	}
+	// Once committed, the receipt names the request and the buyer it answered (P5).
 	var named int64
 	if err := st.(*store.DB).QueryRowForTest(ctx,
-		`SELECT COUNT(*) FROM traces WHERE action_id=?
-		   AND COALESCE(json_extract(dispatch_json,'$.counterparty'),'') <> ''`, free.ID, &named); err != nil {
+		`SELECT COUNT(*) FROM receipts r JOIN traces t ON t.id = r.trace_id
+		  WHERE t.action_id=? AND r.counterparty <> '' AND r.idempotency_key <> ''`, free.ID, &named); err != nil {
 		t.Fatal(err)
 	}
 	if named != 1 {
@@ -1172,9 +1166,6 @@ func TestARepudiatedRevealIsRetired(t *testing.T) {
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
 	k.SetRail(newFakeRail())
 	ctx := context.Background()
-	if err := st.SetConfig(ctx, "signing_public_key", "test-kernel-key"); err != nil {
-		t.Fatal(err)
-	}
 	peer := peerWithAddress(t, k, st, "kpeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "0xcreditor")
 	buyer := setupUser(t, st, "repudiated-buyer", 0)
 	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-repudiated", "aa")

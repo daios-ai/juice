@@ -254,7 +254,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 		if c.a["indicative"] != true {
 			t.Errorf("%s price must be marked indicative, got %v", c.name, c.a["indicative"])
 		}
-		if c.a["action_id"] != "act-1" || c.a["name"] != "greet" {
+		if name, _ := c.a["name"].(string); c.a["action_id"] != "act-1" || !strings.HasSuffix(name, "@peer-priced/greet") {
 			t.Errorf("%s projection lost its identity fields: %v", c.name, c.a)
 		}
 	}
@@ -285,7 +285,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 func TestInspectLocalUserRejected(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "chat", Password: "pw"}); err != nil {
+	if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "chat@k", Password: "pw"}); err != nil {
 		t.Fatal(err)
 	}
 	// fed is present so the guard, not a missing transport, is what rejects.
@@ -294,10 +294,10 @@ func TestInspectLocalUserRejected(t *testing.T) {
 	req := inspectReq("chat")
 	rec := httptest.NewRecorder()
 	srv.ctlInspectPeer(rec, req)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("inspect @chat: status %d, want 422; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("inspect chat: status %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "local user") {
+	if !strings.Contains(rec.Body.String(), "no peer") {
 		t.Errorf("expected a 'local user, not a peer' message, got: %s", rec.Body.String())
 	}
 
@@ -456,7 +456,7 @@ func TestCompletePeerStep_SignsTheBytesItSends(t *testing.T) {
 	}
 	if err := testNet.VerifyStepSignature(received.Counterparty, received.StepID, received.Counterparty,
 		key, received.IdempotencyKey, received.Timestamp,
-		sha256HexBytes(received.Input), received.Signature); err != nil {
+		sha256HexBytes(received.Input), received.ForUserID, received.UserSuperuser, received.Signature); err != nil {
 		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
 	}
 }

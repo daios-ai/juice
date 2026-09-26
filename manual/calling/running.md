@@ -18,7 +18,7 @@ another, or a raw action id. `JSON` is the argument object, `{}` if omitted.
 `@file.json` reads the arguments from a file.
 
 ```
-$ juice run bob/echo '{"msg":"hello"}'
+$ juice run bob@acme/echo '{"msg":"hello"}'
 bob/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": { "msg": "hello" },
@@ -57,7 +57,7 @@ If a required argument is absent or has the wrong type, the request is rejected
 without charge:
 
 ```
-$ juice run bob/echo '{}'
+$ juice run bob@acme/echo '{}'
 bob/echo costs 0.50 fUSD. Run it? [y/N] y
 error: field msg: required field missing
 ```
@@ -72,10 +72,10 @@ If that consent is missing, the kernel rejects the call before charging and
 identifies the action to connect:
 
 ```
-$ juice run bob/mail '{"body":"hi"}'
+$ juice run bob@acme/mail '{"body":"hi"}'
 bob/mail costs 0.00 fUSD. Run it? [y/N] y
 error: grant required for bob/mail
-       Authorize it with: juice user connect bob/mail
+       Authorize it with: juice user connect bob@acme/mail
 ```
 
 ## Pinning the terms you saw
@@ -89,7 +89,7 @@ To use terms you read earlier, pass the `quote_hash` returned by search or
 `action show`. The client sends it unchanged, without another read or prompt:
 
 ```
-$ juice run bob/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
+$ juice run bob@acme/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
 If an otherwise callable action has different terms, the kernel rejects the

@@ -19,21 +19,21 @@ func Decide(chatter kernel.DecideChatter) Spec {
 				"role":    str("Message role: system, user, assistant, or tool"),
 				"content": str("Text content of the message"),
 				"tool": objd("Tool action and result; present on assistant proposal and tool result turns", map[string]any{
-					"action": str("Juice action reference (owner/name)"),
+					"action": str("Juice action address (owner@kernel/name)"),
 					"args":   object("Arguments for the action"),
 					"result": object("Result from the action execution"),
 				}),
 			}, "role"), "Conversation turns (system/user/assistant/tool)"),
-			"actions": arrayOf(map[string]any{"type": "string"}, "Candidate actions as owner/name strings"),
+			"actions": arrayOf(map[string]any{"type": "string"}, "Candidate actions as owner@kernel/name strings"),
 		}, "messages", "actions"),
 		OutputSchema: obj(map[string]any{
-			"action":  str("Selected owner/name"),
+			"action":  str("Selected owner@kernel/name"),
 			"args":    object("Arguments for the selected action"),
 			"message": object("Optional text message from the model"),
 		}, "action", "args"),
 		Handler: func(k Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
-				return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, callerID)
+				return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, k.IsRemoteRef, callerID)
 			}
 		},
 	}
@@ -45,6 +45,7 @@ func executeDecide(
 	chatter kernel.DecideChatter,
 	lookup func(ctx context.Context, ref, callerID string) (*kernel.Action, error),
 	resolve func(ctx context.Context, ref string) (*kernel.Action, error),
+	remote func(ctx context.Context, ref string) bool,
 	callerID string,
 ) (map[string]any, error) {
 	if chatter == nil {
@@ -96,13 +97,13 @@ func executeDecide(
 		if !ok {
 			return nil, kernel.ErrInvalidInput.Wrap("each action must be a string")
 		}
-		// Candidates travel whole: a group root ("bob", "bob@kernel") is as valid a reference as
-		// owner/name, and only the resolver decides what a reference means (§13).
+		// Candidates travel whole: a group root ("bob@kernel") is as valid a reference as
+		// owner@kernel/name, and only the resolver decides what a reference means (D15).
 		var (
 			a   *kernel.Action
 			err error
 		)
-		if kernel.KernelQualified(ref) {
+		if remote(ctx, ref) {
 			// A discovered kernel-qualified reference (lookup → decide → run): resolve it through the
 			// same resolve-and-cache path as run. A stale/unresolvable candidate is DISCARDED so one
 			// dead peer never blocks selection among the valid candidates (§13).

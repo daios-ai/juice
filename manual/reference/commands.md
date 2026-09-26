@@ -45,7 +45,7 @@ The JSON input can be supplied inline or read from a file with `@file.json`.
 | Command | |
 |---|---|
 | `juice kernel serve WORLD` | serve the network WORLD, whose kernel is `$JUICE_HOME/kernels/WORLD/` ([Running a kernel](../operating/running-a-kernel.html)) |
-| `juice kernel add URL [NAME]` | register a kernel this client can reach ([Identity](../calling/identity.html#registering-and-trusting-a-kernel)) |
+| `juice kernel add URL` | register a kernel this client can reach ([Identity](../calling/identity.html#registering-and-trusting-a-kernel)) |
 | `juice kernel list` | the kernels known, marking the one in use |
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |
 | `juice kernel forget NAME` | drop the record and its logins' credentials |

@@ -21,7 +21,7 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: bb7fe1a8-…
-  owner_handle: bob
+  owner: bob@acme
   name: echo
   kind: http
   active: false
@@ -70,10 +70,10 @@ A new action is inactive and private. Enable it to permit execution, then choose
 who may call it by setting its visibility:
 
 ```
-$ juice action enable bob/echo
+$ juice action enable bob@acme/echo
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
 enabled  bob/echo  0.50 fUSD  yes     private
-$ juice action update bob/echo --visibility local
+$ juice action update bob@acme/echo --visibility local
 CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
 updated  bob/echo  0.50 fUSD  yes     local
 ```
@@ -105,8 +105,8 @@ Reactivation is then an explicit step, and callers must renew any required
 consent:
 
 ```
-$ juice action update bob/echo --price 0.75
-$ juice action enable bob/echo
+$ juice action update bob@acme/echo --price 0.75
+$ juice action enable bob@acme/echo
 ```
 
 Changing only the description resets statistics but preserves activity and
@@ -118,8 +118,8 @@ terms are refused before charging. See
 ## Retiring an action
 
 ```
-$ juice action disable bob/echo
-$ juice action delete bob/echo
+$ juice action disable bob@acme/echo
+$ juice action delete bob@acme/echo
 ```
 
 Use `disable` when you may want to offer the action again, and `delete` to
@@ -134,7 +134,7 @@ reference for the action at that path and its descendants. For example,
 enabling `bob/greeter` can enable both operations in an application:
 
 ```
-$ juice action enable bob/greeter
+$ juice action enable bob@acme/greeter
 CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
 enabled  bob/greeter/greet  0.50 fUSD  yes     private
 enabled  bob/greeter/index  0.00 fUSD  yes     private

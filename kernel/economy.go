@@ -229,7 +229,12 @@ func mustHex(s string) []byte {
 // obligation by, the buyer's half of the draw, and the stake that funds a winning ticket. Every
 // pricing input is frozen on the record here, so a retry after a restart draws with exactly the
 // values the peer was committed to (P10, D19). It refuses first if the obligation could not be paid.
-func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args map[string]any, stepID string, gross, importBPS int64) error {
+func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args map[string]any, stepID string, gross, importBPS int64, caller *Account) error {
+	// A trace answers a peer or asks one, never both (P6, D19): a served call is never a proxy, and
+	// a step completion carries no admission terms. The record is one slot, so this is the guard.
+	if t.DispatchJSON != nil {
+		return ErrInvalidState.Wrap("a trace admitted under a peer's terms cannot dispatch to one")
+	}
 	mp, rbps := actionBasePrice(a), actionRemoteBPS(a)
 	dmax, err := k.econ.ServingPrice(mp, rbps)
 	if err != nil {
@@ -251,8 +256,18 @@ func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args 
 	key := uuid.New().String()
 	t.IdempotencyKey = &key
 	t.Ticket = k.econ.Stake(dmax)
-	t.DispatchJSON = marshalDispatch(args, stepID, mp, gross, a.ArtifactHash, rbps, importBPS, secret, lottery)
+	t.DispatchJSON = marshalDispatch(args, stepID, mp, gross, a.ArtifactHash, rbps, importBPS, secret, lottery, callerOnWire(caller))
 	return nil
+}
+
+// callerOnWire is the principal a dispatch carries for its immediate caller (P4): a user of this
+// kernel by stable id and handle; nothing when the caller is a peer's account, since a kernel
+// attests only its own users and the seller then records the kernel.
+func callerOnWire(caller *Account) Principal {
+	if caller == nil || caller.Handle == "" {
+		return Principal{}
+	}
+	return Principal{RemoteID: caller.ID, Handle: caller.Handle}
 }
 
 // payableOnThisRail refuses a paid cross-kernel call whose obligation this kernel could not pay: a
@@ -285,6 +300,10 @@ type BuyerTerms struct {
 	Lottery           int64
 	BlockchainAddress string
 	BlockchainProof   string
+	// CallerUserID and CallerHandle are the buyer's own user the call is made for, as it signed
+	// them (P4): the principal this kernel records as the caller beneath the buyer's account.
+	CallerUserID string
+	CallerHandle string
 	// IdempotencyKey is the call's own name, as the buyer signed it. It is frozen with the rest of
 	// the admitted terms so every receipt this kernel signs for the call names the request it
 	// answers (P4, P5).

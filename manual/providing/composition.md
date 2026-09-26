@@ -76,7 +76,7 @@ The supplied imports include `encoding/json`, `strings`, `strconv`, `math`,
 module, which the following pipeline decodes into a file:
 
 ```
-$ juice run sys/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
+$ juice run sys@acme/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
     | jq -r .result.artifact | base64 -d > stamp.wasm
 ```
 
@@ -87,15 +87,15 @@ its audience:
 $ juice action create stamp --kind wasm --artifact stamp.wasm --price 1 \
     --description "Stamp a note with the current time" \
     --input-schema '{"type":"object","properties":{"note":{"type":"string","description":"text to stamp"}},"required":["note"]}'
-$ juice action enable bob/stamp
-$ juice action update bob/stamp --visibility local
+$ juice action enable bob@acme/stamp
+$ juice action update bob@acme/stamp --visibility local
 ```
 
 The action returns the input note together with the timestamp obtained by its
 child call:
 
 ```
-$ juice run bob/stamp '{"note":"invoice 42"}'
+$ juice run bob@acme/stamp '{"note":"invoice 42"}'
 bob/stamp costs 1.00 fUSD. Run it? [y/N] y
   result: {
     "note": "invoice 42",

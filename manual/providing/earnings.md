@@ -119,7 +119,7 @@ transaction history.
 ## Your track record
 
 ```
-$ juice action show bob/echo
+$ juice action show bob@acme/echo
   …
 
 This kernel's own calls

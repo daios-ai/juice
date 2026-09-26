@@ -3580,7 +3580,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := db.PurgeStaleDiscovery(ctx, cutoff)
+	n, err := db.PurgeStaleDiscovery(ctx, cutoff, "")
 	if err != nil {
 		t.Fatalf("PurgeStaleDiscovery: %v", err)
 	}
@@ -4665,7 +4665,7 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 	if err := db.UpsertKernel(ctx, k2, "two", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour)); err != nil {
+	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour), ""); err != nil {
 		t.Fatalf("PurgeStaleDiscovery: %v", err)
 	}
 	if keys, err := db.SearchDiscoveryLexical(ctx, "beta", 10); err != nil || len(keys) != 1 || keys[0] != k2+"/a1" {

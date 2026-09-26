@@ -16,7 +16,7 @@ and price before running it.
 action candidates. For example, a search for an echo service might return:
 
 ```
-$ juice run sys/lookup '{"query":"echo a message"}'
+$ juice run sys@acme/lookup '{"query":"echo a message"}'
 sys/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
@@ -93,9 +93,9 @@ If you already know an action's reference, `action show` reads its interface
 directly:
 
 ```
-$ juice action show bob/echo
+$ juice action show bob@acme/echo
   id: bb7fe1a8-…
-  owner_handle: bob
+  owner: bob@acme
   name: echo
   kind: http
   active: true
@@ -153,7 +153,7 @@ to include inactive actions within your permitted scope; it also adds an
 ## What other buyers thought
 
 ```
-$ juice action ratings bob/echo
+$ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said
 ```

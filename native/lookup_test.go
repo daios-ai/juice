@@ -59,7 +59,13 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	cfg.TokenSecret = "test-secret"
 	cfg.IssuerUserID = issuerID
 	cfg.SigningKey = priv
-	return kernel.New(kernel.Dependencies{Store: db, Embedder: &fakeEmbedder{}, Config: cfg}), db
+	k := kernel.New(kernel.Dependencies{Store: db, Embedder: &fakeEmbedder{}, Config: cfg})
+	// The test kernel calls itself `k`, so a test address reads alice@k (D15).
+	_ = db.SetConfig(context.Background(), "signing_public_key", base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	if err := k.BindOwnName(context.Background(), "k"); err != nil {
+		t.Fatal(err)
+	}
+	return k, db
 }
 
 func seedOwner(t *testing.T, st kernel.Store, handle string) *kernel.Account {
@@ -130,8 +136,8 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 		t.Fatalf("expected non-empty results, got %v", result)
 	}
 	first, _ := items[0].(map[string]any)
-	if first["action"] != "alice/weather" {
-		t.Errorf("expected @alice/weather first, got %v", first["action"])
+	if first["action"] != "alice@k/weather" {
+		t.Errorf("expected alice@k/weather first, got %v", first["action"])
 	}
 	for _, required := range []string{"action_id", "score", "input_schema", "output_schema"} {
 		if _, ok := first[required]; !ok {

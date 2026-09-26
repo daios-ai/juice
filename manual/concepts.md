@@ -57,9 +57,9 @@ a `wasm` action runs a WebAssembly module in the kernel's sandbox; and a `native
 action uses a built-in handler. A `remote_proxy` is the local cache of an action
 hosted on another kernel. These kinds share the same calling interface.
 
-A **reference** names an action as `owner/name` locally or
-`owner@kernel/name` remotely. The remote kernel can be named by petname or public
-key. If the reference names no action directly, Juice tries its `index` child:
+A **reference** names an action as `owner@kernel/name`, on this kernel and on any
+other alike. The kernel is named as this kernel knows it: its own name for its own
+actions, a petname or public key for another kernel's. If the reference names no action directly, Juice tries its `index` child:
 `bob` can resolve to `bob/index`, and `bob/mail` to `bob/mail/index`. This
 convention gives a group of related actions an entry point.
 

@@ -28,7 +28,7 @@ flow_transaction_access() {
 
     # bob (buyer) calls it 3 times.
     local i last_tx
-    for i in 1 2 3; do last_tx=$(strfield "$(jj "$db" "$hb" run alice/pvd-action '{}')" tx_id); done
+    for i in 1 2 3; do last_tx=$(strfield "$(jj "$db" "$hb" run alice@k/pvd-action '{}')" tx_id); done
 
     # Seller sees all 3; buyer sees all 3; the sum of nets equals the seller's balance.
     local alice_txs
@@ -50,11 +50,11 @@ flow_transaction_access() {
     # fetch every row again just to learn who paid.
     local one_tx list_keys
     one_tx=$(jj "$db" "$ha" tx show "$last_tx")
-    assert_contains "tx_access.show_renders_handles" "owner_handle" "$one_tx"
+    assert_contains "tx_access.show_renders_handles" "owner" "$one_tx"
     assert_not_contains "tx_access.show_hides_ids"  "owner_user_id" "$one_tx"
 
     list_keys=$(python3 -c "import sys,json; print(' '.join(sorted(json.loads(sys.argv[1])[0].keys())))" "$alice_txs" 2>/dev/null)
-    assert_contains     "tx_access.list_renders_handles" "owner_handle"  "$list_keys"
+    assert_contains     "tx_access.list_renders_handles" "owner"  "$list_keys"
     assert_not_contains "tx_access.list_hides_ids"       "owner_user_id" "$list_keys"
 }
 
@@ -97,7 +97,7 @@ flow_list_projections() {
     hid=$(strfield "$(jj "$db" "$ha" action create bulky --kind http --source "http://127.0.0.1:${bport}/b" \
         --description "returns a large reply" --price "$(units 1)")" id)
     j "$db" "$ha" action enable "$hid" >/dev/null 2>&1
-    local i; for i in 1 2 3 4 5; do j "$db" "$ha" run alice/bulky '{}' >/dev/null 2>&1; done
+    local i; for i in 1 2 3 4 5; do j "$db" "$ha" run alice@k/bulky '{}' >/dev/null 2>&1; done
 
     local list_bytes
     list_bytes=$(jj "$db" "$ha" tx list --limit 50 | wc -c)
@@ -115,30 +115,30 @@ flow_admin_supervision() {
     make_admin "$db" "$hs" || { fail "admin.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    # admin user list lists sys and alice; admin user show returns alice.
+    # admin user list lists sys and alice; admin user show returns@k alice.
     assert_contains "admin.user_list" "alice" "$(jj "$db" "$hs" admin user list)"
     assert_contains "admin.user_list_sys" "sys" "$(jj "$db" "$hs" admin user list)"
-    assert_json "admin.user_show" "$(jj "$db" "$hs" admin user show alice)" handle alice
+    assert_json "admin.user_show" "$(jj "$db" "$hs" admin user show alice@k)" address alice@k
 
     # Suspend blocks alice's session; unsuspend restores it.
-    j "$db" "$hs" admin user suspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user suspend alice@k >/dev/null 2>&1
     assert_fails "admin.suspend_blocks_alice" "suspended\|unauthenticated\|error" -- j "$db" "$ha" user me
-    j "$db" "$hs" admin user unsuspend alice >/dev/null 2>&1
+    j "$db" "$hs" admin user unsuspend alice@k >/dev/null 2>&1
     know "$db" "$ha"
     j "$db" "$ha" auth login alice@$KERNEL_NAME --password userpass >/dev/null 2>&1
-    assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" handle alice
+    assert_json "admin.unsuspend_restores_alice" "$(jj "$db" "$ha" user me)" address alice@k
 
     # Superuser rename vacates the old handle; the freed name is reusable by a distinct account,
     # and sys's own handle cannot be renamed.
     local hb; hb=$(home "$dir" bob)
     make_user "$db" "$hs" "$hb" bob
-    j "$db" "$hs" admin user rename bob bob-retired >/dev/null 2>&1
-    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin user show bob-retired)" handle bob-retired
-    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin user show bob
+    j "$db" "$hs" admin user rename bob@k bob-retired@k >/dev/null 2>&1
+    assert_json "admin.rename_new_handle" "$(jj "$db" "$hs" admin user show bob-retired@k)" address bob-retired@k
+    assert_fails "admin.rename_frees_old" "not found\|error" -- j "$db" "$hs" admin user show bob@k
     # The freed handle is reusable by a fresh account.
     make_user "$db" "$hs" "$hb" bob
-    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin user show bob)" handle bob
-    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin user rename sys root
+    assert_json "admin.rename_handle_reused" "$(jj "$db" "$hs" admin user show bob@k)" address bob@k
+    assert_fails "admin.rename_sys_rejected" "cannot be renamed\|error" -- j "$db" "$hs" admin user rename sys@k root@k
 
     # Supervision is scope on the normal commands: sys sees any owner's actions/processes/txs
     # and may disable any action, all over the standard TCP API (no separate admin surface).
@@ -158,7 +158,7 @@ flow_admin_supervision() {
 
     deposit "$db" "$hs" alice 100
     local tx_id proc_id
-    tx_id=$(strfield "$(jj "$db" "$ha" run alice/test '{}')" tx_id)
+    tx_id=$(strfield "$(jj "$db" "$ha" run alice@k/test '{}')" tx_id)
     proc_id=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
     # sys `process list` / `tx list` span all users.
     assert_contains "admin.process_list_scope" "$proc_id" "$(jj "$db" "$hs" process list)"
@@ -180,7 +180,7 @@ flow_time() {
     assert_eq "time.registered" yes "$(has_action "$acts" time)"
 
     # Call it (price=0): result carries a positive unix ts and an RFC-3339 iso ts.
-    local out; out=$(jj "$db" "$ha" run sys/time '{}')
+    local out; out=$(jj "$db" "$ha" run sys@k/time '{}')
     local unix_val; unix_val=$(resultf "$out" unix)
     assert_eq "time.returns_unix" yes "$([ -n "$unix_val" ] && [ "$unix_val" -gt 0 ] 2>/dev/null && echo yes || echo no)"
     assert_eq "time.returns_iso" ok "$(python3 -c "
@@ -198,7 +198,7 @@ flow_message() {
 
     # alice sends sys/message to bob (price=0) → a waiting step addressed to bob.
     local step_id
-    step_id=$(resultf "$(jj "$db" "$ha" run sys/message '{"to":"bob","message":"Please review doc"}')" step_id)
+    step_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"Please review doc"}')" step_id)
     assert_nonempty "message.step_created" "$step_id"
 
     # bob sees the step and completes it.
@@ -208,8 +208,8 @@ flow_message() {
     assert_json "message.step_done" "$(jj "$db" "$ha" step show "$step_id")" status done
 
     # Missing 'to' and unknown recipient are both rejected.
-    assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys/message '{"message":"hi"}'
-    assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- j "$db" "$ha" run sys/message '{"to":"nobody","message":"hi"}'
+    assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys@k/message '{"message":"hi"}'
+    assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- j "$db" "$ha" run sys@k/message '{"to":"nobody@k","message":"hi"}'
 }
 
 flow_native_orphan_purge() {

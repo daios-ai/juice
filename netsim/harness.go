@@ -518,28 +518,38 @@ func waitFor(path, pattern string, within time.Duration) (string, error) {
 	return "", fmt.Errorf("%s did not appear in %s within %s", pattern, filepath.Base(path), within)
 }
 
-// know registers this kernel with one actor's client, under the kernel's own name. A login names
-// the account and the kernel it is on, so the client has to know the kernel first; re-registering
-// the same one at the same address does nothing, so this is safe before every login.
+// know registers this kernel with one actor's client. The record is named by what the kernel
+// calls itself (D15): a login names the account and the kernel it is on, so the client has to know
+// the kernel first; re-registering the same one at the same address does nothing, so this is safe
+// before every login.
 func (k *Kernel) know(actor string) {
-	_, _ = k.Run(actor, "kernel", "add", k.URL, k.Name)
+	_, _ = k.Run(actor, "kernel", "add", k.URL)
+}
+
+// At is the address of a user or an action on this kernel: `ana@hub`, `ana@hub/echo`.
+func (k *Kernel) At(ref string) string {
+	handle, name, _ := strings.Cut(ref, "/")
+	if name == "" {
+		return handle + "@" + k.Handle
+	}
+	return handle + "@" + k.Handle + "/" + name
 }
 
 // MakeUser creates an account, captures its recovery phrase for redaction, and logs it in.
 func (k *Kernel) MakeUser(handle string) {
 	k.know("sysop-" + k.Name)
-	out, _ := k.Run("sysop-"+k.Name, "user", "create", handle+"@"+k.Name, "--password", "userpass")
+	out, _ := k.Run("sysop-"+k.Name, "user", "create", k.At(handle), "--password", "userpass")
 	if m := rePhrase.FindString(out); m != "" {
 		k.net.Secret(m, "<phrase:"+handle+">")
 	}
 	k.know(handle)
-	_, _ = k.Run(handle, "auth", "login", handle+"@"+k.Name, "--password", "userpass")
+	_, _ = k.Run(handle, "auth", "login", k.At(handle), "--password", "userpass")
 }
 
 // Login signs the superuser in after a restart.
 func (k *Kernel) Login() {
 	k.know("sysop-" + k.Name)
-	_, _ = k.Run("sysop-"+k.Name, "auth", "login", "sys@"+k.Name, "--password", "sys-pass")
+	_, _ = k.Run("sysop-"+k.Name, "auth", "login", k.At("sys"), "--password", "sys-pass")
 }
 
 // ---- checks -----------------------------------------------------------------

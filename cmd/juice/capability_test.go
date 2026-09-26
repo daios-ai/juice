@@ -86,11 +86,11 @@ func TestCapabilityComposition(t *testing.T) {
 		cb := r.Header.Get(callbackHeader)
 		capTok := r.Header.Get(capabilityHeader)
 		// Subcall @sub/sub within our trace (juice.call ≡ /v1/call).
-		callStatus, _ = capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub/sub", "args": map[string]any{}})
+		callStatus, _ = capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub@k/sub", "args": map[string]any{}})
 		// Create a step addressed to @caller (juice.step_create ≡ /v1/steps, no trace_id).
 		var sBody []byte
 		stepStatus, sBody = capCallback(cb, capTok, "/v1/steps", map[string]any{
-			"action": "sub/sub", "required_caller": "caller", "partial_args": map[string]any{},
+			"action": "sub@k/sub", "required_caller": "caller@k", "partial_args": map[string]any{},
 		})
 		var sv map[string]any
 		_ = json.Unmarshal(sBody, &sv)
@@ -102,7 +102,7 @@ func TestCapabilityComposition(t *testing.T) {
 	t.Cleanup(compose.Close)
 	createEnabledPublicAction(t, srv, provTok, "compose", "http", compose.URL, "composing action", 100)
 
-	reply := runAction(t, srv, callerTok, "prov/compose", map[string]any{})
+	reply := runAction(t, srv, callerTok, "prov@k/compose", map[string]any{})
 
 	if callStatus != http.StatusOK {
 		t.Fatalf("/v1/call callback status = %d, want 200", callStatus)
@@ -195,7 +195,7 @@ func TestCapabilityConcurrentCallbacksBounded(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				st, _ := capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub/sub", "args": map[string]any{}})
+				st, _ := capCallback(cb, capTok, "/v1/call", map[string]any{"action": "sub@k/sub", "args": map[string]any{}})
 				mu.Lock()
 				statuses[st]++
 				mu.Unlock()
@@ -208,7 +208,7 @@ func TestCapabilityConcurrentCallbacksBounded(t *testing.T) {
 	createEnabledPublicAction(t, srv, provTok, "compose", "http", compose.URL, "composer", 100)
 
 	before := readAvailable(t, db, callerID)
-	runAction(t, srv, callerTok, "prov/compose", map[string]any{})
+	runAction(t, srv, callerTok, "prov@k/compose", map[string]any{})
 
 	if statuses[http.StatusOK] != 2 {
 		t.Errorf("successful subcalls = %d, want 2 (80 ≤ 100 < 120)", statuses[http.StatusOK])
@@ -254,7 +254,7 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 	var victimStepID string
 	victimCompose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, body := capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader), "/v1/steps",
-			map[string]any{"action": "victim/leaf", "required_caller": "prov", "partial_args": map[string]any{}})
+			map[string]any{"action": "victim@k/leaf", "required_caller": "prov@k", "partial_args": map[string]any{}})
 		var sv map[string]any
 		_ = json.Unmarshal(body, &sv)
 		victimStepID, _ = sv["id"].(string)
@@ -262,7 +262,7 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 	}))
 	t.Cleanup(victimCompose.Close)
 	createEnabledPublicAction(t, srv, victimTok, "park", "http", victimCompose.URL, "victim parker", 100)
-	runAction(t, srv, victimTok, "victim/park", map[string]any{})
+	runAction(t, srv, victimTok, "victim@k/park", map[string]any{})
 	if victimStepID == "" {
 		t.Fatal("setup: the victim's process did not park a step")
 	}
@@ -278,7 +278,7 @@ func TestCapabilityStepCompleteIsTraceConfined(t *testing.T) {
 	createEnabledPublicAction(t, srv, provTok, "hook", "http", attacker.URL, "attacker hook", 50)
 
 	before := readAvailable(t, db, victimID)
-	runAction(t, srv, provTok, "prov/hook", map[string]any{})
+	runAction(t, srv, provTok, "prov@k/hook", map[string]any{})
 
 	if completeStatus != http.StatusForbidden {
 		t.Errorf("cross-trace capability completion: status = %d, want 403 (unauthorized)", completeStatus)
@@ -329,7 +329,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	t.Cleanup(compose.Close)
 	createEnabledPublicAction(t, srv, provTok, "hook", "http", compose.URL, "hook", 50)
 
-	runAction(t, srv, callerTok, "prov/hook", map[string]any{})
+	runAction(t, srv, callerTok, "prov@k/hook", map[string]any{})
 
 	if status != http.StatusForbidden {
 		t.Errorf("capability + --peer: status = %d, want 403; body=%s", status, body)
@@ -344,7 +344,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 func TestCapabilityRejectedOnRun(t *testing.T) {
 	srv, _, _ := newCapabilityKernel(t)
 	resp := httpDoWithHeaders(t, srv, "POST", "/v1/run",
-		map[string]any{"action": "sys/whatever", "args": map[string]any{}}, "",
+		map[string]any{"action": "sys@k/whatever", "args": map[string]any{}}, "",
 		map[string]string{capabilityHeader: "anything.sig"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

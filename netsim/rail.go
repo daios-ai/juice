@@ -86,7 +86,7 @@ func (playRail) Finish(n *Net) (map[string]any, error) {
 
 func (playRail) Fund(k *Kernel, user string, credits int64) error {
 	ref := fmt.Sprintf("netsim-%s-%d", user, time.Now().UnixNano())
-	_, err := k.Run("sysop-"+k.Name, "admin", "user", "deposit", "--yes", user, strconv.FormatInt(credits, 10), "--ref", ref)
+	_, err := k.Run("sysop-"+k.Name, "admin", "user", "deposit", "--yes", k.At(user), strconv.FormatInt(credits, 10), "--ref", ref)
 	return err
 }
 

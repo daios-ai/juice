@@ -50,14 +50,14 @@ same amount. It has no fee and creates a ledger entry rather than an execution
 transaction:
 
 ```
-$ juice user transfer bob 1 --reason "thanks"
+$ juice user transfer bob@acme 1 --reason "thanks"
 Send 1.00 fUSD to bob, acting as alice@acme? This cannot be undone. [y/N] y
   amount: 1.00 fUSD
   reason: thanks
   created_at: 2026-09-14T12:05:34Z
   operator_handle: alice
-  from_handle: alice
-  to_handle: bob
+  from: alice@acme
+  to: bob@acme
 ```
 
 {: .warning }
@@ -103,7 +103,7 @@ An action may deliver money in addition to charging for its execution. The
 built-in `sys/transfer` illustrates the distinction:
 
 ```
-$ juice run sys/transfer '{"target":"bob","amount":1500000}'
+$ juice run sys@acme/transfer '{"target":"bob@acme","amount":1500000}'
 ```
 
 The amount is in base units, because it is part of an action's JSON input.
