@@ -19,7 +19,7 @@ stored with mode 0600.
 
 | Key | Default | |
 |---|---|---|
-| `kernel_handle` | none | the nickname this kernel reports on the network. First boot asks for it, since every kernel on a network shares the world's name |
+| `kernel_handle` | none | this kernel's own name: the kernel part of every address on it, `alice@acme`, and the nickname it reports on the network. First boot asks for it, since every kernel on a network shares the world's name |
 | `listen_addr` | `:4040` | where this kernel answers clients, as `host:port`. Omit the host to answer on every interface; use port `0` to let the system choose one |
 | `fed_listen_addrs` | port 31313 | where this kernel answers peers. Empty binds the standard port on both transports; set it to give this kernel its own addresses |
 

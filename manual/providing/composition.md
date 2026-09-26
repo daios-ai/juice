@@ -56,7 +56,7 @@ This example calls `sys/time` and combines its result with a note from the input
 
 ```go
 func Handle(in map[string]any) (map[string]any, error) {
-	raw, err := JuiceCall("sys/time", []byte("{}"))
+	raw, err := JuiceCall("sys@acme/time", []byte("{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ child call:
 
 ```
 $ juice run bob@acme/stamp '{"note":"invoice 42"}'
-bob/stamp costs 1.00 fUSD. Run it? [y/N] y
+bob@acme/stamp costs 1.00 fUSD. Run it? [y/N] y
   result: {
     "note": "invoice 42",
     "stamped_at": "2026-09-14T12:06:04Z"
@@ -139,7 +139,7 @@ POST http://127.0.0.1:4040/v1/call
 X-Juice-Capability: <the capability, verbatim>
 Content-Type: application/json
 
-{"action": "carol/extract", "args": {"text": "…"}}
+{"action": "carol@acme/extract", "args": {"text": "…"}}
 ```
 
 ```

@@ -60,9 +60,9 @@ path, then set the visibility required for their intended audience:
 
 ```
 $ juice action enable bob@acme/greeter
-CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
-enabled  bob/greeter/greet  0.50 fUSD  yes     private
-enabled  bob/greeter/index  0.00 fUSD  yes     private
+CHANGE   ACTION                  PRICE      ACTIVE  AUDIENCE
+enabled  bob@acme/greeter/greet  0.50 fUSD  yes     private
+enabled  bob@acme/greeter/index  0.00 fUSD  yes     private
 ```
 
 ## What the document must declare
@@ -86,8 +86,8 @@ the HTTP request, and uses the selected success response as the output schema.
 ## The root of an application
 
 An operation named `index` becomes the application's default entry point through
-Juice's reference convention. For example, `bob/greeter` resolves to
-`bob/greeter/index` when no action occupies the shorter name.
+Juice's reference convention. For example, `bob@acme/greeter` resolves to
+`bob@acme/greeter/index` when no action occupies the shorter name.
 
 Set `operationId: index` or `x-juice-name: index` on an operation that describes
 the application. This is optional; without it, callers name individual

@@ -2372,7 +2372,7 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	}
 }
 
-// TestAVerbReadsOrWrites: a word means one thing. `user address` registers and `user withdraw`
+// TestAVerbReadsOrWrites: a word means one thing. `user blockchain-address` registers and `user withdraw`
 // pays; what each of them used to show with no argument is a verb of its own, so no command turns
 // from a read into a write because an argument appeared.
 func TestAVerbReadsOrWrites(t *testing.T) {
@@ -2390,7 +2390,7 @@ func TestAVerbReadsOrWrites(t *testing.T) {
 		cmd  func() *cobra.Command
 		args []string
 	}{
-		{"showing an address is not this verb's job", userAddressCmd, nil},
+		{"showing an address is not this verb's job", userBlockchainAddressCmd, nil},
 		{"withdrawing needs the amount it moves", userWithdrawCmd, nil},
 		{"listing withdrawals takes no amount", userWithdrawalsCmd, []string{"5"}},
 	} {

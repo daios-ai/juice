@@ -51,11 +51,11 @@ transaction:
 
 ```
 $ juice user transfer bob@acme 1 --reason "thanks"
-Send 1.00 fUSD to bob, acting as alice@acme? This cannot be undone. [y/N] y
+Send 1.00 fUSD to bob@acme, acting as alice@acme? This cannot be undone. [y/N] y
   amount: 1.00 fUSD
   reason: thanks
   created_at: 2026-09-14T12:05:34Z
-  operator_handle: alice
+  operator: alice@acme
   from: alice@acme
   to: bob@acme
 ```

@@ -15,7 +15,8 @@ Built-ins have local visibility. A provider wishing to offer one of these
 capabilities remotely can compose it into a public action with its own price
 and contract. The operator configures built-in prices under `native.<name>`;
 all default to zero except `sys/tinygo/compile`. Amounts in action JSON use
-base units.
+base units. This page names each built-in by its path under `sys`; on a kernel
+named `acme`, `sys/time` is called as `sys@acme/time`.
 
 ## Search
 

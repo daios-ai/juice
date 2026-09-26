@@ -113,7 +113,7 @@ Federation has no HTTP surface: peer identity, gossip, manifests, and inbound ca
 | Update self | `PUT /v1/me` `{[description], [current_password, password]}` → user | `juice user update [--description] [--password]` |
 | Transfer credits | `POST /v1/transfers` `{recipient, amount, [reason], [external_key]}` → ledger entry | `juice user transfer <recipient> <amount> [--reason --external-key]` |
 | List ledger | `GET /v1/ledger[?limit=&offset=]` → ledger entry[] | `juice user ledger [--limit --offset]` |
-| Register payout address | `PUT /v1/me/address` `{address, signature}` → `{address, attributed}` | `juice user address <address> [--signature <sig>]`; `juice user me` shows the registered one |
+| Register payout address | `PUT /v1/me/blockchain-address` `{blockchain_address, signature}` → `{blockchain_address, attributed}` | `juice user blockchain-address <address> [--signature <sig>]`; `juice user me` shows the registered one |
 | Withdraw credits | `POST /v1/withdrawals` `{id, amount, [reason]}` → withdrawal row `{id, kind, amount, destination, status, tx_hash, reason, created_at, finalized_at}` | `juice user withdraw <amount> [--id <id>] [--reason]` |
 | List withdrawals | `GET /v1/withdrawals[?limit=&offset=]` → own withdrawal rows | `juice user withdrawals [--limit --offset]` |
 | Where to pay in | client-composed from `GET /health` + `GET /v1/me` | `juice user deposit` — prints where to send money and whether the caller has registered an address; `--json` prints what it composed, `{network, kernel_address, your_address, token}` |

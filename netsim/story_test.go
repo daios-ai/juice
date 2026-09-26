@@ -3,8 +3,12 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -33,6 +37,69 @@ func TestTheStoryDoesNotKnowWhichRailItIsOn(t *testing.T) {
 				"payment, finality and measurement belong to the Rail", b.why, m)
 		}
 	}
+}
+
+// A reference reaches a kernel only through the owning kernel's At. A literal is either bare, which
+// every kernel refuses, or spells out a kernel name, which holds only while the harness happens to
+// name its kernels that way; both went unnoticed until a run failed for reasons unrelated to its checks.
+func TestEveryReferenceIsWrittenByAt(t *testing.T) {
+	sends := map[string]bool{"Run": true, "MustWork": true, "MustRefuse": true, "Num": true,
+		"Field": true, "Uses": true, "writeComposite": true}
+	bare := regexp.MustCompile(`^[a-z][a-z0-9-]*/[a-z]`)
+	fset := token.NewFileSet()
+	for _, name := range []string{"story.go", "rail.go", "harness.go"} {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok || !sends[callName(c)] {
+				return true
+			}
+			for i, arg := range c.Args {
+				ast.Inspect(arg, func(n ast.Node) bool {
+					if inner, ok := n.(*ast.CallExpr); ok && callName(inner) == "At" {
+						return false // the one place a name is qualified
+					}
+					if _, ok := n.(*ast.IndexExpr); ok {
+						return false // a table key, never sent
+					}
+					lit, ok := n.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						return true
+					}
+					v, _ := strconv.Unquote(lit.Value)
+					created := i > 0 && isString(c.Args[i-1], "create") // a name, not a reference
+					if (strings.Contains(v, "@") || bare.MatchString(v)) && !created && !strings.Contains(v, "://") {
+						t.Errorf("%s writes the reference %s by hand; name it with the owning kernel's At",
+							fset.Position(lit.Pos()), lit.Value)
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+}
+
+func callName(c *ast.CallExpr) string {
+	switch f := c.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
+func isString(e ast.Expr, want string) bool {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok {
+		return false
+	}
+	v, _ := strconv.Unquote(lit.Value)
+	return v == want
 }
 
 // The rail may vary how often the trading rounds repeat, and nothing else. If a rail could vary
@@ -170,7 +237,7 @@ func TestPaymentsAreCountedPerCallNotPerCounterparty(t *testing.T) {
 // prices the rail from it, so a price cannot be changed in one place and budgeted from another.
 func TestEveryTradedActionHasADeclaredPrice(t *testing.T) {
 	for _, tr := range crossKernelTrades {
-		if _, ok := actionPrices[bareRef(tr.action)]; !ok {
+		if _, ok := actionPrices[tr.action]; !ok {
 			t.Errorf("%s is traded across a boundary but has no declared price", tr.action)
 		}
 	}
@@ -184,21 +251,16 @@ func TestEveryTradedActionHasADeclaredPrice(t *testing.T) {
 // Every cross-kernel trade must name a seller that is a real kernel and an action that is
 // published on it, or the trading rounds quietly measure a catalogue of refusals.
 func TestEveryCrossKernelTradeNamesARealSeller(t *testing.T) {
-	handles := map[string]string{}
+	kernels := map[string]bool{}
 	for _, k := range kernelPlan {
-		handles[k.handle] = k.name
+		kernels[k.name] = true
 	}
 	for _, tr := range crossKernelTrades {
-		at := strings.Index(tr.action, "@")
-		slash := strings.Index(tr.action, "/")
-		if at < 0 || slash < at {
-			t.Errorf("%q is not a cross-kernel reference", tr.action)
-			continue
+		if !kernels[tr.seller] || tr.seller == tr.kernel {
+			t.Errorf("trade %q names seller %q, which is not another kernel of the plan", tr.action, tr.seller)
 		}
-		handle := tr.action[at+1 : slash]
-		if handles[handle] != tr.seller {
-			t.Errorf("trade %q names seller %q, but the handle %q belongs to %q",
-				tr.action, tr.seller, handle, handles[handle])
+		if _, ok := actionPrices[tr.action]; !ok || strings.Contains(tr.action, "@") {
+			t.Errorf("trade %q is not a name the catalogue publishes", tr.action)
 		}
 	}
 }

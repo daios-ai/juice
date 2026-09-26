@@ -374,7 +374,7 @@ func createUser(k *kernel.Kernel, ctx context.Context, req kernel.CreateUserRequ
 // never gates a credential; the token binding stays per-action and fact-derived (§8 confused-deputy
 // defense), so grouping by it changes nothing about which credential dispatch applies.
 type connectorView struct {
-	Directory   string                   `json:"directory"`   // the folder the actions live in (@owner or @owner/path)
+	Directory   string                   `json:"directory"`   // the folder the actions live in (owner@kernel or owner@kernel/path)
 	Connections []*kernel.ConnectionView `json:"connections"` // upstream account(s) backing this directory (usually one)
 	Actions     []*kernel.GrantView      `json:"actions"`     // token-free granted actions under this directory
 }

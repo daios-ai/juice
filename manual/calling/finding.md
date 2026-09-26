@@ -17,11 +17,11 @@ action candidates. For example, a search for an echo service might return:
 
 ```
 $ juice run sys@acme/lookup '{"query":"echo a message"}'
-sys/lookup costs 0.00 fUSD. Run it? [y/N] y
+sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
-        "action": "bob/echo",
+        "action": "bob@acme/echo",
         "action_id": "bb7fe1a8-…",
         "description": "Echo a message back to the caller",
         "input_schema": {
@@ -95,7 +95,6 @@ directly:
 ```
 $ juice action show bob@acme/echo
   id: bb7fe1a8-…
-  owner: bob@acme
   name: echo
   kind: http
   active: true
@@ -104,6 +103,7 @@ $ juice action show bob@acme/echo
   description: Echo a message back to the caller
   input_schema: { … }
   output_schema: {}
+  action: bob@acme/echo
   quote_hash: 4965342976414282…
   requires_grant: false
 
@@ -116,8 +116,8 @@ belonging to its caller. You must connect that account before the action can
 run; see [Consent and assigned work](consent-and-steps.html).
 
 A provider can give a group of actions a common entry point by publishing an
-`index` action. If `bob/greeter` names no action directly, for example,
-`action show` tries `bob/greeter/index`.
+`index` action. If `bob@acme/greeter` names no action directly, for example,
+`action show` tries `bob@acme/greeter/index`.
 
 The same command accepts remote references such as
 `dave@beta-kernel/summarize`. Below the contract it shows the evidence available
@@ -136,11 +136,11 @@ by each report. Verification confirms a matching record of trade, not quality.
 
 ```
 $ juice action list
-ACTION                      PRICE        AUTHORIZE
-bob/mail                    0.00 fUSD   your own login
-dave@beta-kernel/summarize   2.205 fUSD
-bob/stamp                   1.00 fUSD
-bob/echo                    0.50 fUSD
+ACTION                      PRICE       AUTHORIZE
+bob@acme/mail               0.00 fUSD   your own login
+dave@beta-kernel/summarize  2.205 fUSD
+bob@acme/stamp              1.00 fUSD
+bob@acme/echo               0.50 fUSD
   …
 ```
 

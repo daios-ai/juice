@@ -200,6 +200,19 @@ func TestAnUnreadableKernelBlocksTheVerdict(t *testing.T) {
 	}
 }
 
+// A read the story judges by must not turn into zero when it fails: a balance of 0, a price of 0 or
+// no recorded uses would each pass some check for the wrong reason.
+func TestAFailedReadFailsACheck(t *testing.T) {
+	n := newTestNet(t)
+	k := &Kernel{Name: "k1", URL: "http://127.0.0.1:1", net: n}
+	k.Num("ana", "available", "user", "me")
+	k.Field("ana", "id", "user", "me")
+	k.Uses("ana", "ana@hub/echo")
+	if n.Unexpected["harness.read"] != 3 {
+		t.Errorf("three failed reads recorded %d failed checks", n.Unexpected["harness.read"])
+	}
+}
+
 // A missing privacy projection must fail the run. Skipping it means a run that never captured the
 // evidence reports that nothing leaked.
 func TestAMissingPrivacyProjectionFailsTheRun(t *testing.T) {

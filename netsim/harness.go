@@ -237,9 +237,19 @@ func read[T any](k *Kernel, actor string, args ...string) (T, error) {
 	return v, json.Unmarshal([]byte(out), &v)
 }
 
+// object reads a command's JSON object. A read that fails is a failed check, never an empty
+// object: every caller would take the missing fields for zero and judge the economy on it.
+func (k *Kernel) object(actor string, args ...string) map[string]any {
+	m, err := read[map[string]any](k, actor, args...)
+	if err != nil {
+		k.net.Check("harness.read", false, "juice "+strings.Join(args, " ")+": "+err.Error())
+	}
+	return m
+}
+
 // Field reads one field of a command's JSON object as a string; Num as a number.
 func (k *Kernel) Field(actor, field string, args ...string) string {
-	m, _ := read[map[string]any](k, actor, args...)
+	m := k.object(actor, args...)
 	if f, ok := m[field].(float64); ok {
 		return strconv.FormatInt(int64(f), 10)
 	}
@@ -247,15 +257,14 @@ func (k *Kernel) Field(actor, field string, args ...string) string {
 }
 
 func (k *Kernel) Num(actor, field string, args ...string) int64 {
-	m, _ := read[map[string]any](k, actor, args...)
-	return num(m, field)
+	return num(k.object(actor, args...), field)
 }
 
 // Uses is how many calls this kernel itself has recorded against an action, read where the action
 // is read: what a kernel knows about an action travels with the action, not on a surface of its
 // own (U39).
 func (k *Kernel) Uses(actor, ref string) int64 {
-	m, _ := read[map[string]any](k, actor, "action", "show", ref)
+	m := k.object(actor, "action", "show", ref)
 	ev, _ := m["evidence"].(map[string]any)
 	local, _ := ev["local_experience"].(map[string]any)
 	return num(local, "uses")

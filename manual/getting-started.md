@@ -154,7 +154,7 @@ kernel's current time:
 
 ```
 $ juice run sys@acme/time
-sys/time costs 0.00 fUSD. Run it? [y/N] y
+sys@acme/time costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "iso": "2026-09-14T15:05:36Z",
     "unix": 1789398336
@@ -183,11 +183,11 @@ $ juice auth login sys@acme
 Password:
 sys@acme
 $ juice admin user deposit alice@acme 10 --ref demo-payment-1
-Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
+Credit 10.00 fUSD to alice@acme, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
   reason:
   created_at: 2026-09-14T15:05:37Z
-  operator_handle: sys
+  operator: sys@acme
   from: sys@acme
   to: alice@acme
 ```
@@ -232,13 +232,14 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: 6a9e04ce-…
-  owner: bob@acme
   name: echo
   kind: http
   active: false
   visibility: private
   price: 0.50 fUSD
   description: Echo a message back to the caller
+  …
+  action: bob@acme/echo
   …
   quote_hash: 1f8ec43b…
 ```
@@ -249,11 +250,11 @@ it:
 
 ```
 $ juice action enable bob@acme/echo
-CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-enabled  bob/echo  0.50 fUSD  yes     private
+CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
+enabled  bob@acme/echo  0.50 fUSD  yes     private
 $ juice action update bob@acme/echo --visibility local
-CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-updated  bob/echo  0.50 fUSD  yes     local
+CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
+updated  bob@acme/echo  0.50 fUSD  yes     local
 ```
 
 ### Alice finds it and buys it
@@ -262,11 +263,11 @@ updated  bob/echo  0.50 fUSD  yes     local
 $ juice auth use alice@acme
 alice@acme
 $ juice run sys@acme/lookup '{"query":"echo a message"}'
-sys/lookup costs 0.00 fUSD. Run it? [y/N] y
+sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
-        "action": "bob/echo",
+        "action": "bob@acme/echo",
         "action_id": "6a9e04ce-…",
         "description": "Echo a message back to the caller",
         "input_schema": { … },
@@ -290,7 +291,7 @@ send Bob's action a message:
 
 ```
 $ juice run bob@acme/echo '{"msg":"hello"}'
-bob/echo costs 0.50 fUSD. Run it? [y/N] y
+bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": {
       "msg": "hello"
@@ -364,13 +365,14 @@ To use an existing kernel, begin by registering the address its operator gives
 you. You can then create an account and log in without running a server:
 
 ```
-$ juice kernel add https://kernel.example.org work
+$ juice kernel add https://kernel.example.org
+work  network play  https://kernel.example.org  hqDr8oMX…  (added)
 $ juice user create alice@work
 $ juice auth login alice@work
 ```
 
-The name after the URL is this client's own name for the kernel. Without it, the
-kernel's own name is used.
+The client records the kernel under the name the kernel gives itself, here
+`work`. That name is the kernel part of every address on it.
 
 The operator handles the administrative work performed by `sys` in the
 walkthrough. Your funding method depends on that kernel's network: the operator

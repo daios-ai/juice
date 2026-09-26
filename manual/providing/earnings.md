@@ -34,7 +34,7 @@ fee    = ceil(margin × fee_bps / 10000)
 you receive = margin − fee
 ```
 
-A call to `bob/echo` at `0.50` that calls nothing:
+A call to `bob@acme/echo` at `0.50` that calls nothing:
 
 ```
   gross: 0.50 fUSD
@@ -47,13 +47,13 @@ The 20% fee is therefore `0.10`, leaving Bob `0.40`.
 
 ## Worked example with composition
 
-Suppose you sell `bob/pipeline` at `1.00` and it calls `carol/extract` on the
+Suppose you sell `bob@acme/pipeline` at `1.00` and it calls `carol@acme/extract` on the
 same kernel for `0.30`. With a 20% fee, your layer settles as follows:
 
 | | |
 |---|---|
 | Buyer pays | 1.00 |
-| You spend on `carol/extract` | 0.30 |
+| You spend on `carol@acme/extract` | 0.30 |
 | Your margin | 0.70 |
 | Fee on your margin | 0.14 |
 | **You receive** | **0.56** |

@@ -2756,6 +2756,34 @@ func TestServeListStepsPeerRendersRequiredCaller(t *testing.T) {
 	}
 }
 
+// walletRail is a chain world whose every signature verifies; only the naming is under test.
+type walletRail struct{ kernel.Rail }
+
+func (walletRail) Ready(context.Context) error { return nil }
+func (walletRail) Verify(_ []byte, address, _ string) (string, error) {
+	return strings.ToLower(address), nil
+}
+
+// A blockchain address is named blockchain_address wherever it is read or written: `address` is a
+// user's handle@kernel (D20), so the registration route cannot answer under that key.
+func TestServeRegistersABlockchainAddress(t *testing.T) {
+	srv, k := newTestHTTPServer(t)
+	defer srv.Close()
+	k.SetRail(walletRail{})
+	_, tok := makeUser(t, k, "payee")
+	resp := httpDo(t, srv, "PUT", "/v1/me/blockchain-address", map[string]any{"blockchain_address": "0xABC", "signature": "s"}, tok)
+	var got map[string]any
+	decodeResponse(t, resp, &got)
+	if got["blockchain_address"] != "0xabc" || got["address"] != nil {
+		t.Fatalf("registration reply = %v; want blockchain_address 0xabc and no address key", got)
+	}
+	resp = httpDo(t, srv, "GET", "/v1/me", nil, tok)
+	decodeResponse(t, resp, &got)
+	if got["blockchain_address"] != "0xabc" || got["address"] != "payee@"+testOwnName {
+		t.Errorf("me = %v; want both names apart", got)
+	}
+}
+
 func TestServeListActionsOwnerAuth(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()

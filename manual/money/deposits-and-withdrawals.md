@@ -87,7 +87,7 @@ will pay from before sending funds, proving control by signing the kernel's
 registration message with that wallet:
 
 ```
-$ juice user address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+$ juice user blockchain-address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 Sign this message with the wallet holding 0x70997970C51812dc3A010C7d01b50e0d17dc79C8:
 
 juice address registration
@@ -103,7 +103,7 @@ paste the resulting signature at the prompt. The response confirms the
 registered address and lists any held deposits attributed to it:
 
 ```
-  address: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
+  blockchain_address: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
   attributed: []
 ```
 
@@ -187,7 +187,7 @@ Withdraw 50.00 USDT0 on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79
   destination: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
   status: submitted
   created_at: 2026-09-15T00:12:42Z
-  party_handle: alice
+  party: alice@bank
 ```
 
 On a chain network, the withdrawal reserves the amount from your balance and

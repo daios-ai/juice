@@ -60,7 +60,7 @@ hosted on another kernel. These kinds share the same calling interface.
 A **reference** names an action as `owner@kernel/name`, on this kernel and on any
 other alike. The kernel is named as this kernel knows it: its own name for its own
 actions, a petname or public key for another kernel's. If the reference names no action directly, Juice tries its `index` child:
-`bob` can resolve to `bob/index`, and `bob/mail` to `bob/mail/index`. This
+`bob@acme` can resolve to `bob@acme/index`, and `bob@acme/mail` to `bob@acme/mail/index`. This
 convention gives a group of related actions an entry point.
 
 **Visibility** determines an action's audience. A `private` action is available

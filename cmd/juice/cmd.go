@@ -473,7 +473,7 @@ func renderValue(raw json.RawMessage) string {
 func init() {
 	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
 	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
-		userConnectCmd(), userDisconnectCmd(), userAddressCmd(), userDepositCmd(),
+		userConnectCmd(), userDisconnectCmd(), userBlockchainAddressCmd(), userDepositCmd(),
 		userWithdrawCmd(), userWithdrawalsCmd())
 	rootCmd.AddCommand(userCmd)
 }
@@ -652,17 +652,17 @@ func readMe(ctx context.Context) (*meView, error) {
 	return &me, nil
 }
 
-// userAddressCmd registers where the caller is paid. The kernel credits money to whoever finally
+// userBlockchainAddressCmd registers where the caller is paid. The kernel credits money to whoever finally
 // sent it, so an account is paid out only to an address its holder has proved is theirs: the proof
 // is a signature over a message naming this kernel, this account, and that address, and nothing
 // else. The signing happens in the wallet, not here — this command composes the message and takes
 // the signature back.
-func userAddressCmd() *cobra.Command {
+func userBlockchainAddressCmd() *cobra.Command {
 	var signature string
 	cmd := &cobra.Command{
-		Use:   "address [ADDRESS]",
-		Short: "Register the address you are paid at",
-		Long: "Register ADDRESS as the address you are paid at; `juice user me` shows the one " +
+		Use:   "blockchain-address ADDRESS",
+		Short: "Register the blockchain address you pay from and are paid at",
+		Long: "Register ADDRESS as the blockchain address you pay from and are paid at; `juice user me` shows the one " +
 			"registered.\n\n" +
 			"It is yours only once you prove it: this command prints a message naming this kernel, " +
 			"your account, and the address; sign that message with the wallet that holds the address " +
@@ -689,9 +689,9 @@ func userAddressCmd() *cobra.Command {
 				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				signature = strings.TrimSpace(line)
 			}
-			return cli.emitCtx(ctx, "PUT", "/v1/me/address", map[string]any{
-				"address": args[0], "signature": signature,
-			}, output{id: "address"})
+			return cli.emitCtx(ctx, "PUT", "/v1/me/blockchain-address", map[string]any{
+				"blockchain_address": args[0], "signature": signature,
+			}, output{id: "blockchain_address"})
 		},
 	}
 	cmd.Flags().StringVar(&signature, "signature", "", "Signature of the registration message, produced by the wallet holding the address")

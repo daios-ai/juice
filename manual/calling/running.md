@@ -13,13 +13,13 @@ it under the current login:
 $ juice run ACTION [JSON]
 ```
 
-`ACTION` is a reference: `owner/name` on this kernel, `owner@kernel/name` on
-another, or a raw action id. `JSON` is the argument object, `{}` if omitted.
+`ACTION` is a reference, `owner@kernel/name` on this kernel and on any other
+alike, or a raw action id. `JSON` is the argument object, `{}` if omitted.
 `@file.json` reads the arguments from a file.
 
 ```
 $ juice run bob@acme/echo '{"msg":"hello"}'
-bob/echo costs 0.50 fUSD. Run it? [y/N] y
+bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
     "json": { "msg": "hello" },
     …
@@ -58,7 +58,7 @@ without charge:
 
 ```
 $ juice run bob@acme/echo '{}'
-bob/echo costs 0.50 fUSD. Run it? [y/N] y
+bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
 error: field msg: required field missing
 ```
 
@@ -73,8 +73,8 @@ identifies the action to connect:
 
 ```
 $ juice run bob@acme/mail '{"body":"hi"}'
-bob/mail costs 0.00 fUSD. Run it? [y/N] y
-error: grant required for bob/mail
+bob@acme/mail costs 0.00 fUSD. Run it? [y/N] y
+error: grant required for bob@acme/mail
        Authorize it with: juice user connect bob@acme/mail
 ```
 

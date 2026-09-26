@@ -21,18 +21,19 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: bb7fe1a8-…
-  owner: bob@acme
   name: echo
   kind: http
   active: false
   visibility: private
   price: 0.50 fUSD
   …
+  action: bob@acme/echo
+  …
   quote_hash: 4965342976414282…
 ```
 
 Choose a name that is unique among your actions. Slashes let you organize related
-operations under a shared path, such as `bob/mail/send` and `bob/mail/inbox`.
+operations under a shared path, such as `mail/send` and `mail/inbox`.
 The shared path also allows later changes to be applied to the group.
 
 The `--kind` option determines where the implementation runs:
@@ -71,11 +72,11 @@ who may call it by setting its visibility:
 
 ```
 $ juice action enable bob@acme/echo
-CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-enabled  bob/echo  0.50 fUSD  yes     private
+CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
+enabled  bob@acme/echo  0.50 fUSD  yes     private
 $ juice action update bob@acme/echo --visibility local
-CHANGE   ACTION    PRICE       ACTIVE  AUDIENCE
-updated  bob/echo  0.50 fUSD  yes     local
+CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
+updated  bob@acme/echo  0.50 fUSD  yes     local
 ```
 
 | Visibility | Who can call it |
@@ -129,15 +130,16 @@ name needed to interpret them.
 
 ## Acting on a whole path
 
-The mutation commands accept an action ID for one action, or an `owner/path`
-reference for the action at that path and its descendants. For example,
-enabling `bob/greeter` can enable both operations in an application:
+The mutation commands accept an action ID for one action, or an
+`owner@kernel/path` reference for the action at that path and its descendants.
+For example, enabling `bob@acme/greeter` can enable both operations in an
+application:
 
 ```
 $ juice action enable bob@acme/greeter
-CHANGE   ACTION             PRICE       ACTIVE  AUDIENCE
-enabled  bob/greeter/greet  0.50 fUSD  yes     private
-enabled  bob/greeter/index  0.00 fUSD  yes     private
+CHANGE   ACTION                  PRICE      ACTIVE  AUDIENCE
+enabled  bob@acme/greeter/greet  0.50 fUSD  yes     private
+enabled  bob@acme/greeter/index  0.00 fUSD  yes     private
 ```
 
 Price, visibility, and credentials can be updated across the selected path.
@@ -147,8 +149,8 @@ action, since those fields describe a particular service interface.
 ## Groups and the index convention
 
 The `index` convention gives a group an entry point. If no action is named
-`bob/greeter`, a caller using that reference reaches `bob/greeter/index`;
-similarly, `bob` can reach `bob/index`.
+`bob@acme/greeter`, a caller using that reference reaches
+`bob@acme/greeter/index`; similarly, `bob@acme` can reach `bob@acme/index`.
 
 Implement this entry point as an action that describes the group. It has the
 same price, execution, and rating rules as any other action. The convention

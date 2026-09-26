@@ -56,9 +56,9 @@ external reference:
 
 ```
 $ juice admin user deposit alice@acme 10 --ref demo-payment-1
-Credit 10.00 fUSD to alice, acting as sys@acme? This cannot be undone. [y/N] y
+Credit 10.00 fUSD to alice@acme, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
-  operator_handle: sys
+  operator: sys@acme
   from: sys@acme
   to: alice@acme
 ```
@@ -243,7 +243,7 @@ Payments received whose sender nobody has registered:
   amount: 40.00 USDT0
   status: held
   tx_hash: 0xccb0975d…
-  party_handle: 0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc
+  party: 0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc
 Work delivered to foreign buyers and not yet paid for:
 ```
 

@@ -20,7 +20,7 @@ agent's calls in the same way as any other user's.
 Specify the saved login for each invocation with `--as`:
 
 ```
-$ juice --as bot@acme run sys/lookup '{"query":"translate to german"}' --json
+$ juice --as bot@acme run sys@acme/lookup '{"query":"translate to german"}' --json
 ```
 
 Alternatively, set `JUICE_AS=bot@acme` in the environment. Omit `--as` for
@@ -43,8 +43,8 @@ are needed, one per line. These unattended examples also show the price line
 written to stderr; it is separate from the result on stdout:
 
 ```
-$ juice --as bot@acme run sys/time --json
-sys/time costs 0.00 fUSD.
+$ juice --as bot@acme run sys@acme/time --json
+sys@acme/time costs 0.00 fUSD.
 {
   "result": { "iso": "2026-09-14T12:06:52Z", "unix": 1789387612 },
   "tx_id": "98bb64e6-…",
@@ -53,8 +53,8 @@ sys/time costs 0.00 fUSD.
   "process_id": "e9dbb283-…",
   "charge": 0
 }
-$ juice --as bot@acme run sys/time --quiet
-sys/time costs 0.00 fUSD.
+$ juice --as bot@acme run sys@acme/time --quiet
+sys@acme/time costs 0.00 fUSD.
 821a9f33-…
 ```
 
@@ -89,7 +89,7 @@ and, where applicable, `meta`:
 
 ```
 {"code":"schema_violation","error":"field msg: required field missing"}
-{"code":"grant_required","error":"grant required for bob/mail","meta":{"action":"bob/mail"}}
+{"code":"grant_required","error":"grant required for bob@acme/mail","meta":{"action":"bob@acme/mail"}}
 ```
 
 The metadata supplies context for recovery. For example, `grant_required`
@@ -109,7 +109,7 @@ units. On the shipped networks, one display unit contains 1,000,000 base units:
 $ juice user transfer bob@acme 1.5           # display units
 ```
 ```
-POST /v1/run {"action":"sys/transfer","args":{"target":"bob@acme","amount":1500000}}
+POST /v1/run {"action":"sys@acme/transfer","args":{"target":"bob@acme","amount":1500000}}
 ```
 
 Both examples deliver the same amount, although `sys/transfer` may also have
@@ -124,9 +124,9 @@ propose their arguments. Calling it purchases the selection service, but does
 not execute the action it selects:
 
 ```
-$ juice --as bot@acme run sys/llm/decide '{
+$ juice --as bot@acme run sys@acme/llm/decide '{
     "messages": [{"role":"user","content":"summarise this contract"}],
-    "actions": ["bob/echo","dave@beta-kernel/summarize"]
+    "actions": ["bob@acme/echo","dave@beta-kernel/summarize"]
   }' --json
 ```
 
@@ -146,7 +146,7 @@ can change while a program prepares work, so carry the
 request:
 
 ```
-$ juice --as bot@acme run bob/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
+$ juice --as bot@acme run bob@acme/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
 A mismatch on an otherwise callable action produces exit code 11 before any
@@ -235,7 +235,7 @@ Then use the access token as a bearer:
 
 ```
 $ curl -s localhost:4040/v1/run -H "Authorization: Bearer $TOKEN" \
-    -H 'Content-Type: application/json' -d '{"action":"sys/time","args":{}}'
+    -H 'Content-Type: application/json' -d '{"action":"sys@acme/time","args":{}}'
 {"result":{"iso":"2026-09-14T12:07:31Z","unix":1789387651},"tx_id":"800c8279-…", …}
 ```
 

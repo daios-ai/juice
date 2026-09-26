@@ -748,7 +748,7 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
-		r.Put("/v1/me/address", srv.putBlockchainAddress)
+		r.Put("/v1/me/blockchain-address", srv.putBlockchainAddress)
 		r.Post("/v1/withdrawals", srv.postWithdrawal)
 		r.Get("/v1/withdrawals", srv.getWithdrawals)
 		r.Post("/v1/transfers", srv.postTransfer)
@@ -1497,18 +1497,17 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-// getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
 // putBlockchainAddress registers where the caller is paid, against a signature proving they hold it.
 // Registering also delivers anything that address has already paid in (D23).
 func (s *server) putBlockchainAddress(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Address   string `json:"address"`
-		Signature string `json:"signature"`
+		BlockchainAddress string `json:"blockchain_address"`
+		Signature         string `json:"signature"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, attributed, err := s.kernel.SetBlockchainAddress(r.Context(), callerFrom(r), req.Address, req.Signature)
+	u, attributed, err := s.kernel.SetBlockchainAddress(r.Context(), callerFrom(r), req.BlockchainAddress, req.Signature)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1518,7 +1517,7 @@ func (s *server) putBlockchainAddress(w http.ResponseWriter, r *http.Request) {
 	for _, e := range attributed {
 		views = append(views, enrichLedger(r.Context(), e, names))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"address": u.BlockchainAddress, "attributed": views})
+	writeJSON(w, http.StatusOK, map[string]any{"blockchain_address": u.BlockchainAddress, "attributed": views})
 }
 
 // postWithdrawal sends the caller's own credits back out. The id is theirs and is the row, so a
@@ -1550,6 +1549,7 @@ func (s *server) getWithdrawals(w http.ResponseWriter, r *http.Request) {
 	writeOr(w, railTransferViews(s.kernel, r.Context(), rows), nil)
 }
 
+// getLedger returns the caller's own ledger entries (deposits, withdrawals, transfers).
 func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
 	entries, err := s.kernel.ListLedger(r.Context(), callerFrom(r), limit, offset)

@@ -165,7 +165,7 @@ before fees have accumulated, remain logged in as `sys` and register the externa
 wallet address from which you will send USDT0:
 
 ```
-$ juice user address <your-wallet-address>
+$ juice user blockchain-address <your-wallet-address>
 $ juice user deposit
 ```
 

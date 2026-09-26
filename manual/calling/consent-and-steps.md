@@ -23,11 +23,9 @@ identifies what you need to connect:
 
 ```
 $ juice run bob@acme/mail '{"body":"hi"}'
-bob/mail costs 0.00 fUSD. Run it? [y/N] y
-
-Authorize with:
-  juice user connect bob@acme/mail
-error: grant required for bob/mail
+bob@acme/mail costs 0.00 fUSD. Run it? [y/N] y
+error: grant required for bob@acme/mail
+       Authorize it with: juice user connect bob@acme/mail
 ```
 
 The connection procedure depends on the authentication scheme configured for
@@ -46,11 +44,11 @@ For an action configured to use a personal token, supply the token directly:
 
 ```
 $ juice user connect bob@acme/mail --token ghp_…
-Connected bob/mail.
+Connected bob@acme/mail.
 ```
 
-The reference you connect is a selector: it can name an owner (`bob`), a
-directory (`bob/mail`), or a particular action (`bob/mail/send`). The kernel
+The reference you connect is a selector: it can name an owner (`bob@acme`), a
+directory (`bob@acme/mail`), or a particular action (`bob@acme/mail/send`). The kernel
 groups accessible delegated actions under that path by upstream provider,
 allowing one consent to cover related operations. The grant applies to the
 actions included in that consent; adding another action later requires
@@ -71,10 +69,10 @@ $ juice user me
   ]
   connectors: [
     {
-      "directory": "bob",
+      "directory": "bob@acme",
       "connections": [ … ],
       "actions": [
-        { "action": "bob/mail", "provider_key": "bearer:httpbin.org", … }
+        { "action": "bob@acme/mail", "provider_key": "bearer:httpbin.org", … }
       ]
     }
   ]
@@ -89,7 +87,7 @@ To revoke access for a selection of actions, use:
 ```
 $ juice user disconnect bob@acme/mail
   revoked: [
-    "bob/mail"
+    "bob@acme/mail"
   ]
 ```
 
@@ -164,7 +162,8 @@ $ juice step list --peer beta-kernel
 $ juice step complete <id> '{}' --peer beta-kernel
 ```
 
-Your home kernel signs an attestation naming your stable account ID as the
-party addressed by the step. The peer checks it before allowing completion. The
+Your home kernel signs the completion request, which names your stable account
+ID as the party addressed by the step. The peer checks it before allowing
+completion. The
 listing returns the step's input requirements without disclosing the remote
 process owner's identity or other local execution details.

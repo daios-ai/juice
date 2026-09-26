@@ -444,17 +444,25 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 // number of rows is not the number of actions a user asked for. A proxy records the bare name of
 // the action it bought, so a call is cross-kernel when the action lives on another kernel — not
 // when the caller happened to type a reference with an @ in it.
+// catalogueKey is the story's name for the action a transaction records: its address,
+// owner@kernel/name, without the kernel, which the recording kernel names by its own petname.
+func catalogueKey(address string) string {
+	owner, rest, _ := strings.Cut(address, "@")
+	_, name, _ := strings.Cut(rest, "/")
+	return owner + "/" + name
+}
+
 func actionCounts(snaps map[string]Snapshot, owners map[string]string) (topLevel, nested, local, cross, other int) {
 	for name, sn := range snaps {
 		for _, t := range sn.Txs {
 			switch {
 			case str(t, "parent_trace_id") != "":
 				nested++
-			case str(t, "action_name") == "":
+			case str(t, "action") == "":
 				other++
 			default:
 				topLevel++
-				if owner := owners[str(t, "action_name")]; owner != "" && owner != name {
+				if owner := owners[catalogueKey(str(t, "action"))]; owner != "" && owner != name {
 					cross++
 				} else {
 					local++
@@ -543,7 +551,7 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 			}
 			checked++
 			if paid != kept+spent {
-				breaches = append(breaches, breach{name, str(t, "id"), str(t, "action_name"),
+				breaches = append(breaches, breach{name, str(t, "id"), str(t, "action"),
 					str(t, "status"), paid, kept, spent})
 			}
 			if str(t, "status") == "failure" && spent > 0 && num(t, "refund") > 0 {
@@ -737,14 +745,13 @@ func priceFidelity(snaps map[string]Snapshot, prices map[string]int64, owners ma
 			if str(t, "parent_trace_id") != "" {
 				continue // a child is bounded by its parent, not by an advertised price
 			}
-			action := str(t, "action_name")
+			action := catalogueKey(str(t, "action"))
 			mp, known := prices[action]
 			if !known {
 				continue // natives, composites and the attackers' own actions have no fixed price
 			}
-			// A proxy records the bare name of the action it bought, not the reference the caller
-			// typed, so remoteness is decided by where the action actually lives: a call recorded
-			// on any kernel but the seller's crossed a boundary.
+			// Remoteness is decided by where the action actually lives: a call recorded on any
+			// kernel but the seller's crossed a boundary.
 			seller := owners[action]
 			remote := seller != "" && seller != name
 			want := mp * scale

@@ -28,7 +28,7 @@ performing a further service:
 
 ```
 $ juice run sys@acme/message '{"to":"bob@acme","message":"approve the order?"}'
-sys/message costs 0.00 fUSD. Run it? [y/N] y
+sys@acme/message costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "step_id": "b75366d1-…"
   }
@@ -47,8 +47,8 @@ addresses the remaining input to Bob:
 ```go
 id := JuiceStepCreate(
 	[]byte(`{"order":"42"}`),  // arguments already known
-	"bob",                     // who may complete it
-	"bob/approve",             // what runs when they do
+	"bob@acme",                // who may complete it
+	"bob@acme/approve",        // what runs when they do
 )
 ```
 
@@ -58,7 +58,7 @@ An HTTP endpoint creates the same kind of step using its execution capability:
 POST /v1/steps
 X-Juice-Capability: <the capability it was dispatched with>
 
-{"action": "bob/approve", "required_caller": "bob", "partial_args": {"order": "42"}}
+{"action": "bob@acme/approve", "required_caller": "bob@acme", "partial_args": {"order": "42"}}
 ```
 
 The command-line form identifies the trace whose budget funds the step:

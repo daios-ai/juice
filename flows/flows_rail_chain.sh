@@ -45,7 +45,7 @@ _chain_pay_in() {
     uid=$(strfield "$(jj "$db" "$home" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
-    j "$db" "$home" user address "$waddr" --signature "$sig" >/dev/null 2>&1
+    j "$db" "$home" user blockchain-address "$waddr" --signature "$sig" >/dev/null 2>&1
     vault=$(vault_of "$db")
     anvil_send "$ANVIL_KEY" "$CHAIN_TOKEN" "mint(address,uint256)" "$waddr" "$amount"
     anvil_send "$ANVIL_KEY" "$waddr" --value 1ether
@@ -377,7 +377,7 @@ PYEOF
     uid=$(strfield "$(jj "$db" "$ha" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
-    j "$db" "$ha" user address "$waddr" --signature "$sig" >/dev/null 2>&1
+    j "$db" "$ha" user blockchain-address "$waddr" --signature "$sig" >/dev/null 2>&1
     assert_eq "sepolia.address_registered" "${waddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" blockchain_address)"
 
     # Pay in, and wait out L1 finality. This is the assertion: the kernel credits nothing until the

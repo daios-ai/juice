@@ -16,7 +16,7 @@ func emptyStory() *story {
 
 func tx(id, parent, trace, status string, gross, fee, net, refund int64) map[string]any {
 	return map[string]any{"id": id, "parent_trace_id": parent, "trace_id": trace,
-		"status": status, "action_name": "a", "gross": float64(gross), "fee": float64(fee),
+		"status": status, "action": "a@k/a", "gross": float64(gross), "fee": float64(fee),
 		"net": float64(net), "refund": float64(refund)}
 }
 
@@ -200,7 +200,7 @@ func TestConservationCatchesMoneyAppearingAndVanishing(t *testing.T) {
 // A call must charge what its terms said. The remote case is the one that is easy to get wrong:
 // a failed remote call may legitimately charge, because the peer did paid work before failing.
 func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
-	// A proxy records the bare name of what it bought, so the test uses bare names throughout and
+	// A transaction records the action's address; the catalogue knows it by owner/name, and
 	// remoteness comes from where the action lives.
 	prices := map[string]int64{"ana/echo": 10, "cara/quote": 25}
 	owners := map[string]string{"ana/echo": "k1", "cara/quote": "k2"}
@@ -210,16 +210,16 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 
 	// On k1: ana/echo is local, cara/quote is remote.
 	ok := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "ana/echo", "status": "success", "gross": float64(10), "fee": float64(2), "net": float64(8)},
-		{"action_name": "cara/quote", "status": "success", "gross": float64(remoteQuote)},
-		{"action_name": "ana/echo", "status": "failure", "gross": float64(10), "refund": float64(10)},
+		{"action": "ana@hub/echo", "status": "success", "gross": float64(10), "fee": float64(2), "net": float64(8)},
+		{"action": "cara@shop/quote", "status": "success", "gross": float64(remoteQuote)},
+		{"action": "ana@hub/echo", "status": "failure", "gross": float64(10), "refund": float64(10)},
 	}}}
 	if b := priceFidelity(ok, prices, owners, rates, 1); len(b) != 0 {
 		t.Errorf("correctly priced calls were reported as violations: %v", b)
 	}
 
 	wrong := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "ana/echo", "status": "success", "gross": float64(12)},
+		{"action": "ana@hub/echo", "status": "success", "gross": float64(12)},
 	}}}
 	if len(priceFidelity(wrong, prices, owners, rates, 1)) == 0 {
 		t.Error("a call charged more than its price was accepted")
@@ -227,7 +227,7 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 
 	// A local failure keeps nothing.
 	keptOnFailure := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "ana/echo", "status": "failure", "gross": float64(10),
+		{"action": "ana@hub/echo", "status": "failure", "gross": float64(10),
 			"refund": float64(10), "fee": float64(2)},
 	}}}
 	if len(priceFidelity(keptOnFailure, prices, owners, rates, 1)) == 0 {
@@ -238,14 +238,14 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 	// that draw, and no import fee. Demanding a full refund here would be wrong.
 	receipt := `{"charge":20,"premium":2}`
 	remoteFail := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "cara/quote", "status": "failure", "gross": float64(remoteQuote),
+		{"action": "cara@shop/quote", "status": "failure", "gross": float64(remoteQuote),
 			"refund": float64(remoteQuote - 22), "remote_receipt_json": receipt},
 	}}}
 	if b := priceFidelity(remoteFail, prices, owners, rates, 1); len(b) != 0 {
 		t.Errorf("a failed remote call charging exactly its receipt's draw was rejected: %v", b)
 	}
 	overcharged := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "cara/quote", "status": "failure", "gross": float64(remoteQuote),
+		{"action": "cara@shop/quote", "status": "failure", "gross": float64(remoteQuote),
 			"refund": float64(0), "remote_receipt_json": receipt},
 	}}}
 	if len(priceFidelity(overcharged, prices, owners, rates, 1)) == 0 {
@@ -253,7 +253,7 @@ func TestPriceFidelityChecksLocalAndRemoteSeparately(t *testing.T) {
 	}
 	// A remote failure with no receipt has no justification for charging anything.
 	noReceipt := map[string]Snapshot{"k1": {Txs: []map[string]any{
-		{"action_name": "cara/quote", "status": "failure", "gross": float64(remoteQuote), "refund": float64(0)},
+		{"action": "cara@shop/quote", "status": "failure", "gross": float64(remoteQuote), "refund": float64(0)},
 	}}}
 	if len(priceFidelity(noReceipt, prices, owners, rates, 1)) == 0 {
 		t.Error("a failed remote call charged with no receipt to justify it, and was accepted")
