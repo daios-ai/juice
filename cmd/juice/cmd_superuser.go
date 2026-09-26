@@ -118,7 +118,7 @@ func rosterCmds(noun string) []*cobra.Command {
 	}
 	return []*cobra.Command{show, rename,
 		flip("suspend", "suspended", "Suspend a "+r.noun,
-			"Suspend a "+r.noun+": a suspended user cannot log in, and a suspended peer's calls are\nrefused. Reversible with `admin "+r.noun+" unsuspend`."),
+			"Suspend a "+r.noun+": a suspended user cannot log in, and a suspended peer's calls are refused. Reversible with `admin "+r.noun+" unsuspend`."),
 		flip("unsuspend", "unsuspended", "Restore a suspended "+r.noun,
 			"Restore a suspended "+r.noun+", lifting every refusal the suspension caused.")}
 }
@@ -283,11 +283,11 @@ func adminUserDepositCmd() *cobra.Command {
 		Short: "Credit an account for a payment received from outside",
 		Long: "Credit USER for a payment received from outside this kernel.\n\n" +
 			"Two forms:\n" +
-			"  admin user deposit USER AMOUNT --ref FACT   record a payment made outside the system\n" +
-			"  admin user deposit USER --ref TXHASH        assign a received payment to its sender\n\n" +
-			"Crediting cannot be undone: there is no matching withdraw, and the money is the\n" +
+			"  admin user deposit USER AMOUNT --ref FACT   record an outside payment\n" +
+			"  admin user deposit USER --ref TXHASH        assign a received payment\n\n" +
+			"Crediting cannot be undone: there is no matching withdraw, and the money is the " +
 			"account's once it is recorded.\n\n" +
-			"FACT names the payment: your own record of it where this world has no chain, or the\n" +
+			"FACT names the payment: your own record of it where this world has no chain, or the " +
 			"transaction that carried it where it has.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -360,9 +360,9 @@ func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect PEER",
 		Short: "Inspect a remote kernel (by public key or bound petname)",
-		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and\n" +
-			"reachability. The petname is the local name this kernel gave the peer (`admin rename`);\n" +
-			"the nickname is what the peer calls itself, shown for recognition but never usable as a\n" +
+		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and " +
+			"reachability. The petname is the local name this kernel gave the peer (`admin rename`); " +
+			"the nickname is what the peer calls itself, shown for recognition but never usable as a " +
 			"name. An offline peer degrades to locally cached data.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

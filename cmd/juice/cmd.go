@@ -483,10 +483,10 @@ func userCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create USER@KERNEL",
 		Short: "Create a user account on a kernel",
-		Long: "Create the account USER on KERNEL, which is a kernel this client knows (`juice kernel\n" +
-			"list` shows them). Creating an account does not log you in: `juice auth login USER@KERNEL`\n" +
+		Long: "Create the account USER on KERNEL, which is a kernel this client knows (`juice kernel " +
+			"list` shows them). Creating an account does not log you in: `juice auth login USER@KERNEL` " +
 			"does that.\n\n" +
-			"Prints a one-time recovery phrase; write it down. It is the only way to reset a lost\n" +
+			"Prints a one-time recovery phrase; write it down. It is the only way to reset a lost " +
 			"password (`juice auth recover`).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -580,8 +580,8 @@ func userTransferCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "transfer RECIPIENT AMOUNT",
 		Short: "Send money to another user",
-		Long: "Send money to another user, directly and without fee. RECIPIENT is another user's\n" +
-			"handle on this kernel (a public key also resolves a local account). AMOUNT is written\n" +
+		Long: "Send money to another user, directly and without fee. RECIPIENT is another user's " +
+			"handle on this kernel (a public key also resolves a local account). AMOUNT is written " +
 			"the way this kernel's money is written, for example 1.50.\n\n" +
 			"A transfer cannot be undone: the recipient owns the money once it is sent.",
 		Args: cobra.ExactArgs(2),
@@ -662,11 +662,11 @@ func userAddressCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "address [ADDRESS]",
 		Short: "Register the address you are paid at",
-		Long: "Register ADDRESS as the address you are paid at; `juice user me` shows the one\n" +
+		Long: "Register ADDRESS as the address you are paid at; `juice user me` shows the one " +
 			"registered.\n\n" +
-			"It is yours only once you prove it: this command prints a message naming this kernel,\n" +
-			"your account, and the address; sign that message with the wallet that holds the address\n" +
-			"and paste the signature back, or pass it with --signature. Registering also credits you\n" +
+			"It is yours only once you prove it: this command prints a message naming this kernel, " +
+			"your account, and the address; sign that message with the wallet that holds the address " +
+			"and paste the signature back, or pass it with --signature. Registering also credits you " +
 			"for payments already received from that address.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -769,9 +769,9 @@ func userWithdrawCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "withdraw AMOUNT",
 		Short: "Withdraw your credits",
-		Long: "Withdraw AMOUNT to the address you registered with `juice user address`; `juice user\n" +
+		Long: "Withdraw AMOUNT to the address you registered with `juice user address`; `juice user " +
 			"withdrawals` lists the ones you have made and where each stands.\n\n" +
-			"A withdrawal fixes its destination when it is made, so registering another address later\n" +
+			"A withdrawal fixes its destination when it is made, so registering another address later " +
 			"never redirects one already under way.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -861,8 +861,8 @@ func priceIn(price string) (int64, error) {
 
 // Shared placeholder definitions for the action commands' help.
 const (
-	actionPathHelp = "ACTION is an action id or owner/name; owner/path also matches every action beneath\nthat path (bob/mail covers bob/mail/send, never bob/mailer)."
-	actionRefHelp  = "ACTION is owner/name on this kernel, owner@kernel/name on a peer (kernel = its local\nname or public key), or a raw action id."
+	actionPathHelp = "ACTION is an action id or owner/name; owner/path also matches every action beneath that path (bob/mail covers bob/mail/send, never bob/mailer)."
+	actionRefHelp  = "ACTION is owner/name on this kernel, owner@kernel/name on a peer (kernel = its local name or public key), or a raw action id."
 )
 
 func actionCreateCmd() *cobra.Command {
@@ -937,7 +937,7 @@ func actionUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update ACTION|PATH",
 		Short: "Update an action or a path",
-		Long:  "Update an action or a path.\n\n" + actionPathHelp + "\n\nVisibility, price, and auth may target a whole path; a description, schema, or source\nneeds a target naming exactly one action. Changing source, schema, or price disables the\naction until re-enabled.",
+		Long:  "Update an action or a path.\n\n" + actionPathHelp + "\n\nVisibility, price, and auth may target a whole path; a description, schema, or source needs a target naming exactly one action. Changing source, schema, or price disables the action until re-enabled.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			// Pointer fields carry the absent/set distinction the contract defines (§14): a flag the
@@ -1183,7 +1183,7 @@ func actionShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "show ACTION",
 		Short: "Show action details",
-		Long: "Show action details, and what this kernel knows about how the action has behaved:\n" +
+		Long: "Show action details, and what this kernel knows about how the action has behaved: " +
 			"its own calls, what the provider reports, and what other kernels report.\n\n" + actionRefHelp,
 		Args: cobra.ExactArgs(1),
 		RunE: actionRunE(func(ctx context.Context, id, ref string) error {
@@ -1317,9 +1317,9 @@ func actionImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import NAME [SPEC_URL]",
 		Short: "Import an OpenAPI document as one application",
-		Long: "Import one OpenAPI document as the application at NAME, one action per operation.\n" +
-			"SPEC_URL is the http(s) address of the document; give it on the first import — later\n" +
-			"imports reuse the recorded one and reconcile changes, keeping each action's id,\n" +
+		Long: "Import one OpenAPI document as the application at NAME, one action per operation. " +
+			"SPEC_URL is the http(s) address of the document; give it on the first import — later " +
+			"imports reuse the recorded one and reconcile changes, keeping each action's id, " +
 			"history, credentials, and any price you set yourself.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -1482,7 +1482,7 @@ func stepCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create ACTION",
 		Short: "Create a step",
-		Long:  "Create a step: a prepaid continuation of a running call, addressed to one user who\nlater completes it with `step complete`. The step's price is reserved now, so completion\nneeds no further funds.\n\n" + actionRefHelp,
+		Long:  "Create a step: a prepaid continuation of a running call, addressed to one user who later completes it with `step complete`. The step's price is reserved now, so completion needs no further funds.\n\n" + actionRefHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pa := json.RawMessage("{}")
@@ -1595,7 +1595,7 @@ func stepCompleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "complete ID [JSON]",
 		Short: "Complete a waiting step",
-		Long:  "Complete a waiting step addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a\nfile. `step show` lists the fields still expected under allowed_input.",
+		Long:  "Complete a waiting step addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a file. `step show` lists the fields still expected under allowed_input.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			raw := ""
@@ -1718,7 +1718,7 @@ func runCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run ACTION [JSON]",
 		Short: "Run an action",
-		Long:  "Run an action and print its result. The advertised price is the most the whole call can\ncost you; a failed call refunds what was not consumed.\n\n" + actionRefHelp + "\n\n[JSON] is the arguments as a JSON object, default {}; @file.json reads it from a file.",
+		Long:  "Run an action and print its result. The advertised price is the most the whole call can cost you; a failed call refunds what was not consumed.\n\n" + actionRefHelp + "\n\n[JSON] is the arguments as a JSON object, default {}; @file.json reads it from a file.",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, cmdArgs []string) error {
 			argsStr := "{}"

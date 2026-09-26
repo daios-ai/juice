@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
@@ -91,7 +92,102 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", "Server base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "Show underlying error causes")
 	rootCmd.PersistentFlags().StringVar(&flagAs, "as", "", "Login to act as for this command, as USER@KERNEL")
+	cobra.AddTemplateFuncs(map[string]any{
+		"wrap":        func(s string) string { return wrapText(s, helpWidth(), 0) },
+		"wrapCommand": func(c *cobra.Command) string { return wrapText(c.Short, helpWidth(), 3+c.NamePadding()) },
+		"wrapFlags":   func(f interface{ FlagUsagesWrapped(int) string }) string { return f.FlagUsagesWrapped(helpWidth()) },
+	})
+	rootCmd.SetHelpTemplate(helpTemplate)
+	rootCmd.SetUsageTemplate(usageTemplate)
 }
+
+// maxHelpWidth is the column help is written for, the conventional terminal width.
+const maxHelpWidth = 80
+
+// helpWidth is the column help wraps at: the terminal's width, capped at maxHelpWidth, since long
+// lines read worse even on a wide screen; maxHelpWidth when there is no terminal. Help is printed on
+// stdout and the usage after a mistyped command on stderr, so either being a terminal is where the
+// text will be read.
+var helpWidth = func() int { return widthOf(term.GetSize) }
+
+// widthOf is helpWidth's rule over a terminal-size query, so the rule is testable without a terminal.
+func widthOf(size func(fd int) (width, height int, err error)) int {
+	for _, f := range []*os.File{os.Stdout, os.Stderr} {
+		if w, _, err := size(int(f.Fd())); err == nil && w > 0 {
+			return min(w, maxHelpWidth)
+		}
+	}
+	return maxHelpWidth
+}
+
+// wrapText fills s to width columns, word by word, counting runes. Its first line is taken to start
+// at column indent, where the caller has already written the text before it, and every later line is
+// indented to match. A blank line or one starting with a space (a list, an aligned table) is kept as
+// written; a word longer than the room left stays whole on a line of its own.
+func wrapText(s string, width, indent int) string {
+	var b strings.Builder
+	for i, line := range strings.Split(s, "\n") {
+		if i > 0 {
+			b.WriteString("\n" + strings.Repeat(" ", indent))
+		}
+		if line == "" || line[0] == ' ' {
+			b.WriteString(line)
+			continue
+		}
+		col := indent
+		for j, word := range strings.Fields(line) {
+			n := utf8.RuneCountInString(word)
+			if j > 0 && col+1+n > width {
+				b.WriteString("\n" + strings.Repeat(" ", indent))
+				col = indent
+			} else if j > 0 {
+				b.WriteString(" ")
+				col++
+			}
+			b.WriteString(word)
+			col += n
+		}
+	}
+	return b.String()
+}
+
+// helpTemplate and usageTemplate are Cobra v1.10.2's defaults with only the wrapping added: the
+// description, each command's summary, the flag lists, and the closing hint wrap at helpWidth.
+// Usage lines and examples stay as written, since a wrapped command no longer pastes.
+const helpTemplate = `{{with (or .Long .Short)}}{{wrap . | trimTrailingWhitespaces}}
+
+{{end}}{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}`
+
+const usageTemplate = `Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+Examples:
+{{.Example}}{{end}}{{if .HasAvailableSubCommands}}{{$cmds := .Commands}}{{if eq (len .Groups) 0}}
+
+Available Commands:{{range $cmds}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{wrapCommand .}}{{end}}{{end}}{{else}}{{range $group := .Groups}}
+
+{{.Title}}{{range $cmds}}{{if (and (eq .GroupID $group.ID) (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{wrapCommand .}}{{end}}{{end}}{{end}}{{if not .AllChildCommandsHaveGroup}}
+
+Additional Commands:{{range $cmds}}{{if (and (eq .GroupID "") (or .IsAvailableCommand (eq .Name "help")))}}
+  {{rpad .Name .NamePadding }} {{wrapCommand .}}{{end}}{{end}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+Flags:
+{{wrapFlags .LocalFlags | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
+
+Global Flags:
+{{wrapFlags .InheritedFlags | trimTrailingWhitespaces}}{{end}}{{if .HasHelpSubCommands}}
+
+Additional help topics:{{range .Commands}}{{if .IsAdditionalHelpTopicCommand}}
+  {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableSubCommands}}
+
+{{wrap (printf "Use \"%s [command] --help\" for more information about a command." .CommandPath)}}{{end}}
+`
 
 // juiceHome is the installation root every juice-family program shares: $JUICE_HOME if set, else
 // ~/.juice. It holds the kernels this machine runs (kernels/), what this client knows about

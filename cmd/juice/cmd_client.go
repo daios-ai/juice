@@ -42,12 +42,12 @@ func kernelAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add URL [NAME]",
 		Short: "Register a kernel this client can talk to, or follow one that has moved",
-		Long: "Register the kernel answering at URL, under NAME. Without NAME it is registered under the\n" +
-			"nickname the kernel advertises. Adding does not log in and does not select anything:\n" +
+		Long: "Register the kernel answering at URL, under NAME. Without NAME it is registered under the " +
+			"nickname the kernel advertises. Adding does not log in and does not select anything: " +
 			"`juice auth login USER@NAME` does that.\n\n" +
-			"Adding a kernel already known under that name succeeds: the same kernel at the same\n" +
-			"address changes nothing, and one that has moved has its address updated and keeps its\n" +
-			"logins. A different kernel under a name already taken is refused; give it another name,\n" +
+			"Adding a kernel already known under that name succeeds: the same kernel at the same " +
+			"address changes nothing, and one that has moved has its address updated and keeps its " +
+			"logins. A different kernel under a name already taken is refused; give it another name, " +
 			"or `juice kernel forget NAME` first, which also removes that name's logins.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -148,8 +148,8 @@ func kernelForgetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "forget NAME",
 		Short: "Remove this client's record of a kernel, and its logins",
-		Long: "Remove NAME from the kernels this client knows, along with the credentials of every\n" +
-			"login on it. Nothing on the kernel itself is touched: accounts, actions and money are\n" +
+		Long: "Remove NAME from the kernels this client knows, along with the credentials of every " +
+			"login on it. Nothing on the kernel itself is touched: accounts, actions and money are " +
 			"its own, and it goes on serving whoever else knows it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -322,9 +322,9 @@ func loginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login USER@KERNEL",
 		Short: "Log in on a kernel and act as that account",
-		Long: "Log in as USER on KERNEL, and act as that login from now on. KERNEL is a kernel this\n" +
+		Long: "Log in as USER on KERNEL, and act as that login from now on. KERNEL is a kernel this " +
 			"client knows — `juice kernel list` shows them, `juice kernel add URL` adds one.\n\n" +
-			"A login is one account at one kernel. It says both who a command acts as and which\n" +
+			"A login is one account at one kernel. It says both who a command acts as and which " +
 			"kernel it acts through, so nothing else has to be selected.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -547,8 +547,8 @@ func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout [USER@KERNEL]",
 		Short: "Log out, here or on a named login",
-		Long: "End a session and forget its credentials. With no argument it is the login in use, and\n" +
-			"nothing is selected afterwards — a command with no login says so rather than acting as\n" +
+		Long: "End a session and forget its credentials. With no argument it is the login in use, and " +
+			"nothing is selected afterwards — a command with no login says so rather than acting as " +
 			"whoever else happens to be logged in.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -707,8 +707,8 @@ func recoverCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "recover USER@KERNEL",
 		Short: "Reset a lost password using your recovery phrase",
-		Long: "Reset a lost password using the 12-word recovery phrase printed when the account was\n" +
-			"created. Recovering does not log you in: it sets a password, and `juice auth login`\n" +
+		Long: "Reset a lost password using the 12-word recovery phrase printed when the account was " +
+			"created. Recovering does not log you in: it sets a password, and `juice auth login` " +
 			"then uses it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {

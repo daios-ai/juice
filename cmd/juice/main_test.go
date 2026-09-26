@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/spf13/cobra"
@@ -129,6 +130,116 @@ func TestUseLinesUseUppercaseMetavariables(t *testing.T) {
 		}
 	}
 	walk(rootCmd)
+}
+
+// renderHelp renders c's help page as `juice … --help` prints it, at the given width.
+func renderHelp(t *testing.T, c *cobra.Command, width int) string {
+	t.Helper()
+	orig := helpWidth
+	helpWidth = func() int { return width }
+	defer func() { helpWidth = orig }()
+	var buf bytes.Buffer
+	c.SetOut(&buf)
+	defer c.SetOut(nil)
+	if err := c.Help(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+// TestHelpFitsWidth holds every help page to its width. At 80 every line fits; narrower, what is
+// wrapped fits, while usage lines, examples and a description's indented lines stay as written and
+// a word longer than the width stays whole. 60 is narrow yet above where pflag's flag wrapping gives
+// out (below 51 columns here, when one word fills a flag description's room).
+func TestHelpFitsWidth(t *testing.T) {
+	for _, width := range []int{maxHelpWidth, 60} {
+		var walk func(c *cobra.Command)
+		walk = func(c *cobra.Command) {
+			section := "description"
+			for _, line := range strings.Split(renderHelp(t, c, width), "\n") {
+				switch line {
+				case "Usage:", "Aliases:", "Examples:", "Available Commands:", "Flags:", "Global Flags:":
+					section = line
+				}
+				if utf8.RuneCountInString(line) <= width {
+					continue
+				}
+				verbatim := section == "Usage:" || section == "Examples:" || (section == "description" && strings.HasPrefix(line, " "))
+				if width < maxHelpWidth && (verbatim || len(strings.Fields(line)) == 1) {
+					continue
+				}
+				t.Errorf("%q at width %d: line of %d columns: %q", c.CommandPath(), width, utf8.RuneCountInString(line), line)
+			}
+			for _, sub := range c.Commands() {
+				walk(sub)
+			}
+		}
+		walk(rootCmd)
+	}
+}
+
+// TestHelpTextIsParagraphs keeps descriptions as unbroken paragraphs, which help wraps to the
+// terminal: a line break inside a paragraph would go ragged in any narrower window. Only a blank
+// line or an indented line (a list, an aligned table) may follow a break.
+func TestHelpTextIsParagraphs(t *testing.T) {
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		lines := strings.Split(c.Long, "\n")
+		for i := 1; i < len(lines); i++ {
+			if lines[i-1] != "" && lines[i] != "" && lines[i][0] != ' ' {
+				t.Errorf("%q: description breaks a paragraph before %q", c.CommandPath(), lines[i])
+			}
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(rootCmd)
+}
+
+func TestWrapText(t *testing.T) {
+	for _, tc := range []struct {
+		name, in      string
+		width, indent int
+		want          string
+	}{
+		{"fills to the width", "one two three four", 9, 0, "one two\nthree\nfour"},
+		{"counts runes, not bytes", "a — b — c", 5, 0, "a — b\n— c"},
+		{"indents what follows the first line", "one two three", 9, 4, "one\n    two\n    three"},
+		{"keeps blank and indented lines", "one two\n\n  x y z w\nthree", 7, 0, "one two\n\n  x y z w\nthree"},
+		{"keeps a long word whole", "a verylongword b", 5, 0, "a\nverylongword\nb"},
+	} {
+		if got := wrapText(tc.in, tc.width, tc.indent); got != tc.want {
+			t.Errorf("%s: wrapText(%q, %d, %d) = %q, want %q", tc.name, tc.in, tc.width, tc.indent, got, tc.want)
+		}
+	}
+}
+
+// TestHelpWidth: the terminal's width capped at 80, stderr's when stdout is not a terminal (the
+// usage after a mistyped command, or help piped into a pager), and 80 with no terminal at all.
+func TestHelpWidth(t *testing.T) {
+	stdout, stderr := int(os.Stdout.Fd()), int(os.Stderr.Fd())
+	for _, tc := range []struct {
+		name  string
+		sizes map[int]int
+		want  int
+	}{
+		{"narrow stdout", map[int]int{stdout: 60, stderr: 70}, 60},
+		{"wide stdout is capped", map[int]int{stdout: 200}, maxHelpWidth},
+		{"stderr when stdout is not a terminal", map[int]int{stderr: 50}, 50},
+		{"no terminal", map[int]int{}, maxHelpWidth},
+		{"a terminal reporting no width", map[int]int{stdout: 0}, maxHelpWidth},
+	} {
+		got := widthOf(func(fd int) (int, int, error) {
+			if w, ok := tc.sizes[fd]; ok {
+				return w, 24, nil
+			}
+			return 0, 0, errors.New("not a terminal")
+		})
+		if got != tc.want {
+			t.Errorf("%s: width %d, want %d", tc.name, got, tc.want)
+		}
+	}
 }
 
 func TestMain(m *testing.M) {

@@ -34,14 +34,14 @@ func kernelServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve WORLD",
 		Short: "Start a kernel on a network",
-		Long: "Start this installation's kernel on the network WORLD, or create it if this is its\n" +
+		Long: "Start this installation's kernel on the network WORLD, or create it if this is its " +
 			"first boot.\n\n" +
-			"A world is a file in ~/.juice/worlds/ describing one network: the money it uses and the\n" +
-			"servers to meet it through. The worlds this build ships are written there the first time\n" +
-			"you serve, and yours to edit; adding a file adds a network. One installation runs one\n" +
+			"A world is a file in ~/.juice/worlds/ describing one network: the money it uses and the " +
+			"servers to meet it through. The worlds this build ships are written there the first time " +
+			"you serve, and yours to edit; adding a file adds a network. One installation runs one " +
 			"kernel per world, in ~/.juice/kernels/WORLD/.\n\n" +
-			"A first boot fixes what a kernel cannot revise — the network it serves, the name it calls\n" +
-			"itself on that network, and its signing key — and asks for whatever its configuration does\n" +
+			"A first boot fixes what a kernel cannot revise — the network it serves, the name it calls " +
+			"itself on that network, and its signing key — and asks for whatever its configuration does " +
 			"not already say.",
 		// Cobra's own arity message names an argument count; an operator needs the name.
 		Args: func(_ *cobra.Command, args []string) error {
