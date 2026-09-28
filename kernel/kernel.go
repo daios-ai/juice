@@ -2295,7 +2295,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 				return nil, ErrUnauthorized.Wrap("the caller's paying address is not proven")
 			}
 		}
-		if dmax > 0 && payer == "" && k.rail != nil && k.rail.Address() != "" {
+		if dmax > 0 && payer == "" && k.hasAddresses() {
 			return nil, ErrInvalidInput.Wrap("a paid call must say where it will be paid from on this world")
 		}
 		buyer.BlockchainAddress = payer

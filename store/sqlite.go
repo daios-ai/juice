@@ -328,6 +328,16 @@ func strVal(s *string) string {
 
 // ---- Accounts ----
 
+// liveUser is Account.IsLiveUser in SQL: an account holding a handle is a local user, a peer holds
+// none (the accounts CHECK), and a purged peer's tombstone holds none either. alias qualifies the
+// column in a join ("a"), or is empty.
+func liveUser(alias string) string {
+	if alias != "" {
+		alias += "."
+	}
+	return "COALESCE(" + alias + "handle,'') <> ''"
+}
+
 const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,blockchain_address,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.Account) error {
@@ -572,7 +582,7 @@ func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.Accoun
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+userCols+` FROM accounts WHERE kernel_public_key IS NULL AND handle IS NOT NULL
+		`SELECT `+userCols+` FROM accounts WHERE `+liveUser("")+`
 		 ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list accounts")
@@ -744,16 +754,22 @@ func (s *DB) DeleteActionAndGrants(ctx context.Context, id string) error {
 	})
 }
 
-func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*kernel.Action, error) {
-	// Public always; local only when the caller is local (§4/§14). Peers never reach this via a
-	// session, so includeLocal is safe to key on session presence upstream.
-	visFilter := `a.visibility='public'`
+// visibleTo is canCall in SQL for every caller but the owner, over actions a joined to their owner
+// u: live (active, not deleted, owner not suspended) and public, or also local when the caller is a
+// local user (D5). What an owner may see of their own is a separate listing.
+func visibleTo(includeLocal bool) string {
+	vis := `a.visibility='public'`
 	if includeLocal {
-		visFilter = `a.visibility IN ('public','local')`
+		vis = `a.visibility IN ('public','local')`
 	}
+	return `a.active=1 AND a.deleted_at IS NULL AND u.suspended_at IS NULL AND ` + vis
+}
+
+func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*kernel.Action, error) {
+	// Peers never reach this via a session, so includeLocal is safe to key on session presence upstream.
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
-		 WHERE a.active=1 AND `+visFilter+` AND a.deleted_at IS NULL AND u.suspended_at IS NULL
+		 WHERE `+visibleTo(includeLocal)+`
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list visible actions")
@@ -768,8 +784,8 @@ func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, o
 // and the caller filters.
 func (s *DB) ListExportableActionsAfter(ctx context.Context, afterActionID string, limit int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN "accounts" u ON u.id=a.owner_user_id
-		 WHERE a.active=1 AND a.visibility='public' AND a.deleted_at IS NULL AND u.suspended_at IS NULL
+		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
+		 WHERE `+visibleTo(false)+`
 		   AND a.id > ?
 		 ORDER BY a.id ASC LIMIT ?`, afterActionID, limit)
 	if err != nil {
@@ -878,20 +894,10 @@ func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON,
 // is prepaid — a peer row funds nothing (P10), so there is no admission clause and no row may go
 // negative. A zero amount is a no-op. Returns ErrInsufficientFunds when the balance is short.
 func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount int64) error {
-	if amount == 0 {
-		return nil
+	if err := debitAvailable(ctx, tx, accountWallet, userID, amount, "lock reserve"); err != nil {
+		return err
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET available=available-?, locked=locked+? WHERE id=? AND available>=?`,
-		amount, amount, userID, amount,
-	)
-	if err != nil {
-		return dbErr(err, "lock reserve: deduct user")
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInsufficientFunds.Wrap("insufficient user balance")
-	}
-	return nil
+	return lockFunds(ctx, tx, accountWallet, userID, amount, "lock reserve")
 }
 
 // admitExposure raises the kernel's unpaid-delivered-service counter by `amount`, but only while the
@@ -1096,15 +1102,8 @@ func (s *DB) BeginTaskCall(ctx context.Context, taskID string, t *kernel.Trace) 
 		// Guard locked>=price like BeginSubcall so a broken park invariant surfaces as a typed
 		// kernel error rather than a raw CHECK(locked>=0) constraint failure.
 		if parentTraceID != nil {
-			res, lerr := tx.ExecContext(ctx,
-				`UPDATE traces SET locked=locked-? WHERE id=? AND locked>=?`,
-				price, *parentTraceID, price,
-			)
-			if lerr != nil {
-				return dbErr(lerr, "begin task call: release parent trace lock")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInvalidState.Wrap("task park invariant violated: parent trace locked < task price")
+			if err := unlockFunds(ctx, tx, traceWallet, *parentTraceID, price, "begin task call: task park"); err != nil {
+				return err
 			}
 		}
 		// The completer C funds its own stakes — the delivered value, and a lottery ticket when the
@@ -1286,17 +1285,26 @@ func (s *DB) closeProcessTx(ctx context.Context, tx *sql.Tx, processID string) e
 	if err != nil {
 		return dbErr(err, "close process: read")
 	}
-	if available > 0 {
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE accounts SET available=available+?, locked=locked-? WHERE id=?`,
-			available, available, ownerID); err != nil {
-			return dbErr(err, "close process: return available to owner")
-		}
+	return closeProcessWallet(ctx, tx, processID, ownerID, available, "close process")
+}
+
+// closeProcessWallet is the one way a process closes: what it still holds returns to its owner, whose
+// lock on it ends, and the process is closed empty.
+func closeProcessWallet(ctx context.Context, tx *sql.Tx, processID, ownerID string, available int64, op string) error {
+	if err := unlockFunds(ctx, tx, accountWallet, ownerID, available, op); err != nil {
+		return err
 	}
-	_, err = tx.ExecContext(ctx,
-		`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
+	if err := creditAvailable(ctx, tx, accountWallet, ownerID, available, op); err != nil {
+		return err
+	}
+	if ok, err := drainAvailable(ctx, tx, processWallet, processID, available, op); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("%s: process %q moved while closing", op, processID)
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE processes SET status='closed', ended_at=? WHERE id=?`,
 		timeToStr(time.Now().UTC()), processID)
-	return dbErr(err, "close process: close")
+	return dbErr(err, op)
 }
 
 // cancelTaskSubtree cancels all waiting and running tasks whose parent_trace_id is anywhere
@@ -1355,15 +1363,10 @@ func releaseStake(ctx context.Context, tx *sql.Tx, traceID string) error {
 	if stake == 0 {
 		return nil
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET locked=locked-?, available=available+? WHERE id=?`, stake, stake, callerC)
-	if err != nil {
-		return dbErr(err, "release stake")
+	if err := unlockFunds(ctx, tx, accountWallet, callerC, stake, "release stake"); err != nil {
+		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return fmt.Errorf("release stake: caller %q not found: funds would be destroyed", callerC)
-	}
-	return nil
+	return creditAvailable(ctx, tx, accountWallet, callerC, stake, "release stake")
 }
 
 // releaseTransferValue disposes of the value a transfer locked on the caller C (§13). The value channel
@@ -1378,21 +1381,10 @@ func releaseTransferValue(ctx context.Context, tx *sql.Tx, callerC string, value
 	if toID == "" {
 		return fmt.Errorf("transfer settle: value %d > 0 but no recipient: funds would be destroyed", value)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE accounts SET locked=locked-? WHERE id=?`, value, callerC)
-	if err != nil {
-		return dbErr(err, "transfer settle: release caller lock")
+	if err := unlockFunds(ctx, tx, accountWallet, callerC, value, "transfer settle"); err != nil {
+		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return fmt.Errorf("transfer settle: caller %q not found: funds would be destroyed", callerC)
-	}
-	res, err = tx.ExecContext(ctx, `UPDATE accounts SET available=available+? WHERE id=?`, value, toID)
-	if err != nil {
-		return dbErr(err, "transfer settle: credit recipient")
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return fmt.Errorf("transfer settle: recipient %q not found: funds would be destroyed", toID)
-	}
-	return nil
+	return creditAvailable(ctx, tx, accountWallet, toID, value, "transfer settle")
 }
 
 // transferValueOf reads a trace's value snapshot: the amount locked on the caller, the beneficiary it
@@ -1505,58 +1497,29 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		// between moves it — so the statement that zeroes it says so; otherwise the outcome is
 		// recorded and the sweep settles from fresh numbers.
 		taxable := net + fee
-		res, err := tx.ExecContext(ctx,
-			`UPDATE traces SET available=0 WHERE id=? AND available=?`, traceID, taxable)
+		drained, err := drainAvailable(ctx, tx, traceWallet, traceID, taxable, "commit call")
 		if err != nil {
-			return dbErr(err, "commit call: zero trace available")
+			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if !drained {
 			deferred = true
 			return recordOutcome(ctx, tx, ktx, taskID)
 		}
 		// Release the full gross from the caller's lock row (per callerWalletKind, see doc above).
 		// Each settled subcall already released its own gross from this row, so it now holds
 		// exactly this call's gross.
-		if ktx.Gross > 0 {
-			switch callerWalletKind {
-			case kernel.CallerProcess:
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE processes SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
-					return dbErr(err, "commit call: release process lock")
-				}
-			case kernel.CallerTrace:
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE traces SET locked=locked-? WHERE id=?`, ktx.Gross, callerWalletID); err != nil {
-					return dbErr(err, "commit call: release parent trace lock")
-				}
-				// CallerTask: BeginTaskCall already released the lock; nothing to do here.
-			}
+		if err := refundCaller(ctx, tx, callerWalletKind, callerWalletID, ktx.ProcessID, 0, ktx.Gross, "commit call"); err != nil {
+			return err
 		}
-		// Decrement owner.locked by taxable (only the portion that settles to target/sys).
-		if taxable > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET locked=locked-? WHERE id=?`, taxable, ktx.OwnerUserID); err != nil {
-				return dbErr(err, "commit call: debit owner locked")
-			}
+		// The owner's lock ends on the taxable portion, which settles to the target and sys.
+		if err := unlockFunds(ctx, tx, accountWallet, ktx.OwnerUserID, taxable, "commit call: owner"); err != nil {
+			return err
 		}
-		if net > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, net, targetUserID); err != nil {
-				return dbErr(err, "commit call: credit target")
-			}
+		if err := creditAvailable(ctx, tx, accountWallet, targetUserID, net, "commit call: target"); err != nil {
+			return err
 		}
-		if fee > 0 {
-			if feeRecipientID == "" {
-				return fmt.Errorf("commit call: fee %d > 0 but feeRecipientID is empty: funds would be destroyed", fee)
-			}
-			res, feeErr := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, fee, feeRecipientID)
-			if feeErr != nil {
-				return dbErr(feeErr, "commit call: credit fee recipient")
-			}
-			if n, _ := res.RowsAffected(); n != 1 {
-				return fmt.Errorf("commit call: fee recipient %q not found: funds would be destroyed", feeRecipientID)
-			}
+		if err := creditAvailable(ctx, tx, accountWallet, feeRecipientID, fee, "commit call: fee recipient"); err != nil {
+			return err
 		}
 		if err := postSettlement(ctx, tx, ktx.OwnerUserID, receipt.CreatedAt, ktx.ID,
 			ledgerPosting{"net_", targetUserID, net}, ledgerPosting{"fee_", feeRecipientID, fee}); err != nil {
@@ -1596,12 +1559,9 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		if deferred, err = settleGuard(ctx, tx, ktx, taskID); err != nil || deferred {
 			return err
 		}
-		// Read trace.available before zeroing.
-		var traceAvailable int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT available FROM traces WHERE id=?`, traceID,
-		).Scan(&traceAvailable); err != nil {
-			return dbErr(err, "commit failed call: read trace available")
+		traceAvailable, err := availableOf(ctx, tx, traceWallet, traceID, "commit failed call: read trace available")
+		if err != nil {
+			return err
 		}
 		// Cancel subtree tasks and collect their parked prices.
 		taskPrices, err := s.cancelTaskSubtree(ctx, tx, traceID)
@@ -1620,10 +1580,10 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 		if err != nil {
 			return err
 		}
-		// Zero trace.available.
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
-			return dbErr(err, "commit failed call: zero trace available")
+		if ok, err := drainAvailable(ctx, tx, traceWallet, traceID, traceAvailable, "commit failed call"); err != nil {
+			return err
+		} else if !ok {
+			return fmt.Errorf("commit failed call: trace %q moved while settling", traceID)
 		}
 		if err = refundCaller(ctx, tx, callerWalletKind, callerWalletID, ktx.ProcessID, refund, gross, "commit failed call"); err != nil {
 			return err
@@ -1673,42 +1633,35 @@ func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction
 		taxable := obligation + importFee
 		refund := q - taxable
 		ktx.Refund = refund
-		// Zero trace.available.
-		if _, err := tx.ExecContext(ctx, `UPDATE traces SET available=0 WHERE id=?`, traceID); err != nil {
-			return dbErr(err, "commit remote settlement: zero trace available")
+		traceAvailable, err := availableOf(ctx, tx, traceWallet, traceID, "commit remote settlement: read trace available")
+		if err != nil {
+			return err
+		}
+		if ok, err := drainAvailable(ctx, tx, traceWallet, traceID, traceAvailable, "commit remote settlement"); err != nil {
+			return err
+		} else if !ok {
+			return fmt.Errorf("commit remote settlement: trace %q moved while settling", traceID)
 		}
 		if err := refundCaller(ctx, tx, callerWalletKind, callerWalletID, ktx.ProcessID, refund, q, "commit remote settlement"); err != nil {
 			return err
 		}
-		// Decrement owner.locked by taxable (permanently committed portion).
-		if taxable > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET locked=locked-? WHERE id=?`, taxable, ktx.OwnerUserID); err != nil {
-				return dbErr(err, "commit remote settlement: debit owner locked")
-			}
+		// The owner's lock ends on the taxable portion, which the budget pays.
+		if err := unlockFunds(ctx, tx, accountWallet, ktx.OwnerUserID, taxable, "commit remote settlement: owner"); err != nil {
+			return err
 		}
 		// The obligation leaves the budget and returns to the caller C, who owes it on the rail rather
 		// than through any local row; the payout below takes back exactly what the draw says must be
 		// sent. The stake is released from the trace's own snapshot, so it comes back on every path —
 		// including a rejection, which owes nothing and would otherwise strand it.
-		if obligation > 0 {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, obligation, ktx.CallerUserID); err != nil {
-				return dbErr(err, "commit remote settlement: return obligation to caller")
-			}
+		if err := creditAvailable(ctx, tx, accountWallet, ktx.CallerUserID, obligation, "commit remote settlement: obligation to caller"); err != nil {
+			return err
 		}
 		if err := releaseStake(ctx, tx, traceID); err != nil {
 			return err
 		}
 		// Retain the import fee locally on the origin's @sys.
-		if importFee > 0 {
-			if feeRecipientID == "" {
-				return fmt.Errorf("commit remote settlement: importFee %d > 0 but feeRecipientID is empty", importFee)
-			}
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, importFee, feeRecipientID); err != nil {
-				return dbErr(err, "commit remote settlement: credit fee recipient")
-			}
+		if err := creditAvailable(ctx, tx, accountWallet, feeRecipientID, importFee, "commit remote settlement: fee recipient"); err != nil {
+			return err
 		}
 		// The postings for the two movements above. The obligation is one only when C is not the
 		// payer: in a composed call it leaves the process owner's budget for another owner's
@@ -1842,16 +1795,16 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			}
 			rows.Close()
 			for _, tp := range traceParks {
-				if _, err2 = tx.ExecContext(ctx,
-					`UPDATE traces SET locked=locked-? WHERE id=?`, tp.amount, tp.traceID); err2 != nil {
-					return dbErr(err2, "end process: release trace lock")
+				if err2 = unlockFunds(ctx, tx, traceWallet, tp.traceID, tp.amount, "end process: trace park"); err2 != nil {
+					return err2
 				}
 			}
 			// Return parked prices to owner as available.
-			if _, err2 = tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+?, locked=locked-? WHERE id=?`,
-				parkedTotal, parkedTotal, ownerID); err2 != nil {
-				return dbErr(err2, "end process: return parked prices to owner")
+			if err2 = unlockFunds(ctx, tx, accountWallet, ownerID, parkedTotal, "end process: parked prices"); err2 != nil {
+				return err2
+			}
+			if err2 = creditAvailable(ctx, tx, accountWallet, ownerID, parkedTotal, "end process: parked prices"); err2 != nil {
+				return err2
 			}
 		}
 		if _, err = tx.ExecContext(ctx,
@@ -1859,19 +1812,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 			processID); err != nil {
 			return dbErr(err, "end process: cancel waiting tasks")
 		}
-		now := timeToStr(time.Now().UTC())
-		returnAmount := available
-		if returnAmount > 0 {
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+?, locked=locked-? WHERE id=?`,
-				returnAmount, returnAmount, ownerID); err != nil {
-				return dbErr(err, "end process: return available to owner")
-			}
-		}
-		_, err = tx.ExecContext(ctx,
-			`UPDATE processes SET status='closed', available=0, locked=0, ended_at=? WHERE id=?`,
-			now, processID)
-		return dbErr(err, "end process: close")
+		return closeProcessWallet(ctx, tx, processID, ownerID, available, "end process")
 	})
 }
 
@@ -2265,13 +2206,11 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 				return kernel.ErrInvalidState.Wrap("completion trace has descendant transactions; cannot re-park")
 			}
 			// Move funds from completion trace's available back to parent trace's locked.
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE traces SET available=available-? WHERE id=?`, price, *completionTraceID); err != nil {
-				return dbErr(err, "reset task and repark: drain completion trace")
+			if err = debitAvailable(ctx, tx, traceWallet, *completionTraceID, price, "reset task and repark"); err != nil {
+				return err
 			}
-			if _, err = tx.ExecContext(ctx,
-				`UPDATE traces SET locked=locked+? WHERE id=?`, price, *parentTraceID); err != nil {
-				return dbErr(err, "reset task and repark: repark to parent trace")
+			if err = lockFunds(ctx, tx, traceWallet, *parentTraceID, price, "reset task and repark"); err != nil {
+				return err
 			}
 		}
 		// The task's reference to its completion trace goes first: the row it names is deleted next,
@@ -2397,27 +2336,28 @@ func (s *DB) ListPendingRemoteTraces(ctx context.Context) ([]*kernel.Trace, erro
 // refundCaller returns one settled call's refund to the wallet that funded it and releases the
 // lock that call held there, the single rule every settlement path uses (§6).
 func refundCaller(ctx context.Context, tx *sql.Tx, kind, walletID, processID string, refund, gross int64, op string) error {
+	w := processWallet
 	switch kind {
 	case kernel.CallerProcess:
-		_, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available+?, locked=locked-? WHERE id=?`, refund, gross, walletID)
-		return dbErr(err, op+": refund process")
+		// Only the root locks its process, so its settlement ends the whole lock, whatever gross a
+		// recovered root records: one whose budget went into a task completion records none.
+		if err := tx.QueryRowContext(ctx, `SELECT locked FROM processes WHERE id=?`, walletID).Scan(&gross); err != nil {
+			return dbErr(err, op+": read process lock")
+		}
 	case kernel.CallerTrace:
 		// The caller trace is unsettled by construction: a trace settles only after every trace
 		// beneath it (D3), so this refund always finds a live wallet to return to.
-		_, err := tx.ExecContext(ctx,
-			`UPDATE traces SET available=available+?, locked=locked-? WHERE id=?`, refund, gross, walletID)
-		return dbErr(err, op+": refund parent trace")
+		w = traceWallet
 	case kernel.CallerTask:
 		// BeginTaskCall already released the parent trace lock. Return refund to the process.
-		if refund == 0 {
-			return nil
-		}
-		_, err := tx.ExecContext(ctx,
-			`UPDATE processes SET available=available+? WHERE id=?`, refund, processID)
-		return dbErr(err, op+": refund task to process")
+		return creditAvailable(ctx, tx, processWallet, processID, refund, op+": refund task to process")
+	default:
+		return nil
 	}
-	return nil
+	if err := unlockFunds(ctx, tx, w, walletID, gross, op+": caller lock"); err != nil {
+		return err
+	}
+	return creditAvailable(ctx, tx, w, walletID, refund, op+": refund caller")
 }
 
 // settleGuard is the order every settlement commit obeys (D3): a trace settles only after every

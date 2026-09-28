@@ -61,6 +61,11 @@ type Rail interface {
 	Verify(msg []byte, address, sig string) (string, error)
 }
 
+// hasAddresses reports whether this kernel's world pays to addresses (D23). Every payment rule that
+// differs between the two kinds of world — a payer proved at admission, a vault proved before a
+// transfer, a reveal or a paid that is itself the payment — asks here.
+func (k *Kernel) hasAddresses() bool { return k.rail != nil && k.rail.Address() != "" }
+
 // RailStatus is where an external movement stands. Only finalized facts are confirmed or failed.
 type RailStatus string
 
@@ -434,9 +439,9 @@ func (k *Kernel) SetBlockchainAddress(ctx context.Context, callerID, address, si
 	if err != nil {
 		return nil, nil, err
 	}
-	self, err := k.store.GetConfig(ctx, "signing_public_key")
-	if err != nil {
-		return nil, nil, err
+	self := k.SelfKey(ctx)
+	if self == "" {
+		return nil, nil, ErrInternal.Wrap("signing key not configured")
 	}
 	canonical, err := rail.Verify(BlockchainAddressMessage(self, u.ID, address), address, signature)
 	if err != nil {
@@ -472,11 +477,11 @@ func (k *Kernel) BlockchainIdentity(ctx context.Context) (address, proof string)
 	if address == "" {
 		return "", ""
 	}
-	self, err := k.store.GetConfig(ctx, "signing_public_key")
-	if err != nil {
+	self := k.SelfKey(ctx)
+	if self == "" {
 		return "", ""
 	}
-	proof, err = k.rail.Sign(blockchainIdentityMessage(self, k.cfg.Network.Fingerprint, address))
+	proof, err := k.rail.Sign(blockchainIdentityMessage(self, k.cfg.Network.Fingerprint, address))
 	if err != nil {
 		return "", ""
 	}
@@ -504,7 +509,7 @@ func (k *Kernel) verifyBlockchainIdentity(peerKey, address, proof string) (strin
 // since a payment from the peer could never be recognised; where it has none, nothing is recorded.
 func (k *Kernel) ObservePeerVault(ctx context.Context, peerKey, address, proof string) (string, error) {
 	if address == "" {
-		if k.rail != nil && k.rail.Address() != "" {
+		if k.hasAddresses() {
 			return "", ErrUnauthorized.Wrap("the peer proved no blockchain address")
 		}
 		return "", nil

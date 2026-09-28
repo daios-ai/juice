@@ -71,13 +71,10 @@ const CatalogPageSizeForTest = catalogPageSize
 // TestOwnName is the name every test kernel calls itself, so a test address reads `alice@k`.
 const TestOwnName = "k"
 
-// SelfKeyForTest is the key this kernel knows itself by, as ResolveKernel reads it.
-func (k *Kernel) SelfKeyForTest(ctx context.Context) string { return k.selfKey(ctx) }
-
 // BindOwnNameForTest gives a test kernel its own name the way boot does (D15), under a fixed test
 // key when no signing key is configured yet, so ResolveKernel knows "this kernel" from the start.
 func (k *Kernel) BindOwnNameForTest(ctx context.Context) {
-	if k.selfKey(ctx) == "" {
+	if k.SelfKey(ctx) == "" {
 		_ = k.store.SetConfig(ctx, "signing_public_key", base64.RawURLEncoding.EncodeToString(testOwnKey.Public().(ed25519.PublicKey)))
 	}
 	if err := k.BindOwnName(ctx, TestOwnName); err != nil {
@@ -86,3 +83,7 @@ func (k *Kernel) BindOwnNameForTest(ctx context.Context) {
 }
 
 var testOwnKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+
+// CanCall exposes the visibility predicate so an external test can hold the store's SQL copy of it
+// to the same answers.
+var CanCall = canCall

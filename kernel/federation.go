@@ -131,7 +131,7 @@ func (k *Kernel) prepareRemoteTransfer(ctx context.Context, amount int64, ref st
 	}
 	peer, err := k.store.ReadUser(ctx, p.AccountID)
 	if err != nil || peer == nil || peer.KernelPublicKey == "" {
-		return nil, ErrNotFound.Wrapf("user %s not found", ref)
+		return nil, errUserNotFound(ref)
 	}
 	return &TransferEffect{Amount: amount, Dest: p.RemoteID, Peer: peer.KernelPublicKey}, nil
 }
@@ -1108,8 +1108,9 @@ func normalizeTaskInput(raw json.RawMessage) ([]byte, string, error) {
 	return input, sha256Hex(string(input)), nil
 }
 
-// selfKey is this kernel's own base64url public key — the counterparty it signs as.
-func (k *Kernel) selfKey(ctx context.Context) string {
+// SelfKey is this kernel's own base64url public key — the counterparty it signs as, and the name
+// every surface gives it. It is the one reader of the stored key.
+func (k *Kernel) SelfKey(ctx context.Context) string {
 	key, _ := k.store.GetConfig(ctx, "signing_public_key")
 	return key
 }
@@ -1149,7 +1150,7 @@ func (k *Kernel) PeerTasksAwaitingUs(ctx context.Context, peerKey, forUserID str
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
-	sig, ts, err := k.SignTaskList(k.selfKey(ctx), peerKey, forUserID)
+	sig, ts, err := k.SignTaskList(k.SelfKey(ctx), peerKey, forUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -1179,7 +1180,7 @@ func (k *Kernel) CompletePeerTask(ctx context.Context, peerKey, taskID string, r
 	}
 	idempotencyKey := TaskIdempotencyKey(peerKey, taskID, inputHash)
 	superuser := forUserID != "" && k.IsSuperuser(ctx, forUserID)
-	sig, ts, err := k.SignTask(taskID, k.selfKey(ctx), peerKey, idempotencyKey, inputHash, forUserID, superuser)
+	sig, ts, err := k.SignTask(taskID, k.SelfKey(ctx), peerKey, idempotencyKey, inputHash, forUserID, superuser)
 	if err != nil {
 		return nil, err
 	}
@@ -1254,7 +1255,7 @@ func (k *Kernel) EnsureKernelAccount(ctx context.Context, publicKey string) (*Ac
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return nil, err
 	}
-	if publicKey == k.selfKey(ctx) {
+	if publicKey == k.SelfKey(ctx) {
 		return nil, ErrInvalidInput.Wrap("a kernel holds no account with itself")
 	}
 	if existing, err := k.store.ReadAccountByKernelKey(ctx, publicKey); err == nil && existing != nil {
@@ -1303,7 +1304,7 @@ func (k *Kernel) RenameKernel(ctx context.Context, operatorID, publicKey, petnam
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return "", err
 	}
-	if publicKey == k.selfKey(ctx) {
+	if publicKey == k.SelfKey(ctx) {
 		return "", ErrInvalidInput.Wrap("that is this kernel; its name is kernel_handle in its config.json")
 	}
 	return k.BindPetname(ctx, publicKey, petname, true)
@@ -1316,7 +1317,7 @@ func (k *Kernel) OwnName(ctx context.Context) string {
 	if v := k.ownName.Load(); v != nil {
 		return v.(string)
 	}
-	if rk, err := k.store.ReadKernel(ctx, k.selfKey(ctx)); err == nil && rk != nil && rk.Petname != "" {
+	if rk, err := k.store.ReadKernel(ctx, k.SelfKey(ctx)); err == nil && rk != nil && rk.Petname != "" {
 		return rk.Petname
 	}
 	return ""
@@ -1327,7 +1328,7 @@ func (k *Kernel) OwnName(ctx context.Context) string {
 // A peer already holding the name is a refusal with the remedy in it — the operator renames the
 // peer or the kernel — because a boot that silently took another name would rename every user here.
 func (k *Kernel) BindOwnName(ctx context.Context, name string) error {
-	self := k.selfKey(ctx)
+	self := k.SelfKey(ctx)
 	if self == "" {
 		return ErrInvalidState.Wrap("signing key not configured")
 	}
@@ -1357,8 +1358,7 @@ func (k *Kernel) KernelName(ctx context.Context, publicKey string) string {
 // ListKernels returns the whole `admin peers` roster (§14): every known kernel, counterparties and
 // discovery-only alike, from one store query. selfKey is excluded.
 func (k *Kernel) ListKernels(ctx context.Context, includeSuspended bool, limit, offset int) ([]*RemoteKernelView, error) {
-	selfKey, _ := k.store.GetConfig(ctx, "signing_public_key")
-	return k.store.ListKernels(ctx, selfKey, includeSuspended, limit, offset)
+	return k.store.ListKernels(ctx, k.SelfKey(ctx), includeSuspended, limit, offset)
 }
 
 // PeerKeys returns the public keys of all counterparties (kernels holding a live account here) —
@@ -1427,7 +1427,7 @@ func (k *Kernel) DiscoveryCandidates(ctx context.Context, directory []string) []
 		}
 	}
 	out := make([]string, 0, len(lastSeen))
-	self, configured := k.ourKeyB64(), k.selfKey(ctx)
+	self, configured := k.ourKeyB64(), k.SelfKey(ctx)
 	for key := range lastSeen {
 		if key != "" && key != self && key != configured {
 			out = append(out, key)
@@ -1754,7 +1754,7 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	}
 	// Evict directory-only discovered kernels stale past the same horizon, so the discovery cache
 	// stays bounded on a busy network (peer-backed kernels are handled by the loop above).
-	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.selfKey(ctx)); derr != nil {
+	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.SelfKey(ctx)); derr != nil {
 		logger.Error("discovery.purge.failed", "error", derr)
 	} else if evicted > 0 {
 		logger.Info("discovery.purged", "kernels", evicted)

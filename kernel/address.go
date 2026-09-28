@@ -36,6 +36,10 @@ func ParseAddress(s string) (Address, error) {
 	return Address{Handle: handle, Kernel: kernelSeg, Name: name}, nil
 }
 
+// errUserNotFound is the one refusal for a user reference that names nobody, so every resolver
+// reports a miss in the same words and the reference as it was written.
+func errUserNotFound(ref string) error { return ErrNotFound.Wrapf("user %s not found", ref) }
+
 // String renders handle@kernel[/name].
 func (a Address) String() string {
 	if a.Name == "" {
@@ -75,7 +79,7 @@ func (k *Kernel) ResolveKernel(ctx context.Context, seg string) (KernelRef, erro
 	} else {
 		return KernelRef{}, ErrNotFound.Wrapf("kernel %q is not a known name or key", seg)
 	}
-	if key == k.selfKey(ctx) {
+	if key == k.SelfKey(ctx) {
 		return KernelRef{Key: key, Local: true}, nil
 	}
 	acct, _ := k.store.ReadAccountByKernelKey(ctx, key)
@@ -104,7 +108,7 @@ func (k *Kernel) ResolveLocalPrincipal(ctx context.Context, ref string) (*Accoun
 	}
 	u, err := k.store.ReadUserByHandle(ctx, handle)
 	if err != nil || u == nil || !u.IsLiveUser() {
-		return nil, ErrNotFound.Wrapf("user %s not found", ref)
+		return nil, errUserNotFound(ref)
 	}
 	return u, nil
 }
@@ -150,7 +154,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 		u, uerr := k.store.ReadUserByHandle(ctx, a.Handle)
 		if uerr != nil || u == nil || !u.IsLive() {
 			// A tombstone resolves but can never complete: the task would park its price forever.
-			return Principal{}, ErrNotFound.Wrapf("user %s not found", ref)
+			return Principal{}, errUserNotFound(ref)
 		}
 		return Principal{AccountID: u.ID}, nil
 	}
@@ -189,7 +193,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 func (k *Kernel) LocalPrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
 	u, err := k.resolveUser(ctx, ref)
 	if err != nil || u == nil || u.SuspendedAt != nil || u.Handle == "" {
-		return "", "", ErrNotFound.Wrapf("user %s not found", ref)
+		return "", "", errUserNotFound(ref)
 	}
 	return u.ID, u.Handle, nil
 }

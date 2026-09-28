@@ -330,7 +330,7 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 // .well-known document is gone (§13).
 func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	pub, _ := s.kernel.GetConfig(ctx, configKeySigningPublic)
+	pub := s.kernel.SelfKey(ctx)
 	handle := s.kernel.OwnName(ctx)
 	var about string
 	if sys, err := s.kernel.ReadUserByHandle(ctx, "sys"); err == nil && sys != nil {

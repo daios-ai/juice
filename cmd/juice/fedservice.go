@@ -185,10 +185,6 @@ func (h *fedHandlers) OnTask(ctx context.Context, peerKey string, req fed.TaskRe
 }
 
 // ownKey is this kernel's own public key, the recipient every inbound signature is bound to.
-func (h *fedHandlers) ownKey(ctx context.Context) string {
-	k, _ := h.kernel.GetConfig(ctx, configKeySigningPublic)
-	return k
-}
 
 // OnReveal answers the /juice/fed/settle/1 protocol (P10): the seller side of one obligation's
 // draw. The connection-key check and freshness window mirror OnCall/OnTask; the kernel verifies the
@@ -201,7 +197,7 @@ func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.Reve
 		return fedError(err)
 	}
 	t, err := h.kernel.HandleReveal(ctx, req.Counterparty, kernel.RevealPayload{
-		Counterparty: req.Counterparty, Recipient: h.ownKey(ctx), Secret: req.Secret,
+		Counterparty: req.Counterparty, Recipient: h.kernel.SelfKey(ctx), Secret: req.Secret,
 		TicketID: req.TicketID, Timestamp: req.Timestamp, TxHash: req.TxHash,
 	}, req.Signature)
 	if err != nil {
@@ -223,7 +219,7 @@ func (h *fedHandlers) OnTransfer(ctx context.Context, peerKey string, req fed.Tr
 	}
 	if err := h.kernel.HandleTransferPaid(ctx, req.Counterparty, kernel.TransferPaidPayload{
 		Amount: req.Amount, BeneficiaryID: req.BeneficiaryID, BlockchainAddress: req.BlockchainAddress,
-		Counterparty: req.Counterparty, ID: req.ID, Recipient: h.ownKey(ctx), Timestamp: req.Timestamp, TxHash: req.TxHash,
+		Counterparty: req.Counterparty, ID: req.ID, Recipient: h.kernel.SelfKey(ctx), Timestamp: req.Timestamp, TxHash: req.TxHash,
 	}, req.BlockchainProof, req.Signature); err != nil {
 		return fedError(err)
 	}
@@ -360,8 +356,8 @@ func taskRequester(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr string
 	if err := checkFederationTimestamp(tsStr); err != nil {
 		return "", nil, err
 	}
-	self, err := k.GetConfig(ctx, configKeySigningPublic)
-	if err != nil || self == "" {
+	self := k.SelfKey(ctx)
+	if self == "" {
 		return "", nil, kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
 	if err := verify(self); err != nil {
@@ -581,7 +577,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// recipient is this kernel's own key: verifying with it (not the wire value) rejects a request signed
 	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
 	// transport-authenticated caller key (OnCall proved connection key == counterparty).
-	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	ownKey := k.SelfKey(ctx)
 	if err := k.Network().VerifyFederationSignature(cpPubKey, kernel.OutboundCall{
 		ActionID: actionParam, ExpectedContractHash: expectedContractHash, IdempotencyKey: idempotencyKey,
 		Commitment: buyer.Commitment, Lottery: buyer.Lottery, CallerUserID: buyer.CallerUserID, CallerHandle: buyer.CallerHandle,

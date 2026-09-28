@@ -7,8 +7,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	pathpkg "path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1594,5 +1598,235 @@ func TestAPeerVaultIsWrittenOnceAndOutlivesThePeer(t *testing.T) {
 	}
 	if listed, _ := db.ListKernels(ctx, "self", true, 0, 0); len(listed) != 1 || listed[0].PublicKey != stranger {
 		t.Errorf("a kernel seen again is not listed: %+v", listed)
+	}
+}
+
+// Every wallet change goes through one primitive, so the guards are the primitive's and hold on
+// every table alike: a debit or an unlock never goes below zero, a credit or a lock never lands on a
+// missing row, a negative amount is refused, a zero moves nothing, and a drain empties a wallet only
+// when it holds exactly what the caller expected.
+func TestWalletPrimitivesGuardEveryTable(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("wallet-owner", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	read := func(w wallet, id string) (avail, locked int64) {
+		if err := db.db.QueryRowContext(ctx, `SELECT available, locked FROM `+string(w)+` WHERE id=?`, id).Scan(&avail, &locked); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	in := func(fn func(tx *sql.Tx) error) error {
+		return db.withTx(ctx, "wallet test", fn)
+	}
+	for _, c := range []struct {
+		w  wallet
+		id string
+	}{{accountWallet, owner.ID}, {processWallet, p.ID}, {traceWallet, root.ID}} {
+		t.Run(string(c.w), func(t *testing.T) {
+			a0, l0 := read(c.w, c.id)
+			if err := in(func(tx *sql.Tx) error {
+				if err := creditAvailable(ctx, tx, c.w, c.id, 10, "t"); err != nil {
+					return err
+				}
+				if err := debitAvailable(ctx, tx, c.w, c.id, 4, "t"); err != nil {
+					return err
+				}
+				return lockFunds(ctx, tx, c.w, c.id, 3, "t")
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if a, l := read(c.w, c.id); a != a0+6 || l != l0+3 {
+				t.Fatalf("after credit 10, debit 4, lock 3: available=%d locked=%d, want %d and %d", a, l, a0+6, l0+3)
+			}
+			if err := in(func(tx *sql.Tx) error { return debitAvailable(ctx, tx, c.w, c.id, a0+7, "t") }); !errors.Is(err, kernel.ErrInsufficientFunds) {
+				t.Errorf("overdraw: %v, want ErrInsufficientFunds", err)
+			}
+			if err := in(func(tx *sql.Tx) error { return unlockFunds(ctx, tx, c.w, c.id, l0+4, "t") }); !errors.Is(err, kernel.ErrInvalidState) {
+				t.Errorf("over-unlock: %v, want ErrInvalidState", err)
+			}
+			if err := in(func(tx *sql.Tx) error { return creditAvailable(ctx, tx, c.w, c.id, -1, "t") }); err == nil {
+				t.Error("a negative amount was accepted")
+			}
+			for name, fn := range map[string]func(*sql.Tx) error{
+				"credit": func(tx *sql.Tx) error { return creditAvailable(ctx, tx, c.w, "missing", 1, "t") },
+				"lock":   func(tx *sql.Tx) error { return lockFunds(ctx, tx, c.w, "missing", 1, "t") },
+			} {
+				if err := in(fn); err == nil || !strings.Contains(err.Error(), "funds would be destroyed") {
+					t.Errorf("%s on a missing row: %v, want it refused", name, err)
+				}
+			}
+			if err := in(func(tx *sql.Tx) error { return debitAvailable(ctx, tx, c.w, "missing", 0, "t") }); err != nil {
+				t.Errorf("a zero amount wrote something: %v", err)
+			}
+			var drained, stale bool
+			if err := in(func(tx *sql.Tx) (err error) {
+				if stale, err = drainAvailable(ctx, tx, c.w, c.id, a0+5, "t"); err != nil {
+					return err
+				}
+				drained, err = drainAvailable(ctx, tx, c.w, c.id, a0+6, "t")
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if stale || !drained {
+				t.Errorf("drain: stale=%v drained=%v, want only the exact amount to drain", stale, drained)
+			}
+			if a, l := read(c.w, c.id); a != 0 || l != l0+3 {
+				t.Errorf("after drain: available=%d locked=%d, want 0 and %d", a, l, l0+3)
+			}
+		})
+	}
+}
+
+// A root settled after the fact whose budget went into a task completion records a gross of zero,
+// yet its settlement still ends the process's lock whole: only the root locks its process. So the
+// process holds exactly what it owes its owner from that commit on (D2), and closes empty.
+func TestARecoveredRootEndsItsProcessLock(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner, caller := newUser("lock-owner", 100), newUser("lock-caller", 0)
+	for _, u := range []*kernel.Account{owner, caller} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	act := newAction(owner.ID, "lock-act", 40, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 40, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	task := &kernel.Task{ID: uuid.NewString(), ParentTraceID: &root.ID, RequiredCallerUserID: caller.ID,
+		ActionID: act.ID, Price: 40, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	ct := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ParentTraceID: &root.ID, CallerUserID: caller.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginTaskCall(ctx, task.ID, ct); err != nil {
+		t.Fatal(err)
+	}
+	fail := func(tr *kernel.Trace, kind, wallet, taskID string) {
+		t.Helper()
+		now := time.Now().UTC()
+		ktx := &kernel.Transaction{ID: uuid.NewString(), ProcessID: p.ID, TraceID: tr.ID, OwnerUserID: owner.ID,
+			CallerUserID: tr.CallerUserID, TargetUserID: owner.ID, ActionID: act.ID, Status: kernel.TxFailure,
+			Reason: "interrupted", ArgsJSON: []byte("{}"), ReplyJSON: []byte("null"), StartedAt: now, EndedAt: now}
+		if tr.ParentTraceID != nil {
+			ktx.ParentTraceID = *tr.ParentTraceID
+		}
+		build := func(int64) (*kernel.Receipt, error) {
+			return &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: owner.ID, TxID: ktx.ID, TraceID: tr.ID,
+				ActionID: act.ID, Status: kernel.TxFailure, CreatedAt: now}, nil
+		}
+		// Gross as recovery computes it: what is left on the trace (settled children consumed nothing).
+		var gross int64
+		if err := db.db.QueryRowContext(ctx, `SELECT available+locked FROM traces WHERE id=?`, tr.ID).Scan(&gross); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CommitFailedCall(ctx, ktx, build, tr.ID, wallet, kind, owner.ID, gross, nil, "", taskID); err != nil {
+			t.Fatalf("CommitFailedCall: %v", err)
+		}
+	}
+	fail(ct, kernel.CallerTask, p.ID, task.ID)
+	fail(root, kernel.CallerProcess, p.ID, "")
+	got, err := db.ReadProcess(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != kernel.ProcessClosed || got.Available != 0 || got.Locked != 0 {
+		t.Errorf("process after its root settled = %+v, want closed and empty", got)
+	}
+	u, _ := db.ReadUser(ctx, owner.ID)
+	if u.Available != 100 || u.Locked != 0 {
+		t.Errorf("owner: available=%d locked=%d, want 100 and 0", u.Available, u.Locked)
+	}
+}
+
+// No store code writes a wallet column but the primitives. This scan names any statement that does,
+// so a reviewer sees the copy; the tests above and the conformance suite are what check the money.
+// The one exception is the funding statement, whose predicate also carries the D2 checks (trace
+// unsettled, process open) and must run at price zero.
+func TestOnlyThePrimitivesWriteAWallet(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := regexp.MustCompile(`(?is)UPDATE\s+"?(accounts|processes|traces)"?\s+SET\s+(.*?)\s+WHERE`)
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Name.Name == "fundFromTrace" {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				lit, ok := n.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				for _, m := range stmt.FindAllStringSubmatch(lit.Value, -1) {
+					if strings.Contains(m[2], "available") || strings.Contains(m[2], "locked") {
+						t.Errorf("%s: %s writes %s balances outside the wallet primitives", fset.Position(lit.Pos()), fn.Name.Name, m[1])
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// A purchase whose maximum exceeds the lock taken before signing locks the difference from what the
+// operator can still spend, and booking releases the maximum against the exact cost.
+func TestRefillBindingAboveTheLockTakesTheDifference(t *testing.T) {
+	db, sys, _ := railFixture(t)
+	ctx := context.Background()
+	if _, err := db.CreateRailDeposit(ctx, sys, depositRow("rail:earn", "0xop", 100), sys); err != nil {
+		t.Fatal(err)
+	}
+	pay := &kernel.RailTransfer{ID: "p1", Kind: kernel.RailKindPayout, Party: sys, Amount: 10, Credit: 10,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := db.ReserveRailTransfer(ctx, sys, pay); err != nil {
+		t.Fatal(err)
+	}
+	lock := &kernel.RailTransfer{ID: "p1:fuel", Kind: kernel.RailKindRefill, Amount: 40,
+		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
+	if err := db.RecordRailOutcome(ctx, sys, pay.ID, kernel.RailStatusRefilling, "", "", lock); err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balances(t, db, sys); a != 50 || l != 50 {
+		t.Fatalf("after the fuel lock: %d/%d, want 50/50", a, l)
+	}
+	if err := db.BindRefill(ctx, sys, lock.ID, "purchase-1", 60); err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balances(t, db, sys); a != 30 || l != 70 {
+		t.Fatalf("after binding at 60: %d/%d, want 30/70", a, l)
+	}
+	if err := db.BindRefill(ctx, sys, lock.ID, "purchase-1", 200); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Errorf("a maximum beyond what the operator holds: %v, want ErrInsufficientFunds", err)
+	}
+	if err := db.BookRefill(ctx, sys, lock.ID, 25, true, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balances(t, db, sys); a != 65 || l != 10 {
+		t.Fatalf("after booking 25 of 60: %d/%d, want 65/10", a, l)
 	}
 }

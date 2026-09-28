@@ -158,7 +158,7 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 	if err != nil || len(privKeyBytes) != ed25519.PrivateKeySize {
 		return fmt.Errorf("signing_private_key in config is invalid")
 	}
-	pubKeyB64, _ := k.GetConfig(ctx, configKeySigningPublic)
+	pubKeyB64 := k.SelfKey(ctx)
 	if pubKeyB64 == "" {
 		return fmt.Errorf("signing_public_key missing from config")
 	}

@@ -1864,7 +1864,7 @@ func TestResolveLocalPrincipal(t *testing.T) {
 		t.Fatalf("ResolveLocalPrincipal(alice@k): got %v, %v", got, err)
 	}
 	// The address may name this kernel by its key as well as by its name.
-	if got, err := k.ResolveLocalPrincipal(ctx, "alice@"+k.SelfKeyForTest(ctx)); err != nil || got.ID != alice.ID {
+	if got, err := k.ResolveLocalPrincipal(ctx, "alice@"+k.SelfKey(ctx)); err != nil || got.ID != alice.ID {
 		t.Errorf("ResolveLocalPrincipal(alice@<own key>): got %v, %v", got, err)
 	}
 	// A bare handle is not an address, an id is not one either, and a peer's name is not a user.
@@ -2516,6 +2516,71 @@ func TestAnOversizedReplyIsRefusedBeforeAnythingCommits(t *testing.T) {
 	for _, tx := range txs {
 		if tx.Status == kernel.TxSuccess {
 			t.Errorf("a reply nobody can receive settled as a success: %s", tx.ID)
+		}
+	}
+}
+
+// Visibility is spoken once in Go (canCall) and once in SQL, for the listings that show actions to
+// someone other than their owner. The two agree over every combination of visibility, liveness and
+// owner suspension: an anonymous or peer caller sees exactly the actions canCall lets it call, as
+// does a local user, in the session listing and in the catalogue served abroad alike.
+func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	owner := setupUser(t, st, "vis-owner", 0)
+	banned := setupUser(t, st, "vis-banned", 0)
+	if err := st.SuspendUser(ctx, banned.ID); err != nil {
+		t.Fatal(err)
+	}
+	local := setupUser(t, st, "vis-local", 0)
+	peer := &kernel.Account{ID: "vis-peer", KernelPublicKey: "cGVlcg"}
+
+	var ids []string
+	for _, o := range []*kernel.Account{owner, banned} {
+		for _, vis := range []kernel.ActionVisibility{kernel.VisibilityPublic, kernel.VisibilityLocal, kernel.VisibilityPrivate} {
+			for _, active := range []bool{true, false} {
+				a := setupAction(t, st, o.ID, fmt.Sprintf("vis-%s-%v", vis, active), 0)
+				a.Visibility, a.Active = vis, active
+				if err := st.UpdateAction(ctx, a); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, a.ID)
+			}
+		}
+	}
+	listed := func(as []*kernel.Action) map[string]bool {
+		m := map[string]bool{}
+		for _, a := range as {
+			m[a.ID] = true
+		}
+		return m
+	}
+	anon, err := st.ListVisibleActions(ctx, false, 1000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := st.ListVisibleActions(ctx, true, 1000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abroad, err := st.ListExportableActionsAfter(ctx, "", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		a, err := st.ReadAction(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []struct {
+			name   string
+			caller *kernel.Account
+			seen   map[string]bool
+		}{{"anonymous", nil, listed(anon)}, {"local user", local, listed(session)}, {"peer", peer, listed(abroad)}} {
+			if got, want := c.seen[id], kernel.CanCall(c.caller, a); got != want {
+				t.Errorf("%s: %s/%s active=%v owner-suspended=%v: listed %v, canCall %v",
+					c.name, a.Name, a.Visibility, a.Active, a.OwnerSuspended, got, want)
+			}
 		}
 	}
 }

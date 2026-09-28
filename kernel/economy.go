@@ -275,7 +275,7 @@ func callerOnWire(caller *Account) Principal {
 // leave the seller owed with no way to be paid. A free call owes nothing and is always allowed,
 // which is what keeps a cold resolve and a price-0 action working before any address is known.
 func (k *Kernel) payableOnThisRail(ctx context.Context, peerAccountID string, obligation int64) error {
-	if obligation <= 0 || k.rail == nil || k.rail.Address() == "" {
+	if obligation <= 0 || !k.hasAddresses() {
 		return nil // nothing owed, or a world with no addresses: the operator's record is the payment
 	}
 	if k.peerBlockchainAddress(ctx, peerAccountID) != "" {
@@ -374,7 +374,7 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 	// itself the finalized payment (D23): it is recorded with the reveal that names it, and the
 	// ordinary reconciliation then closes the obligation exactly as it closes a scanned one.
 	var payment *RailTransfer
-	if amount > 0 && k.rail != nil && k.rail.Address() == "" {
+	if amount > 0 && k.rail != nil && !k.hasAddresses() {
 		fact, ferr := k.rail.Witness(ctx, p.TxHash, amount)
 		if ferr != nil {
 			return nil, ferr
@@ -496,7 +496,7 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 		return ErrInvalidState.Wrap("federation client is not configured")
 	}
 	vault, proof := k.BlockchainIdentity(ctx)
-	if vault == "" && k.rail != nil && k.rail.Address() != "" {
+	if vault == "" && k.hasAddresses() {
 		return ErrInvalidState.Wrap("this kernel cannot prove its blockchain address yet")
 	}
 	p := TransferPaidPayload{
@@ -540,7 +540,7 @@ func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p Trans
 		return err
 	}
 	var payment *RailTransfer
-	if k.rail != nil && k.rail.Address() == "" {
+	if k.rail != nil && !k.hasAddresses() {
 		fact, ferr := k.rail.Witness(ctx, p.TxHash, p.Amount)
 		if ferr != nil {
 			return ferr

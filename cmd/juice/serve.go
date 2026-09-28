@@ -227,7 +227,7 @@ func runServer(name string) error {
 	srv.fed = fedTransport
 	fedAdapter.SetTransport(fedTransport)
 	fedAdapter.SetContactRecorder(recordContact)
-	pub, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	pub := k.SelfKey(context.Background())
 	fedAdapter.SetLocalPubKey(pub)
 	defer fedTransport.Close()
 
@@ -316,7 +316,7 @@ func runServer(name string) error {
 	// else: the kernel, its network, where clients reach it, and the key that is its identity.
 	// The federation addresses are reported by /health and by `admin kernel show`, so the line
 	// stays short; the peer id inside them is this same key in libp2p's spelling (D15, §14).
-	pubKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	pubKey := k.SelfKey(context.Background())
 	logger.Info("server.ready", "handle", k.OwnName(context.Background()), "network", world.Name,
 		"addr", ln.Addr().String(), "public_key", pubKey)
 
@@ -667,7 +667,7 @@ func (s *server) blockchainAddress(ctx context.Context) string {
 // public key are this kernel's advertised federation identity (§13), not secrets — only the private
 // key is withheld.
 func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
-	pub, _ := s.kernel.GetConfig(r.Context(), configKeySigningPublic)
+	pub := s.kernel.SelfKey(r.Context())
 	net := s.kernel.Network()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              "ok",

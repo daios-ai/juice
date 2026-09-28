@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
@@ -21,53 +22,95 @@ import (
 
 const railCols = `id,kind,party,amount,credit,destination,status,tx_hash,refill_id,reason,attempt,created_at,finalized_at`
 
-// hold moves amount from an account's available into its locked, refusing to overdraw. Money in
-// transit lives there: promised, recorded, and unspendable until the promise resolves.
-func hold(ctx context.Context, tx *sql.Tx, id string, amount int64) error {
-	if amount == 0 {
-		return nil
+// wallet names a table that holds funds: an account, a process, or a trace (D2). Every change to a
+// wallet's available or locked goes through the primitives below and nowhere else, so each carries
+// the same guards: a debit or an unlock never takes a column negative, a credit or a lock never
+// lands on a missing row, and the guard lives in the statement rather than in a read before it.
+type wallet string
+
+const (
+	accountWallet wallet = "accounts"
+	processWallet wallet = "processes"
+	traceWallet   wallet = "traces"
+)
+
+// walletWrite runs one guarded single-column change and reports whether the row matched. A zero
+// amount writes nothing: every leg a settlement skips is a zero, and a zero moves no money.
+func walletWrite(ctx context.Context, tx *sql.Tx, w wallet, set, guard, id string, n int64, op string) (bool, error) {
+	if n < 0 {
+		return false, fmt.Errorf("%s: negative amount %d on %s %q", op, n, w, id)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE accounts SET locked=locked+? WHERE id=?`, amount, id)
+	if n == 0 {
+		return true, nil
+	}
+	args := []any{n, id}
+	if guard != "" {
+		args = append(args, n)
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE `+string(w)+` SET `+set+` WHERE id=?`+guard, args...)
 	if err != nil {
-		return dbErr(err, "rail: hold")
+		return false, dbErr(err, op)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrNotFound.Wrap("rail: account not found")
-	}
-	return nil
+	rows, _ := res.RowsAffected()
+	return rows == 1, nil
 }
 
-// move adds delta to an account's available, refusing to take it negative.
-func move(ctx context.Context, tx *sql.Tx, id string, delta int64) error {
-	if delta == 0 {
-		return nil
-	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET available=available+? WHERE id=? AND (? >= 0 OR available >= ?)`,
-		delta, id, delta, -delta)
-	if err != nil {
-		return dbErr(err, "rail: move")
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInsufficientFunds.Wrap("insufficient balance")
-	}
-	return nil
+func lost(op string, w wallet, id string) error {
+	return fmt.Errorf("%s: %s %q not found: funds would be destroyed", op, w, id)
 }
 
-// release takes amount out of an account's locked.
-func release(ctx context.Context, tx *sql.Tx, id string, amount int64) error {
-	if amount == 0 {
-		return nil
+// creditAvailable adds n to a wallet's available.
+func creditAvailable(ctx context.Context, tx *sql.Tx, w wallet, id string, n int64, op string) error {
+	ok, err := walletWrite(ctx, tx, w, `available=available+?`, ``, id, n, op)
+	if err == nil && !ok {
+		err = lost(op, w, id)
 	}
-	res, err := tx.ExecContext(ctx,
-		`UPDATE accounts SET locked=locked-? WHERE id=? AND locked >= ?`, amount, id, amount)
+	return err
+}
+
+// debitAvailable takes n from a wallet's available, refusing to overdraw.
+func debitAvailable(ctx context.Context, tx *sql.Tx, w wallet, id string, n int64, op string) error {
+	ok, err := walletWrite(ctx, tx, w, `available=available-?`, ` AND available>=?`, id, n, op)
+	if err == nil && !ok {
+		err = kernel.ErrInsufficientFunds.Wrapf("%s: insufficient balance", op)
+	}
+	return err
+}
+
+// lockFunds adds n to a wallet's locked.
+func lockFunds(ctx context.Context, tx *sql.Tx, w wallet, id string, n int64, op string) error {
+	ok, err := walletWrite(ctx, tx, w, `locked=locked+?`, ``, id, n, op)
+	if err == nil && !ok {
+		err = lost(op, w, id)
+	}
+	return err
+}
+
+// unlockFunds takes n from a wallet's locked, refusing to take more than is held.
+func unlockFunds(ctx context.Context, tx *sql.Tx, w wallet, id string, n int64, op string) error {
+	ok, err := walletWrite(ctx, tx, w, `locked=locked-?`, ` AND locked>=?`, id, n, op)
+	if err == nil && !ok {
+		err = kernel.ErrInvalidState.Wrapf("%s: locked funds are missing", op)
+	}
+	return err
+}
+
+// drainAvailable empties a wallet's available iff it holds exactly n, and reports whether it did.
+// It runs at zero too: a settlement whose taxable is zero must still see a balance that moved.
+func drainAvailable(ctx context.Context, tx *sql.Tx, w wallet, id string, n int64, op string) (bool, error) {
+	res, err := tx.ExecContext(ctx, `UPDATE `+string(w)+` SET available=0 WHERE id=? AND available=?`, id, n)
 	if err != nil {
-		return dbErr(err, "rail: release")
+		return false, dbErr(err, op)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return kernel.ErrInvalidState.Wrap("rail: held amount is missing")
-	}
-	return nil
+	rows, _ := res.RowsAffected()
+	return rows == 1, nil
+}
+
+// availableOf reads a wallet's available inside the transaction that is about to settle it.
+func availableOf(ctx context.Context, tx *sql.Tx, w wallet, id, op string) (int64, error) {
+	var n int64
+	err := tx.QueryRowContext(ctx, `SELECT available FROM `+string(w)+` WHERE id=?`, id).Scan(&n)
+	return n, dbErr(err, op)
 }
 
 func insertRail(ctx context.Context, tx *sql.Tx, r *kernel.RailTransfer) error {
@@ -149,7 +192,7 @@ func (s *DB) CreateRailDeposit(ctx context.Context, sys string, row *kernel.Rail
 // bookDeposit is the crossing: credits enter the ledger here and nowhere else, against a finalized
 // fact. The money is the operator's and held — unspendable — until reconciliation says whose it is.
 func bookDeposit(ctx context.Context, tx *sql.Tx, sys string, row *kernel.RailTransfer) error {
-	if err := hold(ctx, tx, sys, row.Amount); err != nil {
+	if err := lockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: hold deposit"); err != nil {
 		return err
 	}
 	if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
@@ -167,13 +210,13 @@ func deliverDeposit(ctx context.Context, tx *sql.Tx, row *kernel.RailTransfer, s
 	if credit > row.Amount {
 		return nil, kernel.ErrInvalidInput.Wrap("rail: credit exceeds the payment")
 	}
-	if err := release(ctx, tx, sys, row.Amount); err != nil {
+	if err := unlockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: deliver deposit"); err != nil {
 		return nil, err
 	}
-	if err := move(ctx, tx, toUserID, credit); err != nil {
+	if err := creditAvailable(ctx, tx, accountWallet, toUserID, credit, "rail: deliver deposit"); err != nil {
 		return nil, err
 	}
-	if err := move(ctx, tx, sys, row.Amount-credit); err != nil {
+	if err := creditAvailable(ctx, tx, accountWallet, sys, row.Amount-credit, "rail: deliver deposit"); err != nil {
 		return nil, err
 	}
 	e := &kernel.LedgerEntry{ID: uuid.NewString(), OperatorUserID: sys, FromUserID: sys,
@@ -210,13 +253,13 @@ func reserveRailTx(ctx context.Context, tx *sql.Tx, sys string, row *kernel.Rail
 	} else if err != sql.ErrNoRows {
 		return dbErr(err, "rail: read row")
 	}
-	if err := move(ctx, tx, party, -credit); err != nil {
+	if err := debitAvailable(ctx, tx, accountWallet, party, credit, "rail: reserve"); err != nil {
 		return err
 	}
-	if err := move(ctx, tx, sys, -(row.Amount - credit)); err != nil {
+	if err := debitAvailable(ctx, tx, accountWallet, sys, row.Amount-credit, "rail: reserve"); err != nil {
 		return err
 	}
-	if err := hold(ctx, tx, sys, row.Amount); err != nil {
+	if err := lockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: reserve"); err != nil {
 		return err
 	}
 	if credit > 0 {
@@ -270,10 +313,10 @@ func (s *DB) RecordRailOutcome(ctx context.Context, sys, id, status, txHash, rea
 		}
 		// Fuel is the operator's cost alone, never user backing: the authorized maximum leaves the
 		// operator's own balance now and is settled against the exact cost at booking.
-		if err := move(ctx, tx, sys, -refill.Amount); err != nil {
+		if err := debitAvailable(ctx, tx, accountWallet, sys, refill.Amount, "rail: lock refill"); err != nil {
 			return err
 		}
-		if err := hold(ctx, tx, sys, refill.Amount); err != nil {
+		if err := lockFunds(ctx, tx, accountWallet, sys, refill.Amount, "rail: lock refill"); err != nil {
 			return err
 		}
 		return insertRail(ctx, tx, refill)
@@ -294,7 +337,7 @@ func (s *DB) FinalizeRailTransfer(ctx context.Context, sys, id, txHash string, a
 		if row.Status == kernel.RailStatusConfirmed || row.Status == kernel.RailStatusFailed {
 			return nil
 		}
-		if err := release(ctx, tx, sys, row.Amount); err != nil {
+		if err := unlockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: finalize"); err != nil {
 			return err
 		}
 		if err := insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
@@ -327,13 +370,13 @@ func (s *DB) CompensateRailTransfer(ctx context.Context, sys, id string, at time
 		if err != nil {
 			return dbErr(err, "rail: read row")
 		}
-		if err := release(ctx, tx, sys, row.Amount); err != nil {
+		if err := unlockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: compensate"); err != nil {
 			return err
 		}
-		if err := move(ctx, tx, row.Party, row.Credit); err != nil {
+		if err := creditAvailable(ctx, tx, accountWallet, row.Party, row.Credit, "rail: compensate"); err != nil {
 			return err
 		}
-		if err := move(ctx, tx, sys, row.Amount-row.Credit); err != nil {
+		if err := creditAvailable(ctx, tx, accountWallet, sys, row.Amount-row.Credit, "rail: compensate"); err != nil {
 			return err
 		}
 		out = &kernel.LedgerEntry{ID: uuid.NewString(), OperatorUserID: sys, FromUserID: sys,
@@ -370,10 +413,10 @@ func (s *DB) BookRefill(ctx context.Context, sys, id string, cost int64, execute
 		if cost > row.Amount {
 			return kernel.ErrInvalidState.Wrapf("refill %s consumed more than it was authorized", id)
 		}
-		if err := release(ctx, tx, sys, row.Amount); err != nil {
+		if err := unlockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: book refill"); err != nil {
 			return err
 		}
-		if err := move(ctx, tx, sys, row.Amount-cost); err != nil {
+		if err := creditAvailable(ctx, tx, accountWallet, sys, row.Amount-cost, "rail: book refill"); err != nil {
 			return err
 		}
 		if cost > 0 {
@@ -412,17 +455,17 @@ func (s *DB) BindRefill(ctx context.Context, sys, id, refillID string, max int64
 			return kernel.ErrInvalidState.Wrapf("refill %s is bound to another purchase", id)
 		}
 		if delta := max - row.Amount; delta < 0 {
-			if err := release(ctx, tx, sys, -delta); err != nil {
+			if err := unlockFunds(ctx, tx, accountWallet, sys, -delta, "rail: bind refill"); err != nil {
 				return err
 			}
-			if err := move(ctx, tx, sys, -delta); err != nil {
+			if err := creditAvailable(ctx, tx, accountWallet, sys, -delta, "rail: bind refill"); err != nil {
 				return err
 			}
 		} else if delta > 0 {
-			if err := move(ctx, tx, sys, -delta); err != nil {
+			if err := debitAvailable(ctx, tx, accountWallet, sys, delta, "rail: bind refill"); err != nil {
 				return err
 			}
-			if err := hold(ctx, tx, sys, delta); err != nil {
+			if err := lockFunds(ctx, tx, accountWallet, sys, delta, "rail: bind refill"); err != nil {
 				return err
 			}
 		}
@@ -445,10 +488,10 @@ func (s *DB) ReleaseRefill(ctx context.Context, sys, id string) error {
 		if row.RefillID != "" {
 			return kernel.ErrInvalidState.Wrapf("refill %s stands for a purchase and cannot be released", id)
 		}
-		if err := release(ctx, tx, sys, row.Amount); err != nil {
+		if err := unlockFunds(ctx, tx, accountWallet, sys, row.Amount, "rail: release refill"); err != nil {
 			return err
 		}
-		if err := move(ctx, tx, sys, row.Amount); err != nil {
+		if err := creditAvailable(ctx, tx, accountWallet, sys, row.Amount, "rail: release refill"); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `DELETE FROM rail_transfers WHERE id=?`, id)
@@ -800,7 +843,7 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 			`SELECT '', '', d.id, a.id FROM rail_transfers d
 			   JOIN accounts a ON a.blockchain_address = d.party
 			  WHERE d.kind = 'deposit' AND d.status = 'held' AND d.party <> ''
-			    AND a.kernel_public_key IS NULL AND a.suspended_at IS NULL AND a.password_hash <> ''
+			    AND `+liveUser("a")+` AND a.suspended_at IS NULL AND a.password_hash <> ''
 			    AND NOT (`+reservedDeposit+`)
 			  ORDER BY d.created_at LIMIT ?`, limit)
 		if err != nil {
@@ -960,7 +1003,7 @@ func (s *DB) RecordIncomingTransfer(ctx context.Context, sys string, it *kernel.
 		}
 		var live bool
 		if err := tx.QueryRowContext(ctx,
-			`SELECT handle IS NOT NULL AND handle <> '' AND kernel_public_key IS NULL FROM accounts WHERE id=?`,
+			`SELECT `+liveUser("")+` FROM accounts WHERE id=?`,
 			it.BeneficiaryID).Scan(&live); err != nil || !live {
 			return kernel.ErrNotFound.Wrap("the transfer names no user of this kernel")
 		}

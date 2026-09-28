@@ -46,7 +46,7 @@ func TestOwnNameIsAPetnameOnTheOwnKey(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
-	self := k.SelfKeyForTest(ctx)
+	self := k.SelfKey(ctx)
 
 	for _, seg := range []string{kernel.TestOwnName, self} {
 		kr, err := k.ResolveKernel(ctx, seg)
@@ -105,12 +105,12 @@ func TestIsRemoteRef(t *testing.T) {
 		t.Fatal(err)
 	}
 	for ref, want := range map[string]bool{
-		"alice@k/x":                             false,
-		"alice@" + k.SelfKeyForTest(ctx) + "/x": false,
-		"alice@peer/x":                          true,
-		"alice@nowhere/x":                       true,
-		"alice@" + testKernelKey(10) + "/x":     true,
-		"alice/x":                               false,
+		"alice@k/x":                         false,
+		"alice@" + k.SelfKey(ctx) + "/x":    false,
+		"alice@peer/x":                      true,
+		"alice@nowhere/x":                   true,
+		"alice@" + testKernelKey(10) + "/x": true,
+		"alice/x":                           false,
 	} {
 		if got := k.IsRemoteRef(ctx, ref); got != want {
 			t.Errorf("IsRemoteRef(%q) = %v, want %v", ref, got, want)

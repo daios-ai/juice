@@ -9,8 +9,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/daios-ai/juice/fed"
@@ -162,5 +165,42 @@ func TestContactClassificationAgreesAcrossPaths(t *testing.T) {
 				t.Errorf("contactFromResult = %v, want %v — the two paths must agree", got, tc.want)
 			}
 		})
+	}
+}
+
+// The call a kernel decides to make and the request it sends are two shapes joined by one mapping.
+// Every wire field must carry its own source, so a field dropped or swapped fails here, and the
+// receiver must verify the request once it rebuilds the call from the wire, as OnCall does.
+func TestAnOutboundCallReachesTheWireWhole(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	local := base64.RawURLEncoding.EncodeToString(pub)
+	call := kernel.OutboundCall{ActionID: "v-action", ExpectedContractHash: "v-hash", IdempotencyKey: "v-key",
+		Commitment: "v-commitment", Lottery: 7, CallerUserID: "v-user", CallerHandle: "v-handle"}
+	fc := &fakeFedCaller{resp: fed.CallResponse{Status: 200, Body: []byte(`{"result":{},"receipt":{"id":"r"}}`)}}
+	signer := func(c kernel.OutboundCall, counterparty, recipient, argsHash string) (string, string, error) {
+		sig, err := testNet.SignFederationPayload(priv, c, counterparty, recipient, "2026-09-28T12:00:00Z", argsHash)
+		return sig, "2026-09-28T12:00:00Z", err
+	}
+	if _, err := executeFederationOverTransport(context.Background(), fc, signer, local, "peerkey",
+		call, "v-address", "v-proof", map[string]any{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+	req := fc.lastReq
+	got := kernel.OutboundCall{ActionID: req.Action, ExpectedContractHash: req.ExpectedContractHash,
+		IdempotencyKey: req.IdempotencyKey, Commitment: req.Commitment, Lottery: req.Lottery,
+		CallerUserID: req.CallerUserID, CallerHandle: req.CallerHandle}
+	if got != call || req.Counterparty != local || req.BlockchainAddress != "v-address" || req.BlockchainProof != "v-proof" || string(req.Args) != `{"n":1}` {
+		t.Errorf("wire request = %+v, want every field from its own source", req)
+	}
+	rv := reflect.ValueOf(req)
+	for i := 0; i < rv.NumField(); i++ {
+		if rv.Field(i).IsZero() {
+			t.Errorf("CallRequest.%s was not set by the mapping", rv.Type().Field(i).Name)
+		}
+	}
+	sum := sha256.Sum256(req.Args)
+	if err := testNet.VerifyFederationSignature(req.Counterparty, got, req.Counterparty, "peerkey", req.Timestamp,
+		hex.EncodeToString(sum[:]), req.Signature); err != nil {
+		t.Errorf("the receiver cannot verify what was sent: %v", err)
 	}
 }

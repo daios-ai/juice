@@ -399,7 +399,7 @@ func (k *Kernel) resolveUser(ctx context.Context, ident string) (*Account, error
 	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil {
 		return u, nil
 	}
-	return nil, ErrNotFound.Wrapf("user %s not found", ident)
+	return nil, errUserNotFound(ident)
 }
 
 // Call executes the central kernel transition, checking D2's preconditions in their stated order.

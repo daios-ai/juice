@@ -5140,3 +5140,50 @@ func mustExec(t *testing.T, raw *sql.DB, q string, args ...any) {
 		t.Fatalf("%s: %v", q, err)
 	}
 }
+
+// The live-user rule is spoken once in Go and once in SQL, and the two agree on every kind of
+// account: a user and a suspended user are live, a peer's account and a purged peer's tombstone
+// are not.
+func TestLiveUserAgreesWithItsSQL(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	user, suspended := newUser("live-user", 0), newUser("live-suspended", 0)
+	for _, u := range []*kernel.Account{user, suspended} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SuspendUser(ctx, suspended.ID); err != nil {
+		t.Fatal(err)
+	}
+	peerOf := func(key string) *kernel.Account {
+		if err := db.UpsertKernel(ctx, key, key, "", "", "", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		a := &kernel.Account{ID: uuid.NewString(), KernelPublicKey: key, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := db.CreateUser(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	peer, gone := peerOf("livepeerkey"), peerOf("livegonekey")
+	if err := db.PurgePeerCascade(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		id   string
+		want bool
+	}{"user": {user.ID, true}, "suspended": {suspended.ID, true}, "peer": {peer.ID, false}, "tombstone": {gone.ID, false}} {
+		a, err := db.ReadUser(ctx, c.id)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var inSQL bool
+		if err := db.db.QueryRowContext(ctx, `SELECT `+liveUser("")+` FROM accounts WHERE id=?`, c.id).Scan(&inSQL); err != nil {
+			t.Fatal(err)
+		}
+		if a.IsLiveUser() != c.want || inSQL != c.want {
+			t.Errorf("%s: Go says %v, SQL says %v, want %v", name, a.IsLiveUser(), inSQL, c.want)
+		}
+	}
+}
