@@ -887,6 +887,33 @@ func (s *story) actValue() error {
 		"run", k4.At("sys/transfer"), fmt.Sprintf(`{"target":%q,"amount":%s}`, k4.At("fay"), s.px(999999)))
 	s.n.MustRefuse("value.unknown_target_refused", "not found|invalid|target|no such", k1, "ana",
 		"run", k1.At("sys/transfer"), fmt.Sprintf(`{"target":%q,"amount":%s}`, k1.At("nobody-here"), s.px(1)))
+
+	// A transfer to a user of another kernel is the same action, k1's own (D18): ana pays exactly the
+	// amount — the transfer is free here — and cara is credited exactly that once k1's payment reaches
+	// k2 and k1 has said whom it is for (P11), and not before.
+	k2 := s.k("k2")
+	anaBefore := k1.Balance("ana")
+	sent, err := read[map[string]any](k1, "ana", "user", "transfer", "--yes", k2.At("cara"), "3")
+	if s.n.Check("value.crosses_kernels", err == nil && str(sent, "tx_id") != "", fmt.Sprintf("expected success: %v", err)) {
+		s.n.Check("value.sender_leg_exact", anaBefore-k1.Balance("ana") == 3*s.scale,
+			fmt.Sprintf("ana paid %d for a transfer of %d", anaBefore-k1.Balance("ana"), 3*s.scale))
+		// The credit is read where k2 records it, the ledger entry naming this transfer, not off
+		// cara's balance: she also sells, and every sale paid while this waits moves it.
+		reason := "transfer " + str(sent, "tx_id")
+		var credited int64
+		arrived := poll(30*time.Minute, 5*time.Second, func() bool {
+			entries, err := read[[]map[string]any](k2, "cara", "user", "ledger", "--limit", "200")
+			credited = 0
+			for _, e := range entries {
+				if str(e, "reason") == reason {
+					credited += num(e, "amount")
+				}
+			}
+			return err == nil && credited > 0
+		})
+		s.n.Check("value.recipient_credited_across_kernels", arrived && credited == 3*s.scale,
+			fmt.Sprintf("cara was credited %d for a transfer of %d", credited, 3*s.scale))
+	}
 	return nil
 }
 
@@ -1341,15 +1368,11 @@ func (s *story) receiptsVerify() {
 // transitive, and a kernel does not relay on request.
 func (s *story) attackReachingPastARefusal() {
 	fmt.Println("  the attacker asks for what was never exported")
-	k3, k1 := s.k("k3"), s.k("k1")
+	k3 := s.k("k3")
 	miss := "not found|not available|refused|denied|no such|unknown"
 	s.n.MustRefuse("attack.local_action_not_exported", miss, k3, "dan", "run", s.k("k1").At("ana/local-only"), `{"msg":"x"}`)
 	s.n.MustRefuse("attack.private_action_not_exported", miss, k3, "dan", "run", s.k("k1").At("ana/helper"), `{"msg":"x"}`)
 	s.n.MustRefuse("attack.no_relay_through_a_third_kernel", miss, k3, "dan", "run", s.k("k2").At("ana/echo"), `{"msg":"x"}`)
-	// Value may not name a beneficiary on another kernel: a transfer that crossed would let a
-	// caller move a stranger's balance from outside.
-	s.n.MustRefuse("attack.value_may_not_cross", "another kernel|not found|local|invalid|target", k1, "ana",
-		"run", k1.At("sys/transfer"), fmt.Sprintf(`{"target":%q,"amount":%s}`, s.k("k2").At("cara"), s.px(5)))
 }
 
 // A newcomer advertises a handle a victim already uses for someone else. A petname is the local

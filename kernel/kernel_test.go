@@ -1459,149 +1459,6 @@ func TestAdjustmentExternalKeyIdempotent(t *testing.T) {
 	}
 }
 
-func TestTransfer(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	alice := setupUser(t, st, "alice", 100)
-	bob := setupUser(t, st, "bob", 0)
-
-	// Happy path: debit sender, credit recipient, one ledger entry from→to.
-	e, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "gift", "")
-	if err != nil {
-		t.Fatalf("transfer: %v", err)
-	}
-	if e.FromUserID != alice.ID || e.ToUserID != bob.ID || e.OperatorUserID != alice.ID || e.Amount != 30 {
-		t.Errorf("ledger entry: got %+v, want from=%s to=%s operator=%s amount=30", e, alice.ID, bob.ID, alice.ID)
-	}
-	assertUserBalance(t, st, alice.ID, 70, 0)
-	assertUserBalance(t, st, bob.ID, 30, 0)
-
-	// Insufficient funds: rejected, balances unchanged.
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 1000, "", ""); !errors.Is(err, kernel.ErrInsufficientFunds) {
-		t.Errorf("over-balance transfer: got %v, want ErrInsufficientFunds", err)
-	}
-	assertUserBalance(t, st, alice.ID, 70, 0)
-	assertUserBalance(t, st, bob.ID, 30, 0)
-
-	// Non-positive amount and self-transfer rejected.
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 0, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("zero amount: got %v, want ErrInvalidInput", err)
-	}
-	if _, err := k.Transfer(ctx, alice.ID, alice.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("self-transfer: got %v, want ErrInvalidInput", err)
-	}
-
-	// Peer/proxy recipient (kernel_public_key set) rejected.
-	if err := st.UpsertKernel(ctx, "cGVlci1rZXk", "peer", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	peer := &kernel.Account{
-		ID: uuid.New().String(), KernelPublicKey: "cGVlci1rZXk", Available: 0,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateUser(ctx, peer); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.Transfer(ctx, alice.ID, peer.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("transfer to peer: got %v, want ErrInvalidInput", err)
-	}
-
-	// Suspended recipient rejected; suspended caller rejected (ErrUnauthenticated).
-	carol := setupUser(t, st, "carol", 0)
-	if err := st.SuspendUser(ctx, carol.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.Transfer(ctx, alice.ID, carol.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("transfer to suspended recipient: got %v, want ErrInvalidInput", err)
-	}
-	if err := st.SuspendUser(ctx, alice.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 10, "", ""); !errors.Is(err, kernel.ErrUnauthenticated) {
-		t.Errorf("suspended caller: got %v, want ErrUnauthenticated", err)
-	}
-}
-
-func TestTransferIdempotent(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	alice := setupUser(t, st, "alice", 100)
-	bob := setupUser(t, st, "bob", 0)
-
-	first, err := k.Transfer(ctx, alice.ID, bob.ID, 40, "invoice", "inv-1")
-	if err != nil {
-		t.Fatalf("transfer: %v", err)
-	}
-	replay, err := k.Transfer(ctx, alice.ID, bob.ID, 40, "invoice", "inv-1")
-	if err != nil {
-		t.Fatalf("replay: %v", err)
-	}
-	if replay.ID != first.ID {
-		t.Errorf("replay returned a new record: got %s, want %s", replay.ID, first.ID)
-	}
-	// Moved once, not twice.
-	assertUserBalance(t, st, alice.ID, 60, 0)
-	assertUserBalance(t, st, bob.ID, 40, 0)
-}
-
-// An idempotency token a client chose names that client's own movement and nothing else. The kernel
-// prefixes every key it mints; the caller's was the one name in that column nobody owned, so a
-// client could hand back a key it had merely read and be told money moved that never did, or occupy
-// a name the rail would later need for a real payment.
-func TestATransferKeyNamesOnlyItsOwnCallersMovement(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-
-	su := setupUser(t, st, "sys", 0)
-	alice := setupUser(t, st, "alice", 100)
-	bob := setupUser(t, st, "bob", 0)
-	mallory := setupUser(t, st, "mallory", 100)
-
-	// A payment the kernel booked under its own key.
-	if _, err := k.Deposit(ctx, su.ID, bob.ID, 50, "", "pay-1"); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := st.ListLedgerByUser(ctx, bob.ID, 0, 0)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("ledger: %d %v", len(entries), err)
-	}
-	kernelKey := entries[0].ExternalKey
-	if kernelKey == "" {
-		t.Fatal("the kernel's own entry carries no key to try")
-	}
-
-	// A stranger naming it is not answered with it, and moves nothing.
-	before, _ := st.ReadUser(ctx, mallory.ID)
-	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 10, "", kernelKey); err != nil {
-		t.Fatalf("a caller's key lives in the caller's namespace, so this is an ordinary transfer: %v", err)
-	}
-	after, _ := st.ReadUser(ctx, mallory.ID)
-	if after.Available != before.Available-10 {
-		t.Errorf("the transfer did not move: %d then %d", before.Available, after.Available)
-	}
-
-	// Two callers may choose one word without naming each other's movement.
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 20, "", "shared"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.Transfer(ctx, mallory.ID, bob.ID, 30, "", "shared"); err != nil {
-		t.Fatalf("another caller's key must not be taken: %v", err)
-	}
-	assertUserBalance(t, st, alice.ID, 80, 0)
-	assertUserBalance(t, st, mallory.ID, 60, 0)
-
-	// One caller reusing their own key on other terms is refused, not answered with the old entry.
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 25, "", "shared"); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("the same key on other terms must be refused, got %v", err)
-	}
-	assertUserBalance(t, st, alice.ID, 80, 0)
-}
-
 func TestListLedger(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -1614,25 +1471,28 @@ func TestListLedger(t *testing.T) {
 	if _, err := k.Deposit(ctx, su.ID, alice.ID, 100, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Transfer(ctx, alice.ID, bob.ID, 30, "", ""); err != nil {
+	if _, err := k.Withdraw(ctx, alice.ID, uuid.NewString(), 30, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Deposit(ctx, su.ID, bob.ID, 20, "", newRef()); err != nil {
 		t.Fatal(err)
 	}
 
-	// Alice sees her deposit (to) and her outbound transfer (from): two entries.
+	// Alice sees her deposit (to) and her withdrawal (from): two entries, the newest first.
 	aliceLedger, err := k.ListLedger(ctx, alice.ID, 50, 0)
 	if err != nil {
 		t.Fatalf("list ledger: %v", err)
 	}
-	if len(aliceLedger) != 2 {
-		t.Fatalf("alice ledger: got %d entries, want 2", len(aliceLedger))
+	if len(aliceLedger) != 2 || aliceLedger[0].FromUserID != alice.ID {
+		t.Fatalf("alice ledger: got %+v, want two entries, her withdrawal first", aliceLedger)
 	}
-	// Bob sees only the inbound transfer (to): one entry.
+	// Bob sees only his own deposit.
 	bobLedger, err := k.ListLedger(ctx, bob.ID, 50, 0)
 	if err != nil {
 		t.Fatalf("list ledger: %v", err)
 	}
-	if len(bobLedger) != 1 || bobLedger[0].ToUserID != bob.ID || bobLedger[0].FromUserID != alice.ID {
-		t.Errorf("bob ledger: got %+v, want one from-alice→to-bob entry", bobLedger)
+	if len(bobLedger) != 1 || bobLedger[0].ToUserID != bob.ID {
+		t.Errorf("bob ledger: got %+v, want his one deposit", bobLedger)
 	}
 }
 
@@ -2428,6 +2288,9 @@ type fakeFederationHTTP struct {
 	// fail so a test can watch the worker resend it.
 	revealed  []kernel.RevealPayload
 	revealErr error
+	// announced is every paid transfer the kernel announced to the beneficiary's kernel (P11).
+	announced   []kernel.TransferPaidPayload
+	announceErr error
 	// Outbound task protocol (§13): the canned list/complete replies, and what the kernel sent.
 	taskListBody      string
 	taskBody          string
@@ -2457,11 +2320,22 @@ func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, na
 		BlockchainAddress: f.resolveBlockchainAddress, BlockchainProof: f.resolveBlockchainProof}, nil
 }
 
-func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (string, string, error) {
+func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (*kernel.ResolvedUser, error) {
 	if f.resolveErr != nil {
-		return "", "", f.resolveErr
+		return nil, f.resolveErr
 	}
-	return f.resolveUserID, f.resolveHandle, nil
+	return &kernel.ResolvedUser{UserID: f.resolveUserID, Handle: f.resolveHandle,
+		BlockchainAddress: f.resolveBlockchainAddress, BlockchainProof: f.resolveBlockchainProof}, nil
+}
+
+// announced records every paid transfer this double was told of, so a test can assert what the
+// sending kernel told the beneficiary's kernel; announceErr makes the announcement fail.
+func (f *fakeFederationHTTP) AnnounceTransfer(_ context.Context, _ string, p kernel.TransferPaidPayload, _, _ string) error {
+	if f.announceErr != nil {
+		return f.announceErr
+	}
+	f.announced = append(f.announced, p)
+	return nil
 }
 
 // revealed records every draw this double was asked to announce, so a test can assert what the

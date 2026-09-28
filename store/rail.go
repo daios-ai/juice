@@ -507,7 +507,7 @@ func (s *DB) ListOpenRailTransfers(ctx context.Context, limit int) ([]*kernel.Ra
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+railCols+` FROM rail_transfers
-		  WHERE kind IN ('payout','obligation')
+		  WHERE kind IN ('payout','obligation','transfer')
 		    AND status NOT IN ('confirmed','failed','credited','announced')
 		  ORDER BY created_at LIMIT ?`, limit)
 	if err != nil {
@@ -527,7 +527,7 @@ func (s *DB) RailPosition(ctx context.Context, sys string) (*kernel.RailPosition
 	    (SELECT COALESCE(SUM(CASE WHEN from_user_id IS NULL THEN amount ELSE -amount END),0)
 	       FROM ledger WHERE (from_user_id IS NULL) <> (to_user_id IS NULL) AND id NOT LIKE 'st_%'),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers
-	       WHERE kind IN ('payout','obligation') AND status IN ('pending','submitted','refilling','blocked')),
+	       WHERE kind IN ('payout','obligation','transfer') AND status IN ('pending','submitted','refilling','blocked')),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers WHERE kind='deposit' AND status='held'),
 	    (SELECT COALESCE(SUM(amount),0) FROM rail_transfers WHERE kind='refill' AND status='pending'),
 	    (SELECT COALESCE(available,0) FROM accounts WHERE id=?)`, sys).
@@ -567,10 +567,13 @@ var unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
 	  LEFT JOIN receipts orc ON orc.trace_id = ot.id
 	 WHERE ` + unresolved("ot", "ox", "orc")
 
-// reservedDeposit says a deposit d comes from an address some unresolved foreign call named as its
-// payer, so it may be that call's money and is nobody else's to take yet. A world with no addresses
-// reserves nothing: there the payment is the reveal that names its own obligation (D23).
-var reservedDeposit = `d.party <> '' AND EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_blockchain_address = d.party)`
+// reservedDeposit says a deposit d is a peer kernel's to explain, so nobody else may be handed it: it
+// comes from a peer's proven vault, whose money is a ticket or a transfer and waits for the reveal or
+// the `paid` naming it (P10, P11), or from an address some unresolved foreign call named as its payer.
+// Both can land before the message naming them. A world with no addresses reserves nothing: there
+// the message is itself the payment (D23).
+var reservedDeposit = `d.party <> '' AND (EXISTS (SELECT 1 FROM kernels v WHERE v.blockchain_address = d.party)
+	OR EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_blockchain_address = d.party))`
 
 // owedSelect is the projection, from the peer's name for the call to the reveal on its trace. The
 // obligation is what the receipt charged plus the markup, so it is zero until the call commits.
@@ -743,6 +746,56 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 			spent[m.deposit], done[m.trace] = true, true
 			closed = append(closed, e)
 		}
+		// Then transfers: a peer's word that its payment is for one of our users (P11) credits that user
+		// only from a held deposit from the payer it proved, carrying the transaction and amount it named.
+		// One deposit credits one transfer.
+		type announced struct{ counterparty, id, beneficiary, deposit string }
+		rows, err := tx.QueryContext(ctx,
+			`SELECT it.counterparty, it.id, it.beneficiary_id, d.id
+			   FROM incoming_transfers it
+			   JOIN rail_transfers d
+			     ON d.kind = 'deposit' AND d.status = 'held'
+			    AND d.party = it.payer AND d.tx_hash = it.tx_hash AND d.amount = it.amount
+			  WHERE it.status = ?
+			  ORDER BY it.created_at LIMIT ?`, kernel.IncomingAnnounced, limit)
+		if err != nil {
+			return dbErr(err, "reconcile deposits: find transfers")
+		}
+		var transfers []announced
+		for rows.Next() {
+			var a announced
+			if err := rows.Scan(&a.counterparty, &a.id, &a.beneficiary, &a.deposit); err != nil {
+				rows.Close()
+				return dbErr(err, "reconcile deposits: scan transfer")
+			}
+			transfers = append(transfers, a)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return dbErr(err, "reconcile deposits: read transfers")
+		}
+		credited := map[announced]bool{}
+		for _, a := range transfers {
+			once := announced{counterparty: a.counterparty, id: a.id}
+			if spent[a.deposit] || credited[once] {
+				continue // one deposit credits one transfer, and one transfer takes one deposit
+			}
+			row, err := readRailTx(ctx, tx, a.deposit)
+			if err != nil {
+				return dbErr(err, "reconcile deposits: read payment")
+			}
+			row.Reason = "transfer " + a.id
+			e, err := deliverDeposit(ctx, tx, row, sysID, a.beneficiary, row.Amount)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE incoming_transfers SET status=? WHERE counterparty=? AND id=?`,
+				kernel.IncomingCredited, a.counterparty, a.id); err != nil {
+				return dbErr(err, "reconcile deposits: credit transfer")
+			}
+			spent[a.deposit], credited[once] = true, true
+			closed = append(closed, e)
+		}
 		known, err := collect(
 			`SELECT '', '', d.id, a.id FROM rail_transfers d
 			   JOIN accounts a ON a.blockchain_address = d.party
@@ -883,6 +936,77 @@ func (s *DB) ListPendingReveals(ctx context.Context, limit int) ([]*kernel.Pendi
 func (s *DB) MarkRevealFailed(ctx context.Context, traceID string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE traces SET reveal_failed_at=? WHERE id=?`, timeToStr(at), traceID)
 	return dbErr(err, "mark reveal failed")
+}
+
+// RecordIncomingTransfer stores a peer's word that a payment of its is for one of our users (P11), keyed
+// by the peer and its id: the same terms again change nothing, other terms under that id are refused,
+// and a beneficiary that is not a live user here is refused. Where the world has no addresses the
+// message is itself the payment, handed in to be booked in this same commit, so the fact and the word
+// naming it can never be found apart.
+func (s *DB) RecordIncomingTransfer(ctx context.Context, sys string, it *kernel.IncomingTransfer, payment *kernel.RailTransfer) error {
+	return s.withTx(ctx, "record incoming transfer", func(tx *sql.Tx) error {
+		var prior kernel.IncomingTransfer
+		err := tx.QueryRowContext(ctx,
+			`SELECT beneficiary_id, amount, payer, tx_hash FROM incoming_transfers WHERE counterparty=? AND id=?`,
+			it.Counterparty, it.ID).Scan(&prior.BeneficiaryID, &prior.Amount, &prior.Payer, &prior.TxHash)
+		switch {
+		case err == nil:
+			if prior.BeneficiaryID != it.BeneficiaryID || prior.Amount != it.Amount || prior.Payer != it.Payer || prior.TxHash != it.TxHash {
+				return kernel.ErrInvalidInput.Wrapf("transfer %s was already announced on other terms", it.ID)
+			}
+			return nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return dbErr(err, "read incoming transfer")
+		}
+		var live bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT handle IS NOT NULL AND handle <> '' AND kernel_public_key IS NULL FROM accounts WHERE id=?`,
+			it.BeneficiaryID).Scan(&live); err != nil || !live {
+			return kernel.ErrNotFound.Wrap("the transfer names no user of this kernel")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO incoming_transfers (counterparty,id,beneficiary_id,amount,payer,tx_hash,status,created_at) VALUES (?,?,?,?,?,?,?,?)`,
+			it.Counterparty, it.ID, it.BeneficiaryID, it.Amount, it.Payer, it.TxHash, kernel.IncomingAnnounced,
+			timeToStr(it.CreatedAt)); err != nil {
+			return dbErr(err, "record incoming transfer")
+		}
+		if payment == nil {
+			return nil
+		}
+		return bookDeposit(ctx, tx, sys, payment)
+	})
+}
+
+// ListTransfersToAnnounce returns this kernel's transfer payments that are final and whose beneficiary's
+// kernel has not yet acknowledged being told of them (P11): what each paid, to whom and on which kernel,
+// read from the payment row and the call that made it. Order as reveals are, so one kernel that cannot
+// answer never holds up the rest: never tried first, then least recently failed.
+func (s *DB) ListTransfersToAnnounce(ctx context.Context, limit int) ([]*kernel.OutgoingTransfer, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT r.id, t.id, t.value_peer, COALESCE(t.value_to,''), r.amount, r.tx_hash
+		   FROM rail_transfers r
+		   JOIN transactions x ON x.id = r.id
+		   JOIN traces t ON t.id = x.trace_id
+		  WHERE r.kind = 'transfer' AND r.status = 'confirmed'
+		  ORDER BY COALESCE(t.reveal_failed_at,'') ASC, r.created_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, dbErr(err, "list transfers to announce")
+	}
+	return queryList(rows, "list transfers to announce", func(scan func(...any) error) (*kernel.OutgoingTransfer, error) {
+		var o kernel.OutgoingTransfer
+		return &o, scan(&o.ID, &o.TraceID, &o.PeerKey, &o.BeneficiaryID, &o.Amount, &o.TxHash)
+	})
+}
+
+// MarkTransferAnnounced records that the beneficiary's kernel acknowledged a transfer's payment: the row
+// is done on this side (P11).
+func (s *DB) MarkTransferAnnounced(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE rail_transfers SET status=? WHERE id=? AND kind=? AND status=?`,
+		kernel.RailStatusAnnounced, id, kernel.RailKindTransfer, kernel.RailStatusConfirmed)
+	return dbErr(err, "mark transfer announced")
 }
 
 // MarkRevealed records that the seller has acknowledged how the draw came out, so the worker stops

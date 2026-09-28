@@ -399,11 +399,13 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 // revealsPerPass bounds one pass, so telling sellers never becomes the whole of a cycle.
 const revealsPerPass = 25
 
-// RevealPending tells sellers still waiting how their obligations came out, and keeps telling them
-// until each has heard: a losing draw the seller never learns about leaves it owed forever. Those
-// never tried come first and the rest longest-untried first, so one unreachable peer delays the
-// others by a pass rather than blocking them for good (P10).
+// RevealPending tells the peers still waiting what this kernel's payments to them were: how each
+// draw came out (P10), and whom each transfer is for (P11). It keeps telling them until each has
+// heard: a losing draw the seller never learns about leaves it owed forever, and a transfer never
+// named leaves its money held. Those never tried come first and the rest longest-untried first, so
+// one unreachable peer delays the others by a pass rather than blocking them for good.
 func (k *Kernel) RevealPending(ctx context.Context) {
+	k.announceTransfers(ctx)
 	pending, err := k.store.ListPendingReveals(ctx, revealsPerPass)
 	if err != nil {
 		return
@@ -452,6 +454,107 @@ func (k *Kernel) Reveal(ctx context.Context, d *PendingReveal) error {
 		return err
 	}
 	return k.store.MarkRevealed(ctx, d.TraceID)
+}
+
+// TransferPaidPayload is what a kernel signs to tell another kernel whom a payment to it is for (P11):
+// the payment's id — the transaction that made it — its transaction on the rail and amount, the
+// sender's proven vault it comes from, and the beneficiary's stable id on the receiver. The vault's
+// proof travels beside the payload, as on a call (P4).
+type TransferPaidPayload struct {
+	Amount            int64  `json:"amount"`
+	BeneficiaryID     string `json:"beneficiary_id"`
+	BlockchainAddress string `json:"blockchain_address"`
+	Counterparty      string `json:"counterparty"`
+	ID                string `json:"id"`
+	Recipient         string `json:"recipient"`
+	Timestamp         string `json:"timestamp"`
+	TxHash            string `json:"tx_hash"`
+}
+
+// announceTransfers tells each kernel a transfer payment went to whom it is for, once the payment is
+// final, until that kernel acknowledges (P11). A refusal is retried like an unanswered one: the money
+// has already left, and only the receiving kernel can put it where it belongs.
+func (k *Kernel) announceTransfers(ctx context.Context) {
+	pending, err := k.store.ListTransfersToAnnounce(ctx, revealsPerPass)
+	if err != nil {
+		return
+	}
+	for _, o := range pending {
+		if err := k.announceTransfer(ctx, o); err != nil {
+			k.log.With(ctx).Warn("transfer.announce_failed", "transfer_id", o.ID, "peer", o.PeerKey, "error", err)
+			if merr := k.store.MarkRevealFailed(ctx, o.TraceID, time.Now().UTC()); merr != nil {
+				k.log.With(ctx).Error("transfer.announce_mark_failed", "transfer_id", o.ID, "error", merr)
+			}
+		}
+	}
+}
+
+// announceTransfer sends one `paid`, signed afresh, and records the acknowledgement.
+func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) error {
+	fe := k.fedClient
+	if fe == nil {
+		return ErrInvalidState.Wrap("federation client is not configured")
+	}
+	vault, proof := k.BlockchainIdentity(ctx)
+	if vault == "" && k.rail != nil && k.rail.Address() != "" {
+		return ErrInvalidState.Wrap("this kernel cannot prove its blockchain address yet")
+	}
+	p := TransferPaidPayload{
+		Amount: o.Amount, BeneficiaryID: o.BeneficiaryID, BlockchainAddress: vault,
+		Counterparty: k.ourKeyB64(), ID: o.ID, Recipient: o.PeerKey,
+		Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: o.TxHash,
+	}
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainTransfer, p)
+	if err != nil {
+		return err
+	}
+	if err := fe.AnnounceTransfer(ctx, o.PeerKey, p, proof, sig); err != nil {
+		return err
+	}
+	k.log.With(ctx).Info("transfer.announced", "transfer_id", o.ID, "peer", o.PeerKey, "amount", o.Amount)
+	return k.store.MarkTransferAnnounced(ctx, o.ID)
+}
+
+// HandleTransferPaid is the receiving side of P11: another kernel says a payment of its is for one of
+// our users. The signature, the recipient and the sender's vault are checked, then the word is stored
+// keyed by the sender and its id — a repeat changes nothing, other terms under that id are refused —
+// and the beneficiary is credited only when a finalized deposit from that vault, with that transaction
+// and amount, is here: now, if it arrived first, or when it does. Where the world has no addresses
+// this message is itself the payment (D23), booked with the word that names it.
+func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p TransferPaidPayload, proof, signature string) error {
+	pub, err := decodeRemotePublicKey(peerKey)
+	if err != nil {
+		return err
+	}
+	if p.Counterparty != peerKey || p.Recipient != k.ourKeyB64() {
+		return ErrUnauthorized.Wrap("the transfer is not addressed from this peer to this kernel")
+	}
+	if err := k.cfg.Network.verify(pub, sigDomainTransfer, p, signature); err != nil {
+		return err
+	}
+	if p.ID == "" || p.TxHash == "" || p.Amount <= 0 || p.BeneficiaryID == "" {
+		return ErrInvalidInput.Wrap("a transfer names its id, payment, amount and beneficiary")
+	}
+	payer, err := k.ObservePeerVault(ctx, peerKey, p.BlockchainAddress, proof)
+	if err != nil {
+		return err
+	}
+	var payment *RailTransfer
+	if k.rail != nil && k.rail.Address() == "" {
+		fact, ferr := k.rail.Witness(ctx, p.TxHash, p.Amount)
+		if ferr != nil {
+			return ferr
+		}
+		payment = heldDeposit(fact, "transfer "+p.ID)
+	}
+	if err := k.store.RecordIncomingTransfer(ctx, k.cfg.FeeRecipientID, &IncomingTransfer{
+		Counterparty: peerKey, ID: p.ID, BeneficiaryID: p.BeneficiaryID, Amount: p.Amount,
+		Payer: payer, TxHash: p.TxHash, CreatedAt: time.Now().UTC(),
+	}, payment); err != nil {
+		return err
+	}
+	k.reconcileDeposits(ctx)
+	return nil
 }
 
 // Economy is the money rules this kernel runs under, for the operator's own view of them.

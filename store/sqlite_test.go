@@ -925,6 +925,44 @@ func TestBeginRunDeductsFunds(t *testing.T) {
 	}
 }
 
+// A run's external key is its caller's (D20): a second run under a used key is refused as taken and
+// moves nothing, the first is readable by the key, and another caller's key of the same name is its own.
+func TestBeginRunRefusesATakenKey(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	alice, bob := newUser("alice", 1000), newUser("bob", 1000)
+	for _, u := range []*kernel.Account{alice, bob} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	begin := func(owner string) (*kernel.Process, error) {
+		p := newProcess(owner)
+		p.ExternalKey, p.RequestHash = "pay-1", "h1"
+		tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		return p, db.BeginRun(ctx, p, tr, owner, 100, 0, 0)
+	}
+	first, err := begin(alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := begin(alice.ID); !errors.Is(err, kernel.ErrRunKeyTaken) {
+		t.Errorf("a taken key: %v, want ErrRunKeyTaken", err)
+	}
+	if u, _ := db.ReadUser(ctx, alice.ID); u.Available != 900 {
+		t.Errorf("the refused run moved money: alice has %d, want 900", u.Available)
+	}
+	if got, err := db.ReadProcessByKey(ctx, alice.ID, "pay-1"); err != nil || got == nil || got.ID != first.ID || got.RequestHash != "h1" {
+		t.Errorf("read by key: %+v %v, want the first run", got, err)
+	}
+	if _, err := begin(bob.ID); err != nil {
+		t.Errorf("another caller's key of the same name: %v", err)
+	}
+	if got, _ := db.ReadProcessByKey(ctx, alice.ID, "none"); got != nil {
+		t.Errorf("an unused key names %+v", got)
+	}
+}
+
 func TestBeginRunAndSubcall(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -3948,74 +3986,39 @@ func TestListNativeActions(t *testing.T) {
 	}
 }
 
-func TestCreateLedgerEntry(t *testing.T) {
+// ListLedgerByUser returns the rows a user is party to on either side, newest first, bounded.
+func TestListLedgerByUser(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	sys := newUser("sys", 0)
-	alice := newUser("alice", 100)
+	alice := newUser("alice", 0)
 	bob := newUser("bob", 0)
 	for _, u := range []*kernel.Account{sys, alice, bob} {
 		if err := db.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	mustEntry := func(e *kernel.LedgerEntry) {
-		t.Helper()
-		if err := db.CreateLedgerEntry(ctx, e); err != nil {
-			t.Fatalf("create ledger entry: %v", err)
-		}
-	}
-	avail := func(id string) int64 {
-		u, err := db.ReadUser(ctx, id)
-		if err != nil {
+	at := time.Now().UTC()
+	for i, e := range []*kernel.LedgerEntry{
+		{OperatorUserID: sys.ID, ToUserID: alice.ID, Amount: 50},
+		{OperatorUserID: sys.ID, FromUserID: alice.ID, Amount: 20},
+		{OperatorUserID: sys.ID, FromUserID: alice.ID, ToUserID: bob.ID, Amount: 30},
+	} {
+		e.ID, e.CreatedAt = uuid.NewString(), at.Add(time.Duration(i)*time.Second)
+		if err := db.withTx(ctx, "test ledger", func(tx *sql.Tx) error { return insertLedgerRow(ctx, tx, e) }); err != nil {
 			t.Fatal(err)
 		}
-		return u.Available
 	}
-
-	// Credit-only (deposit): only to is set.
-	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, ToUserID: alice.ID, Amount: 50, CreatedAt: time.Now().UTC()})
-	if avail(alice.ID) != 150 {
-		t.Errorf("alice after credit: got %d, want 150", avail(alice.ID))
-	}
-	// Debit-only (withdraw): only from is set.
-	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: sys.ID, FromUserID: alice.ID, Amount: 20, CreatedAt: time.Now().UTC()})
-	if avail(alice.ID) != 130 {
-		t.Errorf("alice after debit: got %d, want 130", avail(alice.ID))
-	}
-	// Both (transfer): from and to set, one commit.
-	mustEntry(&kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: alice.ID, FromUserID: alice.ID, ToUserID: bob.ID, Amount: 30, CreatedAt: time.Now().UTC()})
-	if avail(alice.ID) != 100 || avail(bob.ID) != 30 {
-		t.Errorf("after transfer: alice=%d bob=%d, want 100/30", avail(alice.ID), avail(bob.ID))
-	}
-	// Insufficient funds on the debit leg returns ErrInsufficientFunds and moves nothing.
-	err := db.CreateLedgerEntry(ctx, &kernel.LedgerEntry{ID: uuid.New().String(), OperatorUserID: alice.ID, FromUserID: alice.ID, ToUserID: bob.ID, Amount: 1000, CreatedAt: time.Now().UTC()})
-	if !errors.Is(err, kernel.ErrInsufficientFunds) {
-		t.Errorf("overdraw: got %v, want ErrInsufficientFunds", err)
-	}
-	if avail(alice.ID) != 100 || avail(bob.ID) != 30 {
-		t.Errorf("after failed transfer: alice=%d bob=%d, want 100/30 (unchanged)", avail(alice.ID), avail(bob.ID))
-	}
-
-	// ListLedgerByUser: alice is party to the credit, debit, and transfer = 3 committed rows;
-	// the failed transfer rolled back and wrote nothing. Bob only to the transfer = 1.
 	aliceEntries, err := db.ListLedgerByUser(ctx, alice.ID, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(aliceEntries) != 3 {
-		t.Errorf("alice ledger entries: got %d, want 3", len(aliceEntries))
+	if len(aliceEntries) != 3 || aliceEntries[0].ToUserID != bob.ID {
+		t.Errorf("alice: got %+v, want three rows, the newest first", aliceEntries)
 	}
-	bobEntries, err := db.ListLedgerByUser(ctx, bob.ID, 100, 0)
-	if err != nil {
-		t.Fatal(err)
+	if bobEntries, _ := db.ListLedgerByUser(ctx, bob.ID, 100, 0); len(bobEntries) != 1 {
+		t.Errorf("bob: got %d rows, want 1", len(bobEntries))
 	}
-	if len(bobEntries) != 1 {
-		t.Errorf("bob ledger entries: got %d, want 1", len(bobEntries))
-	}
-
-	// Pagination bounds the result set (alice has 3 committed entries).
 	if got, _ := db.ListLedgerByUser(ctx, alice.ID, 1, 0); len(got) != 1 {
 		t.Errorf("limit=1: got %d entries, want 1", len(got))
 	}

@@ -31,11 +31,12 @@ var ErrNotDispatched = errors.New("fed: request not dispatched")
 // protocol is served by gossip (§13); there is no bulk-manifest protocol — a call resolves one
 // action on demand over ProtocolResolve (§8).
 const (
-	ProtocolCall    = "/juice/fed/call/1"
-	ProtocolResolve = "/juice/fed/resolve/1"
-	ProtocolGossip  = "/juice/fed/gossip/1"
-	ProtocolTask    = "/juice/fed/task/1"
-	ProtocolReveal  = "/juice/fed/settle/1"
+	ProtocolCall     = "/juice/fed/call/1"
+	ProtocolResolve  = "/juice/fed/resolve/1"
+	ProtocolGossip   = "/juice/fed/gossip/1"
+	ProtocolTask     = "/juice/fed/task/1"
+	ProtocolReveal   = "/juice/fed/settle/1"
+	ProtocolTransfer = "/juice/fed/transfer/1"
 )
 
 // GossipRequest is the wire form of a /juice/fed/gossip/1 request (§13): the evidence cursor to
@@ -56,6 +57,10 @@ type ResolveRequest struct {
 	Owner string `json:"owner,omitempty"` // action owner handle (kind=action)
 	Name  string `json:"name,omitempty"`  // action name (kind=action)
 	User  string `json:"user,omitempty"`  // user reference: handle or id (kind=user)
+	// BlockchainAddress and BlockchainProof are the asker's proven vault on a user resolve (P11): a
+	// kernel about to pay one of the answerer's users says first where the money will come from.
+	BlockchainAddress string `json:"blockchain_address,omitempty"`
+	BlockchainProof   string `json:"blockchain_proof,omitempty"`
 }
 
 // Response is the shape every protocol reply takes: a status plus an opaque JSON body. Status
@@ -133,6 +138,24 @@ type RevealRequest struct {
 // RevealResponse carries the ticket as the seller now holds it, or an error.
 type RevealResponse = Response
 
+// TransferRequest is the wire form of a /juice/fed/transfer/1 request (P11): the sender tells the
+// kernel a payment went to whom it is for. Signature covers every field but itself and the proof,
+// which is the rail key's own signature over the vault, as on a call.
+type TransferRequest struct {
+	Counterparty      string `json:"counterparty"`       // sender's base64url Ed25519 public key
+	Timestamp         string `json:"timestamp"`          // RFC3339
+	Signature         string `json:"signature"`          // Ed25519 over the scoped canonical payload
+	ID                string `json:"id"`                 // the transaction that made the payment
+	BeneficiaryID     string `json:"beneficiary_id"`     // the user it is for, by stable id on the receiver
+	Amount            int64  `json:"amount"`             // what the payment carries
+	TxHash            string `json:"tx_hash"`            // the payment on the rail
+	BlockchainAddress string `json:"blockchain_address"` // the sender's vault the payment comes from
+	BlockchainProof   string `json:"blockchain_proof"`   // the rail key's proof of that vault
+}
+
+// TransferResponse acknowledges the word stored, or carries an error.
+type TransferResponse = Response
+
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
@@ -154,6 +177,9 @@ type Handlers interface {
 	// obligation's draw. peerKey is the connection's authenticated key; the handler still verifies
 	// req.Signature against req.Counterparty per §13.
 	OnReveal(ctx context.Context, peerKey string, req RevealRequest) RevealResponse
+	// OnTransfer handles an inbound /juice/fed/transfer/1 request (P11): whom a payment to this kernel
+	// is for. The handler verifies req.Signature against req.Counterparty.
+	OnTransfer(ctx context.Context, peerKey string, req TransferRequest) TransferResponse
 }
 
 // Config configures a transport host.

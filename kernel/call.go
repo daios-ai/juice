@@ -85,6 +85,9 @@ type RunRequest struct {
 	ActionRef string         `json:"action"` // owner@kernel/name, or a raw action id
 	Args      map[string]any `json:"args"`
 	QuoteHash string         `json:"quote_hash"` // optional §4-precondition-7 pin; empty means the caller pinned nothing
+	// ExternalKey, when set, makes the run idempotent for its caller (D20): a repeat of the same
+	// {action, args} under it is answered with the first run's outcome instead of running again.
+	ExternalKey string `json:"external_key,omitempty"`
 }
 
 // CallReply is the response from a successful Call().
@@ -365,10 +368,8 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	// learns this with the contract rather than waiting for a gossip pass that may not have run
 	// (P10). An unproven address is simply not learned: the peer stays unpayable, and the call that
 	// would take on a debt is refused rather than settled into a payment nobody can send.
-	if _, verr := k.verifyBlockchainIdentity(peerKey, res.BlockchainAddress, res.BlockchainProof); res.BlockchainAddress != "" && verr == nil {
-		if uerr := k.store.UpsertKernel(ctx, peerKey, "", "", res.BlockchainAddress, res.BlockchainProof, time.Now().UTC()); uerr != nil {
-			k.log.With(ctx).Warn("kernel.blockchain_address.store_failed", "public_key", peerKey, "error", uerr.Error())
-		}
+	if _, verr := k.ObservePeerVault(ctx, peerKey, res.BlockchainAddress, res.BlockchainProof); verr != nil {
+		k.log.With(ctx).Warn("kernel.blockchain_address.store_failed", "public_key", peerKey, "error", verr.Error())
 	}
 	if mount == nil {
 		mount, err = k.EnsureKernelAccount(ctx, peerKey)
@@ -560,17 +561,19 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at import (§8 resolve).
 	// Derive the original remote manifest price (mp) from q for clamping and receipt audit.
 	// lockPrice = q funds the EXECUTION channel from the parent trace; the value channel is a separate
-	// TransferEffect reserve locked from the immediate caller C's own balance in BeginSubcall (§13), so
-	// a composed transfer pays the value from the composing action owner, not the process budget. (For a
-	// root/task call the ExistingTraceID branch below discards this and adopts beginRun's snapshot.)
+	// TransferEffect reserve locked from the immediate caller C's own balance in BeginSubcall (D18), so
+	// a composed transfer pays the value from the composing action owner, not the process budget. A
+	// root or task call was staged by its wrapper, and adopts that snapshot below.
 	lockPrice := action.Price
 	var mp int64 = action.Price // for non-remote-proxy: mp unused; for remote-proxy: corrected below
-	eff, verr := k.prepareTransferEffect(ctx, false, action, req.Args)
-	if verr != nil {
-		return nil, verr
-	}
-	if eff != nil {
-		trace.Value, trace.ValueTo = eff.Amount, eff.Dest
+	if req.ExistingTraceID == "" {
+		eff, verr := k.prepareTransferEffect(ctx, caller, action, req.Args)
+		if verr != nil {
+			return nil, verr
+		}
+		if eff != nil {
+			eff.stage(trace)
+		}
 	}
 	if action.Kind == KindRemoteProxy {
 		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
@@ -817,6 +820,7 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	trace.Ticket = dbTrace.Ticket
 	trace.Value = dbTrace.Value
 	trace.ValueTo = dbTrace.ValueTo
+	trace.ValuePeer = dbTrace.ValuePeer
 	return dbTrace.Available
 }
 

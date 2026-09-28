@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
 )
 
@@ -75,10 +77,11 @@ func (f simFault) String() string {
 type simVerb string
 
 const (
-	verbCall    simVerb = "call"
-	verbResolve simVerb = "resolve"
-	verbReveal  simVerb = "reveal"
-	verbTask    simVerb = "task"
+	verbCall     simVerb = "call"
+	verbResolve  simVerb = "resolve"
+	verbReveal   simVerb = "reveal"
+	verbTask     simVerb = "task"
+	verbTransfer simVerb = "transfer"
 )
 
 // simPlan is the scenario's instruction to the network: what to do to the next message of a given
@@ -304,6 +307,12 @@ func (p *simPort) Task(ctx context.Context, peerKey string, req fed.TaskRequest)
 	})
 }
 
+func (p *simPort) Transfer(ctx context.Context, peerKey string, req fed.TransferRequest) (fed.TransferResponse, error) {
+	return p.deliver(ctx, peerKey, verbTransfer, func(h *fedHandlers) fed.Response {
+		return h.OnTransfer(ctx, p.self, req)
+	})
+}
+
 // body renders a reply for the trace, truncated: a trace is for reading, not for archiving.
 func body(r fed.Response) string {
 	b := string(r.Body)
@@ -466,7 +475,11 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 		t.Fatalf("%s: first boot: %v", name, err)
 	}
 	priv := bootstrapSigning(t, k)
-	_ = err
+	// The one native a scenario here calls: this kernel's own transfer (D18), installed as boot does.
+	native.Register(k, []native.Spec{native.Transfer()})
+	if err := ensureSysNative(context.Background(), k, "sys", native.Transfer(), 0); err != nil {
+		t.Fatalf("%s: install transfer: %v", name, err)
+	}
 	pub := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 
 	adapter := newFedAdapter(pub, k.SignFederation, nil)
@@ -516,6 +529,7 @@ func (s *simNode) restart(t *testing.T) {
 	k := newKernel(cfg, kernel.Dependencies{Store: s.faults, HTTP: httpExec})
 	k.SetSecretBox(box)
 	k.SetSigningKey(s.priv, s.issuerID)
+	native.Register(k, []native.Spec{native.Transfer()})
 
 	adapter := newFedAdapter(s.key, k.SignFederation, nil)
 	adapter.SetTransport(&simPort{net: s.net, self: s.key})
@@ -1411,5 +1425,195 @@ func TestSimPeerRowsNeverHoldMoney(t *testing.T) {
 		if acct.KernelPublicKey != c.peer {
 			t.Errorf("%s's peer row lost its identity", c.node.name)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: a transfer to a user of another kernel (P11)
+// ---------------------------------------------------------------------------
+
+// transfer runs this kernel's own transfer for the caller: the action named is the one that runs,
+// wherever the recipient is (D18).
+func (s *simNode) transfer(t *testing.T, callerID, target string, amount int64, key string) (*kernel.CallReply, error) {
+	t.Helper()
+	return s.k.Run(context.Background(), kernel.RunRequest{
+		CallerID: callerID, ActionRef: "sys@" + testOwnName + "/transfer",
+		Args: map[string]any{"target": target, "amount": float64(amount)}, ExternalKey: key,
+	})
+}
+
+// settleTransfers runs the sender's worker once: the rail pays, then the beneficiary's kernel is
+// told whom the payment is for (P11).
+func (s *simNode) settleTransfers() {
+	s.k.RailPass(context.Background())
+	s.k.RevealPending(context.Background())
+}
+
+// A transfer to bob@B moves exactly the amount: alice pays it and the price of A's own action, B
+// credits bob the amount once the payment arrives and not before, and B's own money and exposure
+// never move, because B sold nothing. Lost and repeated announcements, a restart between payment
+// and announcement, and a recipient B does not have change none of that.
+func TestSimTransferAcrossKernels(t *testing.T) {
+	const amount = 300
+	for _, c := range []struct {
+		name  string
+		price int64
+		fault simFault
+	}{
+		{"free, clean network", 0, faultNone},
+		{"priced, clean network", 7, faultNone},
+		{"announcement delivered twice", 0, faultDeliverTwice},
+		{"announcement acknowledged but the answer lost", 0, faultLoseResponse},
+		{"announcement refused before dispatch", 0, faultRefuseBeforeDispatch},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			net := newSimNet(t)
+			a := net.addNode("a", defaultSimConfig())
+			b := net.addNode("b", defaultSimConfig())
+			ctx := context.Background()
+			if c.price > 0 {
+				if err := ensureSysNative(ctx, a.k, "sys", native.Transfer(), c.price); err != nil {
+					t.Fatal(err)
+				}
+			}
+			alice := a.user(t, "alice", 1000)
+			bob := b.user(t, "bob", 0)
+			bSys, bExposure := b.balance(t, b.sysID), b.exposure(t)
+
+			reply, err := a.transfer(t, alice.ID, "bob@"+b.key, amount, "")
+			if err != nil {
+				net.dump()
+				t.Fatalf("transfer: %v", err)
+			}
+			if got := a.balance(t, alice.ID); got != 1000-amount-c.price {
+				t.Errorf("alice has %d, want %d: the amount and A's price, nothing else", got, 1000-amount-c.price)
+			}
+			row, _ := a.db.ReadRailTransfer(ctx, reply.TxID)
+			if row == nil || row.Kind != kernel.RailKindTransfer || row.Amount != amount {
+				t.Fatalf("A's payment for the transfer = %+v, want one transfer of exactly %d", row, amount)
+			}
+			if got := b.balance(t, bob.ID); got != 0 {
+				t.Errorf("bob was credited %d before any payment", got)
+			}
+
+			if c.fault != faultNone {
+				net.arm(a.key, b.key, verbTransfer, c.fault, 1)
+			}
+			a.settleTransfers()
+			if c.fault != faultNone {
+				net.assertFired(t, c.fault, 1)
+			}
+			if c.fault == faultLoseResponse || c.fault == faultRefuseBeforeDispatch {
+				// Unacknowledged, so it is sent again on the next pass (P11).
+				a.restart(t)
+				a.settleTransfers()
+			}
+			if got := b.balance(t, bob.ID); got != amount {
+				net.dump()
+				t.Errorf("bob has %d, want exactly %d", got, amount)
+			}
+			if got := b.balance(t, b.sysID); got != bSys {
+				t.Errorf("B's sys moved from %d to %d", bSys, got)
+			}
+			if got := b.exposure(t); got != bExposure {
+				t.Errorf("B's exposure moved from %d to %d: B delivered nothing", bExposure, got)
+			}
+			// Nothing further moves on later passes.
+			a.settleTransfers()
+			if got := b.balance(t, bob.ID); got != amount {
+				t.Errorf("a later pass credited bob again: %d", got)
+			}
+			if v, err := a.k.ReadTransaction(ctx, alice.ID, reply.TxID); err != nil || v.Payment == "" {
+				t.Errorf("tx show names no payment: %+v, %v", v, err)
+			}
+		})
+	}
+}
+
+// A recipient B does not have is refused before anything moves on A, and a retried transfer under
+// one external key is paid once.
+func TestSimTransferRefusalAndReplay(t *testing.T) {
+	net := newSimNet(t)
+	a := net.addNode("a", defaultSimConfig())
+	b := net.addNode("b", defaultSimConfig())
+	ctx := context.Background()
+	alice := a.user(t, "alice", 1000)
+	bob := b.user(t, "bob", 0)
+
+	if _, err := a.transfer(t, alice.ID, "nobody@"+b.key, 10, ""); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("transfer to nobody: want ErrNotFound, got %v", err)
+	}
+	if u, _ := a.db.ReadUser(ctx, alice.ID); u.Available != 1000 || u.Locked != 0 {
+		t.Errorf("a refused transfer left alice %d available, %d locked", u.Available, u.Locked)
+	}
+
+	// A kernel asking for bob must prove the vault it names, or it is refused; one naming none, on a
+	// world without addresses, is answered with bob's id (P11).
+	if r := b.h.OnResolve(ctx, a.key, fed.ResolveRequest{Kind: "user", User: "bob", BlockchainAddress: "0xforged", BlockchainProof: "x"}); r.Status != http.StatusForbidden {
+		t.Errorf("an unproven vault on a user resolve: status %d, want 403", r.Status)
+	}
+	if r := b.h.OnResolve(ctx, a.key, fed.ResolveRequest{Kind: "user", User: "bob"}); r.Status != http.StatusOK || !strings.Contains(string(r.Body), bob.ID) {
+		t.Errorf("a user resolve: %d %s, want bob's id", r.Status, r.Body)
+	}
+
+	first, err := a.transfer(t, alice.ID, "bob@"+b.key, 40, "pay-bob-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.transfer(t, alice.ID, "bob@"+b.key, 40, "pay-bob-1")
+	if err != nil || again.TxID != first.TxID {
+		t.Fatalf("a repeat under the same key: %+v, %v; want the first run's transaction %s", again, err, first.TxID)
+	}
+	if _, err := a.transfer(t, alice.ID, "bob@"+b.key, 41, "pay-bob-1"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("other terms under a used key: want ErrInvalidInput, got %v", err)
+	}
+	a.settleTransfers()
+	if got := a.balance(t, alice.ID); got != 960 {
+		t.Errorf("alice has %d, want 960: one payment", got)
+	}
+	if got := b.balance(t, bob.ID); got != 40 {
+		t.Errorf("bob has %d, want 40", got)
+	}
+}
+
+// A run under an external key whose first attempt is still parked is answered "in flight", not run
+// again; once it settles, the repeat is answered with its outcome and charges nothing more (D20).
+func TestSimRunKeyWhileTheFirstRunIsParked(t *testing.T) {
+	net := newSimNet(t)
+	seller := net.addNode("seller", defaultSimConfig())
+	buyer := net.addNode("buyer", defaultSimConfig())
+	cara := seller.user(t, "cara", sellerCapital)
+	act := seller.publish(t, cara, "quote", 25)
+	dan := buyer.user(t, "dan", 1000)
+	ctx := context.Background()
+	keyed := func() (*kernel.CallReply, error) {
+		return buyer.k.Run(ctx, kernel.RunRequest{CallerID: dan.ID, ActionRef: remoteRef(seller, "cara", "quote"),
+			Args: map[string]any{}, ExternalKey: "quote-1"})
+	}
+	if _, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote")); err != nil {
+		t.Fatalf("warm-up run: %v", err)
+	}
+	net.arm(buyer.key, seller.key, verbCall, faultLoseResponse, 1)
+	if _, err := keyed(); !errors.Is(err, kernel.ErrTimeout) {
+		t.Fatalf("the parked run: %v, want a timeout", err)
+	}
+	parked := buyer.balance(t, dan.ID)
+	if _, err := keyed(); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a repeat while parked: %v, want ErrInvalidState", err)
+	}
+	if got := buyer.balance(t, dan.ID); got != parked {
+		t.Errorf("a repeat while parked moved money: %d, was %d", got, parked)
+	}
+	buyer.k.RetryPendingRemoteDispatches(ctx)
+	settled := buyer.balance(t, dan.ID)
+	reply, err := keyed()
+	if err != nil || reply.TxID == "" {
+		t.Fatalf("a repeat after settlement: %+v %v, want the first run's outcome", reply, err)
+	}
+	if n := seller.txCount(t, act.ID); n != 2 {
+		t.Errorf("seller executed %d times, want 2", n)
+	}
+	if got := buyer.balance(t, dan.ID); got != settled {
+		t.Errorf("the repeat after settlement moved money: %d, was %d", got, settled)
 	}
 }

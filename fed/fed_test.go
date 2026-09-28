@@ -16,18 +16,20 @@ import (
 
 // fakeHandlers records the last inbound request and returns canned responses.
 type fakeHandlers struct {
-	lastCallPeer   string
-	lastCall       CallRequest
-	callBody       json.RawMessage
-	gossip         json.RawMessage
-	gossipErr      error
-	resolveBody    json.RawMessage
-	lastTaskPeer   string
-	lastTask       TaskRequest
-	taskBody       json.RawMessage
-	lastRevealPeer string
-	lastReveal     RevealRequest
-	revealBody     json.RawMessage
+	lastCallPeer     string
+	lastCall         CallRequest
+	callBody         json.RawMessage
+	gossip           json.RawMessage
+	gossipErr        error
+	resolveBody      json.RawMessage
+	lastTaskPeer     string
+	lastTask         TaskRequest
+	taskBody         json.RawMessage
+	lastRevealPeer   string
+	lastReveal       RevealRequest
+	revealBody       json.RawMessage
+	lastTransferPeer string
+	lastTransfer     TransferRequest
 }
 
 func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest) CallResponse {
@@ -50,6 +52,12 @@ func (f *fakeHandlers) OnReveal(_ context.Context, peerKey string, req RevealReq
 	f.lastRevealPeer = peerKey
 	f.lastReveal = req
 	return RevealResponse{Status: 200, Body: f.revealBody}
+}
+
+func (f *fakeHandlers) OnTransfer(_ context.Context, peerKey string, req TransferRequest) TransferResponse {
+	f.lastTransferPeer = peerKey
+	f.lastTransfer = req
+	return TransferResponse{Status: 200, Body: json.RawMessage(`{}`)}
 }
 
 func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
@@ -152,6 +160,17 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 	if string(srv.lastTask.Input) != `{"approve":true}` || srv.lastTask.TaskID != "task-1" {
 		t.Errorf("server saw task %+v", srv.lastTask)
+	}
+
+	// Transfer (P11): whom a payment is for reaches the handler with the sender's proven key and
+	// every field intact.
+	tr := TransferRequest{Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z", Signature: "sig",
+		ID: "tx-9", BeneficiaryID: "u-1", Amount: 40, TxHash: "0xabc", BlockchainAddress: "0xvault", BlockchainProof: "proof"}
+	if tResp, err := b.Transfer(ctx, a.PublicKey(), tr); err != nil || tResp.Status != 200 {
+		t.Fatalf("Transfer: %v %+v", err, tResp)
+	}
+	if srv.lastTransferPeer != b.PublicKey() || srv.lastTransfer != tr {
+		t.Errorf("server saw transfer %+v from %q", srv.lastTransfer, srv.lastTransferPeer)
 	}
 
 	// Reachability probe reports a live path.

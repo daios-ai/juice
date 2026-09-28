@@ -28,6 +28,9 @@ type fakeFedCaller struct {
 	err         error
 	lastReq     fed.CallRequest
 	lastTask    fed.TaskRequest
+	// transferResp is the canned answer to an announced transfer, lastTransfer what was announced.
+	transferResp fed.TransferResponse
+	lastTransfer fed.TransferRequest
 }
 
 func (f *fakeFedCaller) Call(_ context.Context, _ string, req fed.CallRequest) (fed.CallResponse, error) {
@@ -46,6 +49,11 @@ func (f *fakeFedCaller) Reveal(_ context.Context, _ string, _ fed.RevealRequest)
 func (f *fakeFedCaller) Task(_ context.Context, _ string, req fed.TaskRequest) (fed.TaskResponse, error) {
 	f.lastTask = req
 	return f.taskResp, f.err
+}
+
+func (f *fakeFedCaller) Transfer(_ context.Context, _ string, req fed.TransferRequest) (fed.TransferResponse, error) {
+	f.lastTransfer = req
+	return f.transferResp, f.err
 }
 
 func TestExecuteFederationSuccess(t *testing.T) {

@@ -465,12 +465,12 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 		args[key] = v
 	}
 
-	// Value transfer (§13): a Task whose action bears the transfer effect delivers value on completion.
-	// Stage it over the merged args so BeginTaskCall locks the value from the completer's own balance
-	// atomic with claiming the task, and settlement credits the beneficiary — the completer funds the
-	// value, the task's execution price stays creator-parked. A peer completer is refused (value is
-	// local to a kernel), and a non-transfer task stages nothing.
-	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
+	// Value transfer (D18): a Task whose action bears the transfer effect delivers value on completion,
+	// to a beneficiary here or on another kernel. Stage it over the merged args so BeginTaskCall locks
+	// the value from the completer's own balance atomic with claiming the task — the completer funds the
+	// value, the task's execution price stays creator-parked. A peer completer is refused (its account
+	// holds nothing), and a non-transfer task stages nothing.
+	eff, err := k.prepareTransferEffect(ctx, caller, action, args)
 	if err != nil {
 		return nil, err
 	}
@@ -500,9 +500,7 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 		taskTrace.CallerRemoteID = completer.UserID
 	}
 	if eff != nil {
-		// No PremiumBPS snapshot: the completer pays no execution premium either, since the task's price
-		// was creator-parked rather than funded across the wire.
-		taskTrace.Value, taskTrace.ValueTo = eff.Amount, eff.Dest
+		eff.stage(taskTrace)
 	}
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
 	// releases it, for every action kind rather than only remote proxies — and it is where the

@@ -73,8 +73,9 @@ inspect it with `task list` and acknowledge it with `task complete`. See
 
 Reserves `amount` base units from the immediate caller and delivers them whole
 on success. The execution price is charged separately, and failure returns the
-value reservation. The recipient must be an ordinary, unsuspended account on
-the same kernel. See
+value reservation. The recipient must be an ordinary, unsuspended account, on
+this kernel or on another; one on another kernel is credited when this kernel's
+payment reaches it. See
 [Moving money through an action](../money/funds.html#moving-money-through-an-action).
 
 ## The web

@@ -211,6 +211,25 @@ func (h *fedHandlers) OnReveal(ctx context.Context, peerKey string, req fed.Reve
 	return fed.Response{Status: http.StatusOK, Body: body}
 }
 
+// OnTransfer answers the /juice/fed/transfer/1 protocol (P11): whom a payment to this kernel is for.
+// The connection-key check and freshness window mirror OnReveal; the kernel verifies the signature and
+// the sender's vault, stores the word, and credits the beneficiary once the payment is here.
+func (h *fedHandlers) OnTransfer(ctx context.Context, peerKey string, req fed.TransferRequest) fed.TransferResponse {
+	if rej := h.admit(req.Counterparty, peerKey, true); rej != nil {
+		return *rej
+	}
+	if err := checkFederationTimestamp(req.Timestamp); err != nil {
+		return fedError(err)
+	}
+	if err := h.kernel.HandleTransferPaid(ctx, req.Counterparty, kernel.TransferPaidPayload{
+		Amount: req.Amount, BeneficiaryID: req.BeneficiaryID, BlockchainAddress: req.BlockchainAddress,
+		Counterparty: req.Counterparty, ID: req.ID, Recipient: h.ownKey(ctx), Timestamp: req.Timestamp, TxHash: req.TxHash,
+	}, req.BlockchainProof, req.Signature); err != nil {
+		return fedError(err)
+	}
+	return fedOK(http.StatusOK, map[string]string{"id": req.ID})
+}
+
 // OnResolve answers the open /juice/fed/resolve/1 protocol (§13): resolve one action to its signed
 // manifest, or one user reference to its stable id+handle — the primitive that lets a caller reach a
 // remote action without prior subscription.
@@ -241,11 +260,18 @@ func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.Res
 		addr, proof := h.kernel.BlockchainIdentity(ctx)
 		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, BlockchainAddress: addr, BlockchainProof: proof})
 	case "user":
+		// A kernel about to pay one of our users says where the money will come from, proven by its rail
+		// key, and is refused if it cannot prove it: its payment must be recognised as its own when it
+		// arrives, before the word naming it does (P11, D23). The reply carries our own vault.
+		if _, err := h.kernel.ObservePeerVault(ctx, peerKey, req.BlockchainAddress, req.BlockchainProof); err != nil {
+			return fedError(err)
+		}
 		id, handle, err := h.kernel.LocalPrincipal(ctx, req.User)
 		if err != nil {
 			return fedError(kernel.ErrNotFound.Wrap("user not found"))
 		}
-		return fedOK(http.StatusOK, map[string]string{"user_id": id, "handle": handle})
+		addr, proof := h.kernel.BlockchainIdentity(ctx)
+		return fedOK(http.StatusOK, kernel.ResolvedUser{UserID: id, Handle: handle, BlockchainAddress: addr, BlockchainProof: proof})
 	default:
 		return fedError(kernel.ErrInvalidInput.Wrap("unknown resolve kind"))
 	}

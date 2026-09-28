@@ -1350,3 +1350,249 @@ func TestEveryPeerMoneyWaitsOnIsNamed(t *testing.T) {
 		t.Errorf("the peer behind the first hundred obligations was not named: %v", keys)
 	}
 }
+
+// transferFixture is a beneficiary's kernel: its operator, bob, a local account that registered the
+// address the sending kernel pays from, and that kernel, whose vault is proven here.
+func transferFixture(t *testing.T) (db *DB, sys string, bob, collider, peer *kernel.Account) {
+	t.Helper()
+	db, sys, _ = railFixture(t)
+	ctx := context.Background()
+	bob, collider = newUser("bob", 0), newUser("collider", 0)
+	for _, u := range []*kernel.Account{bob, collider} {
+		if err := db.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetBlockchainAddress(ctx, collider.ID, "0xsender", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	peer = newPeer(t, db, "sender", "ksenderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 0, 0, time.Now().UTC())
+	if err := db.UpsertKernel(ctx, peer.KernelPublicKey, "", "", "0xsender", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	return db, sys, bob, collider, peer
+}
+
+func incoming(peer *kernel.Account, id, beneficiary string, amount int64, txHash string) *kernel.IncomingTransfer {
+	return &kernel.IncomingTransfer{Counterparty: peer.KernelPublicKey, ID: id, BeneficiaryID: beneficiary,
+		Amount: amount, Payer: "0xsender", TxHash: txHash, CreatedAt: time.Now().UTC()}
+}
+
+// A payment from a peer's vault is that peer's to name (D23): it waits, held, for the peer's word,
+// whichever arrives first, and then reaches the beneficiary it names exactly once — never the local
+// account that registered the same address, and never by the operator's hand.
+func TestATransferReachesItsBeneficiaryInEitherOrder(t *testing.T) {
+	for _, paidFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("paid first %v", paidFirst), func(t *testing.T) {
+			db, sys, bob, collider, peer := transferFixture(t)
+			ctx := context.Background()
+			deposit := func() {
+				if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:t", "0xsender", "0xhash", 50), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			paid := func() {
+				if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-1", bob.ID, 50, "0xhash"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first, second := deposit, paid
+			if paidFirst {
+				first, second = paid, deposit
+			}
+			first()
+			if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 0 {
+				t.Fatalf("half a transfer was delivered: %d %v", len(n), err)
+			}
+			if !paidFirst {
+				if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:t", "0xsender", "0xhash", 50), collider.ID); !errors.Is(err, kernel.ErrInvalidState) {
+					t.Errorf("the operator handed a peer's payment to a local account: %v", err)
+				}
+			}
+			second()
+			if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
+				t.Fatalf("the transfer was not delivered: %d %v", len(n), err)
+			}
+			if a, _ := balances(t, db, bob.ID); a != 50 {
+				t.Errorf("bob has %d, want 50", a)
+			}
+			if a, _ := balances(t, db, collider.ID); a != 0 {
+				t.Errorf("the local account sharing the address got %d", a)
+			}
+			if a, l := balances(t, db, sys); a != 0 || l != 0 {
+				t.Errorf("the operator kept %d available, %d locked", a, l)
+			}
+			paid()
+			if n, _ := db.ReconcileDeposits(ctx, sys, 10); len(n) != 0 {
+				t.Errorf("a repeated announcement delivered again: %d", len(n))
+			}
+			if a, _ := balances(t, db, bob.ID); a != 50 {
+				t.Errorf("bob has %d after a repeat, want 50", a)
+			}
+		})
+	}
+}
+
+// A payment the peer's word does not describe — another amount or another transaction — stays held.
+func TestATransferTakesOnlyThePaymentItNames(t *testing.T) {
+	db, sys, bob, _, peer := transferFixture(t)
+	ctx := context.Background()
+	if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:short", "0xsender", "0xhash", 49), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:other", "0xsender", "0xother", 50), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-1", bob.ID, 50, "0xhash"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 0 {
+		t.Fatalf("a payment the transfer does not name was delivered: %d %v", len(n), err)
+	}
+	if a, _ := balances(t, db, bob.ID); a != 0 {
+		t.Errorf("bob has %d, want 0", a)
+	}
+}
+
+// One transfer takes one payment and one payment serves one transfer, even where one transaction
+// carries two equal payments from the same vault, or two transfers name the same one.
+func TestATransferAndAPaymentPairOnce(t *testing.T) {
+	db, sys, bob, _, peer := transferFixture(t)
+	ctx := context.Background()
+	for _, key := range []string{"rail:tx:0", "rail:tx:1"} {
+		if _, err := db.CreateRailDeposit(ctx, sys, paymentIn(key, "0xsender", "0xtwo", 50), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-1", bob.ID, 50, "0xtwo"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
+		t.Fatalf("one transfer took %d payments: %v", len(n), err)
+	}
+	if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-2", bob.ID, 50, "0xone"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-3", bob.ID, 50, "0xone"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateRailDeposit(ctx, sys, paymentIn("rail:one", "0xsender", "0xone", 50), ""); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 1 {
+		t.Fatalf("one payment served %d transfers: %v", len(n), err)
+	}
+	if a, _ := balances(t, db, bob.ID); a != 100 {
+		t.Errorf("bob has %d, want 100", a)
+	}
+}
+
+// The peer's word is kept by its id: the same terms again are acknowledged, other terms refused, and
+// a beneficiary that is not a live user here is refused before anything is written.
+func TestAnIncomingTransferIsKeyedByItsSenderAndId(t *testing.T) {
+	db, sys, bob, _, peer := transferFixture(t)
+	ctx := context.Background()
+	it := incoming(peer, "tx-1", bob.ID, 50, "0xhash")
+	for i := 0; i < 2; i++ {
+		if err := db.RecordIncomingTransfer(ctx, sys, it, nil); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+	}
+	for _, other := range []*kernel.IncomingTransfer{
+		incoming(peer, "tx-1", bob.ID, 51, "0xhash"),
+		incoming(peer, "tx-1", bob.ID, 50, "0xelse"),
+		incoming(peer, "tx-1", sys, 50, "0xhash"),
+	} {
+		if err := db.RecordIncomingTransfer(ctx, sys, other, nil); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("other terms under a used id: %v, want ErrInvalidInput", err)
+		}
+	}
+	for _, who := range []string{peer.ID, uuid.NewString()} {
+		if err := db.RecordIncomingTransfer(ctx, sys, incoming(peer, "tx-"+who, who, 5, "0xh"), nil); !errors.Is(err, kernel.ErrNotFound) {
+			t.Errorf("a transfer to %s: %v, want ErrNotFound", who, err)
+		}
+	}
+	// Where there are no addresses the word is the payment (D23): booked held in the same commit,
+	// and delivered by the next reconciliation.
+	if err := db.RecordIncomingTransfer(ctx, sys, &kernel.IncomingTransfer{Counterparty: peer.KernelPublicKey, ID: "tx-2",
+		BeneficiaryID: bob.ID, Amount: 7, TxHash: "play:1", CreatedAt: time.Now().UTC()},
+		paymentIn("rail:play:1", "", "play:1", 7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ReconcileDeposits(ctx, sys, 10); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := balances(t, db, bob.ID); a != 7 {
+		t.Errorf("bob has %d, want the 7 the word carried", a)
+	}
+}
+
+// A kernel's proven vault is recorded once on its Kernel row: a different address for the same key is
+// refused. Forgetting the kernel — as a peer, or as a stale directory entry — keeps the key and the
+// address, listed nowhere and not swept again, so a payment from that vault still waits for its word
+// whatever retention is set to; seeing the kernel again brings it back.
+func TestAPeerVaultIsWrittenOnceAndOutlivesThePeer(t *testing.T) {
+	db, sys, _, collider, peer := transferFixture(t)
+	ctx := context.Background()
+	if err := db.UpsertKernel(ctx, peer.KernelPublicKey, "", "", "0xmoved", "", time.Now().UTC()); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a second address for one key: %v, want ErrInvalidState", err)
+	}
+	if err := db.UpsertKernel(ctx, peer.KernelPublicKey, "renamed", "", "0xsender", "", time.Now().UTC()); err != nil {
+		t.Errorf("the same address again: %v", err)
+	}
+	// A directory-only kernel with a proven vault, gone stale, and one with none.
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	stranger, plain := "kstrangerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kplainAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := db.UpsertKernel(ctx, stranger, "stranger", "", "0xstranger", "", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertKernel(ctx, plain, "plain", "", "", "", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self"); err != nil || n != 2 {
+		t.Fatalf("stale sweep evicted %d: %v, want the stranger and the plain kernel", n, err)
+	}
+	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self"); err != nil || n != 0 {
+		t.Errorf("a forgotten kernel was swept again: %d %v", n, err)
+	}
+	for key, want := range map[string]string{peer.KernelPublicKey: "0xsender", stranger: "0xstranger", plain: ""} {
+		if v, err := db.ReadKernelVault(ctx, key); err != nil || v != want {
+			t.Errorf("vault of %s after forgetting: %q %v, want %q", key, v, err, want)
+		}
+	}
+	if listed, err := db.ListKernels(ctx, "self", true, 0, 0); err != nil || len(listed) != 0 {
+		t.Errorf("forgotten kernels are listed: %d %v", len(listed), err)
+	}
+	// Local accounts registered at both vaults' addresses get neither kernel's payment.
+	collider2 := newUser("collider2", 0)
+	if err := db.CreateUser(ctx, collider2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlockchainAddress(ctx, collider2.ID, "0xstranger", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	for i, from := range []string{"0xsender", "0xstranger"} {
+		if _, err := db.CreateRailDeposit(ctx, sys, paymentIn(fmt.Sprintf("rail:late:%d", i), from, "0xlate", 9), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := db.ReconcileDeposits(ctx, sys, 10); err != nil || len(n) != 0 {
+		t.Fatalf("a forgotten kernel's payment was handed out: %d %v", len(n), err)
+	}
+	for _, c := range []*kernel.Account{collider, collider2} {
+		if a, _ := balances(t, db, c.ID); a != 0 {
+			t.Errorf("%s got a forgotten kernel's payment: %d", c.Handle, a)
+		}
+	}
+	// Seen again, the kernel is listed again, under the same vault.
+	if err := db.UpsertKernel(ctx, stranger, "back", "", "0xstranger", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if listed, _ := db.ListKernels(ctx, "self", true, 0, 0); len(listed) != 1 || listed[0].PublicKey != stranger {
+		t.Errorf("a kernel seen again is not listed: %+v", listed)
+	}
+}

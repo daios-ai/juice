@@ -230,7 +230,24 @@ flow_rail_chain_settlement() {
     assert_eq "rail_chain_settlement.seller_paid" 0 "$(await_owed "$FED_DBR" "$FED_HR" "$lkey" 0)"
     assert_jnum "rail_chain_settlement.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
     assert_jnum "rail_chain_settlement.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+
+    # A transfer to a user of R (D18, P11): L's payment into R's vault is exactly the amount, and R
+    # credits carol from that finalized payment, matched by the vault L proved and the payment L
+    # names — never before it arrives and never from R's operator's own money.
+    j "$FED_DBR" "$FED_HR" user create carol@kernel-r --password userpass >/dev/null 2>&1
+    local sent vault_before rsys; sent=$(balance_of "$FED_DBL" "$FED_HL"); rsys=$(balance_of "$FED_DBR" "$FED_HR")
+    vault_before=$(anvil_uint "$CHAIN_TOKEN" "balanceOf(address)(uint256)" "$rvault")
+    assert_nonempty "rail_chain_settlement.transfer" "$(strfield "$(jj "$FED_DBL" "$FED_HL" user transfer carol@kernel-r "$(units 20000)" --yes)" tx_id)"
+    assert_eq "rail_chain_settlement.transfer_sender_pays_exactly" 20000 "$(( sent - $(balance_of "$FED_DBL" "$FED_HL") ))"
+    assert_eq "rail_chain_settlement.transfer_reached_vault" $((vault_before + 20000)) \
+        "$(await_token_balance "$CHAIN_TOKEN" "$rvault" $((vault_before + 20000)))"
+    await_eq "rail_chain_settlement.carol_credited" 20000 user_available "$FED_DBR" "$FED_HR" carol@kernel-r
+    assert_eq "rail_chain_settlement.transfer_operator_unmoved" "$rsys" "$(balance_of "$FED_DBR" "$FED_HR")"
+    assert_jnum "rail_chain_settlement.books_after_transfer" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
 }
+
+# user_available db home user — a user's available balance as that kernel's operator reads it.
+user_available() { numfield "$(jj "$1" "$2" admin user show "$3")" available; }
 
 # Fuel, and what happens when it cannot be bought. A kernel pays for its own gas out of `sys`
 # earnings (D23 refill), and every outgoing money verb depends on that succeeding. This drives the

@@ -3150,9 +3150,6 @@ func TestTombstoneIsNeverALiveTarget(t *testing.T) {
 	if _, err := k.RenameUser(ctx, sys.ID, tomb.ID, "resurrected@k"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("rename a tombstone: want ErrInvalidInput, got %v", err)
 	}
-	if _, err := k.Transfer(ctx, payer.ID, tomb.ID, 10, "", ""); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("transfer to a tombstone: want ErrInvalidInput, got %v", err)
-	}
 	// The kernel enforces it too, not only the HTTP resolver: supervision cannot fund or freeze a
 	// tombstone, and a task parked on one would hold its price with no actor able to free it (§10).
 	if _, err := k.Deposit(ctx, sys.ID, tomb.ID, 10, "", newRef()); !errors.Is(err, kernel.ErrNotFound) {

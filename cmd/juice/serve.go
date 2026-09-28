@@ -751,7 +751,6 @@ func registerRoutes(r chi.Router, srv *server) {
 		r.Put("/v1/me/blockchain-address", srv.putBlockchainAddress)
 		r.Post("/v1/withdrawals", srv.postWithdrawal)
 		r.Get("/v1/withdrawals", srv.getWithdrawals)
-		r.Post("/v1/transfers", srv.postTransfer)
 		r.Get("/v1/ledger", srv.getLedger)
 
 		// Delegated-auth grants and connections (§8). The client hosts the loopback redirect; the
@@ -1474,26 +1473,6 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req kernel.UpdateUserRequest) (any, int, error) {
 		view, err := updateMe(s.kernel, r.Context(), callerFrom(r), req)
 		return view, http.StatusOK, err
-	})(w, r)
-}
-
-// postTransfer moves credits from the authenticated caller to a nominated local recipient (§12).
-func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		Recipient   string `json:"recipient"`
-		Amount      int64  `json:"amount"`
-		Reason      string `json:"reason"`
-		ExternalKey string `json:"external_key"`
-	}) (any, int, error) {
-		recipient, err := s.kernel.ResolveLocalPrincipal(r.Context(), body.Recipient)
-		if err != nil {
-			return nil, 0, err
-		}
-		e, err := s.kernel.Transfer(r.Context(), callerFrom(r), recipient.ID, body.Amount, body.Reason, body.ExternalKey)
-		if err != nil {
-			return nil, 0, err
-		}
-		return enrichLedger(r.Context(), e, s.kernel.NewNames()), http.StatusOK, nil
 	})(w, r)
 }
 

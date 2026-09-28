@@ -116,6 +116,10 @@ const (
 	// back and the user may ask again, while a debt that fails to pay is still a debt — the money
 	// stays committed and the payment is presented again (P10).
 	RailKindObligation = "obligation"
+	// RailKindTransfer is a transfer's value on its way to the kernel of the user it is for (D18). Like
+	// an obligation it is money the settled call already committed, so a payment the rail refuses is
+	// presented again rather than given back (P11).
+	RailKindTransfer = "transfer"
 )
 
 // Rail transfer statuses.
@@ -491,6 +495,30 @@ func (k *Kernel) verifyBlockchainIdentity(peerKey, address, proof string) (strin
 	return k.rail.Verify(blockchainIdentityMessage(peerKey, k.cfg.Network.Fingerprint, address), address, proof)
 }
 
+// ObservePeerVault verifies a peer's proof that it is paid at address and records it (D16), returning
+// the address in the rail's own form. It is the one path every proven vault takes — an action or user
+// resolve reply, a user resolve request, a `paid` (P11) — so the vault a payment from the peer will
+// come from is known here before any does. An unproven claim records nothing; a proven one different
+// from the vault this peer proved before is refused by the store, since the rail key it derives from
+// is created once (D9). Where the world has addresses a missing one is refused like an unproven one,
+// since a payment from the peer could never be recognised; where it has none, nothing is recorded.
+func (k *Kernel) ObservePeerVault(ctx context.Context, peerKey, address, proof string) (string, error) {
+	if address == "" {
+		if k.rail != nil && k.rail.Address() != "" {
+			return "", ErrUnauthorized.Wrap("the peer proved no blockchain address")
+		}
+		return "", nil
+	}
+	canonical, err := k.verifyBlockchainIdentity(peerKey, address, proof)
+	if err != nil {
+		return "", ErrUnauthorized.Wrap("the peer's blockchain address is unproven")
+	}
+	if err := k.store.UpsertKernel(ctx, peerKey, "", "", canonical, proof, time.Now().UTC()); err != nil {
+		return "", err
+	}
+	return canonical, nil
+}
+
 // ---- The worker (D23) ----
 
 // RailPass is one turn of the rail worker: re-drive everything still open, observe payments in,
@@ -600,7 +628,7 @@ func (k *Kernel) driveRailStep(ctx context.Context, row *RailTransfer) {
 			// asking under it again produces nothing at all — so the next one asks under a fresh
 			// name while the row, the obligation and the seller's view of them stay as they were.
 			// Only a withdrawal, which the user asked for and can ask for again, gives its money back.
-			if row.Kind == RailKindObligation {
+			if row.Kind == RailKindObligation || row.Kind == RailKindTransfer {
 				_ = k.store.RetryRailTransfer(ctx, row.ID)
 				logger.Warn("rail.obligation.retry", "rail_transfer_id", row.ID, "reverted_tx", fact.TxHash)
 				return

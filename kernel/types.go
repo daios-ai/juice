@@ -201,8 +201,13 @@ type Process struct {
 	Available   int64         `json:"available"`
 	Locked      int64         `json:"locked"`
 	Status      ProcessStatus `json:"status"`
-	CreatedAt   time.Time     `json:"created_at"`
-	EndedAt     *time.Time    `json:"ended_at,omitempty"`
+	// ExternalKey is the owner's key for the run that created the process, unique per owner, and
+	// RequestHash the hash of the {action, args} it was first used for: a run repeated under the key
+	// is answered with this one's outcome instead of running again (D20). Empty without a key.
+	ExternalKey string     `json:"external_key,omitempty"`
+	RequestHash string     `json:"-"`
+	CreatedAt   time.Time  `json:"created_at"`
+	EndedAt     *time.Time `json:"ended_at,omitempty"`
 }
 
 // TaskStatus is the lifecycle state of a task.
@@ -302,14 +307,16 @@ type Trace struct {
 	// (P4): the payment closing this call's obligation must come from here, and a payment from here
 	// is never anyone else's while the obligation is unresolved. Empty on a local call.
 	OwedBlockchainAddress string `json:"-"`
-	// Value and ValueTo snapshot a TransferEffect on a call whose caller C funds a transfer (§13): the
-	// amount locked from C.available at admission and the beneficiary it is delivered to at settlement
-	// (refunded to C on failure). Sourced from C, not the trace budget, and untaxed, so locked and
-	// delivered are one number. Both 0/"" on every non-transfer call. Riding on the trace is what lets
-	// every settlement path — commit, failure, recovery, forced closure — release the lock without the
-	// in-memory request.
+	// Value, ValueTo and ValuePeer snapshot a TransferEffect on a call whose caller C funds a transfer
+	// (D18): the amount locked from C.available at admission, the beneficiary's stable id, and the key
+	// of the kernel it lives on — empty for one here, delivered at settlement; a peer's, paid at
+	// settlement by a rail payment to that kernel (P11). Refunded to C on failure. Sourced from C, not
+	// the trace budget, and untaxed, so locked and delivered are one number. All zero on every
+	// non-transfer call. Riding on the trace is what lets every settlement path — commit, failure,
+	// recovery, forced closure — release the lock without the in-memory request.
 	Value     int64     `json:"value,omitempty"`
 	ValueTo   string    `json:"value_to,omitempty"`
+	ValuePeer string    `json:"value_peer,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -477,9 +484,9 @@ type Receipt struct {
 	// obligation to draw for and so verify unchanged.
 	Nonce string `json:"nonce,omitempty"`
 	// Value and ValueTo are the transfer channel, kept distinct from the execution channel
-	// (Charge/Premium) so the two never mix (§13): the delivered amount — all-or-nothing, so a
-	// partial-charge failure never dilutes delivery — and the beneficiary. The channel is local to a
-	// kernel and untaxed, so no premium rides it. omitempty keeps both out of the JCS signature when
+	// (Charge/Premium) so the two never mix (D18): the amount that left the caller — all-or-nothing,
+	// so a partial-charge failure never dilutes it — and the beneficiary's stable id on its own
+	// kernel, this one or the one paid. The value is untaxed, so no premium rides it. omitempty keeps both out of the JCS signature when
 	// unset, so non-transfer receipts (and every receipt predating the channel) verify unchanged.
 	Value   int64  `json:"value,omitempty"`
 	ValueTo string `json:"value_to,omitempty"`
@@ -536,7 +543,44 @@ type TransactionView struct {
 	// TicketID names the obligation this call settles, so a party can follow it and an operator
 	// recording its payment can name it. The obligation itself lives on the side that is owed.
 	TicketID string `json:"ticket_id,omitempty"`
+	// Payment is, for a transfer to a user of another kernel, the status of the rail payment that
+	// carries it: what this kernel knows of the money it sent, never that the beneficiary was credited,
+	// which only the other kernel knows (D18).
+	Payment string `json:"payment,omitempty"`
 }
+
+// IncomingTransfer is a peer's signed word that a payment of its is for one of this kernel's users
+// (P11): what the payment must look like to be that transfer's — the payer's proven address, the
+// transaction and the amount — and whom it credits. Announced until a finalized deposit matching it
+// credits the beneficiary.
+type IncomingTransfer struct {
+	Counterparty  string
+	ID            string
+	BeneficiaryID string
+	Amount        int64
+	Payer         string
+	TxHash        string
+	Status        string
+	CreatedAt     time.Time
+}
+
+// OutgoingTransfer is one of this kernel's transfer payments that is final and not yet acknowledged by
+// the beneficiary's kernel (P11): the payment's id, which is the transaction that made it, the trace
+// that made it, the kernel and user it is for, and the payment itself.
+type OutgoingTransfer struct {
+	ID            string
+	TraceID       string
+	PeerKey       string
+	BeneficiaryID string
+	Amount        int64
+	TxHash        string
+}
+
+// IncomingTransfer statuses.
+const (
+	IncomingAnnounced = "announced"
+	IncomingCredited  = "credited"
+)
 
 // IdempotencyRecord prevents duplicate cross-kernel calls.
 type IdempotencyRecord struct {
@@ -613,6 +657,16 @@ type ResolvedAction struct {
 	Manifest          *ActionManifest `json:"manifest"`
 	BlockchainAddress string          `json:"blockchain_address,omitempty"`
 	BlockchainProof   string          `json:"blockchain_proof,omitempty"`
+}
+
+// ResolvedUser is what a user resolve answers (P11): the user's stable id and current handle on the
+// peer, and where the peer is paid with its own proof, as an action resolve carries it — so a kernel
+// about to pay a user there knows where the money goes before any moves.
+type ResolvedUser struct {
+	UserID            string `json:"user_id"`
+	Handle            string `json:"handle"`
+	BlockchainAddress string `json:"blockchain_address,omitempty"`
+	BlockchainProof   string `json:"blockchain_proof,omitempty"`
 }
 
 // PublicRating is the market-facing projection of one rating (§11, U39): value, note, when — and

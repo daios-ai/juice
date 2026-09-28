@@ -52,6 +52,9 @@ func (f *fakeFed) Resolve(_ context.Context, _ string, _ fed.ResolveRequest) (fe
 func (f *fakeFed) Reveal(_ context.Context, _ string, _ fed.RevealRequest) (fed.RevealResponse, error) {
 	return fed.RevealResponse{}, errors.New("fed: reveal not used in these tests")
 }
+func (f *fakeFed) Transfer(_ context.Context, _ string, _ fed.TransferRequest) (fed.TransferResponse, error) {
+	return fed.TransferResponse{}, errors.New("fed: transfer not used in these tests")
+}
 func (f *fakeFed) Task(_ context.Context, _ string, req fed.TaskRequest) (fed.TaskResponse, error) {
 	f.lastTask = req
 	// taskMidStream models a failure AFTER bytes may have reached the peer (a stream error, or a
@@ -537,7 +540,7 @@ func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	if _, err := adapter.ResolveRemoteAction(context.Background(), key, "bob", "greet"); !named(err, key) {
 		t.Errorf("resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
-	if _, _, err := adapter.ResolveRemoteUser(context.Background(), key, "bob"); !named(err, key) {
+	if _, err := adapter.ResolveRemoteUser(context.Background(), key, "bob"); !named(err, key) {
 		t.Errorf("user resolve of an offline peer: %v, want ErrPeerUnreachable naming %s", err, key)
 	}
 	if err := adapter.Reveal(context.Background(), key, kernel.RevealPayload{TicketID: "t1"}, "sig"); !named(err, key) {

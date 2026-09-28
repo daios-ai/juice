@@ -27,6 +27,8 @@ func TestTransferValue(t *testing.T) {
 		{"negative amount", map[string]any{"target": "bob@k", "amount": float64(-5)}, true, 0},
 		{"fractional amount", map[string]any{"target": "bob@k", "amount": float64(1.5)}, true, 0},
 		{"non-numeric amount", map[string]any{"target": "bob@k", "amount": "100"}, true, 0},
+		{"largest exact amount", map[string]any{"target": "bob@k", "amount": float64(1 << 53)}, false, 1 << 53},
+		{"beyond exact range", map[string]any{"target": "bob@k", "amount": float64(1<<53) * 2}, true, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -55,8 +57,8 @@ func seedNativeAction(t *testing.T, st kernel.Store, ownerID, name string, price
 	}
 }
 
-// TestTransferLocal exercises a same-kernel transfer through Call() (run sys/transfer): the caller is
-// debited, the beneficiary credited, and a ledger entry recorded — no fee, no value machinery.
+// TestTransferLocal exercises a same-kernel transfer through Run (run sys/transfer): the caller is
+// debited and the beneficiary credited in the settling commit.
 func TestTransferLocal(t *testing.T) {
 	k, db := newLookupTestKernel(t)
 	Register(k, []Spec{Transfer()})
@@ -80,14 +82,16 @@ func TestTransferLocal(t *testing.T) {
 		t.Errorf("bob available: got %d, want 100", b.Available)
 	}
 
-	// A beneficiary on another kernel is rejected: value is local to one kernel, so there is no form
-	// of this call that names one elsewhere (D18). The peer is a known one, so the refusal is the
-	// rule's and not an unknown name's.
+	// A beneficiary on another kernel must be resolved there before anything is charged (P11): with
+	// no federation to ask, the run is refused and alice keeps her balance.
 	if _, err := k.BindPetname(ctx, base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "other", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("kernel-qualified target: got %v, want ErrInvalidInput", err)
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("unresolvable remote target: got %v, want ErrNotFound", err)
+	}
+	if a, _ := db.ReadUser(ctx, alice.ID); a.Available != 900 || a.Locked != 0 {
+		t.Errorf("alice after a refused remote transfer: %d available, %d locked, want 900/0", a.Available, a.Locked)
 	}
 	// Insufficient balance is rejected atomically (bob has 100, tries to send 200).
 	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: bob.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "alice@k", "amount": float64(200)}}); err == nil {

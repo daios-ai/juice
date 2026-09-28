@@ -851,69 +851,62 @@ flow_ticket() {
     assert_eq "ticket.listed_against_its_buyer" "$lkey" "$(rowfield "$awaiting" owed peer)"
 }
 
-# flow_transfer exercises the value channel across a federated pair (§13). Value is LOCAL to a kernel:
-# alice pays bob on their own kernel, the amount leaving her balance untaxed and arriving in full,
-# while the peer R is present to prove the channel stops at the boundary — its stdlib is never served
-# abroad, so no kernel-qualified transfer resolves and no local funds move on the attempt.
+# flow_transfer sends money to a user of this kernel and to a user of another by one action, this
+# kernel's own transfer (D18). Here the value moves when the call settles. To a user of R, L resolves
+# carol on R first, the sender pays exactly the amount plus L's price, L's rail pays R's vault and
+# then tells R whom the payment is for (P11) — on a world without addresses that word is the payment
+# — and R credits carol exactly the amount, nobody acting. R sold nothing: it owes and is owed nothing.
 flow_transfer() {
     echo "=== FLOW transfer ==="
     local dir; dir=$(new_dir)
-    FED_DBL="$(kdb "$dir/l")"; FED_DBR="$(kdb "$dir/r")"
-    FED_HL="$dir/lsys"; FED_HR="$dir/rsys"
-    mkdir -p "$dir/l" "$dir/r" "$FED_HL/.juice" "$FED_HR/.juice"
+    # The sender's rail worker runs often, so its payment is made and announced inside the flow.
+    FED_LCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "transfer.setup" "setup failed"; return; }
 
-    start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r || { fail "transfer.setup_r" "boot"; return; }
-    know "$FED_DBR" "$FED_HR"
-    j "$FED_DBR" "$FED_HR" auth login sys@kernel-r --password sys-pass >/dev/null 2>&1
-    local boot; boot=$(kernel_fed_addr "$FED_DBR" "$FED_HR"); [ -n "$boot" ] || { fail "transfer.boot" "no addr"; return; }
-    start_server "$FED_DBL" "$FED_HL" kernel_handle=kernel-l seed="$boot" || { fail "transfer.setup_l" "boot"; return; }
-    know "$FED_DBL" "$FED_HL"
-    j "$FED_DBL" "$FED_HL" auth login sys@kernel-l --password sys-pass >/dev/null 2>&1
-    local rkey; rkey=$(kernel_key "$FED_DBR" "$FED_HR"); [ -n "$rkey" ] || { fail "transfer.rkey" "empty"; return; }
-
-    # alice and bob are both local users on L; R exists to prove its stdlib is not served abroad.
-    know "$FED_DBL" "$FED_HL"
+    local ahome bhome chome
     j "$FED_DBL" "$FED_HL" user create bob@kernel-l --password userpass >/dev/null 2>&1
-    know "$FED_DBL" "$FED_HL"
     j "$FED_DBL" "$FED_HL" user create alice@kernel-l --password userpass >/dev/null 2>&1
+    j "$FED_DBR" "$FED_HR" user create carol@kernel-r --password userpass >/dev/null 2>&1
     j "$FED_DBL" "$FED_HL" admin user deposit alice@kernel-l "$(units 1000)" --ref "$(newref)" --yes >/dev/null 2>&1
-    local ahome; ahome=$(home "$dir" alice); know "$FED_DBL" "$ahome"; j "$FED_DBL" "$ahome" auth login alice@kernel-l --password userpass >/dev/null 2>&1
+    ahome=$(home "$dir" alice); know "$FED_DBL" "$ahome"; j "$FED_DBL" "$ahome" auth login alice@kernel-l --password userpass >/dev/null 2>&1
+    bhome=$(home "$dir" bob); know "$FED_DBL" "$bhome"; j "$FED_DBL" "$bhome" auth login bob@kernel-l --password userpass >/dev/null 2>&1
+    chome=$(home "$dir" carol); know "$FED_DBR" "$chome"; j "$FED_DBR" "$chome" auth login carol@kernel-r --password userpass >/dev/null 2>&1
 
-    # alice sends 100 to bob on her own kernel: the execution price (0) rides the trace and is taxed,
-    # while the value moves untaxed from alice's own balance to the beneficiary — two channels (§13).
+    # Here: the execution price (0) rides the trace, the value moves from alice's own balance to bob
+    # in the same commit, and the ledger entry names the call.
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"bob@kernel-l","amount":100}')" tx_id)
     assert_nonempty "transfer.call_succeeded" "$tx_id"
-    assert_json "transfer.tx_success" "$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")" status success
-
-    # The beneficiary receives exactly the amount and the sender pays exactly it (price 0, no markup).
-    assert_eq "transfer.alice_charged" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
-    assert_eq "transfer.bob_credited" 100 "$(numfield "$(jj "$FED_DBL" "$FED_HL" admin user show bob@kernel-l)" available)"
-
-    # Both parties can read the movement. The transaction records the execution (price 0), so without
-    # a ledger entry bob — no party to it — would see 100 credits arrive with nothing to read.
-    local bhome; bhome=$(home "$dir" bob); know "$FED_DBL" "$bhome"; j "$FED_DBL" "$bhome" auth login bob@kernel-l --password userpass >/dev/null 2>&1
+    assert_eq "transfer.alice_charged" 900 "$(balance_of "$FED_DBL" "$ahome")"
+    assert_eq "transfer.bob_credited" 100 "$(balance_of "$FED_DBL" "$bhome")"
     assert_contains "transfer.sender_ledger" "bob" "$(jj "$FED_DBL" "$ahome" user ledger)"
-    assert_contains "transfer.recipient_ledger" "alice" "$(jj "$FED_DBL" "$bhome" user ledger)"
-    assert_eq "transfer.ledger_amount" 100 \
-        "$(jj "$FED_DBL" "$bhome" user ledger | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["amount"])')"
-    # The entry points back at the call that delivered it, so the two records join.
     assert_eq "transfer.ledger_names_tx" "$tx_id" \
         "$(jj "$FED_DBL" "$bhome" user ledger | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["reason"])')"
-
-    # A transfer alice cannot afford is rejected with no balance change.
     j "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"bob@kernel-l","amount":100000}' >/dev/null 2>&1 || true
-    assert_eq "transfer.underfunded_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    assert_eq "transfer.underfunded_no_charge" 900 "$(balance_of "$FED_DBL" "$ahome")"
 
-    # Value does not cross a kernel boundary (§13). The stdlib is local (§9), so R serves no manifest
-    # for sys/transfer: the kernel-qualified form does not resolve, and the refusal costs nothing.
-    assert_fails "transfer.remote_native_not_served" "not found\|not available\|error" -- \
-        j "$FED_DBL" "$ahome" run "sys@$rkey/transfer" '{"target":"bob","amount":10}'
-    assert_eq "transfer.remote_refusal_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    # To a user of R, by `user transfer` and by `run` of the same action, carol named through L's
+    # own petname for R. Carol has nothing until L's payment reaches R.
+    local rsys_before; rsys_before=$(balance_of "$FED_DBR" "$FED_HR")
+    local rtx; rtx=$(strfield "$(jj "$FED_DBL" "$ahome" user transfer carol@kernel-r "$(units 100)" --yes)" tx_id)
+    assert_nonempty "transfer.remote_ran" "$rtx"
+    assert_nonempty "transfer.remote_by_run" "$(strfield "$(jj "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"carol@kernel-r","amount":50}')" tx_id)"
+    assert_eq "transfer.remote_sender_pays_exactly" 750 "$(balance_of "$FED_DBL" "$ahome")"
 
-    # Nor by naming a beneficiary on another kernel: the target is a user of this kernel, always.
-    assert_fails "transfer.qualified_target_rejected" "invalid\|not found\|error" -- \
-        j "$FED_DBL" "$ahome" run sys@kernel-l/transfer "{\"target\":\"bob@$rkey\",\"amount\":10}"
-    assert_eq "transfer.qualified_target_no_charge" 900 "$(numfield "$(jj "$FED_DBL" "$ahome" user me)" available)"
+    # Nobody acts: L pays and says whom for, R credits carol exactly, and both books close.
+    await_eq "transfer.carol_credited_exactly" 150 balance_of "$FED_DBR" "$chome"
+    assert_contains "transfer.remote_names_its_payment" '"payment"' "$(jj "$FED_DBL" "$ahome" tx show "$rtx")"
+    assert_contains "transfer.carol_ledger_names_the_operator" "sys@kernel-r" "$(jj "$FED_DBR" "$chome" user ledger)"
+    assert_json "transfer.sender_audit" "$(jj "$FED_DBL" "$ahome" tx verify "$rtx")" valid True
+    assert_eq "transfer.recipient_operator_unmoved" "$rsys_before" "$(balance_of "$FED_DBR" "$FED_HR")"
+    assert_eq "transfer.nothing_owed" 0 "$(owed_count "$FED_DBR" "$FED_HR" "$FED_LKEY")"
+    assert_jnum "transfer.sender_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
+    assert_jnum "transfer.recipient_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
+    assert_jnum "transfer.recipient_exposure" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure 0
+
+    # R knows no such user: refused before anything moves.
+    assert_fails "transfer.nobody_refused" "not found\|error" -- \
+        j "$FED_DBL" "$ahome" user transfer nobody@kernel-r "$(units 10)" --yes
+    assert_eq "transfer.nobody_no_charge" 750 "$(balance_of "$FED_DBL" "$ahome")"
 }
 
 # The provider dies in the middle of serving a call, then comes back. This is the one crash that

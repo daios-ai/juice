@@ -508,6 +508,7 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolGossip), t.handleGossip)
 	t.host.SetStreamHandler(protocol.ID(ProtocolTask), t.handleTask)
 	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
+	t.host.SetStreamHandler(protocol.ID(ProtocolTransfer), t.handleTransfer)
 }
 
 // streamsPerPeer and streamsSystemWide bound inbound concurrency [policy]; the connections behind
@@ -604,6 +605,12 @@ func (t *Transport) handleReveal(s network.Stream) {
 	})
 }
 
+func (t *Transport) handleTransfer(s network.Stream) {
+	serveReq(t.ctx, s, func(ctx context.Context, key string, req TransferRequest) any {
+		return t.cfg.Handlers.OnTransfer(ctx, key, req)
+	})
+}
+
 func (t *Transport) handleGossip(s network.Stream) {
 	// Gossip carries the evidence cursor and the catalogue scan (§13). The reply frame is the JSON
 	// document; on handler error we close without a frame, which the client reads as empty.
@@ -696,6 +703,11 @@ func (t *Transport) Resolve(ctx context.Context, peerKey string, req ResolveRequ
 // Reveal tells the peer how one obligation's draw came out (P10).
 func (t *Transport) Reveal(ctx context.Context, peerKey string, req RevealRequest) (RevealResponse, error) {
 	return roundTrip[RevealRequest, RevealResponse](ctx, t, peerKey, ProtocolReveal, req)
+}
+
+// Transfer tells the peer whom a payment to it is for (P11).
+func (t *Transport) Transfer(ctx context.Context, peerKey string, req TransferRequest) (TransferResponse, error) {
+	return roundTrip[TransferRequest, TransferResponse](ctx, t, peerKey, ProtocolTransfer, req)
 }
 
 // Gossip fetches one page of the peer's gossip document, resuming from cursor (§13). An empty

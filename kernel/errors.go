@@ -121,6 +121,11 @@ func HTTPStatusFromCode(code string) int {
 // Note the construction order: Wrap() drops the cause, so it must be Wrap(...).Because(...).
 var ErrTaskNotClaimed = errors.New("task not claimed by this completion")
 
+// ErrRunKeyTaken marks a run whose external key another run of the same owner committed first,
+// attached with Because() to an ErrInvalidState like ErrTaskNotClaimed: the kernel answers it as
+// that run's repeat (D20).
+var ErrRunKeyTaken = errors.New("external key already used by a run")
+
 // Sentinel errors.
 var (
 	ErrUnauthenticated   = &KernelError{Code: "unauthenticated", HTTP: 401}

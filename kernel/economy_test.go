@@ -422,3 +422,108 @@ func TestARevealIsThePaymentOnlyWhereTheWorldHasNoAddresses(t *testing.T) {
 		})
 	}
 }
+
+// paidStore records what a transfer announcement leaves behind: the peer's word, the payment booked
+// with it, and the vault recorded for the peer.
+type paidStore struct {
+	Store
+	got     *IncomingTransfer
+	payment *RailTransfer
+	vault   string
+}
+
+func (s *paidStore) RecordIncomingTransfer(_ context.Context, _ string, it *IncomingTransfer, payment *RailTransfer) error {
+	s.got, s.payment = it, payment
+	return nil
+}
+
+func (s *paidStore) UpsertKernel(_ context.Context, _, _, _, address, _ string, _ time.Time) error {
+	s.vault = address
+	return nil
+}
+
+func (s *paidStore) ReconcileDeposits(context.Context, string, int) ([]*LedgerEntry, error) {
+	return nil, nil
+}
+
+// provingRail is a world with addresses whose proofs are checked: "good" proves, anything else does not.
+type provingRail struct{ stubRail }
+
+func (provingRail) Verify(_ []byte, address, proof string) (string, error) {
+	if proof != "good" {
+		return "", errors.New("bad proof")
+	}
+	return address, nil
+}
+
+// A transfer announcement is believed only from the kernel that paid, addressed to this one, signed
+// by it, complete, and naming a vault it proves (P11). On a world without addresses the announcement
+// is itself the payment and is booked with it; on one with addresses the payer is the proven vault
+// and the payment is observed on the rail.
+func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
+	_, own, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	ownKey := base64.RawURLEncoding.EncodeToString(own.Public().(ed25519.PublicKey))
+	good := func() TransferPaidPayload {
+		return TransferPaidPayload{Amount: 50, BeneficiaryID: "bob-id", Counterparty: peerKey, ID: "tx-1",
+			Recipient: ownKey, Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: "0xhash"}
+	}
+	for _, c := range []struct {
+		name   string
+		rail   Rail
+		edit   func(*TransferPaidPayload)
+		signer ed25519.PrivateKey
+		proof  string
+		want   error
+	}{
+		{"accepted where there are no addresses", stubRail{}, nil, priv, "", nil},
+		{"accepted with a proven vault", provingRail{stubRail{addr: "0xme"}}, func(p *TransferPaidPayload) { p.BlockchainAddress = "0xsender" }, priv, "good", nil},
+		{"an unproven vault", provingRail{stubRail{addr: "0xme"}}, func(p *TransferPaidPayload) { p.BlockchainAddress = "0xsender" }, priv, "bad", ErrUnauthorized},
+		{"no vault where there are addresses", provingRail{stubRail{addr: "0xme"}}, nil, priv, "", ErrUnauthorized},
+		{"from another kernel", stubRail{}, func(p *TransferPaidPayload) { p.Counterparty = ownKey }, priv, "", ErrUnauthorized},
+		{"addressed elsewhere", stubRail{}, func(p *TransferPaidPayload) { p.Recipient = peerKey }, priv, "", ErrUnauthorized},
+		{"signed by someone else", stubRail{}, nil, own, "", nil},
+		{"naming no payment", stubRail{}, func(p *TransferPaidPayload) { p.TxHash = "" }, priv, "", ErrInvalidInput},
+		{"naming no beneficiary", stubRail{}, func(p *TransferPaidPayload) { p.BeneficiaryID = "" }, priv, "", ErrInvalidInput},
+		{"of nothing", stubRail{}, func(p *TransferPaidPayload) { p.Amount = 0 }, priv, "", ErrInvalidInput},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := &paidStore{}
+			k := &Kernel{store: st, log: log.Discard(), rail: c.rail, cfg: Config{Network: playNet, SigningKey: own}}
+			p := good()
+			if c.edit != nil {
+				c.edit(&p)
+			}
+			sig, err := k.cfg.Network.sign(c.signer, sigDomainTransfer, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = k.HandleTransferPaid(context.Background(), peerKey, p, c.proof, sig)
+			accepted := c.signer.Equal(priv) && c.want == nil
+			if !accepted {
+				if err == nil || (c.want != nil && !errors.Is(err, c.want)) {
+					t.Fatalf("got %v, want a refusal (%v)", err, c.want)
+				}
+				if st.got != nil {
+					t.Fatalf("a refused announcement was kept: %+v", st.got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.got == nil || st.got.Amount != 50 || st.got.BeneficiaryID != "bob-id" || st.got.Counterparty != peerKey || st.got.TxHash != "0xhash" {
+				t.Fatalf("kept %+v", st.got)
+			}
+			if st.got.Payer != p.BlockchainAddress || st.vault != p.BlockchainAddress {
+				t.Errorf("payer %q, vault recorded %q, want the proven %q", st.got.Payer, st.vault, p.BlockchainAddress)
+			}
+			if wantPayment := c.rail.Address() == ""; (st.payment != nil) != wantPayment {
+				t.Errorf("payment booked with the word: %+v, want %v", st.payment, wantPayment)
+			} else if wantPayment && (st.payment.Amount != 50 || st.payment.TxHash != "0xhash") {
+				t.Errorf("the booked payment %+v is not the one announced", st.payment)
+			}
+		})
+	}
+}

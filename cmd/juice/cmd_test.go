@@ -2839,3 +2839,48 @@ func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
 		}
 	})
 }
+
+// `user transfer` is a run of this kernel's own transfer, whoever the recipient is (D18): the login's
+// kernel names the action, the recipient and the amount in base units are its arguments, the price
+// read is the one pinned, and --external-key rides the run so a repeat never moves money twice.
+// `run --external-key` sends the key the same way.
+func TestATransferIsARunOfThisKernelsTransfer(t *testing.T) {
+	var refs []string
+	var sent []kernel.RunRequest
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
+			refs = append(refs, r.URL.Query().Get("ref"))
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": r.URL.Query().Get("ref")}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 0})
+		case r.Method == "POST" && r.URL.Path == "/v1/run":
+			var req kernel.RunRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			sent = append(sent, req)
+			_ = json.NewEncoder(w).Encode(map[string]any{"tx_id": "t-1", "result": map[string]any{"amount": 1500000}})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	if _, err := execTestCmd(t, userTransferCmd(), "bob@elsewhere", "1.5", "--yes", "--external-key", "pay-1"); err != nil {
+		t.Fatalf("user transfer: %v", err)
+	}
+	if len(refs) != 1 || refs[0] != "sys@stub/transfer" {
+		t.Errorf("the action read: %v, want this kernel's own transfer", refs)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("runs sent: %d", len(sent))
+	}
+	got := sent[0]
+	if got.ActionRef != "sys@stub/transfer" || got.Args["target"] != "bob@elsewhere" || got.Args["amount"] != float64(1500000) ||
+		got.QuoteHash != "h" || got.ExternalKey != "pay-1" {
+		t.Errorf("the run sent: %+v", got)
+	}
+	if _, err := execTestCmd(t, runCmd(), "bob@stub/echo", "--yes", "--external-key", "run-1"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(sent) != 2 || sent[1].ExternalKey != "run-1" {
+		t.Errorf("run --external-key sent %+v", sent[len(sent)-1])
+	}
+}

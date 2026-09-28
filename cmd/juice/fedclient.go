@@ -119,6 +119,7 @@ type federationTransport interface {
 	Call(ctx context.Context, peerKey string, req fed.CallRequest) (fed.CallResponse, error)
 	Resolve(ctx context.Context, peerKey string, req fed.ResolveRequest) (fed.ResolveResponse, error)
 	Reveal(ctx context.Context, peerKey string, req fed.RevealRequest) (fed.RevealResponse, error)
+	Transfer(ctx context.Context, peerKey string, req fed.TransferRequest) (fed.TransferResponse, error)
 	Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error)
 }
 
@@ -191,6 +192,29 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 	return nil
 }
 
+// AnnounceTransfer implements kernel.TransferAnnouncer over /juice/fed/transfer/1 (P11): the sender
+// tells the kernel a payment went to whom it is for. A refusal is reported so the worker tries again.
+func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string, p kernel.TransferPaidPayload, proof, signature string) error {
+	if c.transport == nil {
+		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+	}
+	octx, cancel := context.WithTimeout(ctx, fedTaskListTimeout)
+	defer cancel()
+	resp, err := c.transport.Transfer(octx, peerPublicKey, fed.TransferRequest{
+		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature, ID: p.ID,
+		BeneficiaryID: p.BeneficiaryID, Amount: p.Amount, TxHash: p.TxHash,
+		BlockchainAddress: p.BlockchainAddress, BlockchainProof: proof,
+	})
+	c.contacted(ctx, peerPublicKey, contactFromErr(err))
+	if err != nil {
+		return kernel.PeerUnreachableError(peerPublicKey)
+	}
+	if resp.Status != 200 {
+		return kernel.ErrExecutionFailed.Wrapf("the peer refused the transfer (status %d): %s", resp.Status, resp.Body)
+	}
+	return nil
+}
+
 // ResolveRemoteAction / ResolveRemoteUser implement kernel.RemoteResolver over the transport's
 // /juice/fed/resolve/1 protocol (§13 subscription-free calls): fetch one signed manifest, or map a
 // user reference to its stable id+handle on the peer. A missing transport is ErrPeerUnreachable so
@@ -214,26 +238,29 @@ func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, own
 	return &r, nil
 }
 
-func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (string, string, error) {
+// ResolveRemoteUser carries this kernel's own proven vault in the request, as a call does, so the peer
+// knows where a payment from here comes from before any is sent (P11).
+func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (*kernel.ResolvedUser, error) {
 	if c.transport == nil {
-		return "", "", kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
-	resp, err := c.transport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "user", User: ref})
+	req := fed.ResolveRequest{Kind: "user", User: ref}
+	if c.blockchainIdentity != nil {
+		req.BlockchainAddress, req.BlockchainProof = c.blockchainIdentity(ctx)
+	}
+	resp, err := c.transport.Resolve(ctx, peerPublicKey, req)
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return "", "", kernel.PeerUnreachableError(peerPublicKey)
+		return nil, kernel.PeerUnreachableError(peerPublicKey)
 	}
 	if resp.Status != 200 {
-		return "", "", kernel.ErrNotFound.Wrap("remote user not found")
+		return nil, kernel.ErrNotFound.Wrap("remote user not found")
 	}
-	var body struct {
-		UserID string `json:"user_id"`
-		Handle string `json:"handle"`
+	var r kernel.ResolvedUser
+	if err := json.Unmarshal(resp.Body, &r); err != nil {
+		return nil, kernel.ErrInvalidInput.Wrap("invalid resolve response")
 	}
-	if err := json.Unmarshal(resp.Body, &body); err != nil {
-		return "", "", kernel.ErrInvalidInput.Wrap("invalid resolve response")
-	}
-	return body.UserID, body.Handle, nil
+	return &r, nil
 }
 
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the

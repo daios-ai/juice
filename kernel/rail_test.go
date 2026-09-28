@@ -15,6 +15,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
 )
 
@@ -34,6 +35,7 @@ type fakeRail struct {
 	refill    int64
 	refillSt  kernel.RailStatus
 	verifyErr error
+	signErr   error // this kernel cannot prove its own address
 	// needRefill makes the next Pay say fuel is short; refills counts purchases; found is what
 	// FindRefill answers, the purchase a crash may have interrupted; refillErr is fuel the operator
 	// cannot afford.
@@ -167,7 +169,7 @@ func (f *fakeRail) FinalizedBalances(context.Context) (int64, string, uint64, bo
 	return 0, "", 0, false, nil
 }
 func (f *fakeRail) DepositsScannedTo() (uint64, bool, error) { return f.scanned, true, nil }
-func (f *fakeRail) Sign([]byte) (string, error)              { return "proof", nil }
+func (f *fakeRail) Sign([]byte) (string, error)              { return "proof", f.signErr }
 
 func (f *fakeRail) Verify(_ []byte, address, _ string) (string, error) {
 	if f.verifyErr != nil {
@@ -1193,4 +1195,112 @@ type repudiatingRevealer struct {
 func (f *repudiatingRevealer) Reveal(_ context.Context, _ string, _ kernel.RevealPayload, _ string) error {
 	f.reveals++
 	return kernel.ErrNotFound.Wrap("no such obligation")
+}
+
+// transferAbroadFixture is a sending kernel on a world with addresses: alice funded, the transfer
+// native installed, and a peer whose user resolve the fake federation answers.
+func transferAbroadFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *fakeRail, *fakeFederationHTTP, *kernel.Account, string) {
+	t.Helper()
+	st := newTestStore(t)
+	cfg := testConfig()
+	sys := setupSys(t, nil, st)
+	cfg.FeeRecipientID = sys.ID
+	fake := &fakeFederationHTTP{resolveUserID: "bob-id", resolveHandle: "bob"}
+	k := newKernel(cfg, kernel.Dependencies{Store: st, HTTP: fake, Logger: log.Discard()})
+	fr := newFakeRail()
+	k.SetRail(fr)
+	native.Register(k, []native.Spec{native.Transfer()})
+	tr := setupAction(t, st, sys.ID, "transfer", 0)
+	tr.Effect, tr.Visibility = "transfer", kernel.VisibilityLocal
+	if err := st.UpdateAction(context.Background(), tr); err != nil {
+		t.Fatal(err)
+	}
+	alice := setupUser(t, st, "alice", 1000)
+	peerKey := "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+	if _, err := k.EnsureKernelAccount(context.Background(), peerKey); err != nil {
+		t.Fatal(err)
+	}
+	return k, st, fr, fake, alice, peerKey
+}
+
+func transferTo(k *kernel.Kernel, callerID, target string, amount int64) (*kernel.CallReply, error) {
+	return k.Run(context.Background(), kernel.RunRequest{CallerID: callerID, ActionRef: "sys@" + kernel.TestOwnName + "/transfer",
+		Args: map[string]any{"target": target, "amount": float64(amount)}})
+}
+
+// On a world with addresses a transfer abroad is paid to the vault the beneficiary's kernel proved
+// when it resolved the recipient, and to no other: a kernel that proves none, or proves it badly, is
+// refused before anything moves. Once the payment is final the beneficiary's kernel is told whom it
+// is for, with this kernel's own proven vault, until it acknowledges, and the transaction's audit
+// checks the payment against the vault.
+func TestATransferAbroadPaysTheProvenVaultAndSaysWhoItIsFor(t *testing.T) {
+	k, st, fr, fake, alice, peerKey := transferAbroadFixture(t)
+	ctx := context.Background()
+	unmoved := func(when string) {
+		t.Helper()
+		if a, l := balanceOf(t, st, alice.ID); a != 1000 || l != 0 {
+			t.Fatalf("%s: alice has %d available, %d locked, want 1000/0", when, a, l)
+		}
+	}
+
+	if _, err := transferTo(k, alice.ID, "bob@"+peerKey, 300); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a kernel that proved no vault: %v, want ErrUnauthorized", err)
+	}
+	unmoved("no vault")
+	fake.resolveBlockchainAddress, fake.resolveBlockchainProof = "0xBOBKERNEL", "proof"
+	fr.verifyErr = errors.New("bad proof")
+	if _, err := transferTo(k, alice.ID, "bob@"+peerKey, 300); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a vault proved badly: %v, want ErrUnauthorized", err)
+	}
+	unmoved("unproven vault")
+	fr.verifyErr = nil
+
+	reply, err := transferTo(k, alice.ID, "bob@"+peerKey, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balanceOf(t, st, alice.ID); a != 700 || l != 0 {
+		t.Errorf("alice has %d available, %d locked, want 700/0", a, l)
+	}
+	row, _ := st.ReadRailTransfer(ctx, reply.TxID)
+	if row == nil || row.Kind != kernel.RailKindTransfer || row.Amount != 300 || row.Destination != "0xbobkernel" {
+		t.Fatalf("the payment = %+v, want 300 to the proven vault", row)
+	}
+
+	// Unable to prove its own vault, this kernel announces nothing: an announcement naming no vault
+	// could never be matched to the payment, and would be acknowledged all the same.
+	fr.signErr = errors.New("rail key unavailable")
+	k.RailPass(ctx)
+	k.RevealPending(ctx)
+	if len(fake.announced) != 0 {
+		t.Fatalf("announced without a proven vault: %+v", fake.announced)
+	}
+	fr.signErr = nil
+	fake.announceErr = errors.New("peer offline")
+	k.RevealPending(ctx)
+	if len(fake.announced) != 0 {
+		t.Fatalf("announced through a failing link: %+v", fake.announced)
+	}
+	fake.announceErr = nil
+	k.RevealPending(ctx)
+	if len(fake.announced) != 1 {
+		t.Fatalf("announcements after the link returned: %d, want 1", len(fake.announced))
+	}
+	p := fake.announced[0]
+	if p.ID != reply.TxID || p.Amount != 300 || p.BeneficiaryID != "bob-id" || p.Recipient != peerKey ||
+		p.Counterparty != k.PublicKeyB64() || p.BlockchainAddress != fr.addr || p.TxHash != "tx:"+reply.TxID {
+		t.Errorf("announced %+v", p)
+	}
+	k.RevealPending(ctx)
+	if len(fake.announced) != 1 {
+		t.Errorf("an acknowledged transfer was announced again: %d", len(fake.announced))
+	}
+
+	v, err := k.VerifyReceipt(ctx, alice.ID, reply.TxID)
+	if err != nil || !v.Valid || !v.Checks["payment"] {
+		t.Fatalf("audit: %+v %v, want the payment check held", v, err)
+	}
+	if view, err := k.ReadTransaction(ctx, alice.ID, reply.TxID); err != nil || view.Payment != kernel.RailStatusAnnounced {
+		t.Errorf("tx show payment = %+v %v", view, err)
+	}
 }

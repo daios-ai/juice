@@ -277,7 +277,7 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 			[]string{"money.one_payment_credited_once"}},
 		{"an action that was never exported",
 			[]string{"attack.local_action_not_exported", "attack.private_action_not_exported",
-				"attack.no_relay_through_a_third_kernel", "attack.value_may_not_cross"}},
+				"attack.no_relay_through_a_third_kernel"}},
 		{"a name already in use by someone else",
 			[]string{"attack.squatted_name_unmoved", "attack.squatted_name_still_buys"}},
 	}

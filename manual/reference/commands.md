@@ -84,7 +84,7 @@ those values without an interactive prompt.
 | `juice user update` | `--description`, `--password` |
 | `juice user connect SELECTOR` | consent for an action to use your upstream account ([Consent](../calling/consent-and-tasks.html)) |
 | `juice user disconnect [SELECTOR]` | revoke it; `--account KEY` removes the whole upstream account |
-| `juice user transfer RECIPIENT AMOUNT` | send money to another user of this kernel ([Funds](../money/funds.html)) |
+| `juice user transfer RECIPIENT AMOUNT` | send money to a user of this kernel or another; `--external-key` makes a repeat move nothing ([Funds](../money/funds.html)) |
 | `juice user ledger` | deposits, withdrawals, transfers, delivered value, and settlement postings |
 | `juice user blockchain-address ADDRESS` | register the blockchain address you pay from and are paid at ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
 | `juice user deposit` | where to send money, and whether you are registered ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |

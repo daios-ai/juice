@@ -157,15 +157,20 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if k.fedClient == nil {
 		return Principal{}, ErrNotFound.Wrap("remote resolution unavailable")
 	}
-	remoteID, remoteHandle, rerr := k.fedClient.ResolveRemoteUser(ctx, kr.Key, a.Handle)
+	res, rerr := k.fedClient.ResolveRemoteUser(ctx, kr.Key, a.Handle)
 	if rerr != nil {
 		return Principal{}, rerr
 	}
 	// An empty id is not a principal. Accepted, it would address the task to the peer kernel
 	// itself — operator scope, decided by a remote reply — and strand the user it was meant for.
-	if remoteID == "" {
+	if res == nil || res.UserID == "" {
 		return Principal{}, ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
 	}
+	// Where the peer is paid, proved by its own rail key: a transfer to this user pays there (P11).
+	if _, verr := k.ObservePeerVault(ctx, kr.Key, res.BlockchainAddress, res.BlockchainProof); verr != nil {
+		return Principal{}, verr
+	}
+	remoteID, remoteHandle := res.UserID, res.Handle
 	if _, berr := k.BindPetname(ctx, kr.Key, "", false); berr != nil {
 		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", kr.Key, "error", berr.Error())
 	}

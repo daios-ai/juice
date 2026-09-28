@@ -1222,76 +1222,6 @@ func (k *Kernel) ValidateFeeRecipient(ctx context.Context) error {
 	return nil
 }
 
-// newLedgerEntry builds the immutable audit record shared by the three direct balance movements
-// (§3): a deposit credits (from nil), a withdrawal debits (to nil), a transfer moves between two
-// local users. The store enforces the debit's sufficient-funds rule atomically.
-// CallerKey namespaces an idempotency token a client chose. Every key the kernel mints already
-// carries its own prefix (AttributionKey, the rail's own, a withdrawal's reserve); the caller's was
-// the one name in that column nobody owned, so a client could hand back a key it had merely read and
-// be answered with someone else's entry, or occupy a key the rail would later need for a real
-// payment. Scoped to the caller, a client can collide only with its own earlier key — which is what
-// an idempotency token means. An empty token stays empty: it asks for no replay at all.
-func CallerKey(callerID, key string) string {
-	if key == "" {
-		return ""
-	}
-	return "u:" + callerID + ":" + key
-}
-
-func newLedgerEntry(operatorID, fromUserID, toUserID string, amount int64, reason, externalKey string) *LedgerEntry {
-	return &LedgerEntry{
-		ID:             uuid.New().String(),
-		OperatorUserID: operatorID,
-		FromUserID:     fromUserID,
-		ToUserID:       toUserID,
-		Amount:         amount,
-		Reason:         reason,
-		ExternalKey:    externalKey,
-		CreatedAt:      time.Now().UTC(),
-	}
-}
-
-// Transfer moves credits from the caller's own available balance to another local
-// user, recording one ledger entry (from caller, to recipient). It is user self-service
-// — the self-authorized sibling of Deposit/Withdraw. It is the same-kernel leg of the
-// sys/transfer native action (§13), which composes it through Call() and Tasks; a
-// cross-kernel transfer routes through the federation pipeline instead, never here. The
-// recipient must be a local account (a peer/proxy user is rejected, as crediting it would
-// corrupt the bilateral federation account, §13). Sufficient-funds is enforced atomically at
-// the store debit, so a concurrent spend cannot overdraw.
-func (k *Kernel) Transfer(ctx context.Context, callerID, recipientID string, amount int64, reason, externalKey string) (*LedgerEntry, error) {
-	start := time.Now()
-	logger := k.log.With(ctx)
-	logger.Info("transfer.start", "recipient_user_id", recipientID, "amount", amount)
-	caller, err := k.requireActiveUser(ctx, callerID)
-	if err != nil {
-		return nil, err
-	}
-	if amount <= 0 {
-		return nil, ErrInvalidInput.Wrap("amount must be positive")
-	}
-	if callerID == recipientID {
-		return nil, ErrInvalidInput.Wrap("cannot transfer to yourself")
-	}
-	recipient, err := k.store.ReadUser(ctx, recipientID)
-	if err != nil {
-		return nil, err
-	}
-	if !recipient.IsLiveUser() {
-		return nil, ErrInvalidInput.Wrap("recipient must be a local user account")
-	}
-	if recipient.SuspendedAt != nil {
-		return nil, ErrInvalidInput.Wrap("recipient is suspended")
-	}
-	e := newLedgerEntry(caller.ID, caller.ID, recipient.ID, amount, reason, CallerKey(caller.ID, externalKey))
-	if err := k.store.CreateLedgerEntry(ctx, e); err != nil {
-		logger.Warn("transfer.failed", "recipient_user_id", recipientID, "error", err, "duration_ms", time.Since(start).Milliseconds())
-		return nil, err
-	}
-	logger.Info("transfer.created", "transfer_id", e.ID, "recipient_user_id", recipientID, "amount", amount, "status", "success", "duration_ms", time.Since(start).Milliseconds())
-	return e, nil
-}
-
 // ListLedger returns the authenticated caller's own ledger entries (deposits,
 // withdrawals, and transfers where they are the source or destination), most recent
 // first, bounded by limit/offset.
@@ -2304,7 +2234,7 @@ func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms) (*CallReply, error) {
+func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms, key runKey) (*CallReply, error) {
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds.
@@ -2320,14 +2250,13 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// transfer effect. The execution channel (price) is the normal Call lifecycle, funded by the process;
 	// the value channel is an additive TransferEffect funded from the immediate caller C's OWN balance
 	// (here C == P, a root call) and delivered to the beneficiary untaxed.
-	eff, err := k.prepareTransferEffect(ctx, caller.IsPeer(), action, args)
+	eff, err := k.prepareTransferEffect(ctx, caller, action, args)
 	if err != nil {
 		return nil, err
 	}
 	var value int64
-	var valueTo string
 	if eff != nil {
-		value, valueTo = eff.Amount, eff.Dest
+		value = eff.Amount
 	}
 	// A foreign call is served on this kernel's own credit, not the peer's: the seller funds the
 	// execution from its own balance and is repaid when the buyer's ticket settles on the rail (P10).
@@ -2401,6 +2330,8 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		ID:          uuid.New().String(),
 		OwnerUserID: owner.ID,
 		Status:      ProcessOpen,
+		ExternalKey: key.name,
+		RequestHash: key.hash,
 		CreatedAt:   now,
 	}
 	t := &Trace{
@@ -2417,10 +2348,9 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	}
 	t.TargetRemoteID, t.TargetHandle = targetPrincipal(action)
 	// Snapshot the TransferEffect on the trace so every settlement path releases the locked value
-	// config-independently (§13): the amount locked from C and the beneficiary it is delivered to.
-	// Both zero on a non-transfer call.
+	// config-independently (D18). All zero on a non-transfer call.
 	if eff != nil {
-		t.Value, t.ValueTo = value, valueTo
+		eff.stage(t)
 	}
 	// Persist the inbound execution lock on the trace, for every action kind: whichever settlement
 	// resolves this call — commit, retry, crash recovery — then releases it, so a peer is never
@@ -2480,17 +2410,82 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	return reply, err
 }
 
-// Run atomically creates a process funded with action.Price, then executes the root call.
+// runKey is a caller's key for one run and the hash of the {action, args} it names (D20); zero for
+// a run without one.
+type runKey struct{ name, hash string }
+
+// Run atomically creates a process funded with action.Price, then executes the root call. A run
+// carrying an external key is read against the key first — before the reference is resolved or any
+// peer is asked — so a repeat is answered from the first run even while that run's peer is out of
+// reach, and never runs twice (D20).
 func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
 	caller, err := k.requireActiveUser(ctx, req.CallerID)
 	if err != nil {
 		return nil, err
 	}
+	var key runKey
+	if req.ExternalKey != "" {
+		// The run is what it asks for, not the price it was consented at: a repeat charges nothing.
+		payload, err := CanonicalJSON(map[string]any{"action": req.ActionRef, "args": req.Args})
+		if err != nil {
+			return nil, ErrInvalidInput.Wrap("args must be a JSON object")
+		}
+		key = runKey{name: req.ExternalKey, hash: sha256Hex(string(payload))}
+		prior, err := k.store.ReadProcessByKey(ctx, caller.ID, key.name)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			return k.replayRun(ctx, prior, key.hash)
+		}
+	}
 	action, err := k.ResolveAction(ctx, req.ActionRef)
 	if err != nil {
 		return nil, err
 	}
-	return k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash, BuyerTerms{})
+	reply, err := k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash, BuyerTerms{}, key)
+	if errors.Is(err, ErrRunKeyTaken) {
+		// A concurrent first run under the same key committed first: answer as its repeat.
+		prior, rerr := k.store.ReadProcessByKey(ctx, caller.ID, key.name)
+		if rerr != nil || prior == nil {
+			return nil, err
+		}
+		return k.replayRun(ctx, prior, key.hash)
+	}
+	return reply, err
+}
+
+// replayRun answers a run repeated under its external key with the first run's own outcome: the
+// transaction and receipt its root committed, or 409 while it has none, since that run may still be
+// executing and a second one would pay twice. The same key naming another request is refused rather
+// than answered with an outcome the caller did not ask for.
+func (k *Kernel) replayRun(ctx context.Context, prior *Process, requestHash string) (*CallReply, error) {
+	if prior.RequestHash != requestHash {
+		return nil, ErrInvalidInput.Wrap("this external key was used for a different run")
+	}
+	root, err := k.store.ReadRootTrace(ctx, prior.ID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := k.store.ReadTransactionByTrace(ctx, root.ID)
+	if err != nil {
+		return nil, err
+	}
+	if tx == nil {
+		return nil, ErrInvalidState.Wrap("the run under this external key has not settled yet").WithMeta("process_id", prior.ID)
+	}
+	receipt, err := k.store.ReadReceiptByTxID(ctx, tx.ID)
+	if err != nil {
+		return nil, err
+	}
+	reply := &CallReply{TxID: tx.ID, TraceID: tx.TraceID, ReceiptID: receipt.ID, ProcessID: prior.ID, Charge: &receipt.Charge}
+	if tx.Status != TxSuccess {
+		return reply, withSettlement(ErrorFromCode(tx.Reason).Wrapf("the run under this external key failed (%s)", tx.Reason), tx.ID, receipt.Charge)
+	}
+	if err := json.Unmarshal(tx.ReplyJSON, &reply.Result); err != nil {
+		return nil, ErrInternal.Wrap("could not read the run's stored result")
+	}
+	return reply, nil
 }
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
@@ -2504,7 +2499,7 @@ func (k *Kernel) RunFederated(ctx context.Context, callerID string, action *Acti
 	// The row the handler checked is the row that runs. Reading it again here would open a window
 	// between the contract check and the execution in which the owner could put different terms,
 	// or a different action entirely, under the same name (§8).
-	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "", buyer) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
+	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "", buyer, runKey{}) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
@@ -2712,6 +2707,11 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 	// recovery both read it that way. One string either side: the obligation is the same name on
 	// both books.
 	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr != nil {
+		if tr.ValuePeer != "" {
+			if p, perr := k.store.ReadRailTransfer(ctx, tx.ID); perr == nil && p != nil && p.Kind == RailKindTransfer {
+				v.Payment = p.Status
+			}
+		}
 		if tr.IdempotencyKey != nil {
 			v.TicketID = *tr.IdempotencyKey
 		} else if r, rerr := k.store.ReadReceiptByTxID(ctx, tx.ID); rerr == nil && r != nil && r.IdempotencyKey != "" {

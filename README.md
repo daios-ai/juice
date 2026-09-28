@@ -162,7 +162,7 @@ by the fact that witnesses it, and then move freely between local users:
 ./juice auth login sys@work
 ./juice admin user deposit alice@work 1000 --ref wire-8823   # operator only
 ./juice auth use alice@work
-./juice user transfer bob@work 250      # alice pays bob directly, no fee
+./juice user transfer bob@work 250      # alice pays bob, here or on another kernel
 ./juice user ledger                # deposits, withdrawals, transfers, and settlement postings
 ```
 

@@ -62,35 +62,41 @@ func actionBasePrice(a *Action) int64 {
 	return a.Price
 }
 
-// TransferEffect is the staged value channel of an effect-bearing action (§13): the delivered Amount
-// and the resolved beneficiary Dest. It is produced only for an action whose contract declares an
-// effect, and settled deferredly by the kernel at commit; the two money channels — the execution price,
-// funded by the trace, and this value, funded from the immediate caller C's own balance — never mix.
+// TransferEffect is the staged value channel of an effect-bearing action (D18): the delivered Amount,
+// the beneficiary's stable id Dest, and Peer, the key of the kernel it lives on — empty for one here.
+// It is produced only for an action whose contract declares an effect, and settled deferredly by the
+// kernel at commit; the two money channels — the execution price, funded by the trace, and this
+// value, funded from the immediate caller C's own balance — never mix.
 type TransferEffect struct {
 	Amount int64
 	Dest   string
+	Peer   string
 }
 
-// prepareTransferEffect stages the value channel for a call at funding time (§13), or returns nil when
+// stage snapshots the effect on the trace that carries it, so every settlement path — commit,
+// failure, recovery, forced closure — reads what was locked and for whom from one place.
+func (e *TransferEffect) stage(t *Trace) {
+	t.Value, t.ValueTo, t.ValuePeer = e.Amount, e.Dest, e.Peer
+}
+
+// prepareTransferEffect stages the value channel for a call at funding time (D18), or returns nil when
 // the action declares no transfer effect. Effect identity comes from the action's contract (actionValue
 // keys on a.Effect), never its name.
 //
-// The value channel is local to one kernel: caller, action, and beneficiary are all accounts here, the
-// amount locked from C is exactly the amount delivered, and no fee is levied on it. Value between
-// kernels settles on the external rail, not through a call. callerIsPeer is therefore a rejection
-// rather than a pricing input: a peer completing a parked task is the one path by which a kernel
-// account could otherwise reach an effect-bearing action, since completion re-checks liveness but not
-// visibility (§4 binding rule).
-//
-// It rejects, before any funds move, a peer caller, a non-positive amount, a kernel-qualified target,
-// and an unresolvable / peer / suspended beneficiary.
-func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a *Action, args map[string]any) (*TransferEffect, error) {
+// The beneficiary is resolved here, before any funds move. One of this kernel's must be a live user
+// other than C, not suspended. One on another kernel is resolved to its stable id by user resolve,
+// which also exchanges the two kernels' proven vaults (P11); where the world has addresses, a kernel
+// that has proven none is refused, since the payment would have nowhere to go. A peer caller is
+// refused: its account holds nothing to fund a value (D14), and a peer completing a parked task is the
+// one path by which it could otherwise reach an effect-bearing action, since completion re-checks
+// liveness but not visibility (§4 binding rule).
+func (k *Kernel) prepareTransferEffect(ctx context.Context, caller *Account, a *Action, args map[string]any) (*TransferEffect, error) {
 	fn := k.actionValue(a)
 	if fn == nil {
 		return nil, nil
 	}
-	if callerIsPeer {
-		return nil, ErrInvalidInput.Wrap("value transfer is local to a kernel; a peer cannot fund one")
+	if caller.IsPeer() {
+		return nil, ErrInvalidInput.Wrap("a peer's account holds nothing to transfer")
 	}
 	amount, ref, err := fn(args)
 	if err != nil {
@@ -99,7 +105,9 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 	if amount < 1 {
 		return nil, ErrInvalidInput.Wrap("transfer amount must be a positive integer")
 	}
-	// Value is local to a kernel (D18): the beneficiary is a live user here, never a peer.
+	if k.IsRemoteRef(ctx, ref) {
+		return k.prepareRemoteTransfer(ctx, amount, ref)
+	}
 	benef, err := k.ResolveLocalPrincipal(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -107,7 +115,25 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, callerIsPeer bool, a
 	if benef.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
 	}
+	if benef.ID == caller.ID {
+		return nil, ErrInvalidInput.Wrap("cannot transfer to yourself")
+	}
 	return &TransferEffect{Amount: amount, Dest: benef.ID}, nil
+}
+
+// prepareRemoteTransfer resolves a beneficiary on another kernel (P11): its stable id there, and the
+// vault the payment will go to, proven and recorded by the resolve itself — which refuses a kernel
+// proving none where the world has addresses, so the payment always has a destination.
+func (k *Kernel) prepareRemoteTransfer(ctx context.Context, amount int64, ref string) (*TransferEffect, error) {
+	p, err := k.ResolvePrincipal(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	peer, err := k.store.ReadUser(ctx, p.AccountID)
+	if err != nil || peer == nil || peer.KernelPublicKey == "" {
+		return nil, ErrNotFound.Wrapf("user %s not found", ref)
+	}
+	return &TransferEffect{Amount: amount, Dest: p.RemoteID, Peer: peer.KernelPublicKey}, nil
 }
 
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
@@ -380,6 +406,7 @@ const (
 	sigDomainTaskComplete    = "task_complete"
 	sigDomainTaskList        = "task_list"
 	sigDomainReveal          = "reveal"
+	sigDomainTransfer        = "transfer"
 	sigDomainCapability      = "capability"
 	sigDomainRecovery        = "recovery"
 )
@@ -583,6 +610,15 @@ func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*Rece
 	}
 	if tx.Status == TxSuccess {
 		checks["reply_hash"] = receiptHashMatches(r.ReplyHash, tx.ReplyJSON)
+	}
+	// A transfer to a user of another kernel is sent by a payment, and the receipt alone does not prove
+	// one exists: the payment named by this transaction must carry exactly the value to that kernel's
+	// proven vault (D18).
+	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr.ValuePeer != "" && tx.Status == TxSuccess {
+		p, perr := k.store.ReadRailTransfer(ctx, tx.ID)
+		vault, verr := k.store.ReadKernelVault(ctx, tr.ValuePeer)
+		checks["payment"] = perr == nil && verr == nil && p != nil && p.Kind == RailKindTransfer &&
+			p.Amount == r.Value && p.Destination == vault
 	}
 	return &ReceiptVerification{TransactionID: tx.ID, Valid: checks.allHeld(), Checks: checks, Receipt: r}, nil
 }

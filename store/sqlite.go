@@ -480,8 +480,17 @@ func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey, pubKey); err != nil {
 		return dbErr(err, "delete evidence")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=?`, pubKey); err != nil {
+	// A kernel that proved a vault keeps its key and that address, marked forgotten and emptied of
+	// everything else: a payment from the vault may arrive after it is forgotten, and must still wait
+	// for its word (D23). Seeing the kernel again brings it back (UpsertKernel).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=? AND blockchain_address = ''`, pubKey); err != nil {
 		return dbErr(err, "delete kernel")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE kernels SET petname=NULL, nickname='', about='', gossip_cursor='', last_seen=NULL,
+		        last_contact_failed_at=NULL, catalog_cursor='', catalog_generation=0, forgotten_at=?
+		  WHERE public_key=?`, timeToStr(time.Now().UTC()), pubKey); err != nil {
+		return dbErr(err, "forget kernel")
 	}
 	return nil
 }
@@ -495,7 +504,7 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey 
 		// This kernel's own row holds its name and no account, by design (D15): never a stale peer.
 		rows, err := tx.QueryContext(ctx,
 			`SELECT public_key FROM kernels
-			  WHERE updated_at <= ? AND public_key <> ?
+			  WHERE updated_at <= ? AND public_key <> ? AND forgotten_at IS NULL
 			    AND public_key NOT IN (SELECT kernel_public_key FROM accounts WHERE kernel_public_key IS NOT NULL)`,
 			timeToStr(cutoff), selfKey)
 		if err != nil {
@@ -935,14 +944,43 @@ func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, o
 		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO processes (id,owner_user_id,available,locked,status,created_at,ended_at) VALUES (?,?,0,?,?,?,?)`,
-			p.ID, p.OwnerUserID, price, string(p.Status), timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
-		); err != nil {
+		// The owner's key for this run commits with its funding, so a run either holds its key or never
+		// happened; a key another run of the owner already holds refuses this one whole (D20).
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,external_key,request_hash,created_at,ended_at)
+			 VALUES (?,?,0,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			p.ID, p.OwnerUserID, price, string(p.Status), nullStr(p.ExternalKey), p.RequestHash,
+			timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
+		)
+		if err != nil {
 			return dbErr(err, "begin run: insert process")
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return kernel.ErrInvalidState.Wrap("this external key is already used by a run").Because(kernel.ErrRunKeyTaken)
 		}
 		return insertTraceTx(ctx, tx, t, t.ParentTraceID, price)
 	})
+}
+
+// ReadProcessByKey returns the process an owner's run created under an external key, or nil when
+// the owner never used the key.
+func (s *DB) ReadProcessByKey(ctx context.Context, ownerID, key string) (*kernel.Process, error) {
+	var p kernel.Process
+	var status, createdAt string
+	var endedAt *string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,owner_user_id,available,locked,status,request_hash,created_at,ended_at
+		   FROM processes WHERE owner_user_id=? AND external_key=?`, ownerID, key,
+	).Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &p.RequestHash, &createdAt, &endedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbErr(err, "read process by key")
+	}
+	p.Status, p.ExternalKey = kernel.ProcessStatus(status), key
+	p.CreatedAt, p.EndedAt = strToTime(createdAt), strToNullTime(endedAt)
+	return &p, nil
 }
 
 func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error) {
@@ -968,10 +1006,10 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 	// revealed is written explicitly: the column defaults to 1 so the calls that predate the draw are
 	// never queued for a reveal they have no secret for, but every call made since owes one.
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,created_at,
+		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,value_peer,created_at,
 		                     caller_remote_id,caller_handle,target_remote_id,target_handle)
-		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?,?,?,?,?)`,
-		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedBlockchainAddress, t.Value, nullStr(t.ValueTo), timeToStr(t.CreatedAt),
+		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedBlockchainAddress, t.Value, nullStr(t.ValueTo), t.ValuePeer, timeToStr(t.CreatedAt),
 		t.CallerRemoteID, t.CallerHandle, t.TargetRemoteID, t.TargetHandle,
 	)
 	return dbErr(err, "insert trace")
@@ -1357,36 +1395,40 @@ func releaseTransferValue(ctx context.Context, tx *sql.Tx, callerC string, value
 	return nil
 }
 
-// transferValueOf reads a trace's value snapshot: the amount locked on the caller and the beneficiary
-// it is owed to. Reading it from the trace rather than the in-memory request is what lets every
-// settlement path release the lock identically (§13).
-func transferValueOf(ctx context.Context, tx *sql.Tx, traceID string) (callerC string, value int64, valueTo string, err error) {
+// transferValueOf reads a trace's value snapshot: the amount locked on the caller, the beneficiary it
+// is owed to, and that beneficiary's kernel, empty for one here. Reading it from the trace rather than
+// the in-memory request is what lets every settlement path release the lock identically (D18).
+func transferValueOf(ctx context.Context, tx *sql.Tx, traceID string) (callerC string, value int64, valueTo, peer string, err error) {
 	var to sql.NullString
 	if err = tx.QueryRowContext(ctx,
-		`SELECT COALESCE(value,0), caller_user_id, value_to FROM traces WHERE id=?`, traceID,
-	).Scan(&value, &callerC, &to); err != nil {
-		return "", 0, "", dbErr(err, "transfer: read trace value")
+		`SELECT COALESCE(value,0), caller_user_id, value_to, value_peer FROM traces WHERE id=?`, traceID,
+	).Scan(&value, &callerC, &to, &peer); err != nil {
+		return "", 0, "", "", dbErr(err, "transfer: read trace value")
 	}
-	return callerC, value, to.String, nil
+	return callerC, value, to.String, peer, nil
 }
 
-// commitTraceTransferEffect delivers a trace's transfer value to its beneficiary (§13) and journals
-// the movement. The transaction records the execution channel (gross/net/fee); the delivered value is
+// commitTraceTransferEffect delivers a trace's transfer value to its beneficiary (D18) and journals
+// the movement; a beneficiary on another kernel is paid through the rail instead
+// (reserveTransferPayment). The transaction records the execution channel (gross/net/fee); the delivered value is
 // a balance movement between two users, so it is recorded where every such movement is — one ledger
 // entry, written in this same commit, naming C as authorizer and source and carrying the settling
 // transaction's id as its reason. Without it the beneficiary — no party to the transaction — would
 // see credit arrive with no readable record (§3 U5, U15). The id derives from the transaction (like
 // a settlement's), so one delivery can never be journalled twice.
-func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, traceID, txID string, at time.Time) error {
-	callerC, value, valueTo, err := transferValueOf(ctx, tx, traceID)
+func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, sys, traceID, txID string, at time.Time) error {
+	callerC, value, valueTo, peer, err := transferValueOf(ctx, tx, traceID)
 	if err != nil {
-		return err
-	}
-	if err := releaseTransferValue(ctx, tx, callerC, value, valueTo); err != nil {
 		return err
 	}
 	if value == 0 {
 		return nil
+	}
+	if peer != "" {
+		return reserveTransferPayment(ctx, tx, sys, callerC, value, peer, txID, at)
+	}
+	if err := releaseTransferValue(ctx, tx, callerC, value, valueTo); err != nil {
+		return err
 	}
 	return insertLedgerRow(ctx, tx, &kernel.LedgerEntry{
 		ID: "tv_" + txID, OperatorUserID: callerC, FromUserID: callerC, ToUserID: valueTo,
@@ -1394,10 +1436,28 @@ func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, traceID, txID st
 	})
 }
 
+// reserveTransferPayment turns a transfer's value into the rail payment that carries it to the
+// beneficiary's kernel (D18): C's lock is released and the same amount reserved from C into the
+// operator's hold, in this one commit, so C is debited once. The payment is named by the transaction,
+// which is what the beneficiary's kernel will be told (P11), and goes to that kernel's proven vault —
+// empty where the world has no addresses, where the rail pays no address at all.
+func reserveTransferPayment(ctx context.Context, tx *sql.Tx, sys, callerC string, value int64, peer, txID string, at time.Time) error {
+	var vault string
+	if err := tx.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, peer).Scan(&vault); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return dbErr(err, "transfer: read vault")
+	}
+	if err := releaseTransferValue(ctx, tx, callerC, value, callerC); err != nil {
+		return err
+	}
+	return reserveRailTx(ctx, tx, sys, &kernel.RailTransfer{ID: txID, Kind: kernel.RailKindTransfer, Party: callerC,
+		Amount: value, Credit: value, Destination: vault, Status: kernel.RailStatusPending,
+		Reason: "transfer " + txID, CreatedAt: at}, callerC, value, at)
+}
+
 // refundTransferEffect returns a trace's transfer value to the caller C — the disposition for a failed
 // or interrupted transfer, where delivery is all-or-nothing (§13).
 func refundTransferEffect(ctx context.Context, tx *sql.Tx, traceID string) error {
-	callerC, value, _, err := transferValueOf(ctx, tx, traceID)
+	callerC, value, _, _, err := transferValueOf(ctx, tx, traceID)
 	if err != nil {
 		return err
 	}
@@ -1509,7 +1569,7 @@ func (s *DB) CommitCall(ctx context.Context, ktx *kernel.Transaction, receipt *k
 		}
 		// Value channel (§13): a local/inbound transfer credits its beneficiary from the caller C's own
 		// reserve, untaxed and on a different wallet than the execution above. No-op otherwise.
-		if err := commitTraceTransferEffect(ctx, tx, traceID, ktx.ID, receipt.CreatedAt); err != nil {
+		if err := commitTraceTransferEffect(ctx, tx, feeRecipientID, traceID, ktx.ID, receipt.CreatedAt); err != nil {
 			return err
 		}
 		// A foreign buyer now owes what this call charged, and the exposure admission reserved is
@@ -1817,14 +1877,14 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,created_at,outcome_json,caller_remote_id,caller_handle,target_remote_id,target_handle`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,value_peer,created_at,outcome_json,caller_remote_id,caller_handle,target_remote_id,target_handle`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
 	var parentID, idempotencyKey, dispatchJSON, recordID, valueTo, outcome sql.NullString
 	var ticket, value sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
-		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &createdAt, &outcome,
+		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &t.ValuePeer, &createdAt, &outcome,
 		&t.CallerRemoteID, &t.CallerHandle, &t.TargetRemoteID, &t.TargetHandle)
 	if err != nil {
 		return err
@@ -1944,6 +2004,18 @@ func (s *DB) ReadTransaction(ctx context.Context, id string) (*kernel.Transactio
 	}
 	if err != nil {
 		return nil, dbErr(err, "read transaction")
+	}
+	return &tx, nil
+}
+
+// ReadTransactionByTrace returns the transaction that settled a trace, or nil while it has none.
+func (s *DB) ReadTransactionByTrace(ctx context.Context, traceID string) (*kernel.Transaction, error) {
+	tx, err := scanTx(s.db.QueryRowContext(ctx, `SELECT `+txColumns+` FROM transactions WHERE trace_id=?`, traceID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, dbErr(err, "read transaction by trace")
 	}
 	return &tx, nil
 }
@@ -2760,52 +2832,8 @@ func (s *DB) InitFirstBoot(ctx context.Context, u *kernel.Account, configs map[s
 
 // ---- Ledger ----
 
-func (s *DB) CreateLedgerEntry(ctx context.Context, e *kernel.LedgerEntry) error {
-	return s.withTx(ctx, "ledger", func(tx *sql.Tx) error {
-		// Idempotent replay: an existing external_key returns the recorded entry
-		// before any balance change, so a debit replay never re-evaluates the guard below.
-		if e.ExternalKey != "" {
-			existing, err := readLedgerByExternalKey(ctx, tx, e.ExternalKey)
-			if err != nil {
-				return err
-			}
-			if existing != nil {
-				// A key names one movement. Answering a request that asks for a different one with
-				// this entry would report money moved that never did, so the mismatch is refused
-				// here — like a withdrawal replayed on other terms, and inside the same transaction
-				// the insert would run in.
-				if existing.FromUserID != e.FromUserID || existing.ToUserID != e.ToUserID || existing.Amount != e.Amount {
-					return kernel.ErrInvalidInput.Wrapf("%s already names a different movement", e.ExternalKey)
-				}
-				*e = *existing
-				return nil
-			}
-		}
-		if e.FromUserID != "" {
-			res, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available-? WHERE id=? AND available>=?`,
-				e.Amount, e.FromUserID, e.Amount,
-			)
-			if err != nil {
-				return dbErr(err, "ledger: debit source")
-			}
-			if n, _ := res.RowsAffected(); n == 0 {
-				return kernel.ErrInsufficientFunds.Wrap("insufficient balance")
-			}
-		}
-		if e.ToUserID != "" {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE accounts SET available=available+? WHERE id=?`, e.Amount, e.ToUserID,
-			); err != nil {
-				return dbErr(err, "ledger: credit destination")
-			}
-		}
-		return insertLedgerRow(ctx, tx, e)
-	})
-}
-
 // insertLedgerRow writes one ledger record inside an open transaction — the single INSERT behind
-// every entry class (deposit/withdraw/transfer, ticket credit, refill, transfer-effect delivery). It
+// every entry class (deposit, withdrawal, ticket credit, refill, delivered value, settlement). It
 // inserts what it is given and decides nothing: the nullable columns go through nullStr, so an
 // empty external_key lands as SQL NULL rather than colliding on the unique index.
 func insertLedgerRow(ctx context.Context, tx *sql.Tx, e *kernel.LedgerEntry) error {
@@ -2954,18 +2982,48 @@ func ftsMatchQuery(query string) string {
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
 func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO kernels (public_key,nickname,about,blockchain_address,blockchain_proof,first_seen,updated_at)
+	return s.withTx(ctx, "upsert kernel", func(tx *sql.Tx) error {
+		if err := vaultUnchanged(ctx, tx, publicKey, blockchainAddress); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO kernels (public_key,nickname,about,blockchain_address,blockchain_proof,first_seen,updated_at)
 		 VALUES (?,?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
 		   blockchain_address=CASE WHEN excluded.blockchain_address != '' THEN excluded.blockchain_address ELSE kernels.blockchain_address END,
 		   blockchain_proof=CASE WHEN excluded.blockchain_proof != '' THEN excluded.blockchain_proof ELSE kernels.blockchain_proof END,
+		   forgotten_at=NULL,
 		   updated_at=excluded.updated_at`,
-		publicKey, nickname, about, blockchainAddress, blockchainProof, timeToStr(now), timeToStr(now),
-	)
-	return dbErr(err, "upsert kernel")
+			publicKey, nickname, about, blockchainAddress, blockchainProof, timeToStr(now), timeToStr(now),
+		)
+		return dbErr(err, "upsert kernel")
+	})
+}
+
+// vaultUnchanged refuses a proven vault other than the one a kernel proved before (D16): the address
+// derives from a rail key that is created once and never overwritten (D9).
+func vaultUnchanged(ctx context.Context, tx *sql.Tx, publicKey, address string) error {
+	var known string
+	err := tx.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, publicKey).Scan(&known)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return dbErr(err, "read vault")
+	}
+	if address != "" && known != "" && known != address {
+		return kernel.ErrInvalidState.Wrapf("kernel %s proved vault %s before; a different vault is refused", publicKey, known)
+	}
+	return nil
+}
+
+// ReadKernelVault is where a peer proved it is paid, or empty when it never proved one.
+func (s *DB) ReadKernelVault(ctx context.Context, publicKey string) (string, error) {
+	var address string
+	err := s.db.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, publicKey).Scan(&address)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return address, dbErr(err, "read vault")
 }
 
 // BindPetname assigns a kernel's local petname inside one transaction, so concurrent first use of
@@ -3054,7 +3112,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 		        k.last_seen, k.last_contact_failed_at,
 		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key)
 		 FROM kernels k LEFT JOIN accounts a ON a.kernel_public_key = k.public_key
-		 WHERE k.public_key != ? AND (? OR a.suspended_at IS NULL)
+		 WHERE k.public_key != ? AND k.forgotten_at IS NULL AND (? OR a.suspended_at IS NULL)
 		 ORDER BY k.updated_at DESC, k.public_key
 		 LIMIT ? OFFSET ?`, selfKey, includeSuspended, limit, offset)
 	if err != nil {

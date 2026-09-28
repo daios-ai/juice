@@ -92,7 +92,14 @@ type TicketRevealer interface {
 // federation client disables lazy resolution (a cold cross-kernel ref is then a plain ErrNotFound).
 type RemoteResolver interface {
 	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ResolvedAction, error)
-	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (userID, handle string, err error)
+	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (*ResolvedUser, error)
+}
+
+// TransferAnnouncer carries one signed `paid` to the kernel a transfer's payment went to, over
+// /juice/fed/transfer/1 (P11): whom the payment is for. Like TicketRevealer, the kernel owns the
+// payload and its signature; the adapter owns the wire shape and its deadline.
+type TransferAnnouncer interface {
+	AnnounceTransfer(ctx context.Context, peerPublicKey string, payload TransferPaidPayload, proof, signature string) error
 }
 
 // TaskCaller carries one /juice/fed/task/1 request to a peer (§13): listing the tasks parked for
@@ -115,6 +122,7 @@ type TaskCaller interface {
 type FederationClient interface {
 	FederationExecutor
 	TicketRevealer
+	TransferAnnouncer
 	RemoteResolver
 	TaskCaller
 }
@@ -262,6 +270,10 @@ type Store interface {
 	// against the credit limit in the SAME statement — checking it in Go first would race two
 	// concurrent admissions past one limit (D14).
 	BeginRun(ctx context.Context, p *Process, t *Trace, ownerID string, price, reserve, limit int64) error
+	// ReadProcessByKey returns the process an owner's run created under its external key, or nil
+	// when the owner never used it (D20). BeginRun refuses a key already taken with ErrRunKeyTaken as
+	// its cause, funding nothing.
+	ReadProcessByKey(ctx context.Context, ownerID, key string) (*Process, error)
 
 	ReadProcess(ctx context.Context, id string) (*Process, error)
 	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
@@ -299,6 +311,8 @@ type Store interface {
 	// ---- Transactions ----
 
 	ReadTransaction(ctx context.Context, id string) (*Transaction, error)
+	// ReadTransactionByTrace returns the transaction that settled a trace, or nil while it has none.
+	ReadTransactionByTrace(ctx context.Context, traceID string) (*Transaction, error)
 	ListTransactions(ctx context.Context, filter TxFilter) ([]*Transaction, error)
 
 	// ---- Receipts ----
@@ -449,16 +463,6 @@ type Store interface {
 	// ReadReceipt returns the receipt with the given ID.
 	ReadReceipt(ctx context.Context, id string) (*Receipt, error)
 
-	// ---- Ledger ----
-
-	// CreateLedgerEntry atomically debits e.FromUserID (when set) and credits e.ToUserID
-	// (when set), recording the entry. The debit subtracts amount and returns
-	// ErrInsufficientFunds if that user's available < amount; the credit adds it. When
-	// e.ExternalKey is set and already present, the existing record is returned (loaded
-	// into e) and no balance change is applied — the idempotency check runs before the
-	// debit's available-balance guard.
-	CreateLedgerEntry(ctx context.Context, e *LedgerEntry) error
-
 	// ---- Rail (D23) ----
 	// Every external movement is one row keyed by the fact that caused it, so booking a payment
 	// twice is impossible however it was found, and the money in transit is one query.
@@ -559,6 +563,16 @@ type Store interface {
 	// and the exposure it added stays either way, since only cash reduces exposure. Where the reveal
 	// is itself the payment (D23) the caller passes that payment, booked in the same statement.
 	ApplyReveal(ctx context.Context, sys, traceID string, amount int64, txHash string, payment *RailTransfer) error
+	// RecordIncomingTransfer stores a peer's word that a payment of its is for one of our users (P11),
+	// idempotently by peer and id; payment, where the world has no addresses, is booked with it.
+	RecordIncomingTransfer(ctx context.Context, sys string, it *IncomingTransfer, payment *RailTransfer) error
+	// ListTransfersToAnnounce and MarkTransferAnnounced are the sending side: final transfer payments
+	// whose beneficiary's kernel has not yet acknowledged them, and the acknowledgement (P11).
+	ListTransfersToAnnounce(ctx context.Context, limit int) ([]*OutgoingTransfer, error)
+	MarkTransferAnnounced(ctx context.Context, id string) error
+	// ReadKernelVault is where a peer proved it is paid, or empty; recorded once by UpsertKernel and
+	// never replaced or purged (D16, D23).
+	ReadKernelVault(ctx context.Context, publicKey string) (string, error)
 	// ReconcileDeposits is the one path every observed payment takes: obligations whose money has
 	// arrived are closed first — the join is the rule, so no caller can credit a payment from the
 	// wrong sender, amount or transaction — and whatever no obligation claimed is then attributed to

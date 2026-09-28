@@ -575,14 +575,16 @@ func userUpdateCmd() *cobra.Command {
 }
 
 func userTransferCmd() *cobra.Command {
-	var reason, externalKey string
+	var externalKey string
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "transfer RECIPIENT AMOUNT",
 		Short: "Send money to another user",
-		Long: "Send money to another user, directly and without fee. RECIPIENT is another user's " +
-			"handle on this kernel (a public key also resolves a local account). AMOUNT is written " +
-			"the way this kernel's money is written, for example 1.50.\n\n" +
+		Long: "Send money to another user, on this kernel or another. RECIPIENT is the user's address, " +
+			"handle@kernel. AMOUNT is written the way this kernel's money is written, for example 1.50; " +
+			"the recipient receives exactly that, and the transfer's own price is shown before you confirm. " +
+			"A user of another kernel is credited when this kernel's payment reaches theirs; " +
+			"`juice tx show` reports that payment.\n\n" +
 			"A transfer cannot be undone: the recipient owns the money once it is sent.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -595,15 +597,25 @@ func userTransferCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := cli.confirm(fmt.Sprintf("Send %s to %s", net.Amount(amount), args[0]), yes); err != nil {
+			me, err := cli.identity()
+			if err != nil {
 				return err
 			}
-			return cli.emitCtx(ctx, "POST", "/v1/transfers", map[string]any{
-				"recipient": args[0], "amount": amount, "reason": reason, "external_key": externalKey,
-			}, output{money: moneyLedger})
+			// One transfer action, this kernel's own, whoever the recipient is (D18).
+			req := kernel.RunRequest{
+				ActionRef:   kernel.Address{Handle: kernel.SuperuserHandle, Kernel: me.Kernel, Name: "transfer"}.String(),
+				Args:        map[string]any{"target": args[0], "amount": amount},
+				ExternalKey: externalKey,
+			}
+			raw, _, err := runPinned(ctx, req, func(price int64) error {
+				return cli.confirm(fmt.Sprintf("Send %s to %s, for a price of %s", net.Amount(amount), args[0], net.Amount(price)), yes)
+			})
+			if err != nil {
+				return err
+			}
+			return emit(raw, output{id: "tx_id", money: moneyCall, net: net})
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "Optional reason for audit")
 	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id for this transfer; repeating the command with the same id never moves money twice")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
@@ -1704,7 +1716,7 @@ func init() {
 }
 
 func runCmd() *cobra.Command {
-	var quoteHash string
+	var quoteHash, externalKey string
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "run ACTION [JSON]",
@@ -1728,33 +1740,19 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// A run pays the price it was shown. When the caller names no pin, the client reads the
-			// action and pins what that read returned, so terms that moved between the read and
-			// the run are refused rather than charged — the same guarantee for an action here and
-			// one on another kernel (§4 precondition 7, U8). A pin the caller supplies is sent as
-			// given: it stands for terms a person actually saw, which this read cannot replace.
-			if quoteHash == "" {
-				quoted, price, qerr := quotedTerms(context.Background(), cmdArgs[0])
-				if qerr != nil {
-					return qerr
-				}
-				quoteHash = quoted
-				// The price goes to the person, not into the result: stdout carries what the
-				// command returned and nothing else. At a terminal the person is asked before
-				// their money moves, as every other spending command asks; off a terminal the
-				// price is stated and the run proceeds, because a script has nobody to ask and
-				// the pin already guarantees this is the price it read.
+			// The price goes to the person, not into the result: stdout carries what the command
+			// returned and nothing else. At a terminal the person is asked before their money moves,
+			// as every other spending command asks; off a terminal the price is stated and the run
+			// proceeds, because a script has nobody to ask and the pin already guarantees this is
+			// the price it read.
+			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash, ExternalKey: externalKey}
+			raw, reqBody, err := runPinned(context.Background(), reqBody, func(price int64) error {
 				if interactiveTTY() && !yes {
-					if err := askYesNo(fmt.Sprintf("%s costs %s. Run it?", cmdArgs[0], net.Amount(price))); err != nil {
-						return err
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "%s costs %s.\n", cmdArgs[0], net.Amount(price))
+					return askYesNo(fmt.Sprintf("%s costs %s. Run it?", cmdArgs[0], net.Amount(price)))
 				}
-			}
-			reqBody := kernel.RunRequest{ActionRef: cmdArgs[0], Args: args, QuoteHash: quoteHash}
-			var raw json.RawMessage
-			err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
+				fmt.Fprintf(os.Stderr, "%s costs %s.\n", cmdArgs[0], net.Amount(price))
+				return nil
+			})
 			// A delegated-OAuth action needs a one-time consent (§8). At an interactive terminal,
 			// offer it inline and re-run once, so the user issues a single `juice run`. Non-TTY
 			// callers (scripts, agents) get the structured error + hint instead — no browser.
@@ -1776,8 +1774,30 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Pin terms you read earlier (quote_hash on the action) instead of the ones this command reads")
+	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id for this run; repeating the command with the same id returns the first run's outcome instead of running again")
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the confirmation prompt")
 	return cmd
+}
+
+// runPinned runs an action at the price a person was shown (U8, D20). With no pin given, the client
+// reads the action and pins what that read returned, presenting its price through ask before any
+// money moves, so terms that moved between the read and the run are refused rather than charged. A
+// pin the caller supplied is sent as given: it stands for terms a person actually saw, which this
+// read cannot replace. It returns the request it sent, so a caller can repeat it verbatim.
+func runPinned(ctx context.Context, req kernel.RunRequest, ask func(price int64) error) (json.RawMessage, kernel.RunRequest, error) {
+	if req.QuoteHash == "" {
+		quoted, price, err := quotedTerms(ctx, req.ActionRef)
+		if err != nil {
+			return nil, req, err
+		}
+		if err := ask(price); err != nil {
+			return nil, req, err
+		}
+		req.QuoteHash = quoted
+	}
+	var raw json.RawMessage
+	err := cli.call(ctx, "POST", "/v1/run", req, &raw)
+	return raw, req, err
 }
 
 // quotedTerms reads an action and returns the terms to pin and the price to show. One read, made

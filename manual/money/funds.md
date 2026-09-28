@@ -45,20 +45,26 @@ not imply equal monetary value.
 
 ## Sending money to another user
 
-A local transfer debits your available balance and credits the recipient by the
-same amount. It has no fee and creates a ledger entry rather than an execution
-transaction:
+`user transfer` runs your kernel's own `sys/transfer` action. The recipient
+may be a user of your kernel or of another; the command is the same. It
+debits the amount and the action's price from your balance, and the recipient
+receives exactly the amount:
 
 ```
-$ juice user transfer bob@acme 1 --reason "thanks"
-Send 1.00 fUSD to bob@acme, acting as alice@acme? This cannot be undone. [y/N] y
-  amount: 1.00 fUSD
-  reason: thanks
-  created_at: 2026-09-14T12:05:34Z
-  operator: alice@acme
-  from: alice@acme
-  to: bob@acme
+$ juice user transfer bob@acme 1
+Send 1.00 fUSD to bob@acme, for a price of 0.00 fUSD, acting as alice@acme? This cannot be undone. [y/N] y
 ```
+
+A recipient on your kernel is credited when the call settles. A recipient on
+another kernel is credited when your kernel's payment reaches that kernel:
+your kernel pays the recipient's kernel through the rail and then tells it
+whom the payment is for. `juice tx show` on the transfer's transaction reports
+that payment's `payment` status; it cannot report the credit, which the other
+kernel makes.
+
+`--external-key KEY` names the transfer. Repeating the command with the same
+key, for example after a lost reply, returns the first transfer's outcome and
+moves no money; the same key with another recipient or amount is refused.
 
 {: .warning }
 > A transfer is final. There is no reversal and no dispute: check the handle before
@@ -69,9 +75,8 @@ program supplies `--yes` to give that confirmation in advance. A value-bearing
 action uses different consent semantics, described under
 [Moving money through an action](#moving-money-through-an-action).
 
-The recipient must be on the same kernel. Payments between kernels arise from
-service purchases and follow the settlement procedure in
-[The network economy](../operating/network-economy.html).
+A recipient on another kernel is resolved there before anything is charged;
+an unknown recipient costs nothing.
 
 ## The ledger
 
@@ -83,7 +88,7 @@ $ juice user ledger
 WHEN                  AMOUNT       FROM   TO     WHY
 2026-09-14T12:05:54Z  0.40 fUSD   alice  bob    e989c5e1-…
 2026-09-14T12:05:54Z  0.10 fUSD   alice  sys    e989c5e1-…
-2026-09-14T12:05:34Z  1.00 fUSD   alice  bob    thanks
+2026-09-14T12:05:34Z  1.00 fUSD   alice  bob    3f0a91c2-…
 2026-09-14T12:04:54Z  10.00 fUSD  sys    alice
 ```
 
@@ -121,5 +126,5 @@ composing action's owner, so the value comes from that owner's balance.
 
 Only the kernel can register an action with the contract declaration that
 authorizes value delivery. A provider cannot add that declaration to a custom
-action or use composition to debit the funding user's balance. Delivery is
-local: the recipient must be an ordinary, unsuspended account on the same kernel.
+action or use composition to debit the funding user's balance. The recipient
+must be an ordinary, unsuspended account, on this kernel or on another.

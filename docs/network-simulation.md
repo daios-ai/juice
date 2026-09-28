@@ -123,7 +123,7 @@ attack on the network protocol.
 | more unpaid work than one identity could draw, by minting identities | one credit limit for the whole kernel, checked as an absolute ceiling rather than as what the attack added: a winning draw pays the whole face value, so cash received can exceed what was owed and carry the counter below zero, against which any increase overstates. The attackers are funded and the victim is put on a low limit, and somebody must be refused for want of credit, or it is never reached and the test proves nothing |
 | paid work with no balance to pay for it | refusal before anything is locked |
 | one payment credited more than once | a payment reference is honoured once |
-| an action that was never exported | access is not transitive; a kernel does not relay on request; value may not cross a kernel |
+| an action that was never exported | access is not transitive; a kernel does not relay on request |
 | a name already in use | a petname is the local operator's own label and is never taken from the network |
 
 Lower-level attacks live where they can be made properly: lost, duplicated and refused messages and
