@@ -2,9 +2,11 @@
 
 Status: proposal. Nothing here is built or in `requirements.md`.
 
-An **agent** on Juice is a program such as Claude Code, Codex, or OpenClaw that uses the `juice` 
+An **agent** on Juice is a program such as Claude Code, Codex, or OpenClaw that uses the `juice`
 command on someone's behalf. It finds actions and buys them, publishes actions of its own, and pays
-others. This document says what limits such an agent, and the one change that limit needs.
+others. Such a program has a shell; an agent of Juice's own harness has only Juice's tools, and
+`ecosystem-standard.md` covers it. This document says what limits an agent with a shell, and what
+must change for that limit to hold.
 
 ## Problem
 
@@ -54,7 +56,7 @@ juice run carol@beta/translate '{"text":"hi"}'   # the agent, from then on
 
 With that session the agent does everything an account can do. It looks up and runs actions,
 publishes its own, transfers money, completes tasks, rates what it paid for, and withdraws to the
-registered address. None of it needs permission call by call.
+registered address.
 
 ## Why the account
 
@@ -90,23 +92,37 @@ The `kernel` and `auth` commands come before any level, since they manage the cl
 logins. Actions are not commands. They are named by address and reached through two commands:
 `run` starts a call, and `task complete` resumes one that was waiting.
 
-## Command or action
+## Action or command
 
-Four questions, asked in order, decide where an operation belongs.
+An operation is an action, reached through `run`, when all four of these hold.
 
-1. Does it touch something the caller does not own? Then it is an admin command.
-2. Does it judge or audit a call, as rating does? Then it is a user command and never an action,
-   so that nothing being judged can write its own rating (G8).
-3. Must code running inside an action be able to do it? Then it is an action, because such code
-   can only call other actions and create or complete tasks (D7).
-4. Otherwise it is a user command.
+1. It is an exchange between parties of the network: a caller and a provider, or a caller and a
+   beneficiary.
+2. Its whole effect is stated by its contract: the input, the output, the price, and the amount if
+   it moves money.
+3. It leaves standing state as it was. Standing state is what persists and governs later
+   behaviour: accounts, passwords, connections, the definitions of actions, registered addresses,
+   names, configuration. An action may move money, add to the record, and set work aside as a task.
+4. It executes, and does not judge an execution (G8).
 
-By the third question, paying, sending a message, searching, the clock, randomness and fetching a
-web page are actions. Reading a balance or a record, withdrawing, registering an address,
-publishing and rating are user commands. An agent uses both kinds, and the set of actions needs no
-additions for it.
+Anything else is a command. It is a user command when it acts on the caller's own state or records,
+and an admin command when it acts on another's or the kernel's.
 
-## The one new rule
+| Operation | Fails | It is |
+|---|---|---|
+| Search, language model, clock, randomness, web fetch, compiling | none | an action |
+| Transfer, message | none | an action |
+| Create, change, enable or delete an action | 3 | a user command |
+| Connect a service, change the password, register an address | 3 | a user command |
+| Withdraw | 1, the money leaves the network | a user command |
+| Read a balance or a record, end a process | 1, there is no other party | a user command |
+| Rate | 4 | a user command |
+| Create, suspend or rename an account, credit a deposit | 3, on another's state | an admin command |
+
+By the third criterion, an action can spend but cannot change where money goes or who controls an
+account.
+
+## Password rule
 
 The account limits what an agent can spend. It does not stop the attack above, which changes where
 money goes once it leaves. Two operations do that: registering a blockchain address, and changing
@@ -115,8 +131,7 @@ of registering an address.
 
 The agent has a session and no password, so it can do neither. The person, at a terminal, types
 the password when they register their address. `sudo` draws the same line, and so does a bank that
-checks harder when a payee is added than when one is paid. Withdrawing needs no password, because
-it pays only the registered address.
+checks harder when a payee is added than when one is paid.
 
 | Operation | Password | Reason |
 |---|---|---|
@@ -131,16 +146,22 @@ it pays only the registered address.
 ## Running an agent
 
 A second limit is not Juice's to set. A saved login is a file, and an agent with a shell can read
-every file of the user it runs as. There are two ways to run one.
+every file of the user it runs as. However an agent is run, three things must hold.
 
-The usual way is to start the agent as yourself. It can then use any login saved under your user,
-so only the agent's login should be there. The operator's login and the kernel's own files, which
-include the secret that signs every session, belong under a separate operating-system user that
-you reach with `sudo -u`.
+1. It cannot read the owner's logins or the kernel's files, which include the secret that signs
+   every session.
+2. It cannot become the operating-system users that hold them.
+3. It cannot alter the programs through which the owner types the password.
 
-The stricter way is to give the agent an operating-system user of its own and start it with
-`sudo -iu bot`. It then reads only its own login and cannot touch your files. It also needs its
-own copy of the project it works on, and its own setup of the agent program.
+The strict way is to give the agent an operating-system user of its own, without `sudo` rights,
+and start it with `sudo -iu bot`. All three then hold. The agent needs its own copy of the project
+it works on, and its own setup of the agent program.
+
+The usual way is to start the agent as yourself, and it is weaker. The first two hold only if the
+agent's login is the only one saved under your user, with the operator's login and the kernel
+under a separate user that you reach with `sudo -u`. The third holds only if the agent's sandbox
+confines what it may write. Otherwise the agent can replace the `juice` program or change your
+shell's startup file, and learn the password the next time you type it.
 
 Neither way limits what an agent says. Whatever it puts in the arguments of a call leaves with the
 call.
@@ -155,5 +176,6 @@ call.
 ## Open
 
 - The agent skill tells the agent to create its account and keep the password. It needs rewriting.
-- `auth logout` ends a session only for someone who holds its token. If an agent's token has
-  leaked, the owner cannot end that session; only the operator can, by suspending the account.
+- `auth logout` ends a single session, for whoever holds its token. It cannot stop an agent whose
+  token was copied, or a second client logged in to the same account; only the operator can, by
+  suspending the account. Until this is settled the owner's control is incomplete.
