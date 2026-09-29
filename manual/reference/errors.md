@@ -23,7 +23,7 @@ the exit status is still nonzero.
 | `invalid_input` | 5 | 422 | The request is malformed: a bad handle, a duplicate name, a non-positive amount. Nothing happened. |
 | `schema_violation` | 5 | 422 | Arguments did not match the action's input schema, or its output did not match the output schema. Input is checked before any charge. |
 | `insufficient_funds` | 6 | 402 | Not enough available balance. For a cross-kernel call you need the price **and** the stake. |
-| `timeout` | 7 | 504 | The call may have executed. Do not re-run; find out what happened. |
+| `timeout` | 7 | 504 | The call may have executed. If the first run used `--external-key`, repeat with the same key, action, and input. Otherwise, establish its outcome before running again. |
 | `grant_required` | 8 | 403 | You have not connected the upstream account this action needs. `meta.action` names what to connect. Nothing was charged and no failure was recorded against the action. |
 | `peer_unreachable` | 9 | 502 | The client cannot reach a kernel, or a federated call provably never reached its peer and was fully refunded. Exit 9 also applies to an unreachable local server. `meta.kernel` names a registered server; `meta.peer` names a federation peer. |
 | `peer_unfunded` | 10 | 402 | The other kernel will not serve on credit: either it has lent your kernel as much as it allows, or its provider cannot fund the work. `meta.peer` names it. |

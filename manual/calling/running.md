@@ -40,15 +40,16 @@ while settlement is deferred.
 
 For a local action, the advertised price covers the call and the work it
 performs through other actions. The provider must fit that work within its
-budget. A direct call to another kernel also involves a settlement stake,
-described under [The ticket](#the-ticket), so its final charge can vary around
-the advertised price.
+budget. A call to another kernel can cost more or less than the advertised
+price because of its ticket. [What an action costs](../money/funds.html#what-an-action-costs)
+explains the fees, ticket, and final charge together.
 
-Starting a paid call reserves its price from your available balance. On success,
-the full price is paid: the provider earns the unused margin after the kernel's
-fee. The price therefore represents the service purchased, rather than a meter
-of the resources consumed. A failed call returns the unspent part of the budget.
-Zero-price actions require no execution funds.
+Starting a paid call reserves its price from your available balance. On a
+successful local call, the full price is paid: the provider earns the unused
+margin after the local execution fee. The price represents the service
+purchased, rather than a meter of the resources consumed. A failed call
+returns the unspent part of the budget. Zero-price actions require no
+execution funds.
 
 ## When something goes wrong
 
@@ -103,6 +104,24 @@ error: the action's terms changed; it now costs 0.50 fUSD
 An explicit hash is useful whenever selection and execution happen at different
 times, particularly in programs that prepare work in advance.
 
+## Retrying after a lost reply
+
+Give a purchase a key before starting it if you may need to repeat the request
+after a lost connection:
+
+```
+$ juice run bob@acme/echo '{"msg":"hi"}' --external-key echo-2026-09-14-001
+```
+
+Repeat with the same account, key, action reference, and input to recover that
+run's outcome without buying the work again. If it has settled, you receive its
+original success or failure; the reported charge is for that first run. If it
+has not settled, the kernel reports that it is still pending and gives you the
+process to follow. Reusing the key with another action or input is refused.
+
+Use a new key for a new purchase. Without a key, running again starts another
+purchase; adding a key afterwards cannot recover an earlier unkeyed run.
+
 ## Calling an action on another kernel
 
 To reach a remote provider, include its kernel in the action reference. This
@@ -121,65 +140,26 @@ caches them. Later calls can use the cache. The serving kernel refuses a call
 whose cached terms no longer match; the local cache can then be refreshed for
 a subsequent attempt.
 
-The advertised remote price includes the provider's price, the serving markup,
-and your kernel's import fee. The markup compensates the provider for advancing
-the work and accepting the settlement draw described below. With a provider
-price of `2.00` and both rates at 5%, the advertised total is `2.205`. When the
-obligation is at least the ticket's face value, it is paid exactly, as in this
-example with the default `1.00` ticket:
-
-```
-$ juice user me
-  available: 7.00 fUSD
-$ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
-dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
-  …
-$ juice user me
-  available: 4.795 fUSD
-```
+The advertised price includes the provider's price, its export fee, and
+your kernel's import fee. [What an action costs](../money/funds.html#what-an-action-costs)
+shows who receives each part and works through both ticket outcomes.
 
 ### The ticket
 
 A paid remote call may also reserve a **stake** from your balance. Your kernel's
-`lottery` setting determines its size. This stake supports settlement of small
-obligations, for which making an individual blockchain payment could cost more
-than the service itself.
-
-When the obligation is smaller than the ticket's face value, a draw determines
-whether the full face value is paid or no payment is made. The probability is
-chosen so that the expected payment equals the obligation, and the two kernels
-contribute to the draw without either choosing its outcome. An obligation at
-least as large as the face value is paid exactly.
+`lottery` setting determines its size. It covers a ticket that may pay the
+provider when the call settles. Small purchases use tickets so the kernels
+need not make a rail payment for every call.
 
 {: .warning }
 > A remote call can cost more than its advertised price when the draw pays.
 > Allow for both the required stake and the possible final charge.
 
-The first consequence is a funding requirement: both the price and the stake
-must be available at dispatch. For a price of `2.205` and a stake of `1.00`, a
-balance of `2.50` is insufficient:
-
-```
-$ juice user me
-  available: 2.50 fUSD
-$ juice run 'dave@beta-kernel/summarize' '{"text":"x"}'
-dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
-error: insufficient user balance
-```
-
-The second consequence is variation in the final charge. For a successful call
-whose obligation is below the face value, settlement returns the execution
-budget except for the import fee and releases the stake. A paying draw then
-reserves the face value as payment. The call therefore costs either the import
-fee alone or the import fee plus the face value, and the `charge` it reports is
-whichever of the two you paid. Its expected cost is the
-advertised price; a finite series of calls need not average to that exact amount.
-
-If the obligation is at least the face value, the payment equals the obligation
-and the successful call costs its advertised price. Setting `lottery` to zero
-also pays every obligation exactly, with no stake or draw. Ask your operator
-which setting applies, or inspect `juice admin kernel show` if you operate the
-kernel yourself.
+Both the price and the stake must be available before the call is sent to the
+peer. The `charge` in the reply is what the call cost you when it finished; the
+amount held while it ran is not its final cost. Ask your operator which ticket
+setting applies, or inspect `juice admin kernel show` if you operate the kernel
+yourself.
 
 If the client cannot reach your local kernel, it reports the name and address:
 
@@ -214,10 +194,11 @@ refund, and `juice process end` is refused while the call awaits that answer.
 If the peer never answers, the funds remain reserved.
 
 {: .warning }
-> Do not re-run a parked call. `run` has no idempotency key, so running it again
-> buys the work a second time and you pay twice.
+> If the first request used `--external-key`, you can safely repeat it with the
+> same key, action, and input. Without that original key, submitting another run
+> buys the work again; follow the existing process while its outcome is unknown.
 
-Follow the process instead:
+To follow the process:
 
 ```
 $ juice process show 01d1da53-…

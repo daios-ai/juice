@@ -16,11 +16,9 @@ for the call the buyer made.
 
 A child call receives its allocation from the remaining budget of its parent.
 If the requested action costs more than the parent has available, the kernel
-rejects the child call before it executes:
-
-```
-error: wasm execution failed: run failed: parent trace has 100000 credits, action costs 750000
-```
+rejects the child call before it executes. For example, an action with 100000
+base units left cannot call a child priced at 750000; the child does no work
+and receives no payment.
 
 The current WebAssembly host stops the module on this refusal, causing the
 parent call to fail and refund its unused budget. Check expected child prices

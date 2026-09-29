@@ -58,14 +58,17 @@ units.
 
 | Key | Default | |
 |---|---|---|
-| `fee_bps` | `2000` | the kernel's fee on each provider's margin, in hundredths of a percent: 20% |
-| `remote_bps` | `500` | markup added when serving another kernel: 5% |
+| `fee_bps` | `2000` | local execution fee on each provider's margin, in hundredths of a percent: 20% |
+| `remote_bps` | `500` | export fee added when serving another kernel: 5% |
 | `import_bps` | `500` | fee retained when a local user calls another kernel: 5% |
 | `lottery` | `1000000` | the face value this kernel's buyers stake per cross-kernel call. `0` pays every debt exactly |
 | `lottery_max` | `5000000` | the largest face value accepted from somebody else's buyer |
 | `credit_limit` | `50000000` | the ceiling on work delivered to other kernels and not yet paid for, across all peers together |
 
-See [The network economy](../operating/network-economy.html).
+See [What an action costs](../money/funds.html#what-an-action-costs) for the
+fees and ticket from the buyer's and provider's perspectives. [The network
+economy](../operating/network-economy.html) covers the operator's settlement
+and funding duties.
 
 ## Timing and retention
 

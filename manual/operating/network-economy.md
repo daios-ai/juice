@@ -9,37 +9,38 @@ nav_order: 4
 Federation lets a buyer use a local balance to purchase a service hosted
 elsewhere. The serving provider advances the work, the kernels record the
 result, and an external payment settles the obligation. This chapter explains
-the prices, funding, and evidence involved from the operator's perspective.
-The buyer's procedure is covered in
+the funding and evidence involved from the operator's perspective. The fees,
+ticket, and a worked example for buyers and providers are explained together
+in [What an action costs](../money/funds.html#what-an-action-costs). The buyer's
+procedure is covered in
 [Calling an action on another kernel](../calling/running.html#calling-an-action-on-another-kernel).
 
 ## What a cross-kernel call costs and who gets it
 
-The advertised price combines the provider's local price with a serving markup
-and the originating kernel's import fee:
+The advertised price combines the provider's local price with the export fee
+and the buying kernel's import fee:
 
 ```
 provider's price                  mp
-serving kernel's markup           sr = mp + ceil(mp × remote_bps / 10000)
-buyer's kernel's import fee        q = sr + ceil(sr × import_bps / 10000)
+price with export fee             sr = mp + ceil(mp × remote_bps / 10000)
+price with import fee             q = sr + ceil(sr × import_bps / 10000)
 ```
 
 The buyer reserves `q` as the execution budget. The serving kernel applies its
-ordinary fee to the provider's local execution margin. The serving markup
-compensates the provider for advancing the work and accepting variation in
-ticket settlement, while the origin retains the import fee. A paying ticket
-is credited whole to the serving provider.
+local execution fee to the provider's margin. The export fee compensates the
+provider for advancing the work and accepting variation in ticket settlement,
+while the origin retains the import fee. A paying ticket is credited whole to
+the serving provider.
 
-Both markup rates default to 500 basis points, or 5%. The serving rate is
+Both remote fee rates default to 500 basis points, or 5%. The export rate is
 bound to the call's terms, and the origin records its own import rate at
 dispatch. Later configuration changes therefore do not reprice an existing
 call. The import rate is local accounting information and is not part of the
 remote receipt.
 
-With `mp = 2.00` and both rates at 5%, `sr = 2.10` and `q = 2.205`. On
-success, the seller's receipt contains `charge 2000000` and `premium 100000`
-in base units. The buyer's allocation is `2.205`, including an import fee of
-`0.105`. The final account charge also depends on the ticket mechanism below.
+The buyer's final charge also depends on the ticket mechanism below. The
+[0.10 example](../money/funds.html#what-an-action-costs) shows how the quoted
+price, ticket payment, and final charge differ.
 
 ## The seller advances the work
 

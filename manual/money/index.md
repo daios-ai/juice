@@ -44,11 +44,12 @@ The operator's responsibilities for transaction fees and remote settlement are
 covered in [Funding the kernel](../operating/running-a-kernel.html#funding-the-kernel)
 and [The network economy](../operating/network-economy.html).
 
-[Funds](funds.html) explains available and locked balances, units, local
-transfers, and the account ledger. [Deposits and withdrawals](deposits-and-withdrawals.html)
-then follows payments entering and leaving the kernel.
+[Funds](funds.html) explains available and locked balances, what local and
+remote actions cost, local transfers, and the account ledger.
+[Deposits and withdrawals](deposits-and-withdrawals.html) then follows payments
+entering and leaving the kernel.
 
-Charges arising from execution are covered in
-[Running an action](../calling/running.html) and
-[Earnings](../providing/earnings.html). Automatic settlement between kernels
-is described in [The network economy](../operating/network-economy.html).
+[Running an action](../calling/running.html) covers making a purchase;
+[Earnings](../providing/earnings.html) follows what a provider receives.
+Automatic settlement between kernels is described in
+[The network economy](../operating/network-economy.html).

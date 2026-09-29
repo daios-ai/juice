@@ -33,12 +33,15 @@ and `--quiet` cannot be used together.
 
 | Command | |
 |---|---|
-| `juice run ACTION [JSON]` | run an action ([Running an action](../calling/running.html)) |
+| `juice run ACTION [JSON]` | run an action; `--external-key KEY` lets a repeat recover its outcome without buying it again ([Running an action](../calling/running.html)) |
 
 `run` reads and pins the terms, shows the price, and asks at a terminal;
 `--yes` skips the question. Without a terminal it prints the price to stderr
 and proceeds. Use `--quote-hash H` to send previously inspected terms instead.
 The JSON input can be supplied inline or read from a file with `@file.json`.
+Use the same account, key, action, and input when retrying a run. An unsettled
+run reports its process; a settled run returns its original outcome. Use a new
+key for a new purchase ([Retries](../programs.html#retries)).
 
 ## kernel
 
@@ -91,8 +94,10 @@ those values without an interactive prompt.
 | `juice user withdraw AMOUNT` | take money out ([Taking money out](../money/deposits-and-withdrawals.html#taking-money-out)) |
 | `juice user withdrawals` | withdrawals made, and where each stands |
 
-For retryable requests, give `transfer` an `--external-key` and `withdraw` an
-`--id`, then reuse that key with the same terms. Both accept `--yes` for
+For retryable requests, give `transfer` an `--external-key`, as with `run`, and
+`withdraw` an `--id` containing a UUID you generated and saved before sending.
+Reuse that key with the same terms. Without `--id`, the CLI generates a new
+withdrawal UUID for each invocation. Both money commands accept `--yes` for
 non-interactive confirmation.
 
 ## action

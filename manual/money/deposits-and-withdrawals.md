@@ -209,6 +209,13 @@ rail, and reaches `confirmed` when payment is final. A finalized failure returns
 the reservation to your balance. The `blocked` status means the kernel cannot
 currently proceed, as described below.
 
+If you may need to retry after a lost reply, generate and save a UUID before
+requesting the withdrawal and pass it with `--id`. Repeating the request with
+that ID and the same terms returns the existing withdrawal without taking more
+money. Without `--id`, the CLI generates a new UUID each time, so a second
+invocation requests a second withdrawal. See [Retries](../programs.html#retries)
+for an example.
+
 {: .warning }
 > Withdrawals cannot be undone or recalled. Check the destination in the
 > confirmation line before answering it.

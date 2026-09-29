@@ -14,19 +14,20 @@ explains when a provider also needs funds in its own account.
 
 The price you set provides a budget for the action and any work it buys from
 other actions. For a successful local purchase, the buyer pays that price and
-you earn what remains after downstream costs and the kernel's fee. Remote
-purchases add serving and import charges and use the settlement procedure
-described in [The ticket](../calling/running.html#the-ticket).
+you earn what remains after downstream costs and the local execution fee. Remote
+purchases add export and import fees. [What an action costs](../money/funds.html#what-an-action-costs)
+explains those fees and the ticket together.
 
 Since a successful call is paid at a fixed price, reducing its downstream costs
 increases your margin. The buyer receives the agreed service at the agreed
 price regardless of how much of the execution budget it consumed.
 
-## The kernel's fee
+## The local execution fee
 
-The kernel applies its fee to the margin remaining after downstream work has
-been paid. The rate is configured as `fee_bps`, in hundredths of a percent;
-the default value of 2000 is 20%. For a successful call:
+The kernel applies its local execution fee to the margin remaining after
+downstream work has been paid. The rate is configured as `fee_bps`, in
+hundredths of a percent; the default value of 2000 is 20%. For a successful
+call:
 
 ```
 margin = price − what this call spent on other actions

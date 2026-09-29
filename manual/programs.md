@@ -155,26 +155,45 @@ If the action is inactive, that earlier precondition fails instead.
 
 ## Retries
 
-Repeating `run` starts another purchase. The public run request has no
-idempotency key, so a program must establish the outcome of an earlier request
-before deciding whether to submit it again. Remote transport retries within
-the kernel are different: they retain the original call's identity.
+Before issuing a run that may need to be retried, generate and save a key for
+that purchase. Pass it as `--external-key` from the first request:
+
+```
+$ juice --as bot@acme run bob@acme/echo '{"msg":"hi"}' --external-key echo-2026-09-14-001 --json
+```
+
+If the reply is lost, repeat the request as the same account, with the same key,
+action reference, and input. Once the run has settled, the kernel returns its
+original outcome, including a failure, without running or charging again.
+The reported `charge` belongs to that original run; it is not another debit.
+An HTTP client supplies the key as `external_key` on `POST /v1/run`.
+
+While the run is unsettled, a repeat returns `invalid_state` (HTTP 409, CLI
+exit 1) with its `process_id`. Follow that process or retry the same request
+later. Reusing the key with a different action or input is `invalid_input`
+(HTTP 422, CLI exit 5).
+
+Use a new key when you intend to buy the work again. Without a key, each run
+starts another purchase. A key only protects runs started with it. If you ran
+without one, check what happened before running again.
 
 - A cross-kernel call that parked returns `process_id` and `pending_since`.
   Poll `juice process show <id>` until it closes. Only the peer's signed receipt
   or refusal settles it; there is no timeout refund, and `process end` is
   refused while it waits. A stopped kernel resumes retries when it starts again.
-- A call that failed with exit code 9 provably never left your kernel and was
-  fully refunded. It is safe to retry.
+- A federation error saying the call never reached the peer confirms that no
+  remote work began and the funds were refunded. To make another attempt after
+  that recorded failure, use a new run key; the old key returns the failure.
 
-Transfers and withdrawals provide explicit retry keys: `--external-key` for a
-transfer and `--id` for a withdrawal. Generate and save the key before issuing
-the request, then reuse it with the same terms if a retry is needed. The kernel
-returns the existing movement rather than creating a second one.
+Transfers use `--external-key` in the same way as `run`. For a withdrawal, use
+`--id` with a UUID that you generate and save before issuing the request.
+Reuse it with the same terms if a retry is needed; the kernel returns the
+existing withdrawal rather than creating another. If `--id` is omitted, the
+CLI generates a new UUID for that invocation.
 
 ```
 $ juice --as bot@acme user transfer bob@acme 1 --external-key payout-2026-09-14-001 --yes
-$ juice --as bot@acme user withdraw 5 --id wd-2026-09-14-001 --yes
+$ juice --as bot@acme user withdraw 5 --id 58e1e97f-7a31-4c92-8b6d-9f3048a2c015 --yes
 ```
 
 Task completion also prevents duplicate execution. A repeated local completion
