@@ -171,7 +171,8 @@ The second consequence is variation in the final charge. For a successful call
 whose obligation is below the face value, settlement returns the execution
 budget except for the import fee and releases the stake. A paying draw then
 reserves the face value as payment. The call therefore costs either the import
-fee alone or the import fee plus the face value. Its expected cost is the
+fee alone or the import fee plus the face value, and the `charge` it reports is
+whichever of the two you paid. Its expected cost is the
 advertised price; a finite series of calls need not average to that exact amount.
 
 If the obligation is at least the face value, the payment equals the obligation

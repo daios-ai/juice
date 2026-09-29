@@ -100,10 +100,11 @@ type CallReply struct {
 	// `process show`/`end` when work parks (§14). Subcalls and task completions run inside a process
 	// the caller already addressed, so they omit it.
 	ProcessID string `json:"process_id,omitempty"`
-	// Charge is what the call drew from the caller — the receipt's own number (P5), in base units:
-	// the price on success, only what sub-work already delivered consumed on failure (U13), zero
-	// for a free action. Absent exactly when the transaction and receipt are, since a call whose
-	// settlement is deferred has drawn nothing yet (D3).
+	// Charge is what left the caller at settlement, in base units (D20, callerPaid). For a local call
+	// it is the receipt's own number (P5): the price on success, only what sub-work already delivered
+	// consumed on failure (U13), zero for a free action. For a call to another kernel it is the import
+	// fee plus the ticket's payment when the draw made one (P10). Absent exactly when the transaction
+	// and receipt are, since a call whose settlement is deferred has drawn nothing yet (D3).
 	Charge *int64 `json:"charge,omitempty"`
 }
 

@@ -1274,19 +1274,22 @@ flow_compose_ticket() {
     # an obligation of 21 against a face of 100 pays roughly one call in five (observed 6 of 30 while
     # this was written), so both arms are reached often, and neither is required for the check to
     # mean something.
-    local er et n charged bad=0
+    # The run's reported charge is what left the caller, whichever way the draw fell.
+    local er et n charged reported bad=0 misreported=0
     er=$(numfield "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" exposure)
     et=$(numfield "$(jj "$FED3_DBT" "$FED3_HT" admin kernel show)" exposure)
     for n in $(seq 1 6); do
         local cb; cb=$(numfield "$(jj "$FED_DBL" "$hc" user me)" available)
-        jj "$FED_DBL" "$hc" run sys@kernel-r/wrap '{}' >/dev/null 2>&1
+        reported=$(numfield "$(jj "$FED_DBL" "$hc" run sys@kernel-r/wrap '{}')" charge)
         charged=$(( cb - $(numfield "$(jj "$FED_DBL" "$hc" user me)" available) ))
         case "$charged" in
             2 | 102) ;;
             *) bad=$charged ;;
         esac
+        [ "$reported" = "$charged" ] || misreported="$reported for $charged"
     done
     assert_eq "compose_ticket.every_charge_is_a_draw" 0 "$bad"
+    assert_eq "compose_ticket.charge_is_what_the_caller_paid" 0 "$misreported"
 
     # Whatever the draws decided, each kernel delivered what it delivered, and exposure is the work
     # done and not yet paid for: six obligations of 21 owed to R, and the six of 11 that R itself

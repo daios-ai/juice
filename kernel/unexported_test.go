@@ -982,3 +982,26 @@ func TestAFreeDispatchCarriesNoTicketTerms(t *testing.T) {
 		}
 	}
 }
+
+// callerPaid is what a run reports as charge: a local call's receipt charge; for a call to another
+// kernel, the import fee plus the ticket's payment — and only an obligation row is that payment.
+func TestCallerPaidIsWhatLeftTheCaller(t *testing.T) {
+	local := &Transaction{Fee: 20}
+	remote := &Transaction{Fee: 3, RemoteReceiptJSON: "{}"}
+	receipt := &Receipt{Charge: 30}
+	for _, c := range []struct {
+		name   string
+		tx     *Transaction
+		ticket *RailTransfer
+		want   int64
+	}{
+		{"a local call pays its receipt's charge", local, nil, 30},
+		{"a losing draw pays the import fee alone", remote, nil, 3},
+		{"a paying draw adds the ticket", remote, &RailTransfer{Kind: RailKindObligation, Amount: 1000}, 1003},
+		{"a row that is not the ticket's payment adds nothing", remote, &RailTransfer{Kind: RailKindPayout, Amount: 1000}, 3},
+	} {
+		if got := callerPaid(c.tx, receipt, c.ticket); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}

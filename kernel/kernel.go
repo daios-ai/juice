@@ -2478,9 +2478,16 @@ func (k *Kernel) replayRun(ctx context.Context, prior *Process, requestHash stri
 	if err != nil {
 		return nil, err
 	}
-	reply := &CallReply{TxID: tx.ID, TraceID: tx.TraceID, ReceiptID: receipt.ID, ProcessID: prior.ID, Charge: &receipt.Charge}
+	var ticket *RailTransfer
+	if root.IdempotencyKey != nil {
+		if ticket, err = k.store.ReadRailTransfer(ctx, *root.IdempotencyKey); err != nil {
+			return nil, err
+		}
+	}
+	paid := callerPaid(tx, receipt, ticket)
+	reply := &CallReply{TxID: tx.ID, TraceID: tx.TraceID, ReceiptID: receipt.ID, ProcessID: prior.ID, Charge: &paid}
 	if tx.Status != TxSuccess {
-		return reply, withSettlement(ErrorFromCode(tx.Reason).Wrapf("the run under this external key failed (%s)", tx.Reason), tx.ID, receipt.Charge)
+		return reply, withSettlement(ErrorFromCode(tx.Reason).Wrapf("the run under this external key failed (%s)", tx.Reason), tx.ID, paid)
 	}
 	if err := json.Unmarshal(tx.ReplyJSON, &reply.Result); err != nil {
 		return nil, ErrInternal.Wrap("could not read the run's stored result")

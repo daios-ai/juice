@@ -917,13 +917,30 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	logger.Info("remote.settled", "action", action.Name, "status", ktx.Status,
 		"charge", charge, "premium", premium, "import_fee", importFee, "draw", drawn)
 
+	paid := callerPaid(ktx, localReceipt, payout)
 	if ktx.Status == TxSuccess {
-		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &localReceipt.Charge}, nil
+		return &CallReply{Result: fr.Result, TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &paid}, nil
 	}
-	// Return the committed local receipt alongside the error so an inbound caller can settle
-	// the real charge (a re-proxied remote subcall may have settled with charge > 0).
-	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &localReceipt.Charge},
-		withSettlement(failErr, ktx.ID, localReceipt.Charge)
+	return &CallReply{TxID: ktx.ID, TraceID: trace.ID, ReceiptID: localReceipt.ID, Charge: &paid},
+		withSettlement(failErr, ktx.ID, paid)
+}
+
+// callerPaid is what a settled call cost its caller, the `charge` a run reports (D20), fixed at
+// settlement. For a local call that is its receipt's charge. For a call to another kernel the
+// receipt's charge is the budget settlement used, most of which — the obligation — goes back to the
+// caller, whose ticket then decides what leaves: the import fee, plus the ticket's payment when the
+// draw made one (P7, P10). Only an obligation row is that payment: a losing draw leaves none, and
+// its id is the caller's to reuse, as a withdrawal id for one. A payment that fails is presented
+// again, never given back, so its amount stands.
+func callerPaid(tx *Transaction, receipt *Receipt, ticket *RailTransfer) int64 {
+	if tx.RemoteReceiptJSON == "" {
+		return receipt.Charge
+	}
+	paid := tx.Fee
+	if ticket != nil && ticket.Kind == RailKindObligation {
+		paid += ticket.Amount
+	}
+	return paid
 }
 
 // drawPayment decides what one obligation actually pays and produces the payment to make when the

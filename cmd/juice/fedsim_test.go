@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1242,7 +1243,9 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 			seller.publish(t, cara, "quote", 25)
 			dan := buyer.user(t, "dan", capital)
 
-			if _, err := buyer.run(t, dan.ID, remoteRef(seller, "cara", "quote")); err != nil {
+			req := kernel.RunRequest{CallerID: dan.ID, ActionRef: remoteRef(seller, "cara", "quote"), Args: map[string]any{}, ExternalKey: "ticket-run"}
+			reply, err := buyer.k.Run(context.Background(), req)
+			if err != nil {
 				net.dump()
 				t.Fatalf("run: %v", err)
 			}
@@ -1267,6 +1270,15 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 			// caller, and the caller's own balance carries whatever the draw decided.
 			if want := capital - q + obligation - paid; buyer.balance(t, dan.ID) != want {
 				t.Errorf("after a draw paying %d the caller has %d, want %d", paid, buyer.balance(t, dan.ID), want)
+			}
+			// The run reports what the caller paid — the import fee, plus the ticket's payment when it
+			// drew one — and a retry under the same key reports it again from the stored records.
+			if want := q - obligation + paid; reply.Charge == nil || *reply.Charge != want {
+				t.Fatalf("the run reported charge %s after a draw paying %d, want %d", chargeOf(reply), paid, want)
+			}
+			again, err := buyer.k.Run(context.Background(), req)
+			if err != nil || again.Charge == nil || *again.Charge != *reply.Charge {
+				t.Errorf("the replay reported charge %s (%v), want the first run's %d", chargeOf(again), err, *reply.Charge)
 			}
 
 			// Whatever the draw, a peer row holds no money at all.
@@ -1306,6 +1318,57 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A losing draw leaves no payment row under its ticket's id, and that id is the caller's to reuse —
+// shown to them as the ticket id, and a valid id for a withdrawal. A keyed replay of the call must
+// still report what the call cost at settlement, never the withdrawal that took the id afterwards.
+func TestSimReplayIgnoresAWithdrawalUnderALosingTicketsID(t *testing.T) {
+	net := newSimNet(t)
+	sellCfg := defaultSimConfig()
+	sellCfg.FeeBPS, sellCfg.RemoteBPS = 1000, 700
+	buyCfg := defaultSimConfig()
+	buyCfg.ImportBPS = 1000
+	buyCfg.Lottery = 1000 // far above the obligation of 27: almost every draw loses
+	seller := net.addNode("seller", sellCfg)
+	buyer := net.addNode("buyer", buyCfg)
+	cara := seller.user(t, "cara", sellerCapital)
+	seller.publish(t, cara, "quote", 25)
+	dan := buyer.user(t, "dan", 100000)
+	ctx := context.Background()
+
+	for i := 0; i < 30; i++ {
+		req := kernel.RunRequest{CallerID: dan.ID, ActionRef: remoteRef(seller, "cara", "quote"), Args: map[string]any{}, ExternalKey: fmt.Sprintf("losing-%d", i)}
+		reply, err := buyer.k.Run(ctx, req)
+		if err != nil {
+			net.dump()
+			t.Fatalf("run: %v", err)
+		}
+		if reply.Charge == nil || *reply.Charge != 3 { // the import fee alone: this draw lost
+			continue
+		}
+		trace, err := buyer.k.ReadTrace(ctx, reply.TraceID)
+		if err != nil || trace.IdempotencyKey == nil {
+			t.Fatalf("read trace: %v", err)
+		}
+		if _, err := buyer.k.Withdraw(ctx, dan.ID, *trace.IdempotencyKey, 500, ""); err != nil {
+			t.Fatalf("a withdrawal under the losing ticket's id: %v", err)
+		}
+		again, err := buyer.k.Run(ctx, req)
+		if err != nil || again.Charge == nil || *again.Charge != 3 {
+			t.Errorf("after a withdrawal took the ticket's id, the replay reported charge %s (%v), want 3", chargeOf(again), err)
+		}
+		return
+	}
+	t.Fatal("no draw lost in 30 calls against a face value of 1000")
+}
+
+// chargeOf renders a reply's charge for a failure message: the amount, or "none" when absent.
+func chargeOf(r *kernel.CallReply) string {
+	if r == nil || r.Charge == nil {
+		return "none"
+	}
+	return strconv.FormatInt(*r.Charge, 10)
 }
 
 // A buyer drawing for more than the seller accepts does not trade with it, and finds that out at
