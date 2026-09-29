@@ -69,6 +69,9 @@ func bootstrapSigning(t *testing.T, k *kernel.Kernel) ed25519.PrivateKey {
 	return priv
 }
 
+// unlimited is the password limiter of a test server that is not testing the limit.
+func unlimited(next http.Handler) http.Handler { return next }
+
 // mountFullRouter builds the chi router used by the full test servers: the unauthenticated
 // auth/user-creation routes (no rate limiting in tests) plus all registered routes.
 func mountFullRouter(srv *server) *chi.Mux {
@@ -80,7 +83,7 @@ func mountFullRouter(srv *server) *chi.Mux {
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
-	registerRoutes(r, srv)
+	registerRoutes(r, srv, unlimited)
 	return r
 }
 
@@ -1407,6 +1410,36 @@ func TestRateLimitLogin(t *testing.T) {
 			if resp.StatusCode != http.StatusTooManyRequests {
 				t.Errorf("proxied request %d: expected 429 after burst, got %d", i+1, resp.StatusCode)
 			}
+		}
+	}
+}
+
+// A session reaches the routes that check a password, so each must draw on the limiter or its
+// holder guesses the password at the speed of the server. The limiter itself is tested above;
+// this is that both routes are behind it.
+func TestServePasswordRoutesAreRateLimited(t *testing.T) {
+	_, k := newTestHTTPServer(t)
+	_, tok := makeUser(t, k, "guesser")
+	r := chi.NewRouter()
+	// One request allowed and no refill, so the second from the same client is over the limit.
+	registerRoutes(r, &server{kernel: k, log: log.Discard()}, ipRateLimiter(context.Background(), 0, 1))
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	for _, c := range []struct {
+		path, client string
+		body         map[string]any
+	}{
+		{"/v1/me", "203.0.113.8", map[string]any{"current_password": "guess", "password": "another-one"}},
+		{"/v1/me/blockchain-address", "203.0.113.9", map[string]any{"blockchain_address": "0xabc", "signature": "s", "current_password": "guess"}},
+	} {
+		from := map[string]string{"X-Forwarded-For": c.client}
+		first := httpDoWithHeaders(t, ts, "PUT", c.path, c.body, tok, from)
+		first.Body.Close()
+		second := httpDoWithHeaders(t, ts, "PUT", c.path, c.body, tok, from)
+		second.Body.Close()
+		if first.StatusCode != http.StatusUnauthorized || second.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("%s: got %d then %d, want a refused guess (401) then the limit (429)", c.path, first.StatusCode, second.StatusCode)
 		}
 	}
 }
@@ -2771,7 +2804,14 @@ func TestServeRegistersABlockchainAddress(t *testing.T) {
 	defer srv.Close()
 	k.SetRail(walletRail{})
 	_, tok := makeUser(t, k, "payee")
+	// A session and a genuine signature are not enough: the password is what the owner adds.
 	resp := httpDo(t, srv, "PUT", "/v1/me/blockchain-address", map[string]any{"blockchain_address": "0xABC", "signature": "s"}, tok)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("registration without the password: got %d, want 401", resp.StatusCode)
+	}
+	resp = httpDo(t, srv, "PUT", "/v1/me/blockchain-address",
+		map[string]any{"blockchain_address": "0xABC", "signature": "s", "current_password": "pass"}, tok)
 	var got map[string]any
 	decodeResponse(t, resp, &got)
 	if got["blockchain_address"] != "0xabc" || got["address"] != nil {

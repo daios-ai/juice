@@ -544,15 +544,19 @@ func (k *Kernel) At(ref string) string {
 	return handle + "@" + k.Handle + "/" + name
 }
 
+// userPassword is every simulated user's password: what creates the account, logs it in, and
+// registers where it is paid.
+const userPassword = "userpass"
+
 // MakeUser creates an account, captures its recovery phrase for redaction, and logs it in.
 func (k *Kernel) MakeUser(handle string) {
 	k.know("sysop-" + k.Name)
-	out, _ := k.Run("sysop-"+k.Name, "user", "create", k.At(handle), "--password", "userpass")
+	out, _ := k.Run("sysop-"+k.Name, "user", "create", k.At(handle), "--password", userPassword)
 	if m := rePhrase.FindString(out); m != "" {
 		k.net.Secret(m, "<phrase:"+handle+">")
 	}
 	k.know(handle)
-	_, _ = k.Run(handle, "auth", "login", k.At(handle), "--password", "userpass")
+	_, _ = k.Run(handle, "auth", "login", k.At(handle), "--password", userPassword)
 }
 
 // Login signs the superuser in after a restart.

@@ -35,17 +35,18 @@ EOF
     CHAIN_CFG=(remote_retry_interval_seconds=1)
 }
 
-# _chain_pay_in db home wallet_key amount — the logged-in user registers the wallet by signing the
-# kernel's registration message with it, then pays amount from it into the kernel's vault; returns
-# once the kernel has credited them. Echoes the wallet address.
+# _chain_pay_in db home wallet_key amount [password] — the logged-in user registers the wallet by
+# signing the kernel's registration message with it and giving their password, then pays amount
+# from it into the kernel's vault; returns once the kernel has credited them. Echoes the wallet
+# address.
 _chain_pay_in() {
-    local db="$1" home="$2" wkey="$3" amount="$4" base waddr kkey uid msg sig vault
+    local db="$1" home="$2" wkey="$3" amount="$4" pw="${5:-userpass}" base waddr kkey uid msg sig vault
     base=$(url "$db"); waddr=$(cast wallet address --private-key "$wkey")
     kkey=$(strfield "$(http_body GET "$base/health")" public_key)
     uid=$(strfield "$(jj "$db" "$home" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
-    j "$db" "$home" user blockchain-address "$waddr" --signature "$sig" >/dev/null 2>&1
+    j "$db" "$home" user blockchain-address "$waddr" --signature "$sig" --password "$pw" >/dev/null 2>&1
     vault=$(vault_of "$db")
     anvil_send "$ANVIL_KEY" "$CHAIN_TOKEN" "mint(address,uint256)" "$waddr" "$amount"
     anvil_send "$ANVIL_KEY" "$waddr" --value 1ether
@@ -195,13 +196,13 @@ flow_rail_chain_settlement() {
     # The kernel's account also needs native currency of its own before it can sign a payment out.
     local lvault rvault; lvault=$(vault_of "$FED_DBL"); rvault=$(vault_of "$FED_DBR")
     assert_nonempty "rail_chain_settlement.vaults" "$lvault$rvault"
-    _chain_pay_in "$FED_DBL" "$FED_HL" 0x2222222222222222222222222222222222222222222222222222222222222222 5000000 >/dev/null
+    _chain_pay_in "$FED_DBL" "$FED_HL" 0x2222222222222222222222222222222222222222222222222222222222222222 5000000 sys-pass >/dev/null
     assert_jnum "rail_chain_settlement.debtor_funded" "$(jj "$FED_DBL" "$FED_HL" user me)" available 5000000
     anvil_send "$ANVIL_KEY" "$lvault" --value 1ether
 
     # R's provider funds its own work, out of a real payment in: a foreign call is served on the
     # seller's money (P10), and on a chain that money can only come from the chain.
-    _chain_pay_in "$FED_DBR" "$FED_HR" 0x3333333333333333333333333333333333333333333333333333333333333333 5000000 >/dev/null
+    _chain_pay_in "$FED_DBR" "$FED_HR" 0x3333333333333333333333333333333333333333333333333333333333333333 5000000 sys-pass >/dev/null
     anvil_send "$ANVIL_KEY" "$rvault" --value 1ether
 
     # L buys from R and now owes it. With no lottery the obligation is paid exactly.
@@ -394,7 +395,7 @@ PYEOF
     uid=$(strfield "$(jj "$db" "$ha" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
-    j "$db" "$ha" user blockchain-address "$waddr" --signature "$sig" >/dev/null 2>&1
+    j "$db" "$ha" user blockchain-address "$waddr" --signature "$sig" --password userpass >/dev/null 2>&1
     assert_eq "sepolia.address_registered" "${waddr,,}" "$(strfield "$(jj "$db" "$ha" user me)" blockchain_address)"
 
     # Pay in, and wait out L1 finality. This is the assertion: the kernel credits nothing until the

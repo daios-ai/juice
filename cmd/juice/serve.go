@@ -182,7 +182,8 @@ func runServer(name string) error {
 	}
 
 	// Auth — rate limited: 5 requests/minute per IP, burst of 10. The limiter's sweeper lives as
-	// long as the server.
+	// long as the server. Every route that checks a password draws on this one allowance, so a
+	// guess costs the same whichever route carries it.
 	authLimiter := ipRateLimiter(srvCtx, 5.0/60, 10)
 	r.With(authLimiter).Post("/v1/auth/token", srv.postToken)
 	r.With(authLimiter).Post("/v1/auth/authorize", srv.postAuthorize)
@@ -194,7 +195,7 @@ func runServer(name string) error {
 	// Users — rate limited: 3 requests/minute per IP, burst of 5.
 	r.With(ipRateLimiter(srvCtx, 3.0/60, 5)).Post("/v1/users", srv.postUser)
 
-	registerRoutes(r, srv)
+	registerRoutes(r, srv, authLimiter)
 
 	// Bind explicitly so a bind failure is a real, immediate error, and so a listen address
 	// ending in :0 (OS-assigned port) works: we then advertise the address we actually bound.
@@ -700,7 +701,10 @@ func (s *server) fedAddrs() []string {
 	return addrs
 }
 
-func registerRoutes(r chi.Router, srv *server) {
+// registerRoutes mounts every route a session or a capability reaches. passwordLimit guards the
+// routes that check a password: a session is enough to call them, so without it they would let
+// its holder guess the password faster than logging in does.
+func registerRoutes(r chi.Router, srv *server, passwordLimit func(http.Handler) http.Handler) {
 	r.Get("/health", srv.getHealth)
 
 	// Federation has no HTTP surface: peer identity, inbound calls, manifests, gossip, and
@@ -744,11 +748,11 @@ func registerRoutes(r chi.Router, srv *server) {
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
-		r.Put("/v1/me", srv.putMe)
+		r.With(passwordLimit).Put("/v1/me", srv.putMe)
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
-		r.Put("/v1/me/blockchain-address", srv.putBlockchainAddress)
+		r.With(passwordLimit).Put("/v1/me/blockchain-address", srv.putBlockchainAddress)
 		r.Post("/v1/withdrawals", srv.postWithdrawal)
 		r.Get("/v1/withdrawals", srv.getWithdrawals)
 		r.Get("/v1/ledger", srv.getLedger)
@@ -1476,17 +1480,19 @@ func (s *server) putMe(w http.ResponseWriter, r *http.Request) {
 	})(w, r)
 }
 
-// putBlockchainAddress registers where the caller is paid, against a signature proving they hold it.
-// Registering also delivers anything that address has already paid in (D23).
+// putBlockchainAddress registers where the caller is paid, against a signature proving they hold it
+// and the account's password. Registering also delivers anything that address has already paid in
+// (D23).
 func (s *server) putBlockchainAddress(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BlockchainAddress string `json:"blockchain_address"`
 		Signature         string `json:"signature"`
+		CurrentPassword   string `json:"current_password"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	u, attributed, err := s.kernel.SetBlockchainAddress(r.Context(), callerFrom(r), req.BlockchainAddress, req.Signature)
+	u, attributed, err := s.kernel.SetBlockchainAddress(r.Context(), callerFrom(r), req.CurrentPassword, req.BlockchainAddress, req.Signature)
 	if err != nil {
 		writeErr(w, err)
 		return

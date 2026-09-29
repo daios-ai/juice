@@ -141,7 +141,7 @@ func (c *chainRail) Fund(k *Kernel, user string, credits int64) error {
 	uid := k.Field(user, "id", "user", "me")
 	msg := fmt.Sprintf("juice address registration\nkernel: %s\nuser: %s\naddress: %s", k.Key, uid, w.addr)
 	sig := castOut("wallet", "sign", "--private-key", w.key, msg)
-	if out, err := k.Run(user, "user", "blockchain-address", w.addr, "--signature", sig); err != nil {
+	if out, err := k.Run(user, "user", "blockchain-address", w.addr, "--signature", sig, "--password", userPassword); err != nil {
 		return fmt.Errorf("registering %s's address on %s: %s", user, k.Name, firstLine(out))
 	}
 	if _, err := cast("send", "--private-key", w.key, "--rpc-url", c.rpc, c.token,

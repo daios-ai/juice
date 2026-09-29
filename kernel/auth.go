@@ -53,6 +53,18 @@ func CheckPassword(plain, hash string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
+// confirmPassword is what a session must add before it changes who controls an account or where its
+// money goes: a session is what an agent is given, the password is what its owner keeps.
+func confirmPassword(u *Account, password string) error {
+	if u.PasswordHash == "" {
+		return ErrInvalidState.Wrap("account has no password")
+	}
+	if !CheckPassword(password, u.PasswordHash) {
+		return ErrUnauthenticated.Wrap("invalid current password")
+	}
+	return nil
+}
+
 // IssueToken creates a signed JWT for userID, valid for ttl.
 // When issuer or audience is non-empty the corresponding registered claim is set.
 func IssueToken(userID, secret, issuer, audience string, ttl time.Duration) (string, error) {

@@ -455,6 +455,11 @@ flow_money_reads_as_money() {
     # An irreversible movement is confirmed, and a script that has not said --yes moves nothing.
     assert_fails "money.transfer_needs_yes" "--yes" -- j "$db" "$ha" user transfer sys@k "$(units 10)"
     assert_jnum "money.nothing_moved" "$(jj "$db" "$ha" user me)" available 500
+
+    # Where an account is paid is changed by its owner, not by whoever holds its session: the
+    # password is asked for, and a wrong one is refused before anything else is looked at.
+    assert_fails "money.address_needs_password" "--password" -- j "$db" "$ha" user blockchain-address 0xabc --signature s
+    assert_fails "money.address_wrong_password" "password" -- j "$db" "$ha" user blockchain-address 0xabc --signature s --password wrong
 }
 
 # One output policy, on every command (§14): --json is the reply the server sent, --quiet is the

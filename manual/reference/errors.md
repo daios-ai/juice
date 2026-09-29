@@ -57,7 +57,8 @@ therefore cannot use a mismatched quote to discover that action's terms.
 
 ## Rate limiting
 
-Authentication and account creation may return HTTP `429` when the client's
+Authentication, account creation, and the two requests that check your password
+(changing it, and registering a blockchain address) may return HTTP `429` when the client's
 rate limit is exceeded. Direct loopback requests are exempt; forwarded
 requests arriving through a loopback proxy are still subject to the limit.
 Federation applies its own transport limits.

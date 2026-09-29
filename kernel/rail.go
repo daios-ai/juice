@@ -426,13 +426,18 @@ func blockchainIdentityMessage(kernelKey, network, address string) []byte {
 	return []byte("juice kernel blockchain address\nkernel: " + kernelKey + "\nnetwork: " + network + "\naddress: " + address)
 }
 
-// SetBlockchainAddress registers where a user is paid, against a signature proving they control it. The
+// SetBlockchainAddress registers where a user is paid, against a signature proving they control it
+// and the account's password: the signature is made by whoever holds the address, so alone it
+// would let any holder of a session send the account's withdrawals to themselves. The
 // canonical form is stored, so one address cannot be registered twice under different spellings.
 // Registering also attributes anything that address has already paid in: attribution is a function
 // of the address, not of when the kernel learned it.
-func (k *Kernel) SetBlockchainAddress(ctx context.Context, callerID, address, signature string) (*Account, []*LedgerEntry, error) {
+func (k *Kernel) SetBlockchainAddress(ctx context.Context, callerID, currentPassword, address, signature string) (*Account, []*LedgerEntry, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := confirmPassword(u, currentPassword); err != nil {
 		return nil, nil, err
 	}
 	rail, err := k.railOrFail(ctx)

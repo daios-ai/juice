@@ -206,7 +206,7 @@ func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
 	r.Post("/v1/auth/refresh", srv.postRefresh)
 	r.Post("/v1/auth/logout", srv.postLogout)
 	r.Post("/v1/users", srv.postUser)
-	registerRoutes(r, srv)
+	registerRoutes(r, srv, unlimited)
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
 	return ts
@@ -2447,6 +2447,49 @@ func TestAVerbReadsOrWrites(t *testing.T) {
 	}
 	if len(paths) != 1 || !strings.HasPrefix(paths[0], "GET /v1/withdrawals") {
 		t.Errorf("withdrawals read %v, want one GET of the list", paths)
+	}
+}
+
+// Registering an address sends the account's password with the signature. It is taken from the
+// flag, or typed where somebody is at the terminal; where nobody is, the command refuses before it
+// sends anything rather than registering without it.
+func TestRegisteringAnAddressTakesThePassword(t *testing.T) {
+	var sent map[string]any
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			sent = nil
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u", "blockchain_address": "0xabc"})
+	})
+	origTTY, origPrompt := interactiveTTY, promptPassword
+	t.Cleanup(func() { interactiveTTY, promptPassword = origTTY, origPrompt })
+	promptPassword = func(string) (string, error) { return "typed", nil }
+
+	for _, c := range []struct {
+		name     string
+		terminal bool
+		args     []string
+		want     any // the password sent, or nil where nothing may be sent
+	}{
+		{"from the flag", false, []string{"0xabc", "--signature", "s", "--password", "flagged"}, "flagged"},
+		{"typed at the terminal", true, []string{"0xabc", "--signature", "s"}, "typed"},
+		{"nobody to type it", false, []string{"0xabc", "--signature", "s"}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sent = nil
+			interactiveTTY = func() bool { return c.terminal }
+			_, err := execTestCmd(t, userBlockchainAddressCmd(), c.args...)
+			if c.want == nil {
+				if err == nil || !strings.Contains(err.Error(), "--password") || sent != nil {
+					t.Fatalf("got %v having sent %v, want a refusal naming --password and nothing sent", err, sent)
+				}
+				return
+			}
+			if err != nil || sent["current_password"] != c.want || sent["signature"] != "s" {
+				t.Errorf("got %v having sent %v, want the password %v beside the signature", err, sent, c.want)
+			}
+		})
 	}
 }
 

@@ -181,7 +181,7 @@ amounts are written the way that token is written — `1.50`, not `1500000`:
 
 ```bash
 ./juice user deposit               # where to send money, and whether you are registered
-./juice user blockchain-address 0xAbC...  # register a payout address, proving you control it
+./juice user blockchain-address 0xAbC...  # register a payout address: a signature and your password
 ./juice user withdraw 100 --yes    # pays out to that address
 ./juice user withdrawals          # the ones you have made, and where each stands
 ```

@@ -96,10 +96,13 @@ user: cfeacc90-…
 address: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 
 Signature:
+Password:
 ```
 
 Copy the complete message into your wallet's message-signing function, then
-paste the resulting signature at the prompt. The response confirms the
+paste the resulting signature at the prompt. You are then asked for your
+password. The signature shows who holds the address, and the password shows that
+the account's owner chose it: withdrawals go to this address. The response confirms the
 registered address and lists any held deposits attributed to it:
 
 ```
@@ -107,7 +110,7 @@ registered address and lists any held deposits attributed to it:
   attributed: []
 ```
 
-A program supplies the signature with `--signature` instead of being asked. If you
+A program supplies `--signature` and `--password` instead of being asked. If you
 work at a command line, `cast wallet sign --private-key … "$MESSAGE"` produces the
 same thing.
 

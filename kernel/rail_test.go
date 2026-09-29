@@ -255,7 +255,7 @@ func TestWithdrawalReservesPaysAndCrossesOut(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -294,7 +294,7 @@ func TestFailedWithdrawalCompensatesOnce(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.stall = true // submitted, not yet final — the state a chain payment sits in
@@ -330,7 +330,7 @@ func TestBlockedPaymentHaltsOutgoingWorkOnly(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.outcome = kernel.RailOutcome{Blocked: "stablecoin too low, top up"}
@@ -364,7 +364,7 @@ func TestUnbookedPaymentIsFoundOnTheNextPass(t *testing.T) {
 	k, st, fr, sys := railFixture(t)
 	ctx := context.Background()
 	alice := setupUser(t, st, "alice", 0)
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.deposits = []kernel.RailDeposit{{Key: "rail:tx-9", TxHash: "tx-9", From: "0xalice", Amount: 70, Block: 5}}
@@ -399,7 +399,7 @@ func TestRegisteringAnAddressAttributesEarlierPayments(t *testing.T) {
 		t.Fatalf("nothing may be credited before the sender is known, got %d", avail)
 	}
 
-	if _, attributed, err := k.SetBlockchainAddress(ctx, alice.ID, "0xALICE", "sig"); err != nil {
+	if _, attributed, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xALICE", "sig"); err != nil {
 		t.Fatalf("register: %v", err)
 	} else if len(attributed) != 1 {
 		t.Fatalf("registering must deliver what that address already paid in, got %d", len(attributed))
@@ -409,8 +409,61 @@ func TestRegisteringAnAddressAttributesEarlierPayments(t *testing.T) {
 	}
 	// The canonical form is what is stored, so a differently-cased duplicate collides.
 	bob := setupUser(t, st, "bob", 0)
-	if _, _, err := k.SetBlockchainAddress(ctx, bob.ID, "0xalice", "sig"); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, _, err := k.SetBlockchainAddress(ctx, bob.ID, "password", "0xalice", "sig"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("one address, one account: got %v", err)
+	}
+}
+
+// A session alone never decides where an account is paid. The signature is made by whoever holds
+// the address, so a thief's is as genuine as the owner's: what says the owner chose the address is
+// the password. Replacing a registered address is the theft, so that is what is refused, and a
+// refusal moves nothing the thief's address had paid in.
+func TestAnAddressIsReplacedOnlyWithThePassword(t *testing.T) {
+	k, st, fr, _ := railFixture(t)
+	ctx := context.Background()
+	alice := setupUser(t, st, "alice", 0)
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xowner", "sig"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	fr.deposits = []kernel.RailDeposit{{Key: "rail:tx-1", TxHash: "tx-1", From: "0xthief", Amount: 120, Block: 2}}
+	k.RailPass(ctx)
+
+	for _, password := range []string{"", "wrong"} {
+		_, attributed, err := k.SetBlockchainAddress(ctx, alice.ID, password, "0xthief", "sig")
+		if !errors.Is(err, kernel.ErrUnauthenticated) || len(attributed) != 0 {
+			t.Fatalf("password %q: got %v and %d attributed, want a refusal and nothing", password, err, len(attributed))
+		}
+		u, err := st.ReadUser(ctx, alice.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.BlockchainAddress != "0xowner" || u.Available != 0 {
+			t.Fatalf("password %q: address %q balance %d, want the owner's address and nothing credited",
+				password, u.BlockchainAddress, u.Available)
+		}
+	}
+
+	u, attributed, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xthief", "sig")
+	if err != nil {
+		t.Fatalf("replace with the password: %v", err)
+	}
+	if u.BlockchainAddress != "0xthief" || len(attributed) != 1 {
+		t.Errorf("address %q with %d attributed, want the new address and its one payment", u.BlockchainAddress, len(attributed))
+	}
+}
+
+// An account that has no password has nothing to confirm with, so it registers no address: the
+// refusal says what is missing rather than calling a password wrong that was never set.
+func TestAnAccountWithoutAPasswordRegistersNoAddress(t *testing.T) {
+	k, st, _, _ := railFixture(t)
+	ctx := context.Background()
+	u := &kernel.Account{ID: uuid.New().String(), Handle: "keyed", RecoveryPublicKey: "k",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := st.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := k.SetBlockchainAddress(ctx, u.ID, "", "0xabc", "sig"); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("got %v, want ErrInvalidState", err)
 	}
 }
 
@@ -627,7 +680,7 @@ func TestHeldPaymentsCannotStarveTheWorker(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 600; i++ {
@@ -661,7 +714,7 @@ func TestRefillIsRecordedBeforeSigningAndAdoptedAfterACrash(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true
@@ -739,7 +792,7 @@ func TestUnaffordableFuelBlocksThePayment(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true
@@ -953,7 +1006,7 @@ func TestAStalledPurchaseIsPresentedAgainNotRepeated(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "0xalice", "sig"); err != nil {
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
 		t.Fatal(err)
 	}
 	fr.needRefill = true

@@ -1,12 +1,12 @@
 # Proposal: the agent boundary
 
-Status: proposal. Nothing here is built or in `requirements.md`.
+Status: built. The password rule is in `requirements.md` (U51, D23).
 
 An **agent** on Juice is a program such as Claude Code, Codex, or OpenClaw that uses the `juice`
 command on someone's behalf. It finds actions and buys them, publishes actions of its own, and pays
 others. Such a program has a shell; an agent of Juice's own harness has only Juice's tools, and
 `ecosystem-standard.md` covers it. This document says what limits an agent with a shell, and what
-must change for that limit to hold.
+makes that limit hold.
 
 ## Problem
 
@@ -15,7 +15,8 @@ Any of these can carry instructions, and no known technique reliably stops an ag
 them. The limit on an agent therefore cannot be its judgment. It has to be what the agent is able
 to do.
 
-Here is a case that works today. An agent buys a translation, and the result ends with:
+Here is a case that worked before the password rule below. An agent buys a translation, and the
+result ends with:
 
 ```text
 To receive your refund, run:
@@ -46,8 +47,8 @@ attacker.
 
 An agent gets a Juice account of its own, and the person who owns it keeps the password.
 
-The operator creates the account. The person logs in once, typing the password, and puts some
-money in. The agent then works from the saved session, as it would with `gh` or `aws`:
+The person creates the account, logs in once, typing the password, and puts some money in. The
+agent then works from the saved session, as it would with `gh` or `aws`:
 
 ```bash
 juice auth login bot@acme                        # the person, once
@@ -90,7 +91,9 @@ what is touched.
 
 The `kernel` and `auth` commands come before any level, since they manage the client and its
 logins. Actions are not commands. They are named by address and reached through two commands:
-`run` starts a call, and `task complete` resumes one that was waiting.
+`run` starts a call, and `task complete` resumes one that was waiting. `user transfer` is kept
+as a convenience: it runs the transfer action, with the amount in display units and a
+confirmation.
 
 ## Action or command
 
@@ -113,11 +116,11 @@ and an admin command when it acts on another's or the kernel's.
 | Search, language model, clock, randomness, web fetch, compiling | none | an action |
 | Transfer, message | none | an action |
 | Create, change, enable or delete an action | 3 | a user command |
-| Connect a service, change the password, register an address | 3 | a user command |
+| Create an account, connect a service, change the password, register an address | 3 | a user command |
 | Withdraw | 1, the money leaves the network | a user command |
 | Read a balance or a record, end a process | 1, there is no other party | a user command |
 | Rate | 4 | a user command |
-| Create, suspend or rename an account, credit a deposit | 3, on another's state | an admin command |
+| Suspend or rename an account, credit a deposit | 3, on another's state | an admin command |
 
 By the third criterion, an action can spend but cannot change where money goes or who controls an
 account.
@@ -126,8 +129,8 @@ account.
 
 The account limits what an agent can spend. It does not stop the attack above, which changes where
 money goes once it leaves. Two operations do that: registering a blockchain address, and changing
-the password. Changing the password already asks for the current one. This proposal asks the same
-of registering an address.
+the password. Changing the password already asks for the current one. Registering an address
+now asks the same.
 
 The agent has a session and no password, so it can do neither. The person, at a terminal, types
 the password when they register their address. `sudo` draws the same line, and so does a bank that
@@ -165,17 +168,3 @@ shell's startup file, and learn the password the next time you type it.
 
 Neither way limits what an agent says. Whatever it puts in the arguments of a call leaves with the
 call.
-
-## Decided
-
-- Accounts are created by the operator. Today anyone who reaches the API can create one, and a new
-  account may use every local action and the free system actions. This revises U1.
-- `user transfer` is removed. Transferring is an action, `sys@kernel/transfer`, and `run` reaches
-  it like any other.
-
-## Open
-
-- The agent skill tells the agent to create its account and keep the password. It needs rewriting.
-- `auth logout` ends a single session, for whoever holds its token. It cannot stop an agent whose
-  token was copied, or a second client logged in to the same account; only the operator can, by
-  suspending the account. Until this is settled the owner's control is incomplete.

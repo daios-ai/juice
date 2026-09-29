@@ -1069,8 +1069,8 @@ func (k *Kernel) UpdateUser(ctx context.Context, callerID string, req UpdateUser
 		if err := validatePassword(req.NewPassword); err != nil {
 			return nil, err
 		}
-		if !CheckPassword(req.CurrentPassword, u.PasswordHash) {
-			return nil, ErrUnauthenticated.Wrap("invalid current password")
+		if err := confirmPassword(u, req.CurrentPassword); err != nil {
+			return nil, err
 		}
 		hash, err := HashPassword(req.NewPassword)
 		if err != nil {

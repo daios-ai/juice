@@ -668,9 +668,10 @@ func readMe(ctx context.Context) (*meView, error) {
 // sent it, so an account is paid out only to an address its holder has proved is theirs: the proof
 // is a signature over a message naming this kernel, this account, and that address, and nothing
 // else. The signing happens in the wallet, not here — this command composes the message and takes
-// the signature back.
+// the signature back. The signature says who holds the address; the password says the account's
+// owner chose it, which a session alone does not.
 func userBlockchainAddressCmd() *cobra.Command {
-	var signature string
+	var signature, password string
 	cmd := &cobra.Command{
 		Use:   "blockchain-address ADDRESS",
 		Short: "Register the blockchain address you pay from and are paid at",
@@ -679,7 +680,9 @@ func userBlockchainAddressCmd() *cobra.Command {
 			"It is yours only once you prove it: this command prints a message naming this kernel, " +
 			"your account, and the address; sign that message with the wallet that holds the address " +
 			"and paste the signature back, or pass it with --signature. Registering also credits you " +
-			"for payments already received from that address.",
+			"for payments already received from that address.\n\n" +
+			"Your password is asked for as well, because this address is where your withdrawals go: " +
+			"being logged in is not enough to change it.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			ctx := context.Background()
@@ -701,12 +704,21 @@ func userBlockchainAddressCmd() *cobra.Command {
 				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				signature = strings.TrimSpace(line)
 			}
+			if password == "" {
+				if !interactiveTTY() {
+					return kernel.ErrInvalidInput.Wrap("--password is required when nobody is at the terminal to type it")
+				}
+				if password, err = promptPassword("Password: "); err != nil {
+					return err
+				}
+			}
 			return cli.emitCtx(ctx, "PUT", "/v1/me/blockchain-address", map[string]any{
-				"blockchain_address": args[0], "signature": signature,
+				"blockchain_address": args[0], "signature": signature, "current_password": password,
 			}, output{id: "blockchain_address"})
 		},
 	}
 	cmd.Flags().StringVar(&signature, "signature", "", "Signature of the registration message, produced by the wallet holding the address")
+	cmd.Flags().StringVar(&password, "password", "", "Your password (prompted if omitted)")
 	return cmd
 }
 

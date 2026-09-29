@@ -169,7 +169,8 @@ $ juice user blockchain-address <your-wallet-address>
 $ juice user deposit
 ```
 
-The first command asks for a signature proving control of your wallet. Follow
+The first command asks for a signature proving control of your wallet, and for
+your password. Follow
 the second command's instructions to send the specified USDT0 from that wallet
 to the kernel's address, the same destination used for ETH. Once the payment
 is final and processed, it credits `sys`. The full signing and deposit procedure
