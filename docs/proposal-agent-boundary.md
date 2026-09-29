@@ -25,6 +25,21 @@ with their own key, and all the kernel asks is proof that someone controls the a
 visible happens. Weeks later the owner withdraws the agent's earnings, and the money goes to the
 attacker.
 
+## Desiderata
+
+1. Inside its limit the agent is free. It needs no permission call by call.
+2. An agent can design and publish actions. It is a provider as well as a buyer.
+3. An agent can transfer money, for example to pay a subcontractor.
+4. The limit is known in advance and set by the owner: the money in the account and the outside
+   services connected to it. The agent may earn money of its own.
+5. Harm stays within that limit. A deceived agent reaches no other money, no other account, and no
+   service it was not given. Ratings are the exception: an agent rates what it paid for, as any
+   buyer does.
+6. The kernel enforces the limit, so it holds whatever program the agent is and however it reaches
+   the API.
+7. The owner stays in control. They fund the agent, take money out, and log it out.
+8. Nothing new is built where something existing serves.
+
 ## Solution
 
 An agent gets a Juice account of its own, and the person who owns it keeps the password.
@@ -60,6 +75,37 @@ balance each time it runs, which is how an agent subcontracts. A deceived agent 
 for an attacker, and it would spend money that arrives later. Even so it spends only the agent's
 account.
 
+## Three levels
+
+Every `juice` command acts at one of three levels. They differ in whose authority is used and in
+what is touched.
+
+| Level | Authority | Acts on | Checked by |
+|---|---|---|---|
+| Admin | the `sys` account | other accounts, peers, the kernel, crediting deposits | the caller is the operator |
+| User | any account | that account's own things | the caller owns them or is a party to them |
+| Action | any account, or code acting for an action's owner | whatever the action's contract says, at its price | the call itself (D2) |
+
+The `kernel` and `auth` commands come before any level, since they manage the client and its
+logins. Actions are not commands. They are named by address and reached through two commands:
+`run` starts a call, and `task complete` resumes one that was waiting.
+
+## Command or action
+
+Four questions, asked in order, decide where an operation belongs.
+
+1. Does it touch something the caller does not own? Then it is an admin command.
+2. Does it judge or audit a call, as rating does? Then it is a user command and never an action,
+   so that nothing being judged can write its own rating (G8).
+3. Must code running inside an action be able to do it? Then it is an action, because such code
+   can only call other actions and create or complete tasks (D7).
+4. Otherwise it is a user command.
+
+By the third question, paying, sending a message, searching, the clock, randomness and fetching a
+web page are actions. Reading a balance or a record, withdrawing, registering an address,
+publishing and rating are user commands. An agent uses both kinds, and the set of actions needs no
+additions for it.
+
 ## The one new rule
 
 The account limits what an agent can spend. It does not stop the attack above, which changes where
@@ -71,6 +117,16 @@ The agent has a session and no password, so it can do neither. The person, at a 
 the password when they register their address. `sudo` draws the same line, and so does a bank that
 checks harder when a payee is added than when one is paid. Withdrawing needs no password, because
 it pays only the registered address.
+
+| Operation | Password | Reason |
+|---|---|---|
+| Register or replace the blockchain address | yes | it decides where every later withdrawal goes |
+| Change the password | yes, as today | it decides who controls the account |
+| Withdraw | no | it pays only the registered address |
+| Run, transfer, complete a task | no | limited by the account |
+| Create, change, enable or delete an action | no | an agent must be able to publish |
+| Rate a call | no | only the buyer can, once per call |
+| Connect or disconnect an outside service | no | limited by what the owner connected |
 
 ## Running an agent
 
