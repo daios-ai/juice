@@ -680,6 +680,7 @@ func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
 		"symbol":              net.Symbol,
 		"token":               net.Token,
 		"blockchain_address":  s.blockchainAddress(r.Context()),
+		"version":             version,
 		// Where peers dial this kernel. Public already — the kernel advertises these in the
 		// routing table — and the one place a person outside can read them, which is what an
 		// operator checking their own node from elsewhere, and a client turning a client address
@@ -1733,6 +1734,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		Namespace:         kernel.DiscoveryNamespace(k.Network()),
 		MaxInboundPeers:   int(globalCfg.MaxInboundPeers),
 		RelaySlots:        int(globalCfg.RelaySlots),
+		AgentVersion:      fed.AgentPrefix + version,
 	})
 	if err != nil {
 		return nil, err

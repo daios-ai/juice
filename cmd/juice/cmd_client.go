@@ -27,7 +27,7 @@ import (
 // The kernel noun: one verb runs a kernel from this installation, the rest are what this client
 // knows about kernels it talks to — the same thing from either side, so one noun holds both.
 func init() {
-	kernelCmd := &cobra.Command{Use: "kernel", Short: "Run a kernel, or manage the ones this client knows"}
+	kernelCmd := group("kernel", "Run a kernel, or manage the ones this client knows")
 	kernelCmd.AddCommand(kernelServeCmd(), kernelAddCmd(), kernelListCmd(),
 		kernelHealthCmd(), kernelForgetCmd())
 	rootCmd.AddCommand(kernelCmd)
@@ -130,7 +130,7 @@ func kernelHealthCmd() *cobra.Command {
 			return emit(body, output{id: "public_key", human: func([]byte) error {
 				// The network comes first after the name: a kernel serves one for life, and it
 				// decides what every balance and every signature here means (D23).
-				fmt.Printf("ok  %s  network %s  %s\n", h.Handle, h.Network, h.PublicKey)
+				fmt.Printf("ok  %s  network %s  %s  %s\n", h.Handle, h.Network, h.PublicKey, h.Version)
 				return nil
 			}})
 		},
@@ -309,7 +309,7 @@ func emitKernel(name string, k *kernelRec, outcome string) error {
 }
 
 func init() {
-	authCmd := &cobra.Command{Use: "auth", Short: "Log in, switch between logins, log out"}
+	authCmd := group("auth", "Log in, switch between logins, log out")
 	authCmd.AddCommand(loginCmd(), authUseCmd(), authListCmd(), logoutCmd(), recoverCmd())
 	rootCmd.AddCommand(authCmd)
 }

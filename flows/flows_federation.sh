@@ -653,6 +653,7 @@ flow_fed_inspect_read_only() {
     local doc; doc=$(jj "$dbl" "$hl" admin peer inspect kernel-r)
     assert_json "fed_inspect_read_only.inspect_live"   "$doc" source live
     assert_json "fed_inspect_read_only.inspect_online" "$doc" online True
+    assert_contains "fed_inspect_read_only.inspect_version" "Version:      juice-kernel/" "$(j "$dbl" "$hl" admin peer inspect kernel-r)"
 
     # ...and it left nothing behind: the cache is exactly as it was.
     assert_eq "fed_inspect_read_only.last_seen_unchanged" "$seen_before" \

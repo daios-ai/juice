@@ -371,6 +371,7 @@ type serverHealth struct {
 	Symbol            string `json:"symbol"`
 	Token             string `json:"token"`
 	BlockchainAddress string `json:"blockchain_address"`
+	Version           string `json:"version"`
 	base              string // the address it was read from: a banner is a claim about one place
 }
 

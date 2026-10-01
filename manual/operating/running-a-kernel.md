@@ -318,11 +318,11 @@ is needed.
 
 ```
 $ juice kernel health acme
-ok  acme  network play  fdlMi64P…
+ok  acme  network play  fdlMi64P…  v0.14.46
 ```
 
-Health checks require no login and report the server's identity as well as its
-status. Clients use that identity to check they have reached the expected kernel.
+Health checks require no login and report the server's identity and version as
+well as its status. Clients use that identity to check they have reached the expected kernel.
 
 ## Logs
 

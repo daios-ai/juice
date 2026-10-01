@@ -166,7 +166,7 @@ non-interactive confirmation.
 | `juice admin peer suspend PEER` | refuse its requests, reversibly |
 | `juice admin peer unsuspend PEER` | restore |
 | `juice admin peer rename PEER NEW_NAME` | bind a petname |
-| `juice admin peer inspect PEER` | identity, catalogue, evidence, reachability |
+| `juice admin peer inspect PEER` | identity, catalogue, evidence, reachability, version |
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
 

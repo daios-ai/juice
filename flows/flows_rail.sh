@@ -511,4 +511,7 @@ flow_one_output_policy() {
     # network fingerprint is read here before an operator believes any other number.
     assert_nonempty "output.identity_keeps_the_digest" "$(strfield "$(jj "$db" "$hs" admin kernel show)" network_fingerprint)"
     assert_nonempty "output.health_is_the_banner" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" public_key)"
+    assert_nonempty "output.health_says_the_version" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" version)"
+    # A verb that does not exist under a group is an error, never that group's help and exit 0.
+    assert_fails "output.unknown_verb_is_refused" "unknown command" -- j "$db" "$ha" admin deposit
 }

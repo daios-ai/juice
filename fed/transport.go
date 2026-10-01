@@ -207,6 +207,9 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return nil, fmt.Errorf("fed: resource limits: %w", err)
 	}
 	baseOpts = append(baseOpts, libp2p.ResourceManager(mgr))
+	if cfg.AgentVersion != "" {
+		baseOpts = append(baseOpts, libp2p.UserAgent(cfg.AgentVersion))
+	}
 	if len(bootstrap) > 0 {
 		baseOpts = append(baseOpts, libp2p.EnableAutoRelayWithStaticRelays(bootstrap))
 	}
@@ -721,9 +724,10 @@ func (t *Transport) Gossip(ctx context.Context, peerKey string, req GossipReques
 // Reachability describes how this transport can reach a peer right now — the diagnostic the
 // operator sees via `admin inspect <key>` now that there is no browser-reachable endpoint.
 type Reachability struct {
-	Path      string   `json:"path"`       // "direct", "relayed", or "unreachable"
-	RTTmillis int64    `json:"rtt_millis"` // round-trip time of the resolve+connect, milliseconds
-	Protocols []string `json:"protocols"`  // libp2p protocols the peer advertises
+	Path      string   `json:"path"`              // "direct", "relayed", or "unreachable"
+	RTTmillis int64    `json:"rtt_millis"`        // round-trip time of the resolve+connect, milliseconds
+	Protocols []string `json:"protocols"`         // libp2p protocols the peer advertises
+	Version   string   `json:"version,omitempty"` // the Juice version the peer says it runs; empty when it says none
 	Error     string   `json:"error,omitempty"`
 }
 
@@ -747,6 +751,12 @@ func (t *Transport) Probe(ctx context.Context, peerKey string) Reachability {
 	if protos, err := t.host.Peerstore().GetProtocols(pid); err == nil {
 		for _, p := range protos {
 			r.Protocols = append(r.Protocols, string(p))
+		}
+	}
+	// Identify stored the peer's agent string under this key when the connection was made.
+	if av, err := t.host.Peerstore().Get(pid, "AgentVersion"); err == nil {
+		if s, ok := av.(string); ok && strings.HasPrefix(s, AgentPrefix) {
+			r.Version = s
 		}
 	}
 	return r

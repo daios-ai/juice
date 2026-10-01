@@ -43,12 +43,12 @@ func lastSeenStr(t *time.Time) string {
 // sees all rows on `action/process/tx/task list` and may `action disable` any action, all
 // over the normal TCP API (supervision is scope, not a separate surface).
 func init() {
-	adminCmd := &cobra.Command{Use: "admin", Short: "Superuser commands"}
-	userCmd := &cobra.Command{Use: "user", Short: "Accounts on this kernel"}
+	adminCmd := group("admin", "Superuser commands")
+	userCmd := group("user", "Accounts on this kernel")
 	userCmd.AddCommand(append(rosterCmds("user"), adminUserListCmd(), adminUserDepositCmd())...)
-	peerCmd := &cobra.Command{Use: "peer", Short: "Kernels this one trades with"}
+	peerCmd := group("peer", "Kernels this one trades with")
 	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd())...)
-	kernelCmd := &cobra.Command{Use: "kernel", Short: "This kernel itself"}
+	kernelCmd := group("kernel", "This kernel itself")
 	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd())
 	adminCmd.AddCommand(userCmd, peerCmd, kernelCmd)
 	rootCmd.AddCommand(adminCmd)
@@ -391,6 +391,7 @@ func peerInspectCmd() *cobra.Command {
 					Reachability struct {
 						Path      string `json:"path"`
 						RTTmillis int64  `json:"rtt_millis"`
+						Version   string `json:"version"`
 					} `json:"reachability"`
 					Source string `json:"source"`
 					Online bool   `json:"online"`
@@ -430,6 +431,12 @@ func peerInspectCmd() *cobra.Command {
 					reachLabel = "offline"
 				}
 				fmt.Printf("Reachability: %s (%dms)\n", reachLabel, out.Reachability.RTTmillis)
+				// A peer that is offline, or built before kernels said their version, says none.
+				version := out.Reachability.Version
+				if version == "" {
+					version = "unknown"
+				}
+				fmt.Printf("Version:      %s\n", version)
 				if out.Account != nil {
 					susp := ""
 					if out.Account.Suspended {

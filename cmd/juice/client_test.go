@@ -410,6 +410,7 @@ func healthServerNamed(t *testing.T, handle, key, fingerprint, network string) *
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "ok", "handle": handle, "public_key": key,
 			"network": network, "network_fingerprint": fingerprint, "decimals": 0,
+			"version": "v0.0.0-test",
 		})
 	}))
 	t.Cleanup(srv.Close)

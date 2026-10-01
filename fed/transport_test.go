@@ -203,6 +203,29 @@ func TestProbeDirect(t *testing.T) {
 	}
 }
 
+// A probe reports the version a Juice peer says it runs, and nothing for a peer that sends no
+// Juice version: libp2p always sends an agent string, so the library's own must not pass for one.
+func TestProbeReportsTheVersionAJuicePeerSays(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	a, err := New(context.Background(), Config{Namespace: testNamespace, SigningKey: priv,
+		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, Handlers: &fakeHandlers{}, AllowPrivateAddrs: true,
+		AgentVersion: AgentPrefix + "v1.2.3"})
+	if err != nil {
+		t.Fatalf("New transport: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if r := b.Probe(ctx, a.PublicKey()); r.Version != AgentPrefix+"v1.2.3" {
+		t.Errorf("version of a: got %q, want %q (%+v)", r.Version, AgentPrefix+"v1.2.3", r)
+	}
+	if r := a.Probe(ctx, b.PublicKey()); r.Version != "" {
+		t.Errorf("version of b, which sends none: got %q, want empty", r.Version)
+	}
+}
+
 // An unresolvable key classifies as "unreachable" with an error, and does not hang.
 func TestProbeUnreachable(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)

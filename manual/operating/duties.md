@@ -155,6 +155,7 @@ Petname:      beta-kernel
 Nickname:     beta
 Public key:   hqDr8oMX…
 Reachability: direct (0ms)
+Version:      juice-kernel/v0.14.46
 Traded here:  yes
 
 Public actions (1):

@@ -7,10 +7,32 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// `peer inspect` shows the version the peer said it runs, and says unknown when it said none:
+// a peer that is offline, or built before kernels sent one.
+func TestPeerInspectShowsTheVersionThePeerSaid(t *testing.T) {
+	for _, c := range []struct{ reply, want string }{
+		{`{"path":"direct","rtt_millis":3,"version":"juice-kernel/v1.2.3"}`, "Version:      juice-kernel/v1.2.3\n"},
+		{`{"path":"unreachable","rtt_millis":3}`, "Version:      unknown\n"},
+	} {
+		stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"public_key":"K","reachability":` + c.reply + `,"online":true,"source":"live"}`))
+		})
+		out := captureStdout(t, func() error {
+			_, err := execTestCmd(t, peerInspectCmd(), "K")
+			return err
+		})
+		if !strings.Contains(out, c.want) {
+			t.Errorf("inspect lacks %q:\n%s", c.want, out)
+		}
+	}
+}
 
 func newAdminTestKernel(t *testing.T) *kernel.Kernel {
 	t.Helper()

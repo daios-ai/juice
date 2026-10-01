@@ -506,10 +506,18 @@ func renderValue(raw json.RawMessage) string {
 	return string(r)
 }
 
+// group is a command that only holds verbs. Cobra checks an unknown verb at the root alone, and
+// answers a command with nothing to run with its help before it looks at Args, so a group runs its
+// help itself and states NoArgs: "juice admin deposit" is refused, not answered with help.
+func group(use, short string) *cobra.Command {
+	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error { return c.Help() }}
+}
+
 // ---- user ----
 
 func init() {
-	userCmd := &cobra.Command{Use: "user", Short: "Manage your account"}
+	userCmd := group("user", "Manage your account")
 	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
 		userConnectCmd(), userDisconnectCmd(), userBlockchainAddressCmd(), userDepositCmd(),
 		userWithdrawCmd(), userWithdrawalsCmd())
@@ -895,7 +903,7 @@ func userWithdrawalsCmd() *cobra.Command {
 // ---- action ----
 
 func init() {
-	actionCmd := &cobra.Command{Use: "action", Short: "Manage actions"}
+	actionCmd := group("action", "Manage actions")
 	actionCmd.AddCommand(
 		actionCreateCmd(),
 		actionUpdateCmd(),
@@ -1471,7 +1479,7 @@ func actionRatingsCmd() *cobra.Command {
 // ---- process ----
 
 func init() {
-	processCmd := &cobra.Command{Use: "process", Short: "Manage processes"}
+	processCmd := group("process", "Manage processes")
 	processCmd.AddCommand(processListCmd(), processEndCmd(), processShowCmd())
 	rootCmd.AddCommand(processCmd)
 }
@@ -1539,7 +1547,7 @@ func processShowCmd() *cobra.Command {
 // ---- task ----
 
 func init() {
-	taskCmd := &cobra.Command{Use: "task", Short: "Manage tasks"}
+	taskCmd := group("task", "Manage tasks")
 	taskCmd.AddCommand(taskCreateCmd(), taskListCmd(), taskShowCmd(), taskCompleteCmd())
 	rootCmd.AddCommand(taskCmd)
 }
@@ -1686,7 +1694,7 @@ func taskCompleteCmd() *cobra.Command {
 // ---- tx ----
 
 func init() {
-	txCmd := &cobra.Command{Use: "tx", Short: "Manage transactions"}
+	txCmd := group("tx", "Manage transactions")
 	txCmd.AddCommand(txListCmd(), txShowCmd(), txRateCmd(), txVerifyReceiptCmd())
 	rootCmd.AddCommand(txCmd)
 }

@@ -89,7 +89,7 @@ Money is one unit throughout the CLI, the world's: `--price`, `admin user deposi
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| Health check | `GET /health` (open) → `{status, handle, public_key, network, network_fingerprint, decimals, symbol, token, blockchain_address, fed_addrs}`; identity banner — what a client pins before it trusts a server (C13); `token` is the contract money is paid in, empty where the world has no chain; `fed_addrs` are the addresses peers dial this kernel on, empty until its transport is up | `juice kernel health [<name>]` |
+| Health check | `GET /health` (open) → `{status, handle, public_key, network, network_fingerprint, decimals, symbol, token, blockchain_address, fed_addrs, version}`; identity banner — what a client pins before it trusts a server (C13); `version` is the build the kernel runs; `token` is the contract money is paid in, empty where the world has no chain; `fed_addrs` are the addresses peers dial this kernel on, empty until its transport is up | `juice kernel health [<name>]` |
 
 Federation has no HTTP surface: peer identity, gossip, manifests, and inbound calls travel over the cross-kernel transport (D12), not over this API. Kernels discover each other in the background through libp2p routing discovery over their own network's namespace (D12), so kernels of different networks never meet; discovered actions surface through the `lookup` native, and every known kernel — counterparties and discovery-only alike — appears in the merged `admin peer list` roster and is inspected with `admin peer inspect <key>`.
 

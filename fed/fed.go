@@ -199,4 +199,13 @@ type Config struct {
 	// kernels behind NAT it relays for, each holding one of them. Zero takes the default (D12).
 	MaxInboundPeers int
 	RelaySlots      int
+	// AgentVersion is what this kernel says it runs, sent in libp2p's identify exchange on every
+	// connection and read back by Probe. Empty leaves the library's own string. It is a label:
+	// nothing on the wire is decided by it, so a kernel that sends another one is not stranded.
+	AgentVersion string
 }
+
+// AgentPrefix opens every agent version a Juice kernel sends. Probe keeps a peer's string only
+// under it: a kernel built before versions were sent still identifies with the library's own
+// string, and that would read as a version of Juice if the prefix were not required.
+const AgentPrefix = "juice-kernel/"

@@ -2783,6 +2783,47 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 	walk(rootCmd)
 }
 
+// A group holds verbs and runs nothing of its own, so cobra would answer a mistyped verb under it
+// with the group's help and exit 0, which a script reads as success. Every group is executed
+// through cobra, since a group that lacks a run function shows help whatever its Args say: a stray
+// word is refused by name, and the group alone still answers with its help.
+func TestAGroupRefusesAnUnknownVerb(t *testing.T) {
+	// Executing the root adds cobra's own help and completion commands to the tree; the tests that
+	// walk it for this program's own text must not meet them.
+	own := map[*cobra.Command]bool{}
+	for _, c := range rootCmd.Commands() {
+		own[c] = true
+	}
+	t.Cleanup(func() {
+		for _, c := range rootCmd.Commands() {
+			if !own[c] {
+				rootCmd.RemoveCommand(c)
+			}
+		}
+	})
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Name() == "help" || c.Name() == "completion" {
+			return
+		}
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+		if !c.HasSubCommands() {
+			return
+		}
+		words := strings.Fields(c.CommandPath())[1:]
+		_, err := execTestCmd(t, rootCmd, append(words, "frobnicate")...)
+		if err == nil || !strings.Contains(err.Error(), `unknown command "frobnicate"`) {
+			t.Errorf("%s frobnicate: want unknown command, got %v", c.CommandPath(), err)
+		}
+		if _, err := execTestCmd(t, rootCmd, words...); err != nil {
+			t.Errorf("%s alone must show its help, got %v", c.CommandPath(), err)
+		}
+	}
+	walk(rootCmd)
+}
+
 // A run spends money, so at a terminal the person is asked before it does, at the price this run
 // pins — and says no by saying nothing. Off a terminal the price is stated and the run proceeds:
 // a script has nobody to ask, and the pin is what guarantees the price it was quoted (U8, D20).

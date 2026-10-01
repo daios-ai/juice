@@ -163,6 +163,9 @@ func TestKernelHealthNeedsNoLogin(t *testing.T) {
 	if !strings.Contains(out, "network play") {
 		t.Errorf("health does not report the network: %q", out)
 	}
+	if !strings.Contains(out, "v0.0.0-test") {
+		t.Errorf("health does not report the kernel's version: %q", out)
+	}
 	if _, err := execTestCmd(t, kernelHealthCmd(), "nosuch"); err == nil {
 		t.Error("health on an unknown kernel must be refused")
 	}

@@ -290,10 +290,15 @@ func TestServeHealth(t *testing.T) {
 	// it needs to render or pay money must be in it. A missing key is indistinguishable from a
 	// kernel that has nothing to say, so every one is required, whatever its value.
 	for _, key := range []string{"status", "handle", "public_key", "network", "network_fingerprint",
-		"decimals", "symbol", "token", "blockchain_address"} {
+		"decimals", "symbol", "token", "blockchain_address", "version"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("the health banner omits %q; a client cannot tell that from an empty value", key)
 		}
+	}
+	// The version is the binary's own, so an operator reading a kernel from outside can tell a
+	// stale build from an outage.
+	if body["version"] != version {
+		t.Errorf("version = %v, want the binary's %q", body["version"], version)
 	}
 	// This kernel serves play, where money has no contract and nothing is sent anywhere.
 	if body["token"] != "" || body["blockchain_address"] != "" {
