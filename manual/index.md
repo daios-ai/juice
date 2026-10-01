@@ -130,7 +130,8 @@ introduced here. The later chapters develop each part in more detail.
 | Buy and run actions other people have published | [Money](money/), then [Calling actions](calling/) |
 | Put money into an account, or take it out | [Deposits and withdrawals](money/deposits-and-withdrawals.html) |
 | Publish an action and be paid for it | [Providing actions](providing/) |
-| Write a program or an agent that uses Juice | [Using Juice from a program](programs.html) |
+| Run an agent that uses Juice | [Running an agent](running-an-agent.html) |
+| Write a program that uses Juice | [Using Juice from a program](programs.html) |
 | Run a kernel of your own | [Operating a kernel](operating/) |
 
 [Concepts](concepts.html) explains the terminology and the relationships among

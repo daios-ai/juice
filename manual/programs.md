@@ -1,6 +1,6 @@
 ---
 title: Using Juice from a program
-nav_order: 7
+nav_order: 8
 ---
 
 # Using Juice from a program
@@ -13,7 +13,8 @@ person would otherwise make at the terminal.
 
 Give an agent its own account so that its balance and history can be managed
 independently. The account grants no special privileges; it authorizes the
-agent's calls in the same way as any other user's.
+agent's calls in the same way as any other user's. Setting up an existing
+agent is covered in [Running an agent](running-an-agent.html).
 
 ## Name the login on every command
 
