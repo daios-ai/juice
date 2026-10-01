@@ -838,8 +838,8 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 
 // ---- Process operations ----
 
-func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit, offset int) ([]*processView, error) {
-	processes, err := k.ListProcesses(ctx, callerID, limit, offset)
+func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.ProcessFilter) ([]*processView, error) {
+	processes, err := k.ListProcesses(ctx, callerID, f)
 	if err != nil {
 		return nil, err
 	}
@@ -860,6 +860,10 @@ func listProcesses(k *kernel.Kernel, ctx context.Context, callerID string, limit
 }
 
 func getProcess(k *kernel.Kernel, ctx context.Context, callerID, id string) (*processView, error) {
+	id, err := k.ExpandProcessID(ctx, callerID, id)
+	if err != nil {
+		return nil, err
+	}
 	p, err := k.ReadProcess(ctx, callerID, id)
 	if err != nil {
 		return nil, err
@@ -903,8 +907,14 @@ func createTask(k *kernel.Kernel, ctx context.Context, callerID string, p create
 	return enrichTask(k, ctx, task, k.NewNames()), nil
 }
 
-func listTasks(k *kernel.Kernel, ctx context.Context, callerID, processID, status string, limit, offset int) ([]*taskWithAction, error) {
-	tasks, err := k.ListTasks(ctx, callerID, processID, status, limit, offset)
+func listTasks(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TaskFilter) ([]*taskWithAction, error) {
+	if f.ProcessID != "" {
+		var err error
+		if f.ProcessID, err = k.ExpandProcessID(ctx, callerID, f.ProcessID); err != nil {
+			return nil, err
+		}
+	}
+	tasks, err := k.ListTasks(ctx, callerID, f)
 	if err != nil {
 		return nil, err
 	}
@@ -917,6 +927,10 @@ func listTasks(k *kernel.Kernel, ctx context.Context, callerID, processID, statu
 }
 
 func getTask(k *kernel.Kernel, ctx context.Context, callerID, id string) (*taskWithAction, error) {
+	id, err := k.ExpandTaskID(ctx, callerID, id)
+	if err != nil {
+		return nil, err
+	}
 	task, err := k.ReadTask(ctx, callerID, id)
 	if err != nil {
 		return nil, err
@@ -927,6 +941,12 @@ func getTask(k *kernel.Kernel, ctx context.Context, callerID, id string) (*taskW
 // ---- Transaction operations ----
 
 func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f kernel.TxFilter) ([]*txSummary, error) {
+	if f.ProcessID != "" {
+		var err error
+		if f.ProcessID, err = k.ExpandProcessID(ctx, callerID, f.ProcessID); err != nil {
+			return nil, err
+		}
+	}
 	txs, err := k.ListTransactions(ctx, callerID, f)
 	if err != nil {
 		return nil, err
@@ -940,6 +960,10 @@ func listTransactions(k *kernel.Kernel, ctx context.Context, callerID string, f 
 }
 
 func getTransaction(k *kernel.Kernel, ctx context.Context, callerID, id string) (*txView, error) {
+	id, err := k.ExpandTransactionID(ctx, callerID, id)
+	if err != nil {
+		return nil, err
+	}
 	tv, err := k.ReadTransaction(ctx, callerID, id)
 	if err != nil {
 		return nil, err

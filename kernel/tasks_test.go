@@ -347,7 +347,7 @@ func TestCanListTaskProcessOwnerSeesOwnTask(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	tasks, err := k.ListTasks(ctx, owner.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, owner.ID, kernel.TaskFilter{ProcessID: "", Status: "", All: true, Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestCanListTaskRequiredCallerSeesTask(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	tasks, err := k.ListTasks(ctx, caller.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, caller.ID, kernel.TaskFilter{ProcessID: "", Status: "", All: true, Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("ListTasks by caller: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestCanListTaskUnrelatedUserDenied(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	tasks, err := k.ListTasks(ctx, unrelated.ID, "", "", 50, 0)
+	tasks, err := k.ListTasks(ctx, unrelated.ID, kernel.TaskFilter{ProcessID: "", Status: "", All: true, Limit: 50, Offset: 0})
 	if err != nil {
 		t.Fatalf("ListTasks for unrelated: %v", err)
 	}
@@ -1569,7 +1569,7 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			var procID string
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) && procID == "" {
-				if procs, _ := st.ListProcesses(ctx, provider.ID, 10, 0); len(procs) == 1 {
+				if procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: provider.ID, All: true, Limit: 10, Offset: 0}); len(procs) == 1 {
 					if len(unsettledTraces(t, st, procs[0].ID)) == 2 {
 						procID = procs[0].ID
 					}
@@ -1823,7 +1823,7 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
 		t.Errorf("a trace was funded under a settled parent: %d traces", len(traces))
 	}
-	if tasks, _ := st.ListTasks(ctx, owner.ID, p.ID, "", true, 10, 0); len(tasks) != 0 {
+	if tasks, _ := st.ListTasks(ctx, kernel.TaskFilter{CallerUserID: owner.ID, ProcessID: p.ID, Status: "", Superuser: true, All: true, Limit: 10, Offset: 0}); len(tasks) != 0 {
 		t.Errorf("a task was parked in a closed process: %d", len(tasks))
 	}
 }

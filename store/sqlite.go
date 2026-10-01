@@ -1699,30 +1699,24 @@ func scanProcessFn(scan func(...any) error) (*kernel.Process, error) {
 	return &p, nil
 }
 
-func (s *DB) ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Process, error) {
-	if limit <= 0 {
-		limit = 100
+// idPrefixClause narrows a query to ids starting with a prefix, by range rather than LIKE (see
+// deleteDiscoveryCache): every character of an id is below 'g', so prefix||'g' bounds the range.
+// An empty prefix matches everything.
+const idPrefixClause = ` AND (?='' OR (id >= ? AND id < ? || 'g'))`
+
+func (s *DB) ListProcesses(ctx context.Context, f kernel.ProcessFilter) ([]*kernel.Process, error) {
+	if f.Limit <= 0 {
+		f.Limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
-		 FROM processes WHERE owner_user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		ownerID, limit, offset)
+		 FROM processes
+		 WHERE (?='' OR owner_user_id=?)
+		   AND (? OR status='open')`+idPrefixClause+`
+		 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		f.OwnerUserID, f.OwnerUserID, boolInt(f.All), f.IDPrefix, f.IDPrefix, f.IDPrefix, f.Limit, f.Offset)
 	if err != nil {
 		return nil, dbErr(err, "list processes")
-	}
-	defer rows.Close()
-	return queryList(rows, "list processes", scanProcessFn)
-}
-
-func (s *DB) ListAllProcesses(ctx context.Context, limit, offset int) ([]*kernel.Process, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at
-		 FROM processes ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, dbErr(err, "list all processes")
 	}
 	defer rows.Close()
 	return queryList(rows, "list processes", scanProcessFn)
@@ -1984,6 +1978,8 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		q += ` AND (owner_user_id=? OR caller_user_id=? OR target_user_id=?)`
 		args = append(args, f.PartyUserID, f.PartyUserID, f.PartyUserID)
 	}
+	q += idPrefixClause
+	args = append(args, f.IDPrefix, f.IDPrefix, f.IDPrefix)
 	q += ` ORDER BY started_at DESC`
 	limit := f.Limit
 	if limit <= 0 {
@@ -2097,13 +2093,9 @@ func (s *DB) ReadTask(ctx context.Context, id string) (*kernel.Task, error) {
 	return task, nil
 }
 
-func (s *DB) ListTasks(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*kernel.Task, error) {
-	superInt := 0
-	if isSuperuser {
-		superInt = 1
-	}
-	if limit <= 0 {
-		limit = 50
+func (s *DB) ListTasks(ctx context.Context, f kernel.TaskFilter) ([]*kernel.Task, error) {
+	if f.Limit <= 0 {
+		f.Limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+taskCols+`
@@ -2115,11 +2107,14 @@ func (s *DB) ListTasks(ctx context.Context, callerUserID, processID, status stri
 		        OR ?)
 		   AND (?='' OR parent_trace_id IN (SELECT id FROM traces WHERE process_id=?))
 		   AND (?='' OR status=?)
+		   AND (? OR ?<>'' OR status IN ('waiting','running'))`+idPrefixClause+`
 		 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		callerUserID, callerUserID, superInt,
-		processID, processID,
-		status, status,
-		limit, offset,
+		f.CallerUserID, f.CallerUserID, boolInt(f.Superuser),
+		f.ProcessID, f.ProcessID,
+		f.Status, f.Status,
+		boolInt(f.All), f.Status,
+		f.IDPrefix, f.IDPrefix, f.IDPrefix,
+		f.Limit, f.Offset,
 	)
 	if err != nil {
 		return nil, dbErr(err, "list tasks")

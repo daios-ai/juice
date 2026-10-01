@@ -113,10 +113,10 @@ Use `task list` and `task show` to inspect the work addressed to you:
 
 ```
 $ juice task list
-TASK        STATUS   CREATED BY   COMPLETES  CALLER
-b75366d1-…  waiting  sys@acme/message  sys@acme/sink   bob@acme
-$ juice task show b75366d1-…
-  id: b75366d1-…
+TASK          STATUS   CREATED BY        COMPLETES      CALLER
+b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  bob@acme
+$ juice task show b75366d19c2e
+  id: b75366d19c2e
   partial_args: {
     "message": "approve the order?"
   }

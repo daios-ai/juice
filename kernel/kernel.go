@@ -1752,15 +1752,16 @@ func (k *Kernel) ListAllActions(ctx context.Context, limit, offset int) ([]*Acti
 
 // ListProcesses returns the caller's processes, or all of them when the caller is the
 // superuser (supervision is scope on the normal endpoint, mirroring ListTransactions).
-func (k *Kernel) ListProcesses(ctx context.Context, callerID string, limit, offset int) ([]*Process, error) {
+func (k *Kernel) ListProcesses(ctx context.Context, callerID string, f ProcessFilter) ([]*Process, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
+	f.OwnerUserID = callerID
 	if k.isUserSuperuser(ctx, u) {
-		return k.store.ListAllProcesses(ctx, limit, offset)
+		f.OwnerUserID = ""
 	}
-	return k.store.ListProcesses(ctx, callerID, limit, offset)
+	return k.store.ListProcesses(ctx, f)
 }
 
 // GetConfig returns a persistent config value by key.

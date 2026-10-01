@@ -33,8 +33,8 @@ $ curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
 ```
 
 A release tag pins a version, `--no-modify-path` leaves your shell profile alone,
-and `JUICE_HOME` moves the installation somewhere else entirely, in which case the
-installer records that choice in your profile too, since every `juice` command reads
+and `JUICE_HOME` moves the installation somewhere else entirely. The installer then
+writes nothing to your profile: the choice is yours to set, since every `juice` command reads
 it afresh.
 
 

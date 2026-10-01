@@ -63,6 +63,8 @@ Default output is human-readable text that surfaces the same fields as the HTTP 
 A JSON value also accepts `@path/to/file.json`; the `@` prefix reads the value from the named file. Applies to the positional `json` argument of `run`/`task complete` and to `--input-schema`, `--output-schema`, `--auth`.
 
 **C10 — `args` is always present; empty input is `{}`.**  
+Where `{id}` or `process_id` names a task, process or transaction, four or more of its leading hex digits serve as well, with or without the hyphens, resolved within what the caller may list; a prefix naming several is refused (422), one naming none is 404. The CLI shows these ids by their first twelve hex digits, whole under `--json` and `--quiet`.
+
 `POST /v1/run` and `POST /v1/tasks/{id}/complete` require an `args` field in the request body. `{}` is the canonical representation of an empty argument set. The CLI passes `{}` when the positional `json` argument is omitted; the HTTP layer rejects a missing field with `ErrInvalidInput`. `external_key` on `POST /v1/run` names the run for its caller: a repeat with the same `{action, args}` answers with the first run's outcome and moves nothing, 409 while that run has not settled, and 422 when the key was used with another `{action, args}`.
 
 **C11 — `--required-caller` carries a handle, local or remote.**  
@@ -184,7 +186,7 @@ The per-caller schemes hold no secret in `auth`; each caller supplies their cred
 
 | Operation | HTTP | CLI |
 |-----------|------|-----|
-| List processes | `GET /v1/processes[?limit=&offset=]` → process[]; own processes, or **all for a superuser** | `juice process list [--limit --offset]` |
+| List processes | `GET /v1/processes[?all=1&limit=&offset=]` → process[]; own open processes, closed ones under `all=1`, or **every owner's for a superuser** | `juice process list [--all --limit --offset]` |
 | Show process | `GET /v1/processes/{id}` → process (`owner`, `available`, `locked`, `status`, `awaiting_receipt`, `awaiting_receipt_since?`) | `juice process show <id>` |
 | End process | `POST /v1/processes/{id}/end` → 204 | `juice process end <id>` |
 
@@ -208,7 +210,7 @@ Every transaction has a signed receipt and `receipt-verification` audits it enti
 | Operation | HTTP | CLI |
 |-----------|------|-----|
 | Create task | `POST /v1/tasks` `{trace_id, action, partial_args, required_caller}` → 201 task | `juice task create <action> --trace --required-caller <user> [--partial-args]` |
-| List tasks | `GET /v1/tasks[?process_id=&status=&limit=&offset=]` → task[]; each carries `created_by` (the creating action's address, from the parent trace) alongside `action` (the completion target), `owner` (the payer) and `required_caller` (the completer's address; a peer kernel's name alone when the task is addressed to the kernel itself) | `juice task list [--process --status --limit --offset]` |
+| List tasks | `GET /v1/tasks[?process_id=&status=&all=1&limit=&offset=]` → task[]; open (waiting, running) unless `status` or `all=1`; each carries `created_by` (the creating action's address, from the parent trace) alongside `action` (the completion target), `owner` (the payer) and `required_caller` (the completer's address; a peer kernel's name alone when the task is addressed to the kernel itself) | `juice task list [--process --status --all --limit --offset]` |
 | Show task | `GET /v1/tasks/{id}` → task (incl. `created_by`) | `juice task show <id>` |
 | Complete task | `POST /v1/tasks/{id}/complete` `{args}` → `{result, tx_id, trace_id, task_id}` | `juice task complete <id> [json]` |
 

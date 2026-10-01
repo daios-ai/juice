@@ -1077,10 +1077,9 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		writeOr(w, resps, err)
 		return
 	}
-	all := q.Get("all") == "1" || q.Get("all") == "true"
 	limit, offset := listBounds(r)
 	resps, err := listPublicActions(s.kernel, r.Context(), caller,
-		q.Get("owner"), q.Get("name"), all, limit, offset)
+		q.Get("owner"), q.Get("name"), listAll(r), limit, offset)
 	writeOr(w, resps, err)
 }
 
@@ -1187,9 +1186,17 @@ func (s *server) deleteActionTarget(w http.ResponseWriter, r *http.Request) {
 	writeOr(w, as, err)
 }
 
+// listAll reads the ?all= switch a list takes to show what it hides by default: inactive actions,
+// finished tasks, closed processes.
+func listAll(r *http.Request) bool {
+	all := r.URL.Query().Get("all")
+	return all == "1" || all == "true"
+}
+
 func (s *server) listProcesses(w http.ResponseWriter, r *http.Request) {
 	limit, offset := listBounds(r)
-	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r), limit, offset)
+	processes, err := listProcesses(s.kernel, r.Context(), callerFrom(r),
+		kernel.ProcessFilter{All: listAll(r), Limit: limit, Offset: offset})
 	writeOr(w, processes, err)
 }
 
@@ -1199,7 +1206,11 @@ func (s *server) getProcess(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) endProcess(w http.ResponseWriter, r *http.Request) {
-	if err := s.kernel.EndProcess(r.Context(), callerFrom(r), pathID(r)); err != nil {
+	id, err := s.kernel.ExpandProcessID(r.Context(), callerFrom(r), pathID(r))
+	if err == nil {
+		err = s.kernel.EndProcess(r.Context(), callerFrom(r), id)
+	}
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -1240,7 +1251,11 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 		Rating float64 `json:"rating"`
 		Note   *string `json:"note"`
 	}) (any, int, error) {
-		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), pathID(r), req.Rating, req.Note)
+		id, err := s.kernel.ExpandTransactionID(r.Context(), callerFrom(r), pathID(r))
+		if err != nil {
+			return nil, 0, err
+		}
+		rating, err := s.kernel.RateTransaction(r.Context(), callerFrom(r), id, req.Rating, req.Note)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1249,7 +1264,12 @@ func (s *server) rateTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getReceiptVerification(w http.ResponseWriter, r *http.Request) {
-	v, err := s.kernel.VerifyReceipt(r.Context(), callerFrom(r), pathID(r))
+	id, err := s.kernel.ExpandTransactionID(r.Context(), callerFrom(r), pathID(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	v, err := s.kernel.VerifyReceipt(r.Context(), callerFrom(r), id)
 	writeOr(w, v, err)
 }
 
@@ -1337,7 +1357,7 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 	if peer := strings.TrimSpace(r.URL.Query().Get("peer")); peer != "" {
 		// A peer serves one bounded page of what it holds, under its own order (P8): there is
 		// nothing here for a filter or an offset to act on, so asking is an error, never silence.
-		for _, p := range []string{"process_id", "status", "limit", "offset"} {
+		for _, p := range []string{"process_id", "status", "all", "limit", "offset"} {
 			if r.URL.Query().Get(p) != "" {
 				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the tasks it holds", p))
 				return
@@ -1367,8 +1387,13 @@ func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := listBounds(r)
-	views, err := listTasks(s.kernel, r.Context(), callerFrom(r),
-		r.URL.Query().Get("process_id"), r.URL.Query().Get("status"), limit, offset)
+	views, err := listTasks(s.kernel, r.Context(), callerFrom(r), kernel.TaskFilter{
+		ProcessID: r.URL.Query().Get("process_id"),
+		Status:    r.URL.Query().Get("status"),
+		All:       listAll(r),
+		Limit:     limit,
+		Offset:    offset,
+	})
 	writeOr(w, views, err)
 }
 
@@ -1438,10 +1463,18 @@ func (s *server) postCompleteTask(w http.ResponseWriter, r *http.Request) {
 		// capability's own trace (§9): CompleteTaskInTrace enforces both, so the cap completes only
 		// tasks its own trace parked, never one living in another user's process.
 		if isCap {
-			reply, err := s.kernel.CompleteTaskInTrace(r.Context(), capOwner, capTrace, pathID(r), *req.Args)
+			id, err := s.kernel.ExpandTaskID(r.Context(), capOwner, pathID(r))
+			if err != nil {
+				return nil, 0, err
+			}
+			reply, err := s.kernel.CompleteTaskInTrace(r.Context(), capOwner, capTrace, id, *req.Args)
 			return reply, http.StatusOK, err
 		}
-		reply, err := s.kernel.CompleteTask(r.Context(), callerFrom(r), pathID(r), *req.Args)
+		id, err := s.kernel.ExpandTaskID(r.Context(), callerFrom(r), pathID(r))
+		if err != nil {
+			return nil, 0, err
+		}
+		reply, err := s.kernel.CompleteTask(r.Context(), callerFrom(r), id, *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
 }

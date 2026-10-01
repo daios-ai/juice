@@ -38,7 +38,9 @@ Usage:
 
 Environment:
   JUICE_HOME         where juice keeps everything (default ~/.juice); the binary
-                     goes in its bin/ subdirectory. Must be an absolute path.
+                     goes in its bin/ subdirectory. Must be an absolute path. The
+                     installer never writes it to a shell profile: a home chosen
+                     for one run is set by whoever runs juice, every time.
 EOF
 	exit 0
 }
@@ -152,8 +154,10 @@ main() {
 	mkdir -p "$bin_dir"
 	put_binary "$tmp/juice" "$exe"
 
-	# The binary is only usable if the shell finds it, and a non-default home is only used if every
-	# later command sees it. Both are one line in the same profile.
+	# The binary is only usable if the shell finds it, so its directory goes in the profile. A home
+	# other than the default was set by whoever ran the installer, for the process that ran it;
+	# writing it to the profile would point every later shell at a directory chosen for one
+	# occasion, so for that home both lines are printed and neither is written.
 	path_line="export PATH=\"$bin_dir:\$PATH\""
 	home_line="export JUICE_HOME=\"$juice_home\""
 	case "$(basename "${SHELL:-/bin/sh}")" in
@@ -173,14 +177,10 @@ main() {
 	esac
 	[ "$juice_home" = "$HOME/.juice" ] && needs_home=0 || needs_home=1
 
-	if [ "$modify_path" -eq 1 ]; then
+	if [ "$modify_path" -eq 1 ] && [ "$needs_home" -eq 0 ]; then
 		[ "$needs_path" -eq 1 ] && add_line "$profile" "$bin_dir" "$path_line" &&
-			say "Added $bin_dir to PATH in $profile."
-		[ "$needs_home" -eq 1 ] && add_line "$profile" "JUICE_HOME" "$home_line" &&
-			say "Set JUICE_HOME to $juice_home in $profile, so juice uses that installation."
-		if [ "$needs_path" -eq 1 ] || [ "$needs_home" -eq 1 ]; then
+			say "Added $bin_dir to PATH in $profile." &&
 			say "Open a new shell for that to take effect."
-		fi
 	else
 		[ "$needs_path" -eq 1 ] && say "$bin_dir is not on your PATH. Add it with:" && say "  $path_line"
 		[ "$needs_home" -eq 1 ] &&

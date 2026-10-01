@@ -4020,3 +4020,89 @@ func TestServeOptionalReadsRefuseFailedCredentials(t *testing.T) {
 		}
 	}
 }
+
+// Every position that takes a task, process or transaction id — seven path parameters and two
+// query filters — answers a prefix of the id as it answers the id itself (D15). One table over all
+// of them, so a position left without the expansion is a failing row, not a gap.
+func TestServeEveryIDPositionTakesAPrefix(t *testing.T) {
+	backend := newTaskBackend(t)
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	ownerID, ownerTok := makeUser(t, k, "pre-owner")
+	_, callerTok := makeUser(t, k, "pre-caller")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "pre-owner", "pre-svc")
+
+	// A run, which makes a process and a transaction of the caller's.
+	var call kernel.CallReply
+	decodeResponse(t, httpDo(t, srv, "POST", "/v1/run", map[string]any{
+		"action": "pre-owner@k/pre-svc", "args": map[string]any{}}, callerTok), &call)
+	if call.TxID == "" || call.ProcessID == "" {
+		t.Fatalf("run reply without ids: %+v", call)
+	}
+	// A task parked in a process of the owner's, addressed to the caller.
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	traceID := setupTraceForProcess(t, db, p.ID)
+	var task map[string]any
+	decodeResponse(t, httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
+		"trace_id": traceID, "action": actionID, "required_caller": "pre-caller@k", "partial_args": map[string]any{},
+	}, ownerTok), &task)
+	taskID, _ := task["id"].(string)
+	if taskID == "" {
+		t.Fatalf("task without id: %v", task)
+	}
+	// As the view writes it: the first twelve hex digits, no hyphen.
+	short := func(id string) string { return id[:8] + id[9:13] }
+
+	for _, c := range []struct {
+		method, path string
+		body         any
+		tok          string
+		want         int
+	}{
+		{"GET", "/v1/tasks/" + short(taskID), nil, ownerTok, http.StatusOK},
+		{"GET", "/v1/tasks?process_id=" + short(p.ID), nil, ownerTok, http.StatusOK},
+		{"GET", "/v1/tasks/" + taskID[:13], nil, ownerTok, http.StatusOK}, // the hyphenated spelling serves too
+		{"GET", "/v1/processes/" + short(p.ID), nil, ownerTok, http.StatusOK},
+		{"GET", "/v1/transactions/" + short(call.TxID), nil, callerTok, http.StatusOK},
+		{"GET", "/v1/transactions/" + short(call.TxID) + "/receipt-verification", nil, callerTok, http.StatusOK},
+		{"GET", "/v1/transactions?process_id=" + short(call.ProcessID), nil, callerTok, http.StatusOK},
+		{"POST", "/v1/transactions/" + short(call.TxID) + "/rate", map[string]any{"rating": 1}, callerTok, http.StatusOK},
+		{"POST", "/v1/tasks/" + short(taskID) + "/complete", map[string]any{"args": map[string]any{}}, callerTok, http.StatusOK},
+		{"POST", "/v1/processes/" + short(p.ID) + "/end", nil, ownerTok, http.StatusNoContent},
+	} {
+		resp := httpDo(t, srv, c.method, c.path, c.body, c.tok)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s %s: got %d %s, want %d", c.method, c.path, resp.StatusCode, body, c.want)
+		}
+	}
+
+	// Lists show what is open unless asked for all (D20): the completed task and the run's closed
+	// process are hidden by default, there under ?all=1, and a status asked for is honoured.
+	listed := func(path, tok, id string) bool {
+		resp := httpDo(t, srv, "GET", path, nil, tok)
+		var rows []map[string]any
+		decodeResponse(t, resp, &rows)
+		for _, r := range rows {
+			if r["id"] == id {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		path, tok, id string
+		want          bool
+	}{
+		{"/v1/tasks", ownerTok, taskID, false},
+		{"/v1/tasks?all=1", ownerTok, taskID, true},
+		{"/v1/tasks?status=done", ownerTok, taskID, true},
+		{"/v1/processes", callerTok, call.ProcessID, false},
+		{"/v1/processes?all=1", callerTok, call.ProcessID, true},
+	} {
+		if got := listed(c.path, c.tok, c.id); got != c.want {
+			t.Errorf("GET %s lists %s: %v, want %v", c.path, c.id, got, c.want)
+		}
+	}
+}

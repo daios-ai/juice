@@ -32,8 +32,12 @@ flow_process_lifecycle() {
     j "$db" "$ha" process end "$proc" >/dev/null 2>&1
     assert_jnum "process_lifecycle.funds_restored" "$(jj "$db" "$ha" user me)" available 1000
     assert_json "process_lifecycle.status_closed" "$(jj "$db" "$ha" process show "$proc")" status closed
-    local st; st=$(jj "$db" "$ha" task list | python3 -c "import sys,json;print(next((s['status'] for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)
+    local st; st=$(jj "$db" "$ha" task list --all | python3 -c "import sys,json;print(next((s['status'] for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)
     assert_eq "process_lifecycle.task_cancelled" cancelled "$st"
+    # A closed process leaves the default list and is there under --all; its prefix still names it.
+    assert_not_contains "process_lifecycle.closed_hidden" "$proc" "$(jj "$db" "$ha" process list)"
+    assert_contains "process_lifecycle.closed_under_all" "$proc" "$(jj "$db" "$ha" process list --all)"
+    assert_json "process_lifecycle.process_by_prefix" "$(jj "$db" "$ha" process show "${proc:0:8}${proc:9:4}")" status closed
 }
 
 flow_acl_public() {

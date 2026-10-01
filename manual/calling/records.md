@@ -18,9 +18,9 @@ in detail. The list's `CHARGED` column shows `gross − refund`:
 
 ```
 $ juice tx list
-$ juice tx show 116fd3a6-…
-  id: 116fd3a6-…
-  process_id: 25386daa-…
+$ juice tx show 116fd3a64b0e
+  id: 116fd3a64b0e
+  process_id: 25386daa-7f31-4c1e-9d2a-8e0b6f5a3c47
   trace_id: 29dde7d6-…
   parent_trace_id:
   action_id: bb7fe1a8-…
@@ -171,14 +171,14 @@ an action has no authority to submit ratings through its execution capability.
 
 A process groups the work and reserved funds of one `run`. It closes
 automatically after all calls have settled and no tasks remain outstanding.
-Use the process commands to follow work that has not yet finished:
+Use the process commands to follow work that has not yet finished. The list shows
+open processes; `--all` adds the closed ones:
 
 ```
 $ juice process list
-PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
-e3539f75-…  open    0.00 fUSD  0.00 fUSD
-25386daa-…  closed  0.00 fUSD  0.00 fUSD
-$ juice process show e3539f75-…
+PROCESS       STATUS  AVAILABLE  LOCKED     AWAITING SINCE
+e3539f7502ad  open    0.00 fUSD  0.00 fUSD
+$ juice process show e3539f7502ad
 ```
 
 A process may remain open while a task waits for input or a remote call awaits

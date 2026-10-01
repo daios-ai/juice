@@ -2150,7 +2150,7 @@ func TestRunQuotePinRefusesBeforeFunding(t *testing.T) {
 	if u.Available != 5000 || u.Locked != 0 {
 		t.Errorf("a refused pin must charge and lock nothing; got available=%d locked=%d", u.Available, u.Locked)
 	}
-	if ps, _ := st.ListProcesses(ctx, alice.ID, 10, 0); len(ps) != 0 {
+	if ps, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: alice.ID, All: true, Limit: 10, Offset: 0}); len(ps) != 0 {
 		t.Errorf("a refused pin must create no process, got %d", len(ps))
 	}
 
@@ -2582,5 +2582,78 @@ func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
 					c.name, a.Name, a.Visibility, a.Active, a.OwnerSuspended, got, want)
 			}
 		}
+	}
+}
+
+// A person names a record by the first characters of its id, and the kernel resolves them within
+// what that person may list (D15): a full id passes through untouched, a prefix that picks one of
+// their records expands to it, and one that picks none or several is refused. A record the caller
+// may not list neither matches nor makes a prefix of theirs ambiguous.
+func TestAnIDPrefixNamesOneOfTheCallersRecords(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	alice := setupUser(t, st, "alice", 0)
+	bob := setupUser(t, st, "bob", 0)
+	action := setupLocalAction(t, st, alice.ID, "park", 0)
+
+	// Tasks with chosen ids: two of alice's share "aaaa", one of alice's and one of bob's share
+	// "bbbb", and "cccc" is bob's alone.
+	park := func(owner *kernel.Account, id string) {
+		_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+		trID := tr.ID
+		if err := st.CreateTask(ctx, &kernel.Task{ID: id, ParentTraceID: &trID, RequiredCallerUserID: owner.ID,
+			ActionID: action.ID, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	park(alice, "aaaa1111-0000-4000-8000-000000000001")
+	park(alice, "aaaa2222-0000-4000-8000-000000000002")
+	park(alice, "bbbb1111-0000-4000-8000-000000000003")
+	park(bob, "bbbb2222-0000-4000-8000-000000000004")
+	park(bob, "cccc1111-0000-4000-8000-000000000005")
+
+	for _, c := range []struct {
+		ref, want string
+		err       error
+	}{
+		{"aaaa1111-0000-4000-8000-000000000001", "aaaa1111-0000-4000-8000-000000000001", nil},
+		{"ffffffff-0000-4000-8000-000000000009", "ffffffff-0000-4000-8000-000000000009", nil}, // a full id is never looked up here
+		{"aaaa1111", "aaaa1111-0000-4000-8000-000000000001", nil},
+		{"aaaa11110000", "aaaa1111-0000-4000-8000-000000000001", nil}, // as the view writes it
+		{"AAAA1111-0000-40", "aaaa1111-0000-4000-8000-000000000001", nil},
+		{"aaaa1111000040", "aaaa1111-0000-4000-8000-000000000001", nil},
+		{"aaaa", "", kernel.ErrInvalidInput},                  // two of alice's
+		{"bbbb", "bbbb1111-0000-4000-8000-000000000003", nil}, // bob's bbbb task is not alice's to see
+		{"cccc", "", kernel.ErrNotFound},                      // bob's alone
+		{"aaa", "", kernel.ErrNotFound},                       // too short to name anything
+		{"zzzz", "", kernel.ErrNotFound},                      // not the shape of an id
+	} {
+		got, err := k.ExpandTaskID(ctx, alice.ID, c.ref)
+		if !errors.Is(err, c.err) || got != c.want {
+			t.Errorf("%q: got %q, %v; want %q, %v", c.ref, got, err, c.want, c.err)
+		}
+	}
+
+	// Processes and transactions resolve by the same rule within the caller's own.
+	p, _ := setupOrphanTrace(t, st, alice.ID, alice.ID, alice.ID)
+	if got, err := k.ExpandProcessID(ctx, alice.ID, p.ID[:8]+p.ID[9:13]); err != nil || got != p.ID {
+		t.Errorf("process prefix: got %q, %v; want %q", got, err, p.ID)
+	}
+	if _, err := k.ExpandProcessID(ctx, bob.ID, p.ID[:13]); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("another's process by prefix: got %v, want ErrNotFound", err)
+	}
+	k.RegisterNativeHandler("park", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+		return map[string]any{}, nil
+	})
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/park", Args: map[string]any{}})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got, err := k.ExpandTransactionID(ctx, alice.ID, reply.TxID[:8]+reply.TxID[9:13]); err != nil || got != reply.TxID {
+		t.Errorf("transaction prefix: got %q, %v; want %q", got, err, reply.TxID)
+	}
+	if _, err := k.ExpandTransactionID(ctx, bob.ID, reply.TxID[:13]); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("another's transaction by prefix: got %v, want ErrNotFound", err)
 	}
 }

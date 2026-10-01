@@ -346,11 +346,11 @@ func adminDepositsCmd() *cobra.Command {
 					return err
 				}
 				fmt.Println("Payments received whose sender nobody has registered:")
-				if err := printFields(a.Deposits, moneyRail, net); err != nil {
+				if err := printFields(a.Deposits, moneyRail, nil, net); err != nil {
 					return err
 				}
 				fmt.Println("Work delivered to foreign buyers and not yet paid for:")
-				return printFields(a.Owed, moneyOwed, net)
+				return printFields(a.Owed, moneyOwed, nil, net)
 			}})
 		},
 	}

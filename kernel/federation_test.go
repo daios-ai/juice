@@ -2677,7 +2677,7 @@ func TestEndProcessRefusesWhileACallAwaitsItsReceipt(t *testing.T) {
 		t.Fatalf("expected ErrTimeout (parked), got %v", err)
 	}
 
-	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: caller.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 1 {
 		t.Fatalf("expected 1 open process, got %d", len(procs))
 	}
@@ -2693,7 +2693,7 @@ func TestEndProcessRefusesWhileACallAwaitsItsReceipt(t *testing.T) {
 	if _, err := st.ReadIdempotencyRecord(ctx, "close-key", caller.ID); err != nil {
 		t.Errorf("the lock must still be held after a refused closure: %v", err)
 	}
-	procs, _ = st.ListProcesses(ctx, caller.ID, 10, 0)
+	procs, _ = st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: caller.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 1 || procs[0].Status != kernel.ProcessOpen {
 		t.Error("the process must stay open")
 	}

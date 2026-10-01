@@ -524,7 +524,12 @@ func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, 
 // Transactions carry no foreign key on their user/process/trace columns, so arbitrary ids are fine.
 func insertTx(t *testing.T, db *DB, ownerID, callerID, targetID, actionID string, endedAt time.Time) string {
 	t.Helper()
-	id := uuid.New().String()
+	return insertTxID(t, db, uuid.New().String(), ownerID, callerID, targetID, actionID, endedAt)
+}
+
+// insertTxID is insertTx with the id chosen by the test, for prefix lookups.
+func insertTxID(t *testing.T, db *DB, id, ownerID, callerID, targetID, actionID string, endedAt time.Time) string {
+	t.Helper()
 	_, err := db.db.ExecContext(context.Background(),
 		`INSERT INTO transactions
 		   (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
@@ -1966,7 +1971,7 @@ func TestListProcesses(t *testing.T) {
 		}
 	}
 
-	got, err := db.ListProcesses(ctx, u.ID, 100, 0)
+	got, err := db.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: u.ID, All: true, Limit: 100, Offset: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2329,7 +2334,7 @@ func TestListTasksPagination(t *testing.T) {
 	}
 
 	// The process owner sees all three; limit bounds the page.
-	page1, err := db.ListTasks(ctx, user.ID, "", "", false, 2, 0)
+	page1, err := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 0})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -2338,13 +2343,13 @@ func TestListTasksPagination(t *testing.T) {
 	}
 
 	// Offset skips the first page.
-	page2, _ := db.ListTasks(ctx, user.ID, "", "", false, 2, 2)
+	page2, _ := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 2})
 	if len(page2) != 1 {
 		t.Fatalf("limit=2 offset=2: want 1 task, got %d", len(page2))
 	}
 
 	// A non-positive limit falls back to the default (50), returning all three.
-	all, _ := db.ListTasks(ctx, user.ID, "", "", false, 0, 0)
+	all, _ := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 0, Offset: 0})
 	if len(all) != 3 {
 		t.Fatalf("limit=0 fallback: want all 3 tasks, got %d", len(all))
 	}
@@ -5186,4 +5191,144 @@ func TestLiveUserAgreesWithItsSQL(t *testing.T) {
 			t.Errorf("%s: Go says %v, SQL says %v, want %v", name, a.IsLiveUser(), inSQL, c.want)
 		}
 	}
+}
+
+// The three lists narrow to an id prefix by a range on the key, and without a status show only
+// what is open: a finished task or a closed process is there under All. The prefix is what a
+// person typed from the first groups of an id (D15); the open default is what `task list` and
+// `process list` show (D20).
+func TestListsNarrowByIDPrefixAndShowOpenByDefault(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	user := newUser("pre-user", 0)
+	if err := db.CreateUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	act := newAction(user.ID, "pre-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(rows any) []string {
+		var out []string
+		switch rs := rows.(type) {
+		case []*kernel.Task:
+			for _, r := range rs {
+				out = append(out, r.ID)
+			}
+		case []*kernel.Process:
+			for _, r := range rs {
+				out = append(out, r.ID)
+			}
+		case []*kernel.Transaction:
+			for _, r := range rs {
+				out = append(out, r.ID)
+			}
+		}
+		return out
+	}
+
+	// Processes: two sharing "aaaa", one closed.
+	open := newProcess(user.ID)
+	open.ID = "aaaa1111-0000-4000-8000-000000000001"
+	closed := newProcess(user.ID)
+	closed.ID = "aaaa2222-0000-4000-8000-000000000002"
+	for _, p := range []*kernel.Process{open, closed} {
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRun(ctx, p, root, user.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		ptID := root.ID
+		if err := db.CreateTask(ctx, &kernel.Task{ID: p.ID, ParentTraceID: &ptID, RequiredCallerUserID: user.ID,
+			ActionID: act.ID, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Close the second process and cancel its task directly: what is under test is the listing of a
+	// closed one, not the closing.
+	if _, err := db.db.ExecContext(ctx, `UPDATE processes SET status='closed' WHERE id=?`, closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `UPDATE tasks SET status='cancelled' WHERE id=?`, closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name   string
+		filter kernel.ProcessFilter
+		want   []string
+	}{
+		{"open by default", kernel.ProcessFilter{OwnerUserID: user.ID}, []string{open.ID}},
+		{"all", kernel.ProcessFilter{OwnerUserID: user.ID, All: true}, []string{closed.ID, open.ID}},
+		{"prefix picks one", kernel.ProcessFilter{OwnerUserID: user.ID, All: true, IDPrefix: "aaaa2222"}, []string{closed.ID}},
+		{"prefix picks both", kernel.ProcessFilter{OwnerUserID: user.ID, All: true, IDPrefix: "aaaa"}, []string{closed.ID, open.ID}},
+		{"prefix picks none", kernel.ProcessFilter{OwnerUserID: user.ID, All: true, IDPrefix: "bbbb"}, nil},
+		{"another owner", kernel.ProcessFilter{OwnerUserID: "nobody", All: true, IDPrefix: "aaaa"}, nil},
+	} {
+		got, err := db.ListProcesses(ctx, c.filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g := ids(got); !sameSet(g, c.want) {
+			t.Errorf("processes %s: got %v, want %v", c.name, g, c.want)
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		filter kernel.TaskFilter
+		want   []string
+	}{
+		{"open by default", kernel.TaskFilter{CallerUserID: user.ID}, []string{open.ID}},
+		{"all", kernel.TaskFilter{CallerUserID: user.ID, All: true}, []string{closed.ID, open.ID}},
+		{"a status asked for", kernel.TaskFilter{CallerUserID: user.ID, Status: "cancelled"}, []string{closed.ID}},
+		{"prefix picks one", kernel.TaskFilter{CallerUserID: user.ID, All: true, IDPrefix: "aaaa1111-0000"}, []string{open.ID}},
+		{"prefix picks both", kernel.TaskFilter{CallerUserID: user.ID, All: true, IDPrefix: "aaaa"}, []string{closed.ID, open.ID}},
+		{"prefix picks none", kernel.TaskFilter{CallerUserID: user.ID, All: true, IDPrefix: "bbbb"}, nil},
+	} {
+		got, err := db.ListTasks(ctx, c.filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g := ids(got); !sameSet(g, c.want) {
+			t.Errorf("tasks %s: got %v, want %v", c.name, g, c.want)
+		}
+	}
+
+	// Transactions: the same prefix rule, within one party's.
+	now := time.Now().UTC()
+	t1 := insertTxID(t, db, "cccc1111-0000-4000-8000-000000000001", user.ID, user.ID, user.ID, act.ID, now)
+	t2 := insertTxID(t, db, "cccc2222-0000-4000-8000-000000000002", user.ID, user.ID, user.ID, act.ID, now)
+	for _, c := range []struct {
+		name   string
+		filter kernel.TxFilter
+		want   []string
+	}{
+		{"no prefix", kernel.TxFilter{PartyUserID: user.ID}, []string{t1, t2}},
+		{"prefix picks one", kernel.TxFilter{PartyUserID: user.ID, IDPrefix: "cccc2"}, []string{t2}},
+		{"prefix picks both", kernel.TxFilter{PartyUserID: user.ID, IDPrefix: "cccc"}, []string{t1, t2}},
+		{"prefix picks none", kernel.TxFilter{PartyUserID: user.ID, IDPrefix: "dddd"}, nil},
+		{"another party", kernel.TxFilter{PartyUserID: "nobody", IDPrefix: "cccc"}, nil},
+	} {
+		got, err := db.ListTransactions(ctx, c.filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g := ids(got); !sameSet(g, c.want) {
+			t.Errorf("transactions %s: got %v, want %v", c.name, g, c.want)
+		}
+	}
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, x := range a {
+		seen[x] = true
+	}
+	for _, y := range b {
+		if !seen[y] {
+			return false
+		}
+	}
+	return true
 }

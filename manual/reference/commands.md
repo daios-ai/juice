@@ -10,6 +10,10 @@ Commands generally follow `juice [admin] <noun> <verb>`. The exception is
 `run`, which executes an action directly. This reference summarizes the
 commands and common options; the linked chapters provide worked examples.
 
+A task, process or transaction is shown by the first twelve hex digits of its id,
+such as `b75366d19c2e`, and any command that takes one accepts those digits in
+place of the whole id. `--json` and `--quiet` print ids whole.
+
 The `admin` prefix requires superuser authority. Its noun distinguishes user
 accounts from peers, so a target is interpreted in the intended namespace.
 The superuser can also use ordinary commands with wider access to records and
@@ -131,7 +135,7 @@ non-interactive confirmation.
 
 | Command | |
 |---|---|
-| `juice process list` | your processes and what they hold |
+| `juice process list` | your open processes and what they hold; `--all` adds closed ones |
 | `juice process show ID` | one process |
 | `juice process end ID` | close it, cancelling waiting tasks and returning their money; refused while awaiting a peer's receipt |
 
@@ -140,7 +144,7 @@ non-interactive confirmation.
 | Command | |
 |---|---|
 | `juice task create ACTION` | set work aside ([Tasks and processes](../providing/tasks.html)) |
-| `juice task list` | tasks you may complete or own; `--status`, `--process`, `--peer` |
+| `juice task list` | open tasks you may complete or own; `--all`, `--status`, `--process`, `--peer` |
 | `juice task show ID` | one task, with `allowed_input` |
 | `juice task complete ID [JSON]` | supply what is missing and run it; `--peer` |
 

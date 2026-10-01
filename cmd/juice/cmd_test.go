@@ -966,7 +966,7 @@ func TestProcessList(t *testing.T) {
 	setupProcessCmd(t, env, owner.ID, 0)
 	setupProcessCmd(t, env, other.ID, 0)
 
-	processes, err := env.k.ListProcesses(ctx, owner.ID, 100, 0)
+	processes, err := env.k.ListProcesses(ctx, owner.ID, kernel.ProcessFilter{All: true, Limit: 100, Offset: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1727,7 +1727,7 @@ func TestPrintTextParity(t *testing.T) {
 		if err := json.Unmarshal(raw, &fields); err != nil {
 			t.Fatal(err)
 		}
-		text := captureStdout(t, func() error { return printFields(raw, nil, kernel.Network{}) })
+		text := captureStdout(t, func() error { return printFields(raw, nil, nil, kernel.Network{}) })
 		for key := range fields {
 			if !strings.Contains(text, key+":") {
 				t.Errorf("%T text output missing field %q\n%s", obj, key, text)
@@ -1744,7 +1744,7 @@ func TestPrintTextParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := captureStdout(t, func() error { return printFields(schemas, nil, kernel.Network{}) })
+	text := captureStdout(t, func() error { return printFields(schemas, nil, nil, kernel.Network{}) })
 	if !strings.Contains(text, "input_schema: {") || !strings.Contains(text, `"type": "object"`) {
 		t.Errorf("input_schema not rendered as indented JSON:\n%s", text)
 	}
@@ -2003,7 +2003,7 @@ func TestEmitFollowsOneOutputPolicy(t *testing.T) {
 func TestTheFieldViewScalesOnlyTheFieldsItIsGiven(t *testing.T) {
 	body := []byte(`{"price":1500000,"result":{"price":1500000},"uses":1500000}`)
 	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
-	got := captureStdout(t, func() error { return printFields(body, moneyAction, net) })
+	got := captureStdout(t, func() error { return printFields(body, moneyAction, nil, net) })
 	if !strings.Contains(got, "price: 1.50 credits") {
 		t.Errorf("a named money field was not written in the world's unit:\n%s", got)
 	}
@@ -2272,7 +2272,7 @@ func TestOnlyTheOutputPolicyReadsTheOutputFlags(t *testing.T) {
 func TestAListOfResourcesReadsLikeOne(t *testing.T) {
 	net := kernel.Network{Name: "play", Decimals: 6, Symbol: "credits"}
 	got := captureStdout(t, func() error {
-		return printFields([]byte(`[{"id":"a-1","price":1500000},{"id":"a-2","price":2000000}]`), moneyAction, net)
+		return printFields([]byte(`[{"id":"a-1","price":1500000},{"id":"a-2","price":2000000}]`), moneyAction, nil, net)
 	})
 	if !strings.Contains(got, "price: 1.50 credits") || !strings.Contains(got, "price: 2.00 credits") {
 		t.Errorf("a list's money was not written in the world's unit:\n%s", got)
@@ -2281,7 +2281,7 @@ func TestAListOfResourcesReadsLikeOne(t *testing.T) {
 		t.Errorf("a list lost its rows:\n%s", got)
 	}
 	// Something that is not resources at all still prints as it arrived.
-	plain := captureStdout(t, func() error { return printFields([]byte(`[1,2,3]`), moneyAction, net) })
+	plain := captureStdout(t, func() error { return printFields([]byte(`[1,2,3]`), moneyAction, nil, net) })
 	if !strings.Contains(plain, "1,") && !strings.Contains(plain, "1\n") {
 		t.Errorf("a plain list was not printed: %q", plain)
 	}
@@ -2925,5 +2925,76 @@ func TestATransferIsARunOfThisKernelsTransfer(t *testing.T) {
 	}
 	if len(sent) != 2 || sent[1].ExternalKey != "run-1" {
 		t.Errorf("run --external-key sent %+v", sent[len(sent)-1])
+	}
+}
+
+// A person reads a task, process or transaction id by its first twelve hex digits, and only
+// those: the fields are named per response (idsTask and its kin), so a trace or receipt id, an
+// account id a person copies into a registration message, an action id a command takes whole, or
+// a process id the reader may not own, is never cut. --json and --quiet carry every id whole,
+// since a script pins on it (D20).
+func TestAPersonReadsRecordIDsShort(t *testing.T) {
+	const txID, traceID, procID = "cf75f9e3-727e-461f-a866-4656ff7f8c69", "7cc8b423-7184-414f-b1ac-16a5e09b21dc", "60dd9588-ac76-42e8-b019-0cf8e9987718"
+	body := []byte(`{"id":"` + txID + `","trace_id":"` + traceID + `","process_id":"` + procID + `"}`)
+
+	fields := captureStdout(t, func() error { return printFields(body, nil, idsTx, kernel.Network{}) })
+	for _, want := range []string{"id: cf75f9e3727e\n", "process_id: " + procID + "\n", "trace_id: " + traceID + "\n"} {
+		if !strings.Contains(fields, want) {
+			t.Errorf("field view lacks %q:\n%s", want, fields)
+		}
+	}
+	whole := captureStdout(t, func() error { return printFields(body, nil, nil, kernel.Network{}) })
+	if !strings.Contains(whole, "id: "+txID+"\n") {
+		t.Errorf("a response naming no ids must show them whole:\n%s", whole)
+	}
+
+	rows := []byte(`[{"id":"` + txID + `"}]`)
+	table := captureStdout(t, func() error { return list(column{"TRANSACTION", short("id")}, column{"WHOLE", text("id")})(rows) })
+	if !strings.Contains(table, "cf75f9e3727e  "+txID) {
+		t.Errorf("table: want the short id beside the whole one:\n%s", table)
+	}
+
+	for _, c := range []struct {
+		name        string
+		json, quiet bool
+	}{{"json", true, false}, {"quiet", false, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			oldJSON, oldQuiet := flagJSON, flagQuiet
+			flagJSON, flagQuiet = c.json, c.quiet
+			t.Cleanup(func() { flagJSON, flagQuiet = oldJSON, oldQuiet })
+			got := captureStdout(t, func() error { return emit(body, output{ids: idsTx}) })
+			if !strings.Contains(got, txID) || strings.Contains(got, "cf75f9e3727e") {
+				t.Errorf("--%s must carry the whole id:\n%s", c.name, got)
+			}
+		})
+	}
+}
+
+// `task list` and `process list` show what is open; --all asks the server for the rest, by the
+// same parameter `action list` uses, and is sent only when typed.
+func TestListsAskForAllOnlyWhenTold(t *testing.T) {
+	var asked []string
+	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path+"?"+r.URL.RawQuery)
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	for _, c := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+		want string
+	}{
+		{"tasks by default", taskListCmd, nil, "/v1/tasks?"},
+		{"tasks with --all", taskListCmd, []string{"--all"}, "/v1/tasks?all=true"},
+		{"processes by default", processListCmd, nil, "/v1/processes?limit=50"},
+		{"processes with --all", processListCmd, []string{"--all"}, "/v1/processes?all=1&limit=50"},
+	} {
+		asked = nil
+		if _, err := execTestCmd(t, c.cmd(), c.args...); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(asked) != 1 || asked[0] != c.want {
+			t.Errorf("%s: asked %v, want %q", c.name, asked, c.want)
+		}
 	}
 }

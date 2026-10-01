@@ -196,6 +196,98 @@ func looksLikeID(s string) bool {
 	return err == nil
 }
 
+// idPrefixMin is the shortest prefix that names a record: git's floor, enough that a slip of the
+// keyboard matches nothing rather than something.
+const idPrefixMin = 4
+
+// expandID returns the one id that ref names among the records list sees: a full id as it is,
+// else the id a prefix picks out, refused when it picks none or several. The prefix is read as
+// hex digits, with or without the id's hyphens — the view writes it without them — and spelled
+// back in the id's own form before the lookup, so the key's range serves it. list is the caller's
+// own list of the kind, narrowed to the prefix and limited to two, so a record the caller may not
+// list neither matches nor makes a visible prefix ambiguous (D15). kind names the record in the
+// refusal.
+func expandID(ref, kind string, list func(prefix string) ([]string, error)) (string, error) {
+	if looksLikeID(ref) {
+		return ref, nil
+	}
+	hex := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(ref)), "-", "")
+	if len(hex) < idPrefixMin || strings.Trim(hex, "0123456789abcdef") != "" {
+		return "", ErrNotFound.Wrapf("%q names no %s: give its id, or its first %d or more characters", ref, kind, idPrefixMin)
+	}
+	prefix := idPrefixForm(hex)
+	ids, err := list(prefix)
+	if err != nil {
+		return "", err
+	}
+	switch len(ids) {
+	case 0:
+		return "", ErrNotFound.Wrapf("no %s of yours starts with %s", kind, prefix)
+	case 1:
+		return ids[0], nil
+	}
+	return "", ErrInvalidInput.Wrapf("%s names more than one of your %ss; give more of the id", prefix, kind)
+}
+
+// idPrefixForm spells leading hex digits of an id in the id's own form, with hyphens after the
+// 8th, 12th, 16th and 20th digits, as far as the digits reach.
+func idPrefixForm(hex string) string {
+	var b strings.Builder
+	for i, c := range hex {
+		if i == 8 || i == 12 || i == 16 || i == 20 {
+			b.WriteByte('-')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// ExpandTaskID resolves a task id or a prefix of one, within the tasks callerID may list.
+func (k *Kernel) ExpandTaskID(ctx context.Context, callerID, ref string) (string, error) {
+	return expandID(ref, "task", func(prefix string) ([]string, error) {
+		tasks, err := k.ListTasks(ctx, callerID, TaskFilter{IDPrefix: prefix, All: true, Limit: 2})
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(tasks))
+		for i, t := range tasks {
+			ids[i] = t.ID
+		}
+		return ids, nil
+	})
+}
+
+// ExpandProcessID resolves a process id or a prefix of one, within the processes callerID may list.
+func (k *Kernel) ExpandProcessID(ctx context.Context, callerID, ref string) (string, error) {
+	return expandID(ref, "process", func(prefix string) ([]string, error) {
+		processes, err := k.ListProcesses(ctx, callerID, ProcessFilter{IDPrefix: prefix, All: true, Limit: 2})
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(processes))
+		for i, p := range processes {
+			ids[i] = p.ID
+		}
+		return ids, nil
+	})
+}
+
+// ExpandTransactionID resolves a transaction id or a prefix of one, within the transactions
+// callerID is a party to.
+func (k *Kernel) ExpandTransactionID(ctx context.Context, callerID, ref string) (string, error) {
+	return expandID(ref, "transaction", func(prefix string) ([]string, error) {
+		txs, err := k.ListTransactions(ctx, callerID, TxFilter{IDPrefix: prefix, Limit: 2})
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(txs))
+		for i, tx := range txs {
+			ids[i] = tx.ID
+		}
+		return ids, nil
+	})
+}
+
 // indexActionName is the action that represents a group at its root: referring to a path
 // resolves the exact action named, else that path's index child — the web's index-page
 // convention (§13). An index is an ordinary action in every other respect.

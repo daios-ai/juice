@@ -174,6 +174,7 @@ type output struct {
 	id    string
 	rows  string // the field holding this reply's resources, when a reply wraps them in one
 	money []string
+	ids   []string // the fields a person reads short (shortID); never under --json or --quiet
 	human func(body []byte) error
 	net   kernel.Network // the world's unit, read before the request by units()
 }
@@ -219,7 +220,7 @@ func emit(body []byte, o output) error {
 	case o.human != nil:
 		return o.human(body)
 	}
-	return printFields(body, o.money, o.net)
+	return printFields(body, o.money, o.ids, o.net)
 }
 
 func (o output) idField() string {
@@ -260,6 +261,23 @@ type column struct {
 // text reads one field of a row as it stands.
 func text(field string) func(json.RawMessage) string {
 	return func(row json.RawMessage) string { return strField(row, field) }
+}
+
+// short reads one field of a row as an id a person reads: see shortID.
+func short(field string) func(json.RawMessage) string {
+	return func(row json.RawMessage) string { return shortID(strField(row, field)) }
+}
+
+// shortID is how a person reads a task, process or transaction id: its first twelve hex digits,
+// as Docker shows a container, which the server resolves back to the record (D15). Only an id in
+// a field named for it is cut (idsTask and the lists beside it), never one guessed from its
+// shape, since an account or action id is copied whole into other commands. Anything that is not
+// a UUID is returned as is.
+func shortID(s string) string {
+	if _, err := uuid.Parse(s); err != nil || len(s) != 36 {
+		return s
+	}
+	return s[:8] + s[9:13]
 }
 
 // money reads one field of a row as an amount, in the unit a person reads.
@@ -366,7 +384,7 @@ func printIDs(body []byte, field string) error {
 // (CLI/HTTP parity, §14). The fields named as money are written the way this kernel writes money
 // (D20); every other value prints as it arrived, because an action's own arguments and results
 // ride inside these responses and are never reinterpreted.
-func printFields(body []byte, money []string, net kernel.Network) error {
+func printFields(body []byte, money, ids []string, net kernel.Network) error {
 	if len(body) == 0 {
 		return nil
 	}
@@ -382,7 +400,7 @@ func printFields(body []byte, money []string, net kernel.Network) error {
 			if i > 0 {
 				fmt.Println()
 			}
-			if err := printFields(row, money, net); err != nil {
+			if err := printFields(row, money, ids, net); err != nil {
 				return err
 			}
 		}
@@ -405,18 +423,25 @@ func printFields(body []byte, money []string, net kernel.Network) error {
 		if err := dec.Decode(&raw); err != nil {
 			return err
 		}
-		fmt.Printf("  %s: %s\n", key, renderField(key, raw, money, net))
+		fmt.Printf("  %s: %s\n", key, renderField(key, raw, money, ids, net))
 	}
 	return nil
 }
 
-// renderField formats one field: money in the world's unit, a duration with the unit it is in, and
-// everything else as renderValue does. A bare number a person cannot interpret is not an answer.
-func renderField(key string, raw json.RawMessage, money []string, net kernel.Network) string {
+// renderField formats one field: money in the world's unit, an id a person will type by its first
+// groups, a duration with the unit it is in, and everything else as renderValue does. A bare
+// number a person cannot interpret is not an answer.
+func renderField(key string, raw json.RawMessage, money, ids []string, net kernel.Network) string {
 	for _, m := range money {
 		var amount int64
 		if m == key && json.Unmarshal(raw, &amount) == nil {
 			return net.Amount(amount)
+		}
+	}
+	for _, f := range ids {
+		var id string
+		if f == key && json.Unmarshal(raw, &id) == nil {
+			return shortID(id)
 		}
 	}
 	if strings.HasSuffix(key, "latency_estimate") {
@@ -438,7 +463,20 @@ var (
 	moneyLedger  = []string{"amount"}
 	moneyTask    = []string{"price"}
 	moneyCall    = []string{"charge"}
-	moneyOwed    = []string{"obligation", "amount"}
+)
+
+// The ids in each response a person reads short (D20): those of records the reader can name by
+// prefix, since the prefix resolves within their own records. A task's or transaction's
+// process_id stays whole: its required caller or counterparty sees the record without owning the
+// process. A trace or receipt id stays whole: nothing takes a prefix of one. A run's process is the
+// caller's own, so idsCall shortens it; a completion on a peer shortens nothing (idsPeer).
+var (
+	idsTask    = []string{"id"}
+	idsProcess = []string{"id"}
+	idsTx      = []string{"id"}
+	idsCall    = []string{"tx_id", "process_id", "task_id"}
+	idsPeer    []string
+	moneyOwed  = []string{"obligation", "amount"}
 )
 
 // renderValue formats one JSON value for text output: strings unquoted, objects and
@@ -613,7 +651,7 @@ func userTransferCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(raw, output{id: "tx_id", money: moneyCall, net: net})
+			return emit(raw, output{id: "tx_id", money: moneyCall, ids: idsCall, net: net})
 		},
 	}
 	cmd.Flags().StringVar(&externalKey, "external-key", "", "Unique id for this transfer; repeating the command with the same id never moves money twice")
@@ -640,7 +678,7 @@ func userLedgerCmd() *cobra.Command {
 				column{"AMOUNT", money("amount", net)},
 				column{"FROM", party("from")},
 				column{"TO", party("to")},
-				column{"WHY", text("reason")},
+				column{"WHY", short("reason")},
 			)})
 		},
 	}
@@ -1297,7 +1335,7 @@ func printActionWithEvidence(b []byte, net kernel.Network) error {
 		} `json:"evidence"`
 	}
 	_ = json.Unmarshal(b, &resp)
-	if err := printFields(b, moneyAction, net); err != nil {
+	if err := printFields(b, moneyAction, nil, net); err != nil {
 		return err
 	}
 	if resp.Evidence == nil {
@@ -1439,6 +1477,7 @@ func init() {
 }
 
 func processListCmd() *cobra.Command {
+	var all bool
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -1452,8 +1491,12 @@ func processListCmd() *cobra.Command {
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
+			// Open by default, like `action list`; --all adds closed ones.
+			if all {
+				q.Set("all", "1")
+			}
 			return cli.emitCtx(ctx, "GET", "/v1/processes?"+q.Encode(), nil, output{human: list(
-				column{"PROCESS", text("id")},
+				column{"PROCESS", short("id")},
 				column{"STATUS", text("status")},
 				column{"AVAILABLE", money("available", net)},
 				column{"LOCKED", money("locked", net)},
@@ -1463,6 +1506,7 @@ func processListCmd() *cobra.Command {
 			)})
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "Include closed processes; by default only open ones are listed")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1487,7 +1531,7 @@ func processShowCmd() *cobra.Command {
 		Short: "Show process details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cli.emit("GET", "/v1/processes/"+args[0], nil, output{money: moneyAccount})
+			return cli.emit("GET", "/v1/processes/"+args[0], nil, output{money: moneyAccount, ids: idsProcess})
 		},
 	}
 }
@@ -1522,7 +1566,7 @@ func taskCreateCmd() *cobra.Command {
 				RequiredCaller: requiredCaller,
 				PartialArgs:    pa,
 			}
-			return cli.emit("POST", "/v1/tasks", body, output{money: moneyTask})
+			return cli.emit("POST", "/v1/tasks", body, output{money: moneyTask, ids: idsTask})
 		},
 	}
 	cmd.Flags().StringVar(&traceID, "trace", "", "Id of the funding call (the trace_id returned by run), whose budget pays for the task (required)")
@@ -1535,6 +1579,7 @@ func taskCreateCmd() *cobra.Command {
 
 func taskListCmd() *cobra.Command {
 	var processID, status, peer string
+	var all bool
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -1543,14 +1588,14 @@ func taskListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Every flag typed is sent: the server decides what combines, so none is silently dropped.
 			q := url.Values{}
-			for flag, param := range map[string]string{"peer": "peer", "process": "process_id", "status": "status", "limit": "limit", "offset": "offset"} {
+			for flag, param := range map[string]string{"peer": "peer", "process": "process_id", "status": "status", "all": "all", "limit": "limit", "offset": "offset"} {
 				if cmd.Flags().Changed(flag) {
 					q.Set(param, cmd.Flags().Lookup(flag).Value.String())
 				}
 			}
 			if peer == "" {
 				return cli.emit("GET", "/v1/tasks?"+q.Encode(), nil, output{human: list(
-					column{"TASK", text("id")},
+					column{"TASK", short("id")},
 					column{"STATUS", text("status")},
 					column{"CREATED BY", text("created_by")},
 					column{"COMPLETES", text("action")},
@@ -1589,6 +1634,7 @@ func taskListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
+	cmd.Flags().BoolVar(&all, "all", false, "Include finished tasks (done, cancelled); by default only open ones are listed")
 	cmd.Flags().StringVar(&peer, "peer", "", "List tasks this peer (its local name or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
@@ -1600,7 +1646,7 @@ func taskShowCmd() *cobra.Command {
 		Short: "Show task details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cli.emit("GET", "/v1/tasks/"+args[0], nil, output{money: moneyTask})
+			return cli.emit("GET", "/v1/tasks/"+args[0], nil, output{money: moneyTask, ids: idsTask})
 		},
 	}
 }
@@ -1625,7 +1671,12 @@ func taskCompleteCmd() *cobra.Command {
 			if peer != "" {
 				body["peer"] = peer
 			}
-			return cli.emit("POST", "/v1/tasks/"+args[0]+"/complete", body, output{id: "tx_id"})
+			// A peer's ids are the peer's to resolve, so they are shown as they came.
+			ids := idsCall
+			if peer != "" {
+				ids = idsPeer
+			}
+			return cli.emit("POST", "/v1/tasks/"+args[0]+"/complete", body, output{id: "tx_id", ids: ids})
 		},
 	}
 	cmd.Flags().StringVar(&peer, "peer", "", "Complete a task held by this peer (its local name or key), over federation")
@@ -1659,7 +1710,7 @@ func txListCmd() *cobra.Command {
 			}
 			setLimitOffset(q, limit, offset)
 			return cli.emitCtx(ctx, "GET", "/v1/transactions?"+q.Encode(), nil, output{human: list(
-				column{"TRANSACTION", text("id")},
+				column{"TRANSACTION", short("id")},
 				column{"STARTED", text("started_at")},
 				column{"ACTION", text("action")},
 				column{"STATUS", text("status")},
@@ -1682,7 +1733,7 @@ func txShowCmd() *cobra.Command {
 		Short: "Show transaction details",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cli.emit("GET", "/v1/transactions/"+args[0], nil, output{money: moneyTx})
+			return cli.emit("GET", "/v1/transactions/"+args[0], nil, output{money: moneyTx, ids: idsTx})
 		},
 	}
 }
@@ -1782,7 +1833,7 @@ func runCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(raw, output{id: "tx_id", money: moneyCall, net: net})
+			return emit(raw, output{id: "tx_id", money: moneyCall, ids: idsCall, net: net})
 		},
 	}
 	cmd.Flags().StringVar(&quoteHash, "quote-hash", "", "Pin terms you read earlier (quote_hash on the action) instead of the ones this command reads")

@@ -312,12 +312,13 @@ func (k *Kernel) ReadTask(ctx context.Context, callerID, taskID string) (*Task, 
 }
 
 // ListTasks returns tasks visible to the caller.
-func (k *Kernel) ListTasks(ctx context.Context, callerID, processID, status string, limit, offset int) ([]*Task, error) {
+func (k *Kernel) ListTasks(ctx context.Context, callerID string, f TaskFilter) ([]*Task, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
-	return k.store.ListTasks(ctx, callerID, processID, status, k.isUserSuperuser(ctx, u), limit, offset)
+	f.CallerUserID, f.Superuser = callerID, k.isUserSuperuser(ctx, u)
+	return k.store.ListTasks(ctx, f)
 }
 
 // ListTasksAwaitingCaller returns the waiting tasks callerID is the required caller of, oldest

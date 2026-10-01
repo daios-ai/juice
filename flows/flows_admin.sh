@@ -160,8 +160,8 @@ flow_admin_supervision() {
     local tx_id proc_id
     tx_id=$(strfield "$(jj "$db" "$ha" run alice@k/test '{}')" tx_id)
     proc_id=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
-    # sys `process list` / `tx list` span all users.
-    assert_contains "admin.process_list_scope" "$proc_id" "$(jj "$db" "$hs" process list)"
+    # sys `process list` / `tx list` span all users; the run's process is closed, so --all.
+    assert_contains "admin.process_list_scope" "$proc_id" "$(jj "$db" "$hs" process list --all)"
     assert_eq "admin.tx_list_scope" yes \
         "$([ "$(list_len "$(jj "$db" "$hs" tx list)")" -ge 1 ] && echo yes || echo no)"
 
@@ -204,8 +204,21 @@ flow_message() {
     # bob sees the task and completes it.
     assert_contains "message.bob_sees_task" "$task_id" "$(jj "$db" "$hb" task list)"
     assert_json "message.task_waiting" "$(jj "$db" "$hb" task show "$task_id")" status waiting
-    assert_contains "message.bob_completes_task" tx_id "$(jj "$db" "$hb" task complete "$task_id" '{}')"
+    local ctx; ctx=$(strfield "$(jj "$db" "$hb" task complete "$task_id" '{}')" tx_id)
+    assert_nonempty "message.bob_completes_task" "$ctx"
     assert_json "message.task_done" "$(jj "$db" "$ha" task show "$task_id")" status done
+
+    # A person names a record by the first groups of its id, which is how a list shows it; a
+    # finished task leaves the default list and is there under --all (D15, D20).
+    local short="${task_id:0:8}${task_id:9:4}"
+    assert_json "message.task_by_prefix" "$(jj "$db" "$ha" task show "$short")" status done
+    assert_json "message.task_by_hyphenated_prefix" "$(jj "$db" "$ha" task show "${task_id:0:13}")" status done
+    assert_fails "message.prefix_too_short" "names no task" -- j "$db" "$ha" task show c
+    assert_contains "message.list_shows_short_id" "$short" "$(j "$db" "$ha" task list --all)"
+    assert_not_contains "message.list_hides_whole_id" "$task_id" "$(j "$db" "$ha" task list --all)"
+    assert_contains "message.json_keeps_whole_id" "$task_id" "$(jj "$db" "$ha" task list --all)"
+    assert_not_contains "message.done_task_hidden" "$task_id" "$(jj "$db" "$ha" task list)"
+    assert_contains "message.tx_by_prefix" "$ctx" "$(jj "$db" "$ha" tx show "${ctx:0:8}${ctx:9:4}")"
 
     # Missing 'to' and unknown recipient are both rejected.
     assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys@k/message '{"message":"hi"}'

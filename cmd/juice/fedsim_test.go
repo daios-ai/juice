@@ -251,35 +251,35 @@ func (p *simPort) deliver(ctx context.Context, peerKey string, verb simVerb,
 	call func(h *fedHandlers) fed.Response) (fed.Response, error) {
 
 	if p.net.isBlocked(p.self, peerKey) {
-		p.net.logf("%s -> %s %s BLOCKED (link cut)", short(p.self), short(peerKey), verb)
+		p.net.logf("%s -> %s %s BLOCKED (link cut)", key8(p.self), key8(peerKey), verb)
 		return fed.Response{}, fmt.Errorf("sim: link cut: %w", fed.ErrNotDispatched)
 	}
 	dst := p.net.node(peerKey)
 	if dst == nil {
-		return fed.Response{}, fmt.Errorf("sim: no such peer %s: %w", short(peerKey), fed.ErrNotDispatched)
+		return fed.Response{}, fmt.Errorf("sim: no such peer %s: %w", key8(peerKey), fed.ErrNotDispatched)
 	}
 
 	switch f := p.net.take(p.self, peerKey, verb); f {
 	case faultRefuseBeforeDispatch:
-		p.net.logf("%s -> %s %s REFUSED before dispatch", short(p.self), short(peerKey), verb)
+		p.net.logf("%s -> %s %s REFUSED before dispatch", key8(p.self), key8(peerKey), verb)
 		return fed.Response{}, fmt.Errorf("sim: refused: %w", fed.ErrNotDispatched)
 
 	case faultLoseResponse:
 		// The peer does the work. Only the answer is lost — which is why this must not be
 		// reported as not-dispatched: the call may well have executed and been charged.
 		resp := call(dst.h)
-		p.net.logf("%s -> %s %s delivered (status %d), RESPONSE LOST", short(p.self), short(peerKey), verb, resp.Status)
+		p.net.logf("%s -> %s %s delivered (status %d), RESPONSE LOST", key8(p.self), key8(peerKey), verb, resp.Status)
 		return fed.Response{}, fmt.Errorf("sim: response lost after dispatch")
 
 	case faultDeliverTwice:
 		first := call(dst.h)
 		second := call(dst.h)
-		p.net.logf("%s -> %s %s delivered TWICE (status %d then %d)", short(p.self), short(peerKey), verb, first.Status, second.Status)
+		p.net.logf("%s -> %s %s delivered TWICE (status %d then %d)", key8(p.self), key8(peerKey), verb, first.Status, second.Status)
 		return second, nil
 
 	default:
 		resp := call(dst.h)
-		p.net.logf("%s -> %s %s status %d %s", short(p.self), short(peerKey), verb, resp.Status, body(resp))
+		p.net.logf("%s -> %s %s status %d %s", key8(p.self), key8(peerKey), verb, resp.Status, body(resp))
 		return resp, nil
 	}
 }
@@ -323,7 +323,7 @@ func body(r fed.Response) string {
 	return b
 }
 
-func short(key string) string {
+func key8(key string) string {
 	if len(key) > 8 {
 		return key[:8]
 	}

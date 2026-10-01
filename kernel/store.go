@@ -207,6 +207,32 @@ type TxFilter struct {
 	// PartyUserID matches transactions where the user is any party:
 	// process owner (owner_user_id), call caller (caller_user_id), or action owner (target_user_id).
 	PartyUserID string
+	// IDPrefix narrows to transactions whose id starts with it; empty means all. It is how a
+	// prefix typed by a person is resolved within what the caller may list (D15).
+	IDPrefix string
+	Limit    int
+	Offset   int
+}
+
+// TaskFilter selects tasks for ListTasks: those the caller may see, narrowed by process, status
+// and id prefix. Without a status, only open tasks (waiting, running) are listed unless All is set.
+type TaskFilter struct {
+	CallerUserID string
+	Superuser    bool // the caller sees every task, not only their own
+	ProcessID    string
+	Status       string
+	All          bool
+	IDPrefix     string
+	Limit        int
+	Offset       int
+}
+
+// ProcessFilter selects processes for ListProcesses: one owner's, or every owner's when
+// OwnerUserID is empty. Only open processes are listed unless All is set.
+type ProcessFilter struct {
+	OwnerUserID string
+	All         bool
+	IDPrefix    string
 	Limit       int
 	Offset      int
 }
@@ -276,8 +302,7 @@ type Store interface {
 	ReadProcessByKey(ctx context.Context, ownerID, key string) (*Process, error)
 
 	ReadProcess(ctx context.Context, id string) (*Process, error)
-	ListProcesses(ctx context.Context, ownerID string, limit, offset int) ([]*Process, error)
-	ListAllProcesses(ctx context.Context, limit, offset int) ([]*Process, error)
+	ListProcesses(ctx context.Context, f ProcessFilter) ([]*Process, error)
 
 	// BeginSubcall is D3's call-entry write set.
 	BeginSubcall(ctx context.Context, parentTraceID string, t *Trace, price int64) error
@@ -365,7 +390,7 @@ type Store interface {
 	CreateTask(ctx context.Context, s *Task) error
 	ReadTask(ctx context.Context, id string) (*Task, error)
 	// ListTasks returns tasks visible to caller. processID and status are optional filters ("" = no filter).
-	ListTasks(ctx context.Context, callerUserID, processID, status string, isSuperuser bool, limit, offset int) ([]*Task, error)
+	ListTasks(ctx context.Context, f TaskFilter) ([]*Task, error)
 	ListTasksAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*Task, error)
 	// ResetTaskAndRepark re-parks a task's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.

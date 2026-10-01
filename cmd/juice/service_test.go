@@ -534,7 +534,7 @@ func TestListTasks_Enriched(t *testing.T) {
 		t.Fatalf("createTask: %v", err)
 	}
 
-	tasks, err := listTasks(k, ctx, ownerID, p.ID, "", 50, 0)
+	tasks, err := listTasks(k, ctx, ownerID, kernel.TaskFilter{ProcessID: p.ID, All: true, Limit: 50})
 	if err != nil {
 		t.Fatalf("listTasks: %v", err)
 	}

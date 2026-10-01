@@ -2597,7 +2597,7 @@ func TestRunInputSchemaRejectionLeavesNoProcess(t *testing.T) {
 	if got.Locked != 0 {
 		t.Errorf("user.Locked=%d after schema rejection, want 0 (no process should be created)", got.Locked)
 	}
-	procs, _ := st.ListProcesses(ctx, alice.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: alice.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after schema rejection, got %d", len(procs))
 	}
@@ -2630,7 +2630,7 @@ func TestRunNoSigningKeyLeavesNoProcess(t *testing.T) {
 	if got.Locked != 0 {
 		t.Errorf("user.Locked=%d after signing-key rejection, want 0 (no process should be created)", got.Locked)
 	}
-	procs, _ := st.ListProcesses(ctx, bob.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: bob.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after signing-key rejection, got %d", len(procs))
 	}
@@ -2662,7 +2662,7 @@ func TestRunDoesNotCreateProcessForInactiveAction(t *testing.T) {
 	if got.Locked != 0 {
 		t.Errorf("user.Locked=%d after inactive action rejection, want 0 (no process created)", got.Locked)
 	}
-	procs, _ := st.ListProcesses(ctx, alice.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: alice.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after inactive action rejection, got %d", len(procs))
 	}
@@ -2695,7 +2695,7 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	if got.Locked != 0 {
 		t.Errorf("user.Locked=%d after insufficient balance, want 0 (no process created)", got.Locked)
 	}
-	procs, _ := st.ListProcesses(ctx, caller.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: caller.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after insufficient balance, got %d", len(procs))
 	}
@@ -2737,7 +2737,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
 	}
-	procs, _ := st.ListProcesses(ctx, peer.ID, 10, 0)
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: peer.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no process for a denied inbound local call, got %d", len(procs))
 	}
@@ -3120,7 +3120,7 @@ func TestListProcessesSuperuserWidening(t *testing.T) {
 	proc := setupProcess(t, st, alice.ID, 0)
 
 	has := func(callerID string) bool {
-		ps, err := k.ListProcesses(ctx, callerID, 50, 0)
+		ps, err := k.ListProcesses(ctx, callerID, kernel.ProcessFilter{All: true, Limit: 50, Offset: 0})
 		if err != nil {
 			t.Fatalf("ListProcesses(%s): %v", callerID, err)
 		}
@@ -3254,7 +3254,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 	if u.Available != 1000 || u.Locked != 0 {
 		t.Errorf("balance moved: available=%d locked=%d, want 1000/0", u.Available, u.Locked)
 	}
-	procs, _ := k.ListProcesses(ctx, owner.ID, 100, 0)
+	procs, _ := k.ListProcesses(ctx, owner.ID, kernel.ProcessFilter{All: true, Limit: 100, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("process created despite pre-lock rejection: %d", len(procs))
 	}
@@ -3522,7 +3522,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 	if u, _ := k.ReadUser(ctx, owner.ID); u.Available != 1000 || u.Locked != 0 {
 		t.Errorf("balance moved: available=%d locked=%d, want 1000/0", u.Available, u.Locked)
 	}
-	if procs, _ := k.ListProcesses(ctx, owner.ID, 100, 0); len(procs) != 0 {
+	if procs, _ := k.ListProcesses(ctx, owner.ID, kernel.ProcessFilter{All: true, Limit: 100, Offset: 0}); len(procs) != 0 {
 		t.Errorf("process created despite pre-lock rejection: %d", len(procs))
 	}
 }
