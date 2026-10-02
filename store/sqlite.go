@@ -395,7 +395,8 @@ func (s *DB) DeactivateImportedIfHash(ctx context.Context, actionID, expectedHas
 // comparison is `<=`: julianday() returns a float64 whose resolution near today's epoch is only
 // ~tens of microseconds, so last_active and a cutoff a hair later can round equal; since seeds
 // always precede the cutoff and julianday is monotonic, `<=` is deterministic where `<` flaked.
-// A peer with any waiting/running task addressed to it or to one of its actions is still in use and skipped.
+// A peer with any open task addressed to it, bound to one of its actions, or held by it for one of
+// ours is still in use and skipped.
 func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id FROM accounts u
@@ -414,6 +415,7 @@ WHERE u.kernel_public_key IS NOT NULL AND u.kernel_public_key != ''
          WHERE s.status IN ('waiting','running')
            AND (s.required_caller_user_id=u.id
                 OR s.action_id IN (SELECT id FROM actions WHERE owner_user_id=u.id)))
+  AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key=u.kernel_public_key AND m.status IN ('waiting','running'))
   -- Nothing owed either way: no call it made is still unrevealed or unpaid here, and no call we
   -- made to it is still waiting to tell it how the draw came out. Purging would drop the account
   -- the reveal or the payment is keyed on, and the obligation could never close (P10).
@@ -450,6 +452,11 @@ func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
 		const owned = `SELECT id FROM actions WHERE owner_user_id=?`
 		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, userID); err != nil {
 			return dbErr(err, "delete action_stats")
+		}
+		// The peer's tasks go with their mailbox entries, and so does everything it delivered here.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mailbox WHERE holder_key=? OR id IN (SELECT id FROM tasks WHERE required_caller_user_id=? OR action_id IN (`+owned+`))`,
+			pubKey.String, userID, userID); err != nil {
+			return dbErr(err, "delete mailbox entries")
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_user_id=? OR action_id IN (`+owned+`)`, userID, userID); err != nil {
 			return dbErr(err, "delete tasks")
@@ -678,6 +685,11 @@ func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*
 func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) error {
 	inJSON, _ := json.Marshal(a.InputSchema)
 	outJSON, _ := json.Marshal(a.OutputSchema)
+	// A waiting task's allowed input is derived from this schema, so a change re-delivers it (P8).
+	var schemaMoved bool
+	if err := tx.QueryRowContext(ctx, `SELECT input_schema<>? FROM actions WHERE id=?`, string(inJSON), a.ID).Scan(&schemaMoved); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return dbErr(err, "update action: read schema")
+	}
 	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
 		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
@@ -685,7 +697,11 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
 		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
-	return dbErr(err, "update action")
+	if err != nil || !schemaMoved {
+		return dbErr(err, "update action")
+	}
+	_, err = reviseTasks(ctx, tx, "", "action_id=? AND status='waiting'", a.ID)
+	return err
 }
 
 func (s *DB) UpdateAction(ctx context.Context, a *kernel.Action) error {
@@ -1117,13 +1133,11 @@ func (s *DB) BeginTaskCall(ctx context.Context, taskID string, t *kernel.Trace) 
 			return err
 		}
 		// Claim the task and record which trace will complete it.
-		res, err := tx.ExecContext(ctx,
-			`UPDATE tasks SET status='running', completion_trace_id=? WHERE id=? AND status='waiting'`,
-			t.ID, taskID)
+		claimed, err := reviseTasks(ctx, tx, ", status='running', completion_trace_id=?", "id=? AND status='waiting'", t.ID, taskID)
 		if err != nil {
-			return dbErr(err, "begin task call: claim task")
+			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		if len(claimed) == 0 {
 			return kernel.ErrInvalidState.Wrap("task already claimed").Because(kernel.ErrTaskNotClaimed)
 		}
 		return nil
@@ -1208,14 +1222,11 @@ func (s *DB) upsertActionStats(ctx context.Context, tx *sql.Tx, stats *kernel.St
 // completeTaskTx transitions a task to done and records the tx_id atomically.
 // Requires exactly one row to be affected; returns ErrInvalidState if not (B2 fix).
 func (s *DB) completeTaskTx(ctx context.Context, tx *sql.Tx, taskID, txID, label string) error {
-	res, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET status='done', tx_id=? WHERE id=? AND status='running'`,
-		txID, taskID,
-	)
+	done, err := reviseTasks(ctx, tx, ", status='done', tx_id=?", "id=? AND status='running'", txID, taskID)
 	if err != nil {
-		return dbErr(err, label+": complete task")
+		return err
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	if len(done) != 1 {
 		return kernel.ErrInvalidState.Wrap("task transition to done affected unexpected rows")
 	}
 	return nil
@@ -1325,17 +1336,14 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 	if err != nil {
 		return 0, dbErr(err, "cancel task subtree: sum prices")
 	}
-	_, err = tx.ExecContext(ctx, `
+	if _, err = reviseTasks(ctx, tx, ", status='cancelled'", `status='waiting' AND parent_trace_id IN (
 WITH RECURSIVE sub(id) AS (
     SELECT ? AS id
     UNION ALL
     SELECT t.id FROM traces t JOIN sub s ON t.parent_trace_id=s.id
 )
-UPDATE tasks SET status='cancelled'
-WHERE parent_trace_id IN (SELECT id FROM sub)
-  AND status='waiting'`, traceID)
-	if err != nil {
-		return 0, dbErr(err, "cancel task subtree: cancel tasks")
+SELECT id FROM sub)`, traceID); err != nil {
+		return 0, err
 	}
 	return total, nil
 }
@@ -1801,10 +1809,10 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 				return err2
 			}
 		}
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE tasks SET status='cancelled' WHERE id IN (SELECT s.id FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
+		if _, err = reviseTasks(ctx, tx, ", status='cancelled'",
+			`id IN (SELECT s.id FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
 			processID); err != nil {
-			return dbErr(err, "end process: cancel waiting tasks")
+			return err
 		}
 		return closeProcessWallet(ctx, tx, processID, ownerID, available, "end process")
 	})
@@ -2052,7 +2060,11 @@ func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
 			task.RequiredCallerHandle, task.ActionID, rawJSONStr(task.PartialArgs),
 			task.Price, task.ImportBPS, string(task.Status), timeToStr(task.CreatedAt),
 		)
-		return dbErr(err, "create task: insert")
+		if err != nil {
+			return dbErr(err, "create task: insert")
+		}
+		_, err = reviseTasks(ctx, tx, "", "id=?", task.ID)
+		return err
 	})
 }
 
@@ -2093,22 +2105,141 @@ func (s *DB) ReadTask(ctx context.Context, id string) (*kernel.Task, error) {
 	return task, nil
 }
 
-func (s *DB) ListTasks(ctx context.Context, f kernel.TaskFilter) ([]*kernel.Task, error) {
+// CancelTask declines a waiting task (D6): cancelled, its parked price back to its process, and the
+// process closed if nothing else is open, in one commit. A running task's price funds a call in
+// flight, and a finished one has nothing to return, so both are refused.
+func (s *DB) CancelTask(ctx context.Context, id string) error {
+	return s.withTx(ctx, "cancel task", func(tx *sql.Tx) error {
+		var price int64
+		var traceID, processID string
+		err := tx.QueryRowContext(ctx,
+			`SELECT s.price, t.id, t.process_id FROM tasks s JOIN traces t ON t.id=s.parent_trace_id WHERE s.id=? AND s.status='waiting'`,
+			id).Scan(&price, &traceID, &processID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return kernel.ErrInvalidState.Wrap("task is not waiting")
+		}
+		if err != nil {
+			return dbErr(err, "cancel task: read")
+		}
+		if _, err := reviseTasks(ctx, tx, ", status='cancelled'", "id=? AND status='waiting'", id); err != nil {
+			return err
+		}
+		// The park leaves the trace that made it; like any refund to a task's computation it lands
+		// on the process, which returns it to its owner when it closes.
+		if err := unlockFunds(ctx, tx, traceWallet, traceID, price, "cancel task: park"); err != nil {
+			return err
+		}
+		if err := creditAvailable(ctx, tx, processWallet, processID, price, "cancel task: refund"); err != nil {
+			return err
+		}
+		return s.closeProcessTx(ctx, tx, processID)
+	})
+}
+
+// reviseTasks is the one writer of a task's state: every change bumps the task's revision and
+// rewrites its mailbox entry here in the same commit, so neither the entry nor the notice a peer is
+// owed can fall behind the task (P8). set assigns what changes, after a leading comma.
+func reviseTasks(ctx context.Context, tx *sql.Tx, set, where string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `UPDATE tasks SET revision=revision+1`+set+` WHERE `+where+` RETURNING id`, args...)
+	if err != nil {
+		return nil, dbErr(err, "revise tasks")
+	}
+	ids, err := queryList(rows, "revise tasks", scanID)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		e, _, err := readOwnTask(ctx, tx, id)
+		if err == nil {
+			err = upsertMailbox(ctx, tx, e)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// readOwnTask builds a task this kernel holds as its mailbox entry, and the key of the peer it is
+// addressed to, empty when its addressee is here.
+func readOwnTask(ctx context.Context, q rowQuerier, id string) (*kernel.TaskEntry, string, error) {
+	e := &kernel.TaskEntry{}
+	var status, partial, createdAt, schema, outcome, reply, peerKey string
+	err := q.QueryRowContext(ctx, `
+SELECT s.id, s.revision, s.status, s.required_caller_user_id, COALESCE(s.required_caller_remote_id,''),
+       s.required_caller_handle, s.partial_args, s.price, COALESCE(s.tx_id,''), s.created_at, s.action_id,
+       COALESCE(a.input_schema,''), COALESCE(t.action_id,''), COALESCE(p.owner_user_id,''), COALESCE(t.process_id,''),
+       COALESCE(x.status,''), COALESCE(x.reply_json,''), COALESCE(rc.kernel_public_key,''),
+       COALESCE((SELECT value FROM config WHERE key='signing_public_key'),'')
+  FROM tasks s
+  LEFT JOIN actions a ON a.id=s.action_id
+  LEFT JOIN traces t ON t.id=s.parent_trace_id
+  LEFT JOIN processes p ON p.id=t.process_id
+  LEFT JOIN transactions x ON x.id=s.tx_id
+  LEFT JOIN accounts rc ON rc.id=s.required_caller_user_id
+ WHERE s.id=?`, id).Scan(&e.ID, &e.Revision, &status, &e.RequiredCaller.AccountID, &e.RequiredCaller.RemoteID,
+		&e.RequiredCaller.Handle, &partial, &e.Price, &e.TxID, &createdAt, &e.ActionID,
+		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &peerKey, &e.HolderKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", kernel.ErrNotFound.Wrap("task not found")
+	}
+	if err != nil {
+		return nil, "", dbErr(err, "read task notice")
+	}
+	e.Status, e.Outcome = kernel.TaskStatus(status), kernel.TxStatus(outcome)
+	e.PartialArgs, e.CreatedAt = strToRawJSON(partial), strToTime(createdAt)
+	if reply != "" {
+		e.Result = json.RawMessage(reply)
+	}
+	if e.Status == kernel.TaskWaiting {
+		var in map[string]any
+		_ = json.Unmarshal([]byte(schema), &in)
+		e.AllowedInput = kernel.DeriveAllowedSchema(in, e.PartialArgs)
+	}
+	return e, peerKey, nil
+}
+
+// upsertMailbox is the one writer of the mailbox: an entry is kept iff it is newer than the one held.
+func upsertMailbox(ctx context.Context, tx *sql.Tx, e *kernel.TaskEntry) error {
+	notice, err := json.Marshal(e.TaskNotice)
+	if err != nil {
+		return dbErr(err, "encode task notice")
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO mailbox (holder_key,id,required_caller_user_id,required_caller_remote_id,required_caller_handle,
+                     owner_user_id,process_id,status,revision,notice_json,created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(holder_key,id) DO UPDATE SET status=excluded.status, revision=excluded.revision, notice_json=excluded.notice_json
+ WHERE excluded.revision > mailbox.revision`,
+		e.HolderKey, e.ID, e.RequiredCaller.AccountID, nullStr(e.RequiredCaller.RemoteID), e.RequiredCaller.Handle,
+		nullStr(e.OwnerUserID), nullStr(e.ProcessID), string(e.Status), e.Revision, string(notice), timeToStr(e.CreatedAt))
+	return dbErr(err, "deliver task")
+}
+
+const mailboxCols = `holder_key,id,required_caller_user_id,COALESCE(required_caller_remote_id,''),required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json`
+
+func scanMailbox(scan func(...any) error) (*kernel.TaskEntry, error) {
+	e := &kernel.TaskEntry{}
+	var notice string
+	if err := scan(&e.HolderKey, &e.ID, &e.RequiredCaller.AccountID, &e.RequiredCaller.RemoteID, &e.RequiredCaller.Handle,
+		&e.OwnerUserID, &e.ProcessID, &notice); err != nil {
+		return nil, err
+	}
+	return e, json.Unmarshal([]byte(notice), &e.TaskNotice)
+}
+
+func (s *DB) ListMailbox(ctx context.Context, f kernel.TaskFilter) ([]*kernel.TaskEntry, error) {
 	if f.Limit <= 0 {
 		f.Limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+taskCols+`
-		 FROM tasks
-		 WHERE (parent_trace_id IN (
-		            SELECT id FROM traces WHERE process_id IN (
-		                SELECT id FROM processes WHERE owner_user_id=?))
-		        OR required_caller_user_id=?
-		        OR ?)
-		   AND (?='' OR parent_trace_id IN (SELECT id FROM traces WHERE process_id=?))
+		`SELECT `+mailboxCols+`
+		 FROM mailbox
+		 WHERE (required_caller_user_id=? OR owner_user_id=? OR ?)
+		   AND (?='' OR process_id=?)
 		   AND (?='' OR status=?)
 		   AND (? OR ?<>'' OR status IN ('waiting','running'))`+idPrefixClause+`
-		 ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		 ORDER BY created_at DESC, id LIMIT ? OFFSET ?`,
 		f.CallerUserID, f.CallerUserID, boolInt(f.Superuser),
 		f.ProcessID, f.ProcessID,
 		f.Status, f.Status,
@@ -2117,9 +2248,100 @@ func (s *DB) ListTasks(ctx context.Context, f kernel.TaskFilter) ([]*kernel.Task
 		f.Limit, f.Offset,
 	)
 	if err != nil {
-		return nil, dbErr(err, "list tasks")
+		return nil, dbErr(err, "list mailbox")
 	}
-	return queryList(rows, "list tasks", scanTask)
+	return queryList(rows, "list mailbox", scanMailbox)
+}
+
+func (s *DB) ReadMailbox(ctx context.Context, id string) (*kernel.TaskEntry, error) {
+	e, err := scanMailbox(s.db.QueryRowContext(ctx, `SELECT `+mailboxCols+` FROM mailbox WHERE id=?`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, kernel.ErrNotFound.Wrap("task not found")
+	}
+	if err != nil {
+		return nil, dbErr(err, "read mailbox")
+	}
+	return e, nil
+}
+
+// RecordTaskNotice delivers a peer's notice to its addressee here (P8). An id is one task's, from one
+// holder to one addressee: a notice changing either is refused, as is an addressee that is no user here.
+func (s *DB) RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID string, n *kernel.TaskNotice) error {
+	return s.withTx(ctx, "record task notice", func(tx *sql.Tx) error {
+		var held, addressee string
+		err := tx.QueryRowContext(ctx, `SELECT holder_key, required_caller_user_id FROM mailbox WHERE id=?`, n.ID).Scan(&held, &addressee)
+		if err == nil && (held != holderKey || addressee != requiredCallerID) {
+			return kernel.ErrInvalidInput.Wrap("a task id is delivered by one holder to one addressee")
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return dbErr(err, "record task notice: read")
+		}
+		var live bool
+		if err := tx.QueryRowContext(ctx, `SELECT `+liveUser("")+` FROM accounts WHERE id=?`, requiredCallerID).Scan(&live); err != nil || !live {
+			return kernel.ErrNotFound.Wrap("the task names no user of this kernel")
+		}
+		return upsertMailbox(ctx, tx, &kernel.TaskEntry{TaskNotice: *n, HolderKey: holderKey,
+			RequiredCaller: kernel.Principal{AccountID: requiredCallerID}})
+	})
+}
+
+// RedeliverTasks gives every task this kernel holds that has no mailbox entry its first one: the
+// tasks made before the mailbox existed, delivered at startup by the one writer.
+func (s *DB) RedeliverTasks(ctx context.Context) error {
+	return s.withTx(ctx, "redeliver tasks", func(tx *sql.Tx) error {
+		_, err := reviseTasks(ctx, tx, "", "id NOT IN (SELECT id FROM mailbox)")
+		return err
+	})
+}
+
+// ListUndeliveredTasks returns the notices owed to peers — a task addressed to a peer whose revision
+// it has not acknowledged — never tried first, then least recently failed, as reveals are ordered.
+func (s *DB) ListUndeliveredTasks(ctx context.Context, limit int) ([]*kernel.OutgoingNotice, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT s.id FROM tasks s JOIN accounts a ON a.id=s.required_caller_user_id
+		  WHERE a.kernel_public_key IS NOT NULL AND s.revision<>s.told_revision
+		  ORDER BY COALESCE(s.told_failed_at,'') ASC, s.created_at ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, dbErr(err, "list undelivered tasks")
+	}
+	ids, err := queryList(rows, "list undelivered tasks", scanID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*kernel.OutgoingNotice, 0, len(ids))
+	for _, id := range ids {
+		o, err := s.ReadOutgoingNotice(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// ReadOutgoingNotice is a task's current notice as the kernel of its addressee may see it.
+func (s *DB) ReadOutgoingNotice(ctx context.Context, id string) (*kernel.OutgoingNotice, error) {
+	e, peerKey, err := readOwnTask(ctx, s.db, id)
+	if err != nil {
+		return nil, err
+	}
+	if peerKey == "" {
+		return nil, kernel.ErrNotFound.Wrap("task is not addressed to a peer")
+	}
+	return &kernel.OutgoingNotice{PeerKey: peerKey, Notice: e.ForPeer(e.RequiredCaller.RemoteID)}, nil
+}
+
+// MarkTaskTold records the revision a peer acknowledged. It never moves back, so an older send
+// acknowledged late cannot mark a newer revision told.
+func (s *DB) MarkTaskTold(ctx context.Context, id string, revision int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET told_revision=?, told_failed_at=NULL WHERE id=? AND told_revision<?`, revision, id, revision)
+	return dbErr(err, "mark task told")
+}
+
+// MarkTaskTellFailed moves an undelivered notice behind every one not yet tried.
+func (s *DB) MarkTaskTellFailed(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET told_failed_at=? WHERE id=?`, timeToStr(at), id)
+	return dbErr(err, "mark task tell failed")
 }
 
 // ListOrphanRunningTasks returns running tasks that have a completion trace but no tx, in one
@@ -2210,9 +2432,8 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 		}
 		// The task's reference to its completion trace goes first: the row it names is deleted next,
 		// and the foreign key on it is restrictive.
-		if _, err = tx.ExecContext(ctx,
-			`UPDATE tasks SET status='waiting', completion_trace_id=NULL WHERE id=? AND status='running'`, taskID); err != nil {
-			return dbErr(err, "reset task and repark: reset task")
+		if _, err = reviseTasks(ctx, tx, ", status='waiting', completion_trace_id=NULL", "id=? AND status='running'", taskID); err != nil {
+			return err
 		}
 		// The claim locked the completer's stake and transfer value on their own account; the trace
 		// that records them is about to go, so they are released here, by the helpers every failed
@@ -2233,32 +2454,10 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 }
 
 func (s *DB) ResetRunningTasks(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tasks SET status='waiting' WHERE status='running' AND tx_id IS NULL`)
-	return dbErr(err, "reset running tasks")
-}
-
-// ListTasksAwaitingCaller returns the waiting tasks one counterparty may complete, oldest first —
-// the longest stranded are what an operator needs to see. Scoped in the query: ListTasks' visibility
-// predicate also matches every task inside a process the caller owns, so filtering it in Go after
-// the row cap could discard the whole page, and for a peer those are exactly the tasks its own
-// inbound calls would crowd out (§13). remoteUserID narrows to one principal on that kernel; empty
-// returns every task the kernel may complete, its users' included, which is what an operator sees.
-func (s *DB) ListTasksAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*kernel.Task, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+taskCols+`
-		 FROM tasks
-		 WHERE required_caller_user_id=? AND status='waiting'
-		   AND (?='' OR required_caller_remote_id=?)
-		 ORDER BY created_at ASC, id ASC LIMIT ?`,
-		requiredCallerUserID, remoteUserID, remoteUserID, limit)
-	if err != nil {
-		return nil, dbErr(err, "list tasks awaiting caller")
-	}
-	return queryList(rows, "list tasks awaiting caller", scanTask)
+	return s.withTx(ctx, "reset running tasks", func(tx *sql.Tx) error {
+		_, err := reviseTasks(ctx, tx, ", status='waiting'", "status='running' AND tx_id IS NULL")
+		return err
+	})
 }
 
 // nullStr converts an empty string to nil for nullable TEXT columns.

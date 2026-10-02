@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -296,13 +297,11 @@ func TestCapabilityTaskCompleteIsTraceConfined(t *testing.T) {
 }
 
 // TestCapabilityCannotDriveFederation: a capability is local to its trace and carries no supervision
-// authority (§9), so it must never reach the `--peer` completion path — that request is signed by the
-// whole kernel. The trap is that a capability request has no session caller, so an empty caller reads
-// as "kernel-level completion", the superuser form. An untrusted endpoint holding any valid
-// capability would then complete a kernel-addressed task on a peer with operator authority.
-// The assertion is that NOTHING is dispatched, not merely that the call errors.
+// authority (§9), so it completes only a task its own trace parked — never one held on a peer, even
+// one addressed to the action's owner, which a completion would sign and send as that owner. The
+// assertion is that NOTHING is dispatched, not merely that the call errors.
 func TestCapabilityCannotDriveFederation(t *testing.T) {
-	srv, k, _ := newCapabilityKernel(t)
+	srv, k, db := newCapabilityKernel(t)
 
 	// A recording transport behind a real adapter: any federation dispatch shows up in lastTask.
 	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-peer"}`), taskStatus: 200}
@@ -311,19 +310,23 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 
-	_, provTok := makeUser(t, k, "prov")
+	provID, provTok := makeUser(t, k, "prov")
 	callerID, callerTok := makeUser(t, k, "caller")
 	giveCredits(t, k, callerID, 1000)
 
-	// A stranger peer key: unresolvable locally, which is exactly the cold-dispatch case.
-	strangerKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	// A task a peer holds for the action's owner, delivered to the owner's mailbox.
+	peerKey := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	heldID := uuid.New().String()
+	if err := db.RecordTaskNotice(context.Background(), peerKey, provID, &kernel.TaskNotice{
+		ID: heldID, Revision: 1, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 
 	var status int
 	var body []byte
 	compose := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status, body = capCallback(r.Header.Get(callbackHeader), r.Header.Get(capabilityHeader),
-			"/v1/tasks/"+uuid.New().String()+"/complete",
-			map[string]any{"peer": strangerKey, "args": map[string]any{}})
+			"/v1/tasks/"+heldID+"/complete", map[string]any{"args": map[string]any{}})
 		_ = json.NewEncoder(w).Encode(map[string]any{"done": true})
 	}))
 	t.Cleanup(compose.Close)
@@ -331,8 +334,8 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 
 	runAction(t, srv, callerTok, "prov@k/hook", map[string]any{})
 
-	if status != http.StatusForbidden {
-		t.Errorf("capability + --peer: status = %d, want 403; body=%s", status, body)
+	if status < 400 {
+		t.Errorf("capability completing a peer-held task: status = %d, want a refusal; body=%s", status, body)
 	}
 	if f.lastTask.Kind != "" {
 		t.Errorf("a capability must not reach federation at all; dispatched %+v", f.lastTask)

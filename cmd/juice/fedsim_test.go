@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1678,5 +1679,153 @@ func TestSimRunKeyWhileTheFirstRunIsParked(t *testing.T) {
 	}
 	if got := buyer.balance(t, dan.ID); got != settled {
 		t.Errorf("the repeat after settlement moved money: %d, was %d", got, settled)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: a task reaches the party it is addressed to (U41, P8)
+// ---------------------------------------------------------------------------
+
+// messageTo parks a sys/message task on this kernel, sent by sender to the address to, and returns
+// its id. The natives are installed as boot installs them.
+func (s *simNode) messageTo(t *testing.T, senderID, to string) string {
+	t.Helper()
+	ctx := context.Background()
+	native.Register(s.k, []native.Spec{native.Message(), native.Sink()})
+	for _, spec := range []native.Spec{native.Message(), native.Sink()} {
+		if err := ensureSysNative(ctx, s.k, "sys", spec, 0); err != nil {
+			t.Fatalf("%s: install %s: %v", s.name, spec.Name, err)
+		}
+	}
+	reply, err := s.k.Run(ctx, kernel.RunRequest{CallerID: senderID, ActionRef: "sys@" + testOwnName + "/message",
+		Args: map[string]any{"to": to, "message": "hello"}})
+	if err != nil {
+		t.Fatalf("%s: message %s: %v", s.name, to, err)
+	}
+	return reply.Result["task_id"].(string)
+}
+
+// TestSimTaskReachesItsRecipient is U41 end to end through two real kernels: a task parked on one
+// kernel for a user of another appears in that user's own task list, naming nothing but their
+// login, and is completed or declined there exactly as a local one — the reply updating the
+// entry before the command returns. A second completion is refused and changes nothing.
+func TestSimTaskReachesItsRecipient(t *testing.T) {
+	net := newSimNet(t)
+	holder := net.addNode("holder", defaultSimConfig())
+	home := net.addNode("home", defaultSimConfig())
+	ana := holder.user(t, "ana", 0)
+	alice := home.user(t, "alice", 0)
+	ctx := context.Background()
+
+	first := holder.messageTo(t, ana.ID, "alice@"+home.key)
+	second := holder.messageTo(t, ana.ID, "alice@"+home.key)
+	holder.k.RevealPending(ctx) // the telling worker's pass
+
+	open, err := home.k.ListTasks(ctx, alice.ID, kernel.TaskFilter{})
+	if err != nil || len(open) != 2 {
+		net.dump()
+		t.Fatalf("alice's own list: %d tasks, %v; want both delivered", len(open), err)
+	}
+	for _, e := range open {
+		if e.HolderKey != holder.key || e.Status != kernel.TaskWaiting || e.ActionID != "" || e.CreatedByID != "" {
+			t.Errorf("delivered entry %+v: want waiting, held by the holder, its actions withheld", e)
+		}
+	}
+
+	if _, err := home.k.CompleteTask(ctx, alice.ID, first, json.RawMessage(`{}`)); err != nil {
+		net.dump()
+		t.Fatalf("complete: %v", err)
+	}
+	if e, _ := home.k.ReadTask(ctx, alice.ID, first); e.Status != kernel.TaskDone || e.TxID == "" || e.Outcome != kernel.TxSuccess {
+		t.Errorf("after completing, alice's entry = %+v; want done with the holder's transaction", e)
+	}
+	if held, _ := holder.db.ReadTask(ctx, first); held.Status != kernel.TaskDone {
+		t.Errorf("the holder's task is %q, want done", held.Status)
+	}
+
+	e, err := home.k.CancelTask(ctx, alice.ID, second)
+	if err != nil || e.Status != kernel.TaskCancelled {
+		t.Fatalf("decline: %+v %v; want the entry cancelled before the command returns", e, err)
+	}
+	if held, _ := holder.db.ReadTask(ctx, second); held.Status != kernel.TaskCancelled {
+		t.Errorf("the holder's task is %q, want cancelled", held.Status)
+	}
+	// With both tasks answered, nothing holds ana's processes open: the decline closed its own.
+	if open, _ := holder.db.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: ana.ID}); len(open) != 0 {
+		t.Errorf("%d of ana's processes stayed open after their tasks were answered", len(open))
+	}
+
+	if _, err := home.k.CompleteTask(ctx, alice.ID, first, json.RawMessage(`{}`)); err == nil {
+		t.Error("a second completion was accepted")
+	}
+}
+
+// TestSimTaskNoticeIsToldUntilAcknowledged: a notice whose answer is lost is told again, and the
+// repeat is acknowledged without a second entry; a holder this kernel has suspended delivers
+// nothing until it is unsuspended (U37).
+func TestSimTaskNoticeIsToldUntilAcknowledged(t *testing.T) {
+	net := newSimNet(t)
+	holder := net.addNode("holder", defaultSimConfig())
+	home := net.addNode("home", defaultSimConfig())
+	ana := holder.user(t, "ana", 0)
+	alice := home.user(t, "alice", 0)
+	ctx := context.Background()
+	entries := func() int {
+		t.Helper()
+		got, err := home.k.ListTasks(ctx, alice.ID, kernel.TaskFilter{All: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got)
+	}
+	owed := func() int {
+		t.Helper()
+		got, err := holder.db.ListUndeliveredTasks(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(got)
+	}
+
+	if err := home.k.SuspendKernel(ctx, home.sysID, holder.key); err != nil {
+		t.Fatal(err)
+	}
+	holder.messageTo(t, ana.ID, "alice@"+home.key)
+	holder.k.RevealPending(ctx)
+	if entries() != 0 || owed() != 1 {
+		t.Fatalf("a suspended holder delivered: %d entries, %d still owed", entries(), owed())
+	}
+	peer, _ := home.db.ReadAccountByKernelKey(ctx, holder.key)
+	if err := home.k.UnsuspendUser(ctx, home.sysID, peer.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	net.arm(holder.key, home.key, verbTask, faultLoseResponse, 1)
+	holder.k.RevealPending(ctx)
+	net.assertFired(t, faultLoseResponse, 1)
+	if entries() != 1 || owed() != 1 {
+		t.Fatalf("after a lost acknowledgement: %d entries, %d owed; want delivered and still owed", entries(), owed())
+	}
+	holder.k.RevealPending(ctx)
+	if entries() != 1 || owed() != 0 {
+		t.Errorf("after the resend: %d entries, %d owed; want one entry, nothing owed", entries(), owed())
+	}
+}
+
+// TestSimRestartDeliversTasksMadeBeforeTheMailbox: a waiting task with no mailbox entry — one made
+// before the mailbox existed — is delivered when the kernel starts, and read like any other.
+func TestSimRestartDeliversTasksMadeBeforeTheMailbox(t *testing.T) {
+	net := newSimNet(t)
+	node := net.addNode("solo", defaultSimConfig())
+	ana := node.user(t, "ana", 0)
+	bob := node.user(t, "bob", 0)
+	ctx := context.Background()
+	id := node.messageTo(t, ana.ID, "bob@"+testOwnName)
+	if err := node.db.ExecForTest(ctx, `DELETE FROM mailbox`); err != nil {
+		t.Fatal(err)
+	}
+	node.restart(t)
+	if e, err := node.k.ReadTask(ctx, bob.ID, id); err != nil || e.Status != kernel.TaskWaiting {
+		t.Errorf("after restart: %+v %v; want the waiting task delivered", e, err)
 	}
 }

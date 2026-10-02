@@ -1591,27 +1591,30 @@ func TestTaskCompleteSignatureCoversTheUser(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	cp, recip, uid, sid, ts := pubB64, "recipkey", "user-1", "task-1", "2026-07-31T00:00:00Z"
 
-	sig, err := testNet.SignTaskPayload(priv, sid, cp, recip, "idem", ts, "ihash", uid, false)
+	sig, err := testNet.SignTaskPayload(priv, "complete", sid, cp, recip, "idem", ts, "ihash", uid, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err != nil {
+	if err := testNet.VerifyTaskSignature("complete", sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err != nil {
 		t.Fatalf("valid completion rejected: %v", err)
 	}
 	// The user, the operator scope and the absence of a user are each their own payload (P8).
-	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", "other", false, sig); err == nil {
+	if err := testNet.VerifyTaskSignature("complete", sid, cp, recip, "idem", ts, "ihash", "other", false, sig); err == nil {
 		t.Error("wrong user_id verified")
 	}
-	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, true, sig); err == nil {
+	if err := testNet.VerifyTaskSignature("complete", sid, cp, recip, "idem", ts, "ihash", uid, true, sig); err == nil {
 		t.Error("a claimed operator scope verified under a signature that did not cover it")
 	}
-	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", "", false, sig); err == nil {
+	if err := testNet.VerifyTaskSignature("complete", sid, cp, recip, "idem", ts, "ihash", "", false, sig); err == nil {
 		t.Error("a user-signed completion verified as a kernel-level one")
 	}
-	// Domain disjointness: a task-list signature never verifies as a completion.
-	lsig, _ := testNet.SignTaskListPayload(priv, cp, recip, ts, uid)
-	if err := testNet.VerifyTaskSignature(sid, cp, recip, "idem", ts, "ihash", uid, false, lsig); err == nil {
-		t.Error("task_list signature verified as task_complete")
+	// Domain disjointness: a decline never verifies as a completion, nor a completion as a decline.
+	csig, _ := testNet.SignTaskPayload(priv, "cancel", sid, cp, recip, "idem", ts, "ihash", uid, false)
+	if err := testNet.VerifyTaskSignature("complete", sid, cp, recip, "idem", ts, "ihash", uid, false, csig); err == nil {
+		t.Error("task_cancel signature verified as task_complete")
+	}
+	if err := testNet.VerifyTaskSignature("cancel", sid, cp, recip, "idem", ts, "ihash", uid, false, sig); err == nil {
+		t.Error("task_complete signature verified as task_cancel")
 	}
 }
 
@@ -1929,22 +1932,6 @@ func TestVerifyRemoteReceiptFailsClosed(t *testing.T) {
 	}
 	if v.Valid || v.Checks["draw"] {
 		t.Errorf("a priced call with no ticket verified: valid=%v checks=%v", v.Valid, v.Checks)
-	}
-}
-
-// TestPeerTasksAwaitingUsCarriesTruncated: a peer serves one bounded page (P8); when more is
-// waiting the flag is the only signal, so dropping it would silently hide pending work.
-func TestPeerTasksAwaitingUsCarriesTruncated(t *testing.T) {
-	st := newTestStore(t)
-	fake := &fakeFederationHTTP{taskListBody: `{"tasks":[{"id":"s1","price":3}],"truncated":true}`}
-	k := newTestKernelWithHTTP(st, fake)
-	setupSys(t, nil, st)
-	held, err := k.PeerTasksAwaitingUs(context.Background(), "cGVlci10cnVuYw", "")
-	if err != nil {
-		t.Fatalf("PeerTasksAwaitingUs: %v", err)
-	}
-	if len(held.Tasks) != 1 || held.Tasks[0].ID != "s1" || !held.Truncated {
-		t.Errorf("want one task and truncated=true, got %+v", held)
 	}
 }
 

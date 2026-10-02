@@ -339,45 +339,6 @@ func (k *Kernel) servedRequest(ctx context.Context, t *Trace) (idempotencyKey, c
 // (idempotency_record_id) under serving terms and dispatched none of its own (D19).
 func ServingReserve(dispatchJSON *string) int64 { return dispatched(dispatchJSON).Reserve }
 
-// PeerTaskView is what a remote peer may see of a task parked for it: the request, not the
-// requester. Deliberately NOT the local task view — that one carries the creating action's name,
-// the process owner's handle, and raw local ids, and a user identity crossing a kernel boundary is
-// precisely what §13's encapsulation forbids. Each field is here because the completer needs it:
-// partial_args is the payload channel (§14 has sys/message put its body there) and allowed_input is
-// §14's substitute for reading a target action that may be private. One type serves both ends of the
-// protocol — the serving kernel builds it, the buying kernel decodes it — so neither side can drift.
-type PeerTaskView struct {
-	ID string `json:"id"`
-	// RequiredCaller names which principal on the RECEIVING kernel the task is addressed to, when
-	// it is addressed to one of its users rather than to the kernel itself. It is that kernel's own
-	// id, so it discloses nothing of the parking kernel: it lets the receiver route the task to the
-	// user who may complete it, which the signed completion names (P8).
-	RequiredCaller string          `json:"required_caller,omitempty"`
-	PartialArgs    json.RawMessage `json:"partial_args,omitempty"`
-	AllowedInput   map[string]any  `json:"allowed_input,omitempty"`
-	Price          int64           `json:"price"`
-	CreatedAt      time.Time       `json:"created_at"`
-}
-
-// PeerTaskList is one page of a peer's answer: the tasks, and whether more are waiting than the
-// page could carry (P8) — a bounded page with no continuation, so the flag is the whole signal.
-type PeerTaskList struct {
-	Tasks     []PeerTaskView `json:"tasks"`
-	Truncated bool           `json:"truncated,omitempty"`
-}
-
-// NewPeerTaskView projects one waiting task into the peer-facing shape (§13).
-func (k *Kernel) NewPeerTaskView(s *Task, action *Action) *PeerTaskView {
-	v := &PeerTaskView{ID: s.ID, PartialArgs: s.PartialArgs, Price: s.Price, CreatedAt: s.CreatedAt}
-	if s.RequiredCallerRemoteID != nil {
-		v.RequiredCaller = *s.RequiredCallerRemoteID
-	}
-	if action != nil {
-		v.AllowedInput = DeriveAllowedSchema(action.InputSchema, s.PartialArgs)
-	}
-	return v
-}
-
 // callerWalletFor returns the (walletID, walletKind) that funds a call:
 //   - task completion → CallerTask (no wallet id; BeginTaskCall already released the lock)
 //   - subcall (has parent trace) → CallerTrace
@@ -404,7 +365,8 @@ const (
 	sigDomainEvidenceReceipt = "evidence_receipt"
 	sigDomainFedCall         = "fed_call"
 	sigDomainTaskComplete    = "task_complete"
-	sigDomainTaskList        = "task_list"
+	sigDomainTaskCancel      = "task_cancel"
+	sigDomainTaskNotice      = "task_notice"
 	sigDomainReveal          = "reveal"
 	sigDomainTransfer        = "transfer"
 	sigDomainCapability      = "capability"
@@ -1080,23 +1042,6 @@ func (k *Kernel) SignFederation(c OutboundCall, counterparty, recipient, argsHas
 	return
 }
 
-// SignTask signs a task-completion payload with the platform key and returns
-// (signature, timestamp). recipient is the peer being addressed. Returns an error if the signing
-// key is not configured.
-func (k *Kernel) SignTask(taskID, counterparty, recipient, idempotencyKey, inputHash, userID string, superuser bool) (sig, ts string, err error) {
-	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignTaskPayload(k.cfg.SigningKey, taskID, counterparty, recipient, idempotencyKey, ts, inputHash, userID, superuser)
-	return
-}
-
-// SignTaskList signs a task-list request with the platform key and returns
-// (signature, timestamp). recipient is the peer being addressed.
-func (k *Kernel) SignTaskList(counterparty, recipient, forUserID string) (sig, ts string, err error) {
-	ts = time.Now().UTC().Format(time.RFC3339)
-	sig, err = k.cfg.Network.SignTaskListPayload(k.cfg.SigningKey, counterparty, recipient, ts, forUserID)
-	return
-}
-
 // ---- Outbound task protocol (§13) ----
 
 // TaskIdempotencyKey derives the cross-kernel key for one task completion. It is DERIVED, never
@@ -1160,54 +1105,140 @@ func taskReply(status int, body []byte, notDispatched bool, err error, peerKey s
 	return nil
 }
 
-// PeerTasksAwaitingUs lists the tasks a peer holds for this kernel (§13), for admin inspect and
-// `task list --peer`. One bounded fetch: the queue is a handful of pending cross-kernel approvals,
-// not a corpus.
-func (k *Kernel) PeerTasksAwaitingUs(ctx context.Context, peerKey, forUserID string) (*PeerTaskList, error) {
+// sendTask carries a completion or a decline to the peer holding a task (P8), as the caller, and
+// delivers the notice its reply carries before returning, so the caller's entry here is current.
+func (k *Kernel) sendTask(ctx context.Context, callerID string, e *TaskEntry, kind string, rawInput json.RawMessage) (*TaskReply, error) {
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
-	sig, ts, err := k.SignTaskList(k.SelfKey(ctx), peerKey, forUserID)
+	if callerID != e.RequiredCaller.AccountID {
+		return nil, ErrUnauthorized.Wrap("only the task's required caller may complete or decline it")
+	}
+	// A suspended holder delivers nothing, so its reply could not be recorded after the work ran.
+	if k.holderSuspended(ctx, e.HolderKey) {
+		return nil, ErrUnauthorized.Wrap("this kernel has suspended the task's holder")
+	}
+	r := TaskRequest{Kind: kind, Counterparty: k.ourKeyB64(), Timestamp: time.Now().UTC().Format(time.RFC3339),
+		TaskID: e.ID, ForUserID: callerID, UserSuperuser: k.IsSuperuser(ctx, callerID)}
+	var inputHash string
+	if kind == "complete" {
+		var err error
+		if r.Input, inputHash, err = normalizeTaskInput(rawInput); err != nil {
+			return nil, err
+		}
+		r.IdempotencyKey = TaskIdempotencyKey(e.HolderKey, e.ID, inputHash)
+	}
+	sig, err := k.cfg.Network.SignTaskPayload(k.cfg.SigningKey, kind, e.ID, r.Counterparty, e.HolderKey,
+		r.IdempotencyKey, r.Timestamp, inputHash, r.ForUserID, r.UserSuperuser)
 	if err != nil {
 		return nil, err
 	}
-	status, body, notDispatched, err := k.fedClient.ListPeerTasks(ctx, peerKey, ts, sig, forUserID)
-	// Values, not pointers: the list is peer-controlled, and a reply of {"tasks":[null]} would
-	// otherwise decode to a nil element that every reader must remember to guard.
-	var list PeerTaskList
-	if err := taskReply(status, body, notDispatched, err, peerKey, &list); err != nil {
+	r.Signature = sig
+	status, body, notDispatched, err := k.fedClient.SendTask(ctx, e.HolderKey, r)
+	var reply struct {
+		CallReply
+		Notice *SignedTaskNotice `json:"notice"`
+	}
+	var nerr error = ErrExecutionFailed.Wrap("the holder's reply carries no task notice")
+	if err == nil && json.Unmarshal(body, &reply) == nil && reply.Notice != nil && reply.Notice.Notice.ID == e.ID {
+		nerr = k.HandleTaskNotice(ctx, e.HolderKey, reply.Notice)
+	}
+	if err := taskReply(status, body, notDispatched, err, e.HolderKey, &reply); err != nil {
 		return nil, err
 	}
-	return &list, nil
+	// The work ran on the holder; a success is reported only once the entry here says so (P8).
+	want := TaskCancelled
+	if kind == "complete" {
+		want = TaskDone
+	}
+	if cur, err := k.store.ReadMailbox(ctx, e.ID); nerr == nil && (err != nil || cur.Status != want) {
+		nerr = ErrExecutionFailed.Wrapf("the holder's notice does not show the task %s", want)
+	}
+	if nerr != nil {
+		return nil, ErrExecutionFailed.Wrapf("the task was answered on its holder, but not recorded here: %v", nerr).WithMeta("tx_id", reply.TxID)
+	}
+	return &TaskReply{CallReply: &reply.CallReply, TaskID: e.ID}, nil
 }
 
-// CompletePeerTask resumes a task a peer parked for this kernel over /juice/fed/task/1 (§13). No money
-// moves here: the task's price was parked on the serving kernel at creation and completion never checks
-// funds (§10), so the requester creates no local trace or transaction and a timeout pins nothing. The
-// completion settles wholly on the serving kernel under §6. forUserID, when non-empty, is the
-// completing user's stable id here, signed into the request with whether they are this kernel's
-// operator (P8); empty is a kernel-level completion for a kernel-addressed task.
-func (k *Kernel) CompletePeerTask(ctx context.Context, peerKey, taskID string, rawInput json.RawMessage, forUserID string) (map[string]any, error) {
+// signNotice signs a task's notice for the kernel of its addressee, afresh for each send (P3).
+func (k *Kernel) signNotice(o *OutgoingNotice) (*SignedTaskNotice, error) {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainTaskNotice,
+		taskNoticePayload{Counterparty: k.ourKeyB64(), Notice: o.Notice, Recipient: o.PeerKey, Timestamp: ts})
+	return &SignedTaskNotice{Notice: o.Notice, Timestamp: ts, Signature: sig}, err
+}
+
+// TaskNoticeFor is a task's current notice for a reply to peerKey, nil unless the task is addressed
+// to that kernel: every reply to a completion or decline carries one (P8).
+func (k *Kernel) TaskNoticeFor(ctx context.Context, taskID, peerKey string) *SignedTaskNotice {
+	o, err := k.store.ReadOutgoingNotice(ctx, taskID)
+	if err != nil || o.PeerKey != peerKey {
+		return nil
+	}
+	s, err := k.signNotice(o)
+	if err != nil {
+		return nil
+	}
+	return s
+}
+
+// announceTasks tells each peer the state of the tasks addressed to it until it acknowledges the
+// revision sent (P8). A refusal is retried like an unanswered notice, behind those never tried.
+func (k *Kernel) announceTasks(ctx context.Context) {
 	if k.fedClient == nil {
-		return nil, ErrInvalidState.Wrap("federation transport not running")
+		return
 	}
-	input, inputHash, err := normalizeTaskInput(rawInput)
+	pending, err := k.store.ListUndeliveredTasks(ctx, revealsPerPass)
 	if err != nil {
-		return nil, err
+		return
 	}
-	idempotencyKey := TaskIdempotencyKey(peerKey, taskID, inputHash)
-	superuser := forUserID != "" && k.IsSuperuser(ctx, forUserID)
-	sig, ts, err := k.SignTask(taskID, k.SelfKey(ctx), peerKey, idempotencyKey, inputHash, forUserID, superuser)
+	for _, o := range pending {
+		if err := k.announceTask(ctx, o); err != nil {
+			k.log.With(ctx).Warn("task.notice_failed", "task_id", o.Notice.ID, "peer", o.PeerKey, "error", err)
+			if merr := k.store.MarkTaskTellFailed(ctx, o.Notice.ID, time.Now().UTC()); merr != nil {
+				k.log.With(ctx).Error("task.notice_mark_failed", "task_id", o.Notice.ID, "error", merr)
+			}
+		}
+	}
+}
+
+// announceTask sends one notice and records the revision acknowledged.
+func (k *Kernel) announceTask(ctx context.Context, o *OutgoingNotice) error {
+	s, err := k.signNotice(o)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	status, body, notDispatched, err := k.fedClient.CompletePeerTask(ctx, peerKey, ts, sig, taskID,
-		idempotencyKey, input, forUserID, superuser)
-	var reply map[string]any
-	if err := taskReply(status, body, notDispatched, err, peerKey, &reply); err != nil {
-		return nil, err
+	status, body, notDispatched, err := k.fedClient.SendTask(ctx, o.PeerKey, TaskRequest{Kind: "notice",
+		Counterparty: k.ourKeyB64(), Timestamp: s.Timestamp, Signature: s.Signature, Notice: &s.Notice})
+	if err := taskReply(status, body, notDispatched, err, o.PeerKey, &struct{}{}); err != nil {
+		return err
 	}
-	return reply, nil
+	return k.store.MarkTaskTold(ctx, o.Notice.ID, o.Notice.Revision)
+}
+
+// holderSuspended reports whether this kernel has suspended a task's holder, which delivers nothing (U37).
+func (k *Kernel) holderSuspended(ctx context.Context, key string) bool {
+	peer, err := k.store.ReadAccountByKernelKey(ctx, key)
+	return err == nil && peer != nil && peer.SuspendedAt != nil
+}
+
+// HandleTaskNotice delivers a holder's notice to the addressee here (P8): the signature is checked
+// against the holder and this kernel, a suspended holder is refused (U37), and a notice addressed to
+// no user is this kernel's own, answered by its operator. The actions a peer withholds are dropped.
+func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *SignedTaskNotice) error {
+	p := taskNoticePayload{Counterparty: holderKey, Notice: s.Notice, Recipient: k.ourKeyB64(), Timestamp: s.Timestamp}
+	if err := k.cfg.Network.verifyPeer(holderKey, sigDomainTaskNotice, p, s.Signature); err != nil {
+		return ErrUnauthenticated.Wrap("task notice signature is invalid")
+	}
+	if k.holderSuspended(ctx, holderKey) {
+		return ErrUnauthorized.Wrap("this kernel has suspended the task's holder")
+	}
+	n := s.Notice.ForPeer(s.Notice.UserID)
+	addressee := n.UserID
+	if addressee == "" {
+		addressee = k.cfg.FeeRecipientID
+	}
+	return k.store.RecordTaskNotice(ctx, holderKey, addressee, &n)
 }
 
 // ---- Peer operations ----
@@ -2658,31 +2689,19 @@ type fedCallPayload struct {
 	Timestamp            string `json:"timestamp"`
 }
 
-// taskCompletePayload is what a home kernel signs to complete a peer's task (P8). UserID is the
-// completing user's stable id here and Superuser the home kernel's word that this user is its
-// operator — the scope a task addressed to the kernel itself demands. Both omitted for a
-// kernel-level completion, whose canonical bytes are therefore unchanged.
+// taskCompletePayload is what a home kernel signs to complete or decline a peer's task (P8). UserID
+// is the acting user's stable id here and Superuser the home kernel's word that this user is its
+// operator — the scope a task addressed to the kernel itself demands. A decline carries no input,
+// so its key and hash are absent; a completion always carries both, so its bytes are unchanged.
 type taskCompletePayload struct {
 	Counterparty   string `json:"counterparty"`
-	IdempotencyKey string `json:"idempotency_key"`
-	InputHash      string `json:"input_hash"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	InputHash      string `json:"input_hash,omitempty"`
 	Recipient      string `json:"recipient"`
 	TaskID         string `json:"task_id"`
 	Superuser      bool   `json:"superuser,omitempty"`
 	Timestamp      string `json:"timestamp"`
 	UserID         string `json:"user_id,omitempty"`
-}
-
-// taskListPayload asks a peer which of its parked tasks this kernel may complete. UserID names one
-// principal on the requesting kernel when the question is asked on a user's behalf, as completion
-// already is: listing and completing then have the same granularity, so a user can see
-// the work addressed to them rather than only its operator. Omitted for a kernel-level ask, whose
-// canonical bytes are therefore unchanged.
-type taskListPayload struct {
-	Counterparty string `json:"counterparty"`
-	Recipient    string `json:"recipient"`
-	Timestamp    string `json:"timestamp"`
-	UserID       string `json:"user_id,omitempty"`
 }
 
 // verifyPeerSignature verifies a peer's base64url Ed25519 signature over a payload in its own
@@ -2716,38 +2735,44 @@ func (n Network) SignFederationPayload(key ed25519.PrivateKey, c OutboundCall, c
 	return n.sign(key, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash))
 }
 
-// SignTaskPayload creates a base64url Ed25519 signature over the canonical task-completion payload
-// — a key-set disjoint from every other signed Juice payload (§12, §13).
-func (n Network) SignTaskPayload(key ed25519.PrivateKey, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
-	return n.sign(key, sigDomainTaskComplete, taskCompletePayload{Counterparty: counterparty,
+// taskNoticePayload is what a holder signs to tell a kernel a task's state (P8).
+type taskNoticePayload struct {
+	Counterparty string     `json:"counterparty"`
+	Notice       TaskNotice `json:"notice"`
+	Recipient    string     `json:"recipient"`
+	Timestamp    string     `json:"timestamp"`
+}
+
+// SignedTaskNotice is a notice as it travels, pushed or carried on a reply.
+type SignedTaskNotice struct {
+	Notice    TaskNotice `json:"notice"`
+	Timestamp string     `json:"timestamp"`
+	Signature string     `json:"signature"`
+}
+
+// taskDomain is the signature domain of a request to a task's holder: completing or declining it.
+func taskDomain(kind string) string {
+	if kind == "cancel" {
+		return sigDomainTaskCancel
+	}
+	return sigDomainTaskComplete
+}
+
+// SignTaskPayload creates a base64url Ed25519 signature over a canonical completion (kind "complete")
+// or decline ("cancel") — each in its own domain, disjoint from every other (§12, §13).
+func (n Network) SignTaskPayload(key ed25519.PrivateKey, kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
+	return n.sign(key, taskDomain(kind), taskCompletePayload{Counterparty: counterparty,
 		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
 		TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID})
 }
 
-// VerifyTaskSignature verifies a counterparty's Ed25519 signature over the canonical task-completion
-// payload. recipient must be the verifying kernel's own public key.
-func (n Network) VerifyTaskSignature(taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
+// VerifyTaskSignature verifies a counterparty's Ed25519 signature over a canonical completion or
+// decline. recipient must be the verifying kernel's own public key.
+func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
 	p := taskCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
 		InputHash: inputHash, Recipient: recipient, TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID}
-	if err := n.verifyPeer(counterparty, sigDomainTaskComplete, p, sigB64); err != nil {
+	if err := n.verifyPeer(counterparty, taskDomain(kind), p, sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("task signature is invalid")
-	}
-	return nil
-}
-
-// SignTaskListPayload creates a base64url Ed25519 signature over the canonical task-list payload.
-// The sigDomainTaskList prefix keeps this key-set disjoint from every other signed payload (§12).
-func (n Network) SignTaskListPayload(key ed25519.PrivateKey, counterparty, recipient, timestamp, forUserID string) (string, error) {
-	return n.sign(key, sigDomainTaskList, taskListPayload{Counterparty: counterparty,
-		Recipient: recipient, Timestamp: timestamp, UserID: forUserID})
-}
-
-// VerifyTaskListSignature verifies a counterparty's Ed25519 signature over the canonical task-list
-// payload. recipient must be the verifying kernel's own public key.
-func (n Network) VerifyTaskListSignature(counterparty, recipient, timestamp, forUserID, sigB64 string) error {
-	p := taskListPayload{Counterparty: counterparty, Recipient: recipient, Timestamp: timestamp, UserID: forUserID}
-	if err := n.verifyPeer(counterparty, sigDomainTaskList, p, sigB64); err != nil {
-		return ErrUnauthenticated.Wrap("task list signature is invalid")
 	}
 	return nil
 }

@@ -102,15 +102,26 @@ type TransferAnnouncer interface {
 	AnnounceTransfer(ctx context.Context, peerPublicKey string, payload TransferPaidPayload, proof, signature string) error
 }
 
-// TaskCaller carries one /juice/fed/task/1 request to a peer (§13): listing the tasks parked for
-// this kernel, or completing one. Like TicketRevealer, it takes the signed scalars the kernel
-// produced and returns the peer's raw status/body — the kernel owns the protocol (key derivation,
-// signing, settlement disposition), the adapter owns the wire shape and its transport deadline.
-// notDispatched reports the §13 never-dispatched proof: the request provably never left this host.
+// TaskRequest is one signed /juice/fed/task/1 request (P8): a holder's notice, or a completion or
+// decline sent to the holder. The kernel signs it; the adapter carries it.
+type TaskRequest struct {
+	Kind           string // "notice" | "complete" | "cancel"
+	Counterparty   string
+	Timestamp      string
+	Signature      string
+	TaskID         string
+	IdempotencyKey string
+	Input          []byte
+	ForUserID      string
+	UserSuperuser  bool
+	Notice         *TaskNotice
+}
+
+// TaskCaller carries one /juice/fed/task/1 request to a peer (P8). Like TicketRevealer, it returns
+// the peer's raw status/body — the kernel owns the protocol, the adapter the wire shape and its
+// deadline. notDispatched reports the never-dispatched proof: the request provably never left.
 type TaskCaller interface {
-	CompletePeerTask(ctx context.Context, peerKey, timestamp, signature, taskID, idempotencyKey string,
-		input []byte, forUserID string, userSuperuser bool) (status int, body []byte, notDispatched bool, err error)
-	ListPeerTasks(ctx context.Context, peerKey, timestamp, signature, forUserID string) (status int, body []byte, notDispatched bool, err error)
+	SendTask(ctx context.Context, peerKey string, r TaskRequest) (status int, body []byte, notDispatched bool, err error)
 }
 
 // FederationClient is the outbound federation adapter: everything the kernel needs to reach a peer
@@ -214,8 +225,8 @@ type TxFilter struct {
 	Offset   int
 }
 
-// TaskFilter selects tasks for ListTasks: those the caller may see, narrowed by process, status
-// and id prefix. Without a status, only open tasks (waiting, running) are listed unless All is set.
+// TaskFilter selects mailbox entries for ListMailbox: those the caller may see, narrowed by process,
+// status and id prefix. Without a status, only open tasks (waiting, running) are listed unless All is set.
 type TaskFilter struct {
 	CallerUserID string
 	Superuser    bool // the caller sees every task, not only their own
@@ -389,9 +400,24 @@ type Store interface {
 	// available into its locked. Returns ErrInsufficientFunds if parent_trace.available < price.
 	CreateTask(ctx context.Context, s *Task) error
 	ReadTask(ctx context.Context, id string) (*Task, error)
-	// ListTasks returns tasks visible to caller. processID and status are optional filters ("" = no filter).
-	ListTasks(ctx context.Context, f TaskFilter) ([]*Task, error)
-	ListTasksAwaitingCaller(ctx context.Context, requiredCallerUserID, remoteUserID string, limit int) ([]*Task, error)
+	// CancelTask declines a waiting task: cancelled, its parked price returned to its process, and the
+	// process closed if nothing else is open — one commit (D6).
+	CancelTask(ctx context.Context, id string) error
+	// ListMailbox returns the mailbox entries the filter's caller may see (D4); ReadMailbox one by id.
+	ListMailbox(ctx context.Context, f TaskFilter) ([]*TaskEntry, error)
+	ReadMailbox(ctx context.Context, id string) (*TaskEntry, error)
+	// RecordTaskNotice delivers a peer's notice to the addressee here, kept iff newer (P8).
+	RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID string, n *TaskNotice) error
+	// RedeliverTasks gives every task this kernel funds that has no mailbox entry yet its first one.
+	RedeliverTasks(ctx context.Context) error
+	// ListUndeliveredTasks returns notices owed to peers, never tried first, then least recently failed;
+	// ReadOutgoingNotice one task's current notice as its addressee's kernel may see it.
+	ListUndeliveredTasks(ctx context.Context, limit int) ([]*OutgoingNotice, error)
+	ReadOutgoingNotice(ctx context.Context, id string) (*OutgoingNotice, error)
+	// MarkTaskTold records the revision a peer acknowledged; MarkTaskTellFailed moves a notice that
+	// could not be delivered behind every one not yet tried.
+	MarkTaskTold(ctx context.Context, id string, revision int64) error
+	MarkTaskTellFailed(ctx context.Context, id string, at time.Time) error
 	// ResetTaskAndRepark re-parks a task's price and resets to waiting. Used when the
 	// completion trace is empty (crash during execution) to prevent double-completion minting.
 	ResetTaskAndRepark(ctx context.Context, taskID string) error

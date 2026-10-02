@@ -144,9 +144,10 @@ non-interactive confirmation.
 | Command | |
 |---|---|
 | `juice task create ACTION` | set work aside ([Tasks and processes](../providing/tasks.html)) |
-| `juice task list` | open tasks you may complete or own; `--all`, `--status`, `--process`, `--peer` |
+| `juice task list` | open tasks you may complete or own, from any kernel; `--all`, `--status`, `--process` |
 | `juice task show ID` | one task, with `allowed_input` |
-| `juice task complete ID [JSON]` | supply what is missing and run it; `--peer` |
+| `juice task complete ID [JSON]` | supply what is missing and run it |
+| `juice task cancel ID` | decline a waiting task; its price returns to its process |
 
 `task create` requires `--trace` and `--required-caller`, and takes
 `--partial-args`.

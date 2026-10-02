@@ -272,20 +272,17 @@ func runServer(name string) error {
 	railCtx, railCancel := context.WithCancel(context.Background())
 	defer railCancel()
 	// A rail pass is what turns a won draw into a payment that can be announced, so it wakes the
-	// reveal worker when it finishes rather than leaving the news to wait out an interval.
-	revealNow := make(chan struct{}, 1)
+	// telling worker when it finishes rather than leaving the news to wait out an interval; so does
+	// a task made or declined for a peer.
 	go startDiscoveryLoop(railCtx, globalCfg.remoteRetryInterval(), func(ctx context.Context) {
 		k.RailPass(ctx)
-		select {
-		case revealNow <- struct{}{}:
-		default:
-		}
+		k.WakeTell()
 	})
 
-	// Telling sellers how their draws came out is network work, so it runs on its own cadence and
-	// not inside the rail's lock: a peer that does not answer must not hold up the rail pass, or
-	// withdrawals behind it (P10).
-	go everyTickOrWhenWoken(railCtx, globalCfg.remoteRetryInterval(), revealNow, k.RevealPending)
+	// Telling peers what they are owed is network work, so it runs on its own cadence and not inside
+	// the rail's lock: a peer that does not answer must not hold up the rail pass, or withdrawals
+	// behind it (P10).
+	go everyTickOrWhenWoken(railCtx, globalCfg.remoteRetryInterval(), k.TellWoken(), k.RevealPending)
 
 	// Reap peers idle past peer_retention_days (§13 Retention) on a slow timer, plus one pass now.
 	// DB-only, so it runs regardless of the federation transport; started only when enabled.
@@ -746,6 +743,7 @@ func registerRoutes(r chi.Router, srv *server, passwordLimit func(http.Handler) 
 		// Tasks (reads are JWT-only; the POSTs accept a capability too — see below).
 		r.Get("/v1/tasks", srv.listTasks)
 		r.Get("/v1/tasks/{id}", srv.getTask)
+		r.Post("/v1/tasks/{id}/cancel", srv.postCancelTask)
 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
@@ -1352,41 +1350,6 @@ func (s *server) postToken(w http.ResponseWriter, r *http.Request) {
 // ---- Task handlers ----
 
 func (s *server) listTasks(w http.ResponseWriter, r *http.Request) {
-	// ?peer= asks a peer which of its parked tasks this caller may complete — the listing half of
-	// `task complete --peer`, under the same rule: an ordinary user asks as themselves and sees the
-	// tasks addressed to them, the superuser asks as the whole kernel and sees all of them (§13).
-	if peer := strings.TrimSpace(r.URL.Query().Get("peer")); peer != "" {
-		// A peer serves one bounded page of what it holds, under its own order (P8): there is
-		// nothing here for a filter or an offset to act on, so asking is an error, never silence.
-		for _, p := range []string{"process_id", "status", "all", "limit", "offset"} {
-			if r.URL.Query().Get(p) != "" {
-				writeErr(w, kernel.ErrInvalidInput.Wrapf("%s cannot be combined with peer: a peer serves one page of the tasks it holds", p))
-				return
-			}
-		}
-		callerID := callerFrom(r)
-		forUserID := callerID
-		if s.kernel.IsSuperuser(r.Context(), callerID) {
-			forUserID = ""
-		}
-		peerKey, err := s.resolvePeerKey(r.Context(), peer)
-		if err != nil {
-			writeOr(w, nil, err)
-			return
-		}
-		tasks, err := s.kernel.PeerTasksAwaitingUs(r.Context(), peerKey, forUserID)
-		if err == nil {
-			// The peer names our user by id, which routes; the user reads the address (D20).
-			names := s.kernel.NewNames()
-			for i, v := range tasks.Tasks {
-				if v.RequiredCaller != "" {
-					tasks.Tasks[i].RequiredCaller = names.Address(r.Context(), kernel.Principal{AccountID: v.RequiredCaller})
-				}
-			}
-		}
-		writeOr(w, tasks, err)
-		return
-	}
 	limit, offset := listBounds(r)
 	views, err := listTasks(s.kernel, r.Context(), callerFrom(r), kernel.TaskFilter{
 		ProcessID: r.URL.Query().Get("process_id"),
@@ -1433,33 +1396,11 @@ func (s *server) getTask(w http.ResponseWriter, r *http.Request) {
 func (s *server) postCompleteTask(w http.ResponseWriter, r *http.Request) {
 	handle(func(r *http.Request, req struct {
 		Args *json.RawMessage `json:"args"`
-		Peer string           `json:"peer"`
 	}) (any, int, error) {
 		if req.Args == nil {
 			return nil, 0, kernel.ErrInvalidInput.Wrap("args is required")
 		}
 		capTrace, capOwner, isCap := capFromContext(r)
-		// The --peer request is signed by the whole kernel, so it is a session-caller path only. A
-		// capability is local to its trace and carries no supervision or federation authority (§9) —
-		// and it presents no session caller, which downstream reads as the kernel-level form. Checked
-		// before the branch, or an untrusted endpoint would dispatch abroad as the operator.
-		if isCap && req.Peer != "" {
-			return nil, 0, kernel.ErrUnauthorized.Wrap("a capability cannot complete a task on a peer")
-		}
-		// A peer-held task is completed over /juice/fed/task/1 (§13) — the same command, since a task
-		// is a task. Every caller completes as themselves: the home kernel attests their stable id,
-		// and whether they are its operator, and the serving kernel matches that against the task's
-		// addressing — a user completes the tasks addressed to them, the operator those and the ones
-		// addressed to the kernel itself.
-		if req.Peer != "" {
-			forUserID := callerFrom(r)
-			peerKey, err := s.resolvePeerKey(r.Context(), strings.TrimSpace(req.Peer))
-			if err != nil {
-				return nil, 0, err
-			}
-			body, err := s.kernel.CompletePeerTask(r.Context(), peerKey, pathID(r), *req.Args, forUserID)
-			return body, http.StatusOK, err
-		}
 		// Under a capability the caller is the executing action's owner AND the authority is the
 		// capability's own trace (§9): CompleteTaskInTrace enforces both, so the cap completes only
 		// tasks its own trace parked, never one living in another user's process.
@@ -1478,6 +1419,19 @@ func (s *server) postCompleteTask(w http.ResponseWriter, r *http.Request) {
 		reply, err := s.kernel.CompleteTask(r.Context(), callerFrom(r), id, *req.Args)
 		return reply, http.StatusOK, err
 	})(w, r)
+}
+
+// postCancelTask declines a waiting task, wherever it is held (D6), answering with it as it now stands.
+func (s *server) postCancelTask(w http.ResponseWriter, r *http.Request) {
+	id, err := s.kernel.ExpandTaskID(r.Context(), callerFrom(r), pathID(r))
+	if err == nil {
+		var e *kernel.TaskEntry
+		if e, err = s.kernel.CancelTask(r.Context(), callerFrom(r), id); err == nil {
+			writeJSON(w, http.StatusOK, enrichTask(s.kernel, r.Context(), e, s.kernel.NewNames()))
+			return
+		}
+	}
+	writeErr(w, err)
 }
 
 // postCall is the capability-only HTTP twin of juice.call (§9): a subcall on the capability's

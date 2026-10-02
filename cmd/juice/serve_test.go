@@ -1878,7 +1878,8 @@ func TestWaitingOnPeer(t *testing.T) {
 	}
 
 	names := k.NewNames()
-	peerTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID}
+	waiting := kernel.TaskNotice{Status: kernel.TaskWaiting}
+	peerTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: peer.ID}}
 	pv := enrichTask(k, ctx, peerTask, names)
 	if !pv.WaitingOnPeer {
 		t.Error("task addressed to a peer should be waiting_on_peer")
@@ -1887,12 +1888,11 @@ func TestWaitingOnPeer(t *testing.T) {
 	if pv.RequiredCaller != "peer-caller" {
 		t.Errorf("required_caller: got %q, want peer-caller", pv.RequiredCaller)
 	}
-	rid := "alice-remote-id"
-	userTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID, RequiredCallerRemoteID: &rid, RequiredCallerHandle: "alice"}
+	userTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: peer.ID, RemoteID: "alice-remote-id", Handle: "alice"}}
 	if got := enrichTask(k, ctx, userTask, names).RequiredCaller; got != "alice@peer-caller" {
 		t.Errorf("a task addressed to a user on the peer: got %q, want alice@peer-caller", got)
 	}
-	localTask := &kernel.Task{Status: kernel.TaskWaiting, RequiredCallerUserID: localID}
+	localTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: localID}}
 	lv := enrichTask(k, ctx, localTask, names)
 	if lv.WaitingOnPeer {
 		t.Error("task addressed to a local user should not be waiting_on_peer")
@@ -1900,7 +1900,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	if !strings.HasSuffix(lv.RequiredCaller, "@"+testOwnName) {
 		t.Errorf("a local user is addressed on this kernel: got %q", lv.RequiredCaller)
 	}
-	doneTask := &kernel.Task{Status: kernel.TaskDone, RequiredCallerUserID: peer.ID}
+	doneTask := &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{Status: kernel.TaskDone}, RequiredCaller: kernel.Principal{AccountID: peer.ID}}
 	if enrichTask(k, ctx, doneTask, names).WaitingOnPeer {
 		t.Error("a non-waiting task should never be waiting_on_peer")
 	}
@@ -2754,43 +2754,26 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 	}
 }
 
-// A peer serves one page of what it holds, under its own order: a filter or an offset has nothing
-// to act on, so combining one with ?peer= is refused rather than silently ignored.
-func TestServeListTasksPeerRefusesFilters(t *testing.T) {
+// A task held by a peer reads like one held here: its addressee by address, never a raw id, and its
+// owner the holding kernel by name, since the holder withholds who funds it (P8, D20).
+func TestServeRendersATaskHeldByAPeer(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
 	defer srv.Close()
-	_, tok := makeUser(t, k, "peer-list-flags")
-	for _, q := range []string{"limit=5", "offset=1", "status=waiting", "process_id=x"} {
-		resp := httpDo(t, srv, "GET", "/v1/tasks?peer=cGVlcg&"+q, nil, tok)
-		resp.Body.Close()
-		if resp.StatusCode != kernel.ErrInvalidInput.HTTP {
-			t.Errorf("?peer with %s: want %d, got %d", q, kernel.ErrInvalidInput.HTTP, resp.StatusCode)
-		}
+	ctx := context.Background()
+	id, _ := makeUser(t, k, "peer-list-me")
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	if _, err := k.BindPetname(ctx, peerKey, "holder", false); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// peerTaskLister is a peer that holds one canned page of tasks; the listing is all it answers.
-type peerTaskLister struct {
-	kernel.FederationClient
-	body string
-}
-
-func (p peerTaskLister) ListPeerTasks(context.Context, string, string, string, string) (int, []byte, bool, error) {
-	return http.StatusOK, []byte(p.body), false, nil
-}
-
-// A peer names the user a task waits for by that user's id here, which routes; the user reads the
-// task list with the id rendered as their address (D20), never as the raw id.
-func TestServeListTasksPeerRendersRequiredCaller(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
-	defer srv.Close()
-	id, tok := makeUser(t, k, "peer-list-me")
-	k.SetFederation(peerTaskLister{body: `{"tasks":[{"id":"s-1","required_caller":"` + id + `","price":0,"created_at":"2026-01-01T00:00:00Z"}]}`})
-	resp := httpDo(t, srv, "GET", "/v1/tasks?peer="+base64.RawURLEncoding.EncodeToString(make([]byte, 32)), nil, tok)
-	var list kernel.PeerTaskList
-	decodeResponse(t, resp, &list)
-	if len(list.Tasks) != 1 || list.Tasks[0].RequiredCaller != "peer-list-me@"+testOwnName {
-		t.Fatalf("peer task list = %+v; want required_caller peer-list-me@%s", list, testOwnName)
+	v := enrichTask(k, ctx, &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s-1", UserID: id, Status: kernel.TaskWaiting},
+		HolderKey: peerKey, RequiredCaller: kernel.Principal{AccountID: id}}, k.NewNames())
+	if v.RequiredCaller != "peer-list-me@"+testOwnName || v.Owner != "holder" || v.WaitingOnPeer {
+		t.Fatalf("view = %+v; want required_caller peer-list-me@%s, owner holder, not waiting on a peer", v, testOwnName)
+	}
+	wire, _ := json.Marshal(v)
+	if strings.Contains(string(wire), id) {
+		t.Errorf("the view carries a raw user id: %s", wire)
 	}
 }
 

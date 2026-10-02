@@ -469,14 +469,15 @@ var (
 // prefix, since the prefix resolves within their own records. A task's or transaction's
 // process_id stays whole: its required caller or counterparty sees the record without owning the
 // process. A trace or receipt id stays whole: nothing takes a prefix of one. A run's process is the
-// caller's own, so idsCall shortens it; a completion on a peer shortens nothing (idsPeer).
+// caller's own, so idsCall shortens it. A completion's transaction may be the holder's, on a peer,
+// where no prefix of it resolves, so idsComplete shortens only the task.
 var (
-	idsTask    = []string{"id"}
-	idsProcess = []string{"id"}
-	idsTx      = []string{"id"}
-	idsCall    = []string{"tx_id", "process_id", "task_id"}
-	idsPeer    []string
-	moneyOwed  = []string{"obligation", "amount"}
+	idsTask     = []string{"id"}
+	idsProcess  = []string{"id"}
+	idsTx       = []string{"id"}
+	idsCall     = []string{"tx_id", "process_id", "task_id"}
+	idsComplete = []string{"task_id"}
+	moneyOwed   = []string{"obligation", "amount"}
 )
 
 // renderValue formats one JSON value for text output: strings unquoted, objects and
@@ -1548,7 +1549,7 @@ func processShowCmd() *cobra.Command {
 
 func init() {
 	taskCmd := group("task", "Manage tasks")
-	taskCmd.AddCommand(taskCreateCmd(), taskListCmd(), taskShowCmd(), taskCompleteCmd())
+	taskCmd.AddCommand(taskCreateCmd(), taskListCmd(), taskShowCmd(), taskCompleteCmd(), taskCancelCmd())
 	rootCmd.AddCommand(taskCmd)
 }
 
@@ -1586,7 +1587,7 @@ func taskCreateCmd() *cobra.Command {
 }
 
 func taskListCmd() *cobra.Command {
-	var processID, status, peer string
+	var processID, status string
 	var all bool
 	var limit, offset int
 	cmd := &cobra.Command{
@@ -1596,54 +1597,24 @@ func taskListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Every flag typed is sent: the server decides what combines, so none is silently dropped.
 			q := url.Values{}
-			for flag, param := range map[string]string{"peer": "peer", "process": "process_id", "status": "status", "all": "all", "limit": "limit", "offset": "offset"} {
+			for flag, param := range map[string]string{"process": "process_id", "status": "status", "all": "all", "limit": "limit", "offset": "offset"} {
 				if cmd.Flags().Changed(flag) {
 					q.Set(param, cmd.Flags().Lookup(flag).Value.String())
 				}
 			}
-			if peer == "" {
-				return cli.emit("GET", "/v1/tasks?"+q.Encode(), nil, output{human: list(
-					column{"TASK", short("id")},
-					column{"STATUS", text("status")},
-					column{"CREATED BY", text("created_by")},
-					column{"COMPLETES", text("action")},
-					column{"CALLER", text("required_caller")},
-				)})
-			}
-			// A peer holds the task and answers for it, so the reply carries only what it may
-			// disclose: the id to complete, what is already filled in, and what you may supply.
-			ctx := context.Background()
-			net, err := humanUnits(ctx)
-			if err != nil {
-				return err
-			}
-			return cli.emitCtx(ctx, "GET", "/v1/tasks?"+q.Encode(), nil, output{rows: "tasks", human: func(b []byte) error {
-				var held struct {
-					Tasks     json.RawMessage `json:"tasks"`
-					Truncated bool            `json:"truncated"`
-				}
-				if err := json.Unmarshal(b, &held); err != nil {
-					return err
-				}
-				if err := list(
-					column{"TASK", text("id")},
-					column{"PRICE", money("price", net)},
-					column{"CREATED", text("created_at")},
-					column{"SUPPLIED", text("partial_args")},
-				)(held.Tasks); err != nil {
-					return err
-				}
-				if held.Truncated {
-					fmt.Println("more tasks are waiting than one page carries; complete some and ask again")
-				}
-				return nil
-			}})
+			return cli.emit("GET", "/v1/tasks?"+q.Encode(), nil, output{human: list(
+				column{"TASK", short("id")},
+				column{"STATUS", text("status")},
+				column{"CREATED BY", text("created_by")},
+				column{"COMPLETES", text("action")},
+				column{"OWNER", text("owner")},
+				column{"CALLER", text("required_caller")},
+			)})
 		},
 	}
 	cmd.Flags().StringVar(&processID, "process", "", "Filter by process ID")
 	cmd.Flags().StringVar(&status, "status", "", "Filter by status (waiting, running, done, cancelled)")
 	cmd.Flags().BoolVar(&all, "all", false, "Include finished tasks (done, cancelled); by default only open ones are listed")
-	cmd.Flags().StringVar(&peer, "peer", "", "List tasks this peer (its local name or key) is holding for you, over federation")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }
@@ -1660,8 +1631,7 @@ func taskShowCmd() *cobra.Command {
 }
 
 func taskCompleteCmd() *cobra.Command {
-	var peer string
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "complete ID [JSON]",
 		Short: "Complete a waiting task",
 		Long:  "Complete a waiting task addressed to you, supplying what is missing.\n\n[JSON] is the completion input as a JSON object, default {}; @file.json reads it from a file. `task show` lists the fields still expected under allowed_input.",
@@ -1675,20 +1645,21 @@ func taskCompleteCmd() *cobra.Command {
 			if err != nil {
 				return kernel.ErrInvalidInput.Wrapf("invalid input: %v", err)
 			}
-			body := map[string]any{"args": input}
-			if peer != "" {
-				body["peer"] = peer
-			}
-			// A peer's ids are the peer's to resolve, so they are shown as they came.
-			ids := idsCall
-			if peer != "" {
-				ids = idsPeer
-			}
-			return cli.emit("POST", "/v1/tasks/"+args[0]+"/complete", body, output{id: "tx_id", ids: ids})
+			return cli.emit("POST", "/v1/tasks/"+args[0]+"/complete", map[string]any{"args": input}, output{id: "tx_id", ids: idsComplete})
 		},
 	}
-	cmd.Flags().StringVar(&peer, "peer", "", "Complete a task held by this peer (its local name or key), over federation")
-	return cmd
+}
+
+func taskCancelCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cancel ID",
+		Short: "Decline a waiting task",
+		Long:  "Decline a waiting task addressed to you, or cancel one your process funds: its price returns to the process that reserved it.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cli.emit("POST", "/v1/tasks/"+args[0]+"/cancel", nil, output{money: moneyTask, ids: idsTask})
+		},
+	}
 }
 
 // ---- tx ----

@@ -115,24 +115,6 @@ func parkTaskAction(t *testing.T, k *kernel.Kernel) string {
 	return a.ID
 }
 
-func fedTaskList(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey) (int, map[string]any, error) {
-	t.Helper()
-	return fedTaskListFor(t, k, priv, "")
-}
-
-// fedTaskListFor asks the same question on one principal's behalf, as a peer does when a user
-// rather than its operator wants to see the work parked for them (§13).
-func fedTaskListFor(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, forUserID string) (int, map[string]any, error) {
-	t.Helper()
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := testNet.SignTaskListPayload(priv, cp, selfKey(t, k), ts, forUserID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return handleFederationTaskList(k, context.Background(), cp, ts, sig, forUserID)
-}
-
 // derivedTaskKey is the key a completion must carry, taken from the kernel's own derivation rather
 // than a copy of it: a test that restates the rule cannot catch the rule changing.
 func derivedTaskKey(t *testing.T, k *kernel.Kernel, taskID string, input []byte) string {
@@ -144,7 +126,7 @@ func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, ta
 	t.Helper()
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := testNet.SignTaskPayload(priv, taskID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input), "", false)
+	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +141,7 @@ func fedTaskCompleteAs(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, 
 	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
 	self := selfKey(t, k)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, err := testNet.SignTaskPayload(priv, taskID, cp, self, idempKey, ts, sha256HexBytes(input), userID, superuser)
+	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, self, idempKey, ts, sha256HexBytes(input), userID, superuser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +217,7 @@ func TestFedTask_CompletionScopeMustMatch(t *testing.T) {
 	cp := keyA
 	self := selfKey(t, k)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	sig, _ := testNet.SignTaskPayload(privA, forKernel2, cp, self, key(forKernel2, in), ts, sha256HexBytes(in), alice, false) // signed as NOT operator
+	sig, _ := testNet.SignTaskPayload(privA, "complete", forKernel2, cp, self, key(forKernel2, in), ts, sha256HexBytes(in), alice, false) // signed as NOT operator
 	if _, _, err := handleFederationTaskComplete(k, context.Background(), cp, ts, key(forKernel2, in), forKernel2, sig, in, alice, true); err == nil {
 		t.Error("a forged operator scope was accepted")
 	}
@@ -248,28 +230,6 @@ func TestFedTask_CompletionScopeMustMatch(t *testing.T) {
 	}
 	if blindStore.reads != 1 {
 		t.Errorf("the failed read was skipped over: the handler read the task %d times, want to stop at the first", blindStore.reads)
-	}
-}
-
-// TestFedTask_ExactlyFullPageIsNotTruncated: the flag says more is waiting only when more is.
-func TestFedTask_ExactlyFullPageIsNotTruncated(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-	keyA, privA := fedPeer(t, k, "peer-page")
-	for i := 0; i < maxPeerTaskPage; i++ {
-		parkTaskForPeer(t, k, db, keyA)
-	}
-	_, body, err := fedTaskList(t, k, privA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tasks, _ := body["tasks"].([]*kernel.PeerTaskView); len(tasks) != maxPeerTaskPage || body["truncated"] != nil {
-		t.Fatalf("exactly one page: want %d tasks and no truncation, got %d and %v", maxPeerTaskPage, len(tasks), body["truncated"])
-	}
-	parkTaskForPeer(t, k, db, keyA)
-	_, body, _ = fedTaskList(t, k, privA)
-	if tasks, _ := body["tasks"].([]*kernel.PeerTaskView); len(tasks) != maxPeerTaskPage || body["truncated"] != true {
-		t.Fatalf("one past the page: want %d tasks and truncated, got %d and %v", maxPeerTaskPage, len(tasks), body["truncated"])
 	}
 }
 
@@ -290,119 +250,6 @@ func TestWireErrorShieldsInternal(t *testing.T) {
 	}
 }
 
-func TestFedTask_ListShowsOnlyOwnWaitingTasks(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	keyA, privA := fedPeer(t, k, "peer-a")
-	_, privB := fedPeer(t, k, "peer-b")
-	taskID := parkTaskForPeer(t, k, db, keyA)
-
-	status, body, err := fedTaskList(t, k, privA)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Fatalf("expected 200, got %d", status)
-	}
-	tasks, _ := body["tasks"].([]*kernel.PeerTaskView)
-	if len(tasks) != 1 || tasks[0].ID != taskID {
-		t.Fatalf("expected exactly the parked task, got %+v", tasks)
-	}
-	if len(tasks[0].AllowedInput) == 0 {
-		t.Errorf("expected allowed_input so the peer can complete without reading the action")
-	}
-
-	// A different peer sees nothing: the task is not addressed to it.
-	_, bodyB, err := fedTaskList(t, k, privB)
-	if err != nil {
-		t.Fatalf("list for peer B: %v", err)
-	}
-	if tasksB, _ := bodyB["tasks"].([]*kernel.PeerTaskView); len(tasksB) != 0 {
-		t.Errorf("peer B must not see peer A's task, got %+v", tasksB)
-	}
-}
-
-// TestFedTask_ListIsUserScoped: listing and completing must have the same granularity. A task
-// addressed to one principal on the peer is listed to that principal, and never to another; the
-// operator's kernel-level ask still sees every task it may complete, user-addressed ones included,
-// which is the only place a peer-held task is visible to them.
-func TestFedTask_ListIsUserScoped(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-
-	keyA, privA := fedPeer(t, k, "peer-scoped")
-	const alice, bob = "alice-remote-id", "bob-remote-id"
-	forAlice := parkTaskForPeerUser(t, k, db, keyA, alice)
-	forKernel := parkTaskForPeer(t, k, db, keyA)
-
-	ids := func(body map[string]any) []string {
-		tasks, _ := body["tasks"].([]*kernel.PeerTaskView)
-		out := make([]string, len(tasks))
-		for i, s := range tasks {
-			out[i] = s.ID
-		}
-		return out
-	}
-
-	_, aliceBody, err := fedTaskListFor(t, k, privA, alice)
-	if err != nil {
-		t.Fatalf("list for alice: %v", err)
-	}
-	if got := ids(aliceBody); len(got) != 1 || got[0] != forAlice {
-		t.Fatalf("alice must see exactly the task addressed to her, got %v", got)
-	}
-
-	_, bobBody, err := fedTaskListFor(t, k, privA, bob)
-	if err != nil {
-		t.Fatalf("list for bob: %v", err)
-	}
-	if got := ids(bobBody); len(got) != 0 {
-		t.Errorf("bob must see none of alice's tasks, got %v", got)
-	}
-
-	// The operator asks as the whole kernel and sees both — omitting the user must never filter.
-	_, allBody, err := fedTaskList(t, k, privA)
-	if err != nil {
-		t.Fatalf("kernel-level list: %v", err)
-	}
-	got := ids(allBody)
-	if len(got) != 2 {
-		t.Fatalf("the operator must see every task this kernel may complete, got %v", got)
-	}
-	tasks, _ := allBody["tasks"].([]*kernel.PeerTaskView)
-	for _, s := range tasks {
-		if s.ID == forAlice && s.RequiredCaller != alice {
-			t.Errorf("a user-addressed task must name its principal, got %q", s.RequiredCaller)
-		}
-		if s.ID == forKernel && s.RequiredCaller != "" {
-			t.Errorf("a kernel-addressed task names no principal, got %q", s.RequiredCaller)
-		}
-	}
-}
-
-// A signature-valid stranger is not provisioned an account by a read; it simply has no tasks.
-func TestFedTask_ListUnknownKeyIsEmptyAndProvisionsNothing(t *testing.T) {
-	srv, k := newTestHTTPServer(t)
-	defer srv.Close()
-
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
-	status, body, err := fedTaskList(t, k, priv)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Fatalf("expected 200, got %d", status)
-	}
-	if tasks, _ := body["tasks"].([]*kernel.PeerTaskView); len(tasks) != 0 {
-		t.Errorf("expected no tasks for a stranger, got %+v", tasks)
-	}
-	if u, _ := k.ReadAccountByKernelKey(context.Background(), cp); u != nil {
-		t.Errorf("a read must not provision an account, but %s now exists", u.Handle)
-	}
-}
-
 // Every way a task request is refused, in one table. Each case starts from the same fixture — a
 // registered peer with one task parked for it — and mutates exactly one thing, so what is under
 // test is the mutation and not the setup. These were seven near-identical tests.
@@ -413,9 +260,9 @@ func TestFedTask_RequestsAreRejected(t *testing.T) {
 		// run performs the rejected request. keyA/privA are the peer the task is parked for.
 		run func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error
 	}{
-		{"bad list signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, _ string) error {
+		{"bad cancel signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			_, _, err := handleFederationTaskList(k, ctx, keyA, ts, "bogus", "")
+			_, _, err := handleFederationTaskCancel(k, ctx, keyA, ts, taskID, "bogus", "", false)
 			return err
 		}},
 		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, taskID string) error {
@@ -423,22 +270,29 @@ func TestFedTask_RequestsAreRejected(t *testing.T) {
 			_, _, err := handleFederationTaskComplete(k, ctx, keyA, ts, "idem-1", taskID, "bogus", []byte("{}"), "", false)
 			return err
 		}},
-		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, _ string) error {
+		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
 			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
-			sig, _ := testNet.SignTaskListPayload(privA, keyA, selfKey(t, k), stale, "")
-			_, _, err := handleFederationTaskList(k, ctx, keyA, stale, sig, "")
+			sig, _ := testNet.SignTaskPayload(privA, "cancel", taskID, keyA, selfKey(t, k), "", stale, "", "", false)
+			_, _, err := handleFederationTaskCancel(k, ctx, keyA, stale, taskID, sig, "", false)
 			return err
 		}},
 		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := testNet.SignTaskPayload(privA, taskID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)), "", false)
+			sig, _ := testNet.SignTaskPayload(privA, "complete", taskID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)), "", false)
 			_, _, err := handleFederationTaskComplete(k, ctx, keyA, ts, "idem-t", taskID, sig, []byte(`{"ok":false}`), "", false)
 			return err
 		}},
 		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
-			sig, _ := testNet.SignTaskListPayload(privA, keyA, "some-other-kernels-key", ts, "")
-			_, _, err := handleFederationTaskList(k, ctx, keyA, ts, sig, "")
+			sig, _ := testNet.SignTaskPayload(privA, "cancel", taskID, keyA, "some-other-kernels-key", "", ts, "", "", false)
+			_, _, err := handleFederationTaskCancel(k, ctx, keyA, ts, taskID, sig, "", false)
+			return err
+		}},
+		{"a decline by a known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, taskID string) error {
+			keyB, privB := fedPeer(t, k, "peer-b")
+			ts := time.Now().UTC().Format(time.RFC3339)
+			sig, _ := testNet.SignTaskPayload(privB, "cancel", taskID, keyB, selfKey(t, k), "", ts, "", "", false)
+			_, _, err := handleFederationTaskCancel(k, ctx, keyB, ts, taskID, sig, "", false)
 			return err
 		}},
 		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, taskID string) error {
@@ -457,8 +311,10 @@ func TestFedTask_RequestsAreRejected(t *testing.T) {
 			if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
-			if _, _, err := fedTaskList(t, k, privA); err == nil {
-				t.Error("a suspended peer's list must also be refused")
+			ts := time.Now().UTC().Format(time.RFC3339)
+			sig, _ := testNet.SignTaskPayload(privA, "cancel", taskID, keyA, selfKey(t, k), "", ts, "", "", false)
+			if _, _, err := handleFederationTaskCancel(k, ctx, keyA, ts, taskID, sig, "", false); err == nil {
+				t.Error("a suspended peer's decline must also be refused")
 			}
 			_, _, err := fedTaskComplete(t, k, privA, taskID, "idem-s", []byte("{}"))
 			return err
@@ -488,7 +344,7 @@ func TestFedTask_OnTaskRejects(t *testing.T) {
 	// Defense in depth: a validly-signed request may not be replayed over a connection
 	// authenticated as a different peer (mirrors OnCall).
 	resp := h.OnTask(context.Background(), "different-connection-key",
-		fed.TaskRequest{Kind: "list", Counterparty: "claimed-key"})
+		fed.TaskRequest{Kind: "notice", Counterparty: "claimed-key"})
 	if resp.Status != kernel.ErrUnauthenticated.HTTP {
 		t.Errorf("mismatched connection key: got %d, want %d", resp.Status, kernel.ErrUnauthenticated.HTTP)
 	}
@@ -581,82 +437,45 @@ func TestFedTask_PeerCompletesLocalAction(t *testing.T) {
 	}
 }
 
-func TestFedTask_ListNotCrowdedOutByOwnProcesses(t *testing.T) {
-	srv, k, db := newTestHTTPServerFull(t)
-	defer srv.Close()
-	ctx := context.Background()
-
-	keyA, privA := fedPeer(t, k, "peer-a")
-	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
-	sys, _ := k.ReadUserByHandle(ctx, "sys")
-
-	// The task actually addressed to the peer, created FIRST so a newest-first cap would drop it.
-	taskID := parkTaskForPeer(t, k, db, keyA)
-
-	// 60 tasks inside processes the peer owns, awaiting a local user — visible to it via
-	// CanListTask, but not completable by it.
-	local, _ := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "local@k", Password: "pw12345678"})
-	action := parkTaskAction(t, k)
-	for i := 0; i < 60; i++ {
-		p := setupProcessHTTP(t, db, peer.ID, 0)
-		if _, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), action, json.RawMessage(`{}`), kernel.Principal{AccountID: local.ID}); err != nil {
-			t.Fatalf("seed task %d: %v", i, err)
-		}
-	}
-	_ = sys
-
-	_, body, err := fedTaskList(t, k, privA)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	tasks, _ := body["tasks"].([]*kernel.PeerTaskView)
-	if len(tasks) != 1 || tasks[0].ID != taskID {
-		ids := make([]string, len(tasks))
-		for i, s := range tasks {
-			ids[i] = s.ID
-		}
-		t.Fatalf("expected exactly the peer-addressed task %s, got %v", taskID, ids)
-	}
-}
-
-// The peer-facing view must carry the request and nothing about the requester. This asserts on the
-// serialized JSON rather than the struct, because the defect it guards against was reusing a type
-// whose EMBEDDED fields leaked — a field-by-field check on the wrong type would have passed.
-// owner_handle is the sharp one: a local user identity crossing a kernel boundary is what §5's
-// encapsulation exists to prevent.
-func TestFedTask_ListDisclosesRequestNotRequester(t *testing.T) {
+// The notice a peer is told must carry the request and nothing about the requester. This asserts on
+// the serialized JSON rather than the struct, because the defect it guards against was reusing a
+// type whose fields leaked. A local user identity crossing a kernel boundary is what P8 withholds.
+func TestFedTask_NoticeDisclosesRequestNotRequester(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
-	keyA, privA := fedPeer(t, k, "peer-a")
+	keyA, _ := fedPeer(t, k, "peer-a")
 	taskID := parkTaskForPeer(t, k, db, keyA)
 
-	_, body, err := fedTaskList(t, k, privA)
-	if err != nil {
-		t.Fatalf("list: %v", err)
+	n := k.TaskNoticeFor(context.Background(), taskID, keyA)
+	if n == nil {
+		t.Fatal("no notice for a task addressed to the peer")
 	}
-	wire, err := json.Marshal(body)
+	if other := k.TaskNoticeFor(context.Background(), taskID, "another-kernels-key"); other != nil {
+		t.Error("a notice was built for a kernel the task is not addressed to")
+	}
+	wire, err := json.Marshal(n)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(wire)
 
 	// Present: what the completer needs.
-	for _, want := range []string{taskID, "allowed_input", "price", "created_at"} {
+	for _, want := range []string{taskID, "allowed_input", "price", "created_at", "revision", "signature"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("peer view must carry %q; got %s", want, got)
+			t.Errorf("notice must carry %q; got %s", want, got)
 		}
 	}
 	// Absent: local composition and identity.
-	for _, leak := range []string{"owner_handle", "created_by", "required_caller", "parent_trace_id",
-		"action_id", "completion_trace_id", "waiting_on_peer"} {
+	for _, leak := range []string{"owner", "created_by", "required_caller", "parent_trace_id",
+		"action_id", "completion_trace_id", "waiting_on_peer", "process"} {
 		if strings.Contains(got, leak) {
-			t.Errorf("peer view leaks %q: %s", leak, got)
+			t.Errorf("notice leaks %q: %s", leak, got)
 		}
 	}
 	// The process owner's handle must not appear under any key at all.
 	if strings.Contains(got, "sys") {
-		t.Errorf("peer view leaks a local handle: %s", got)
+		t.Errorf("notice leaks a local handle: %s", got)
 	}
 }
 
@@ -695,28 +514,28 @@ func TestFedTask_SignatureDomainsAreDisjoint(t *testing.T) {
 	const hash = "abc123"
 
 	const rcpt = "recipient-kernel-key"
-	taskSig, _ := testNet.SignTaskPayload(priv, "task-1", cp, rcpt, "idem-1", ts, hash, "", false)
-	listSig, _ := testNet.SignTaskListPayload(priv, cp, rcpt, ts, "")
+	taskSig, _ := testNet.SignTaskPayload(priv, "complete", "task-1", cp, rcpt, "idem-1", ts, hash, "", false)
+	cancelSig, _ := testNet.SignTaskPayload(priv, "cancel", "task-1", cp, rcpt, "", ts, "", "", false)
 	callSig, _ := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: "act-id", ExpectedContractHash: "chash", IdempotencyKey: "idem-1", Commitment: "", Lottery: 0}, cp, rcpt, ts, hash)
 
 	// A call signature must not pass as a task signature, nor either task kind as the other.
-	if err := testNet.VerifyTaskSignature("task-1", cp, rcpt, "idem-1", ts, hash, "", false, callSig); err == nil {
+	if err := testNet.VerifyTaskSignature("complete", "task-1", cp, rcpt, "idem-1", ts, hash, "", false, callSig); err == nil {
 		t.Error("a federation call signature must not verify as a task completion")
 	}
-	if err := testNet.VerifyTaskSignature("task-1", cp, rcpt, "idem-1", ts, hash, "", false, listSig); err == nil {
-		t.Error("a task list signature must not verify as a task completion")
+	if err := testNet.VerifyTaskSignature("complete", "task-1", cp, rcpt, "", ts, "", "", false, cancelSig); err == nil {
+		t.Error("a decline must not verify as a completion")
 	}
-	if err := testNet.VerifyTaskListSignature(cp, rcpt, ts, "", taskSig); err == nil {
-		t.Error("a task completion signature must not verify as a task list")
+	if err := testNet.VerifyTaskSignature("cancel", "task-1", cp, rcpt, "idem-1", ts, hash, "", false, taskSig); err == nil {
+		t.Error("a completion must not verify as a decline")
 	}
 	if err := testNet.VerifyFederationSignature(cp, kernel.OutboundCall{ActionID: "act-id", ExpectedContractHash: "chash", IdempotencyKey: "idem-1", Commitment: "", Lottery: 0}, cp, rcpt, ts, hash, taskSig); err == nil {
 		t.Error("a task signature must not verify as a federation call")
 	}
 	// Sanity: each verifies under its own domain.
-	if err := testNet.VerifyTaskSignature("task-1", cp, rcpt, "idem-1", ts, hash, "", false, taskSig); err != nil {
+	if err := testNet.VerifyTaskSignature("complete", "task-1", cp, rcpt, "idem-1", ts, hash, "", false, taskSig); err != nil {
 		t.Errorf("task signature should verify in its own domain: %v", err)
 	}
-	if err := testNet.VerifyTaskListSignature(cp, rcpt, ts, "", listSig); err != nil {
-		t.Errorf("list signature should verify in its own domain: %v", err)
+	if err := testNet.VerifyTaskSignature("cancel", "task-1", cp, rcpt, "", ts, "", "", false, cancelSig); err != nil {
+		t.Errorf("decline signature should verify in its own domain: %v", err)
 	}
 }

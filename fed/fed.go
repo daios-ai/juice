@@ -102,24 +102,25 @@ type CallRequest struct {
 // {error,receipt}.
 type CallResponse = Response
 
-// TaskRequest is the wire form of a /juice/fed/task/1 request (§13). Kind selects the operation:
-// "list" enumerates the waiting tasks this peer is the required caller of, "complete" resumes one.
-// Input carries the exact bytes the caller hashed and signed, so input_hash matches byte-for-byte.
+// TaskRequest is the wire form of a /juice/fed/task/1 request (P8). Kind selects the operation:
+// "notice" tells the addressee's kernel a task's state, "complete" resumes a task and "cancel"
+// declines it at its holder. Input carries the exact bytes the caller hashed and signed, so
+// input_hash matches byte-for-byte.
 type TaskRequest struct {
-	Kind           string          `json:"kind"`                      // "list" | "complete"
+	Kind           string          `json:"kind"`                      // "notice" | "complete" | "cancel"
 	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
 	Timestamp      string          `json:"timestamp"`                 // RFC3339
 	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
-	TaskID         string          `json:"task_id,omitempty"`         // complete only
+	TaskID         string          `json:"task_id,omitempty"`         // complete, cancel
 	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
 	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
-	ForUserID      string          `json:"for_user_id,omitempty"`     // list/complete: the acting user's stable id on the requesting kernel, signed into the payload (P8)
-	UserSuperuser  bool            `json:"user_superuser,omitempty"`  // complete: the home kernel's word that this user is its operator, the scope a kernel-addressed task demands
+	ForUserID      string          `json:"for_user_id,omitempty"`     // complete, cancel: the acting user's stable id on the requesting kernel, signed into the payload (P8)
+	UserSuperuser  bool            `json:"user_superuser,omitempty"`  // complete, cancel: the home kernel's word that this user is its operator, the scope a kernel-addressed task demands
+	Notice         json.RawMessage `json:"notice,omitempty"`          // notice only: the task's state, signed with the envelope
 }
 
-// TaskResponse carries a task list or completion result. Unlike a call, a task completion parks
-// nothing on the requester, so failures are plain typed errors — there is no local trace awaiting a
-// signed rejection receipt (§13).
+// TaskResponse carries an acknowledgement or a completion's result, with the task's current notice
+// on a completion or decline, or an error.
 type TaskResponse = Response
 
 // RevealRequest is the wire form of a /juice/fed/settle/1 request (P10): the buyer tells the seller
@@ -170,8 +171,8 @@ type Handlers interface {
 	// evidence page after req.Cursor) as JSON (§13). Gossip carries no membership — discovery of
 	// which kernels exist is routing discovery's job (Advertise/DiscoverProviders).
 	OnGossip(ctx context.Context, peerKey string, req GossipRequest) (json.RawMessage, error)
-	// OnTask handles an inbound /juice/fed/task/1 request: listing or completing the waiting
-	// tasks this peer is the required caller of (§10, §13).
+	// OnTask handles an inbound /juice/fed/task/1 request: a task notice, or completing or
+	// declining a task addressed to this peer (P8).
 	OnTask(ctx context.Context, peerKey string, req TaskRequest) TaskResponse
 	// OnReveal handles an inbound /juice/fed/settle/1 request (P10): the seller side of one
 	// obligation's draw. peerKey is the connection's authenticated key; the handler still verifies

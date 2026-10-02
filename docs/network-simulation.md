@@ -153,7 +153,7 @@ and tampered receipts in `kernel/federation_test.go`, which can re-sign with a p
 | U35 intermittent connectivity | `fedsim_test.go`; flow `fed_provider_crash_recovery`; netsim act 12 (offline only) |
 | U36 offline verification | netsim act 10; `kernel` tests |
 | U37–U40 suspend, petnames, privacy, discovery | netsim acts 10, 11, attack 5 |
-| U41 remote tasks | flow `fed_task_complete` |
+| U41 remote tasks | netsim act 7; flow `fed_task_complete`; `fedsim_test.go` |
 | U44 observability | netsim act 12 (parked funds and their age) |
 | U47 non-transitive access | netsim attack 4 |
 | G1 conservation | **netsim conservation** (independent) |

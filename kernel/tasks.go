@@ -81,7 +81,8 @@ func (k *Kernel) Recover(ctx context.Context) error {
 	if err := k.store.ResetRunningTasks(ctx); err != nil {
 		return err
 	}
-	return nil
+	// Tasks made before the mailbox existed are delivered once, by the one writer (D4).
+	return k.store.RedeliverTasks(ctx)
 }
 
 // newTraceFailureTx builds the failure Transaction skeleton for a trace settled after the fact.
@@ -281,13 +282,15 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 	if err := k.store.CreateTask(ctx, task); err != nil {
 		return nil, err
 	}
+	k.WakeTell()
 	k.log.With(ctx).Info("task.created", "task_id", task.ID, "trace_id", traceID, "status", "success")
 	return task, nil
 }
 
 // CreateTaskByRef is CreateTask for a creator that names the action and the required caller by
-// address, here or on a peer, as a script and the HTTP surface both do.
-func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requiredCaller string, partialArgs json.RawMessage) (*Task, error) {
+// address, here or on a peer, as a script and the HTTP surface both do. It answers with the task as
+// delivered, which is how every surface reads one.
+func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requiredCaller string, partialArgs json.RawMessage) (*TaskEntry, error) {
 	action, err := k.ResolveAction(ctx, actionRef)
 	if err != nil {
 		return nil, err
@@ -296,40 +299,76 @@ func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requir
 	if err != nil {
 		return nil, err
 	}
-	return k.CreateTask(ctx, traceID, action.ID, partialArgs, caller)
-}
-
-// ReadTask returns a task if the caller has read access.
-func (k *Kernel) ReadTask(ctx context.Context, callerID, taskID string) (*Task, error) {
-	task, err := k.store.ReadTask(ctx, taskID)
+	task, err := k.CreateTask(ctx, traceID, action.ID, partialArgs, caller)
 	if err != nil {
 		return nil, err
 	}
-	if !k.canReadTask(ctx, callerID, task) {
-		return nil, ErrUnauthorized.Wrap("read permission denied")
-	}
-	return task, nil
+	return k.store.ReadMailbox(ctx, task.ID)
 }
 
-// ListTasks returns tasks visible to the caller.
-func (k *Kernel) ListTasks(ctx context.Context, callerID string, f TaskFilter) ([]*Task, error) {
+// ReadTask returns a mailbox entry (D4) if the caller may read it: the party it is addressed to, the
+// owner of the process that funds it, or the superuser (D6).
+func (k *Kernel) ReadTask(ctx context.Context, callerID, taskID string) (*TaskEntry, error) {
+	e, err := k.store.ReadMailbox(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if callerID == "" || callerID != e.RequiredCaller.AccountID && callerID != e.OwnerUserID && !k.IsSuperuser(ctx, callerID) {
+		return nil, ErrUnauthorized.Wrap("read permission denied")
+	}
+	return e, nil
+}
+
+// ListTasks returns the mailbox entries visible to the caller, wherever each task is held.
+func (k *Kernel) ListTasks(ctx context.Context, callerID string, f TaskFilter) ([]*TaskEntry, error) {
 	u, err := k.requireActiveUser(ctx, callerID)
 	if err != nil {
 		return nil, err
 	}
 	f.CallerUserID, f.Superuser = callerID, k.isUserSuperuser(ctx, u)
-	return k.store.ListTasks(ctx, f)
+	return k.store.ListMailbox(ctx, f)
 }
 
-// ListTasksAwaitingCaller returns the waiting tasks callerID is the required caller of, oldest
-// first — "what awaits me". Unlike ListTasks it takes no superuser widening: the question is
-// scoped to one user by construction, and the federation task protocol (§13) answers it for a
-// peer, which must never be able to widen its view of another kernel's tasks.
-func (k *Kernel) ListTasksAwaitingCaller(ctx context.Context, callerID, remoteUserID string, limit int) ([]*Task, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+// CancelTask declines a waiting task (D6) and returns its entry as it now stands. A task held by a
+// peer is declined there, as the caller; one held here, by its required caller or process owner.
+func (k *Kernel) CancelTask(ctx context.Context, callerID, taskID string) (*TaskEntry, error) {
+	e, err := k.ReadTask(ctx, callerID, taskID)
+	if err != nil {
 		return nil, err
 	}
-	return k.store.ListTasksAwaitingCaller(ctx, callerID, remoteUserID, limit)
+	if e.Status != TaskWaiting {
+		return nil, ErrInvalidState.Wrap("task is not waiting")
+	}
+	if e.HolderKey != k.SelfKey(ctx) {
+		_, err = k.sendTask(ctx, callerID, e, "cancel", nil)
+	} else {
+		err = k.CancelTaskHeld(ctx, callerID, e.ID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return k.store.ReadMailbox(ctx, e.ID)
+}
+
+// CancelTaskHeld declines a waiting task this kernel holds, for its required caller — a peer's
+// account when the decline arrives over P8, scope already matched — or its process owner.
+func (k *Kernel) CancelTaskHeld(ctx context.Context, callerID, taskID string) error {
+	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+		return err
+	}
+	e, err := k.store.ReadMailbox(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if callerID != e.RequiredCaller.AccountID && callerID != e.OwnerUserID {
+		return ErrUnauthorized.Wrap("only the task's required caller or its process owner may decline it")
+	}
+	if err := k.store.CancelTask(ctx, taskID); err != nil {
+		return err
+	}
+	k.WakeTell()
+	k.log.With(ctx).Info("task.cancelled", "task_id", taskID)
+	return nil
 }
 
 // CompleteTask resumes a waiting task by merging caller input with partial_args and executing the next call.
@@ -348,6 +387,16 @@ func (k *Kernel) ListTasksAwaitingCaller(ctx context.Context, callerID, remoteUs
 //	                                      the task stays running for RetryPendingRemoteDispatches
 //	otherwise (reply == nil)              rejected before anything settled; the task is waiting again
 func (k *Kernel) CompleteTask(ctx context.Context, callerID, taskID string, input json.RawMessage) (*TaskReply, error) {
+	e, err := k.ReadTask(ctx, callerID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if e.Status != TaskWaiting {
+		return nil, ErrInvalidState.Wrap("task is not waiting").Because(ErrTaskNotClaimed)
+	}
+	if e.HolderKey != k.SelfKey(ctx) {
+		return k.sendTask(ctx, callerID, e, "complete", input)
+	}
 	return k.completeTask(ctx, callerID, taskID, input, "", "", peerCompleter{})
 }
 
@@ -567,19 +616,6 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 	}
 	k.log.With(ctx).Info("task.completed", "task_id", taskID, "tx_id", reply.TxID, "status", "success")
 	return &TaskReply{CallReply: reply, TaskID: taskID}, nil
-}
-
-// canReadTask returns true if the caller may read the task.
-func (k *Kernel) canReadTask(ctx context.Context, callerID string, task *Task) bool {
-	if callerID == "" || callerID == task.RequiredCallerUserID {
-		return callerID != ""
-	}
-	if task.ParentTraceID != nil {
-		if trace, err := k.store.ReadTrace(ctx, *task.ParentTraceID); err == nil && k.ProcessOwnerID(ctx, trace.ProcessID) == callerID {
-			return true
-		}
-	}
-	return k.IsSuperuser(ctx, callerID)
 }
 
 // DeriveAllowedSchema returns the subset of actionSchema that is not already covered by partialArgs.

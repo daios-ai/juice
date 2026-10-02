@@ -1232,26 +1232,6 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	}
 }
 
-// `task list --peer` sends every flag typed, so the one refusal of a filter beside a peer is the
-// server's, and no flag is dropped on the way (D20).
-func TestTaskListPeerSendsEveryFlag(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "peer-cli@k", Password: "pass"}); err != nil {
-		t.Fatal(err)
-	}
-	tok, _ := loginTokenFor(env.k, ctx, "peer-cli", "pass")
-	if err := saveToken(tok); err != nil {
-		t.Fatal(err)
-	}
-	for flag, value := range map[string]string{"status": "waiting", "process": "p-1", "limit": "5", "offset": "2"} {
-		_, err := execTestCmd(t, taskListCmd(), "--peer", "beta", "--"+flag, value)
-		if err == nil || !strings.Contains(err.Error(), "cannot be combined with peer") {
-			t.Errorf("--peer with --%s: want the server's refusal, got %v", flag, err)
-		}
-	}
-}
-
 func TestServeGetTask(t *testing.T) {
 	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
@@ -1309,6 +1289,53 @@ func TestServeGetTask(t *testing.T) {
 	defer r3.Body.Close()
 	if r3.StatusCode != http.StatusForbidden {
 		t.Errorf("unrelated GET /v1/tasks/%s: expected 403, got %d", sid, r3.StatusCode)
+	}
+}
+
+// POST /v1/tasks/{id}/cancel declines a waiting task for its required caller (D6, D20): a stranger
+// is refused, the decline answers with the task as it now stands, and a second is refused.
+func TestServeCancelTask(t *testing.T) {
+	backend := newTaskBackend(t)
+	srv, k, db := newTestHTTPServerFull(t)
+	defer srv.Close()
+	ownerID, ownerTok := makeUser(t, k, "cancel-owner")
+	_, callerTok := makeUser(t, k, "cancel-caller")
+	_, strangerTok := makeUser(t, k, "cancel-stranger")
+	actionID, _ := createTaskAction(t, srv, backend.URL, ownerTok, "cancel-owner", "cancel-svc")
+	p := setupProcessHTTP(t, db, ownerID, 0)
+	created := httpDo(t, srv, "POST", "/v1/tasks", map[string]any{"trace_id": setupTraceForProcess(t, db, p.ID),
+		"action": actionID, "required_caller": "cancel-caller@k", "partial_args": map[string]any{}}, ownerTok)
+	var task map[string]any
+	decodeResponse(t, created, &task)
+	sid := task["id"].(string)
+
+	if r := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/cancel", nil, strangerTok); r.StatusCode != http.StatusForbidden {
+		t.Errorf("a stranger's decline: %d, want 403", r.StatusCode)
+	}
+	r := httpDo(t, srv, "POST", "/v1/tasks/"+sid[:8]+"/cancel", nil, callerTok)
+	var got map[string]any
+	decodeResponse(t, r, &got)
+	if got["id"] != sid || got["status"] != "cancelled" || got["owner"] != "cancel-owner@k" {
+		t.Errorf("decline answered %v; want the task cancelled, named by its owner", got)
+	}
+	if r := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/cancel", nil, callerTok); r.StatusCode != kernel.ErrInvalidState.HTTP {
+		t.Errorf("a second decline: %d, want %d", r.StatusCode, kernel.ErrInvalidState.HTTP)
+	}
+}
+
+// `task cancel` reaches the server and reports its refusal like any command.
+func TestTaskCancelCmd(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "tc-caller@k", Password: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := loginTokenFor(env.k, ctx, "tc-caller", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execTestCmd(t, taskCancelCmd(), "abcd1234"); err == nil || !strings.Contains(err.Error(), "abcd") {
+		t.Errorf("declining a task that does not exist: %v, want a refusal naming it", err)
 	}
 }
 
@@ -1715,7 +1742,7 @@ func TestPrintTextParity(t *testing.T) {
 			OutputSchema: map[string]any{"type": "object"},
 		}, env.k.NewNames()),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
-		&taskWithAction{Task: &kernel.Task{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
+		&taskWithAction{TaskNotice: kernel.TaskNotice{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
 	}
 	for _, obj := range objects {
 		// Canonical key set from the marshaled object (what HTTP would send).

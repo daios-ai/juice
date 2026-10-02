@@ -124,45 +124,35 @@ type federationTransport interface {
 }
 
 // Transport deadlines live here, with the carrier: the kernel owns task protocol semantics but has
-// no business naming a wall-clock bound per operation. A list only measures reachability, while a
+// no business naming a wall-clock bound per operation. A notice or a decline is quick, while a
 // completion waits on the peer running the resumed call synchronously — hence the wider bound. Both
 // derive from the caller's context, so cancellation upstream still cuts them short.
 const (
-	fedTaskListTimeout     = 8 * time.Second
+	fedTaskTimeout         = 8 * time.Second
 	fedTaskCompleteTimeout = 60 * time.Second
 )
 
-// CompletePeerTask and ListPeerTasks implement kernel.TaskCaller over /juice/fed/task/1 (§13). The
-// kernel hands over signed scalars; this builds the wire request, dispatches it, and reports the
-// raw status/body plus the never-dispatched proof — no Juice semantics are applied here.
-func (c *fedAdapter) CompletePeerTask(ctx context.Context, peerKey, timestamp, signature, taskID, idempotencyKey string,
-	input []byte, forUserID string, userSuperuser bool) (int, []byte, bool, error) {
-	return c.task(ctx, peerKey, fedTaskCompleteTimeout, fed.TaskRequest{
-		Kind: "complete", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
-		TaskID: taskID, IdempotencyKey: idempotencyKey, Input: json.RawMessage(input),
-		ForUserID: forUserID, UserSuperuser: userSuperuser,
-	})
-}
-
-func (c *fedAdapter) ListPeerTasks(ctx context.Context, peerKey, timestamp, signature, forUserID string) (int, []byte, bool, error) {
-	return c.task(ctx, peerKey, fedTaskListTimeout, fed.TaskRequest{
-		Kind: "list", Counterparty: c.localPubKey, Timestamp: timestamp, Signature: signature,
-		ForUserID: forUserID,
-	})
-}
-
-func (c *fedAdapter) task(ctx context.Context, peerKey string, timeout time.Duration, req fed.TaskRequest) (int, []byte, bool, error) {
+// SendTask implements kernel.TaskCaller over /juice/fed/task/1 (P8): it builds the wire request from
+// what the kernel signed, dispatches it, and reports the raw status/body plus the never-dispatched
+// proof — no Juice semantics are applied here.
+func (c *fedAdapter) SendTask(ctx context.Context, peerKey string, r kernel.TaskRequest) (int, []byte, bool, error) {
 	if c.transport == nil {
 		return 0, nil, true, nil // no carrier: the request provably cannot have been sent (§13)
+	}
+	req := fed.TaskRequest{Kind: r.Kind, Counterparty: r.Counterparty, Timestamp: r.Timestamp, Signature: r.Signature,
+		TaskID: r.TaskID, IdempotencyKey: r.IdempotencyKey, Input: json.RawMessage(r.Input),
+		ForUserID: r.ForUserID, UserSuperuser: r.UserSuperuser}
+	if r.Notice != nil {
+		req.Notice, _ = json.Marshal(r.Notice)
+	}
+	timeout := fedTaskTimeout
+	if r.Kind == "complete" {
+		timeout = fedTaskCompleteTimeout
 	}
 	octx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	resp, err := c.transport.Task(octx, peerKey, req)
-	// A completion is work and dates the peer; a list is a read, and `admin inspect` is built on one
-	// (§14: inspection writes nothing, so no display state depends on being looked at).
-	if req.Kind != "list" {
-		c.contacted(ctx, peerKey, contactFromErr(err))
-	}
+	c.contacted(ctx, peerKey, contactFromErr(err))
 	if err != nil {
 		return 0, nil, errors.Is(err, fed.ErrNotDispatched), err
 	}
@@ -176,7 +166,7 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 	if c.transport == nil {
 		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
-	octx, cancel := context.WithTimeout(ctx, fedTaskListTimeout)
+	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
 	resp, err := c.transport.Reveal(octx, peerPublicKey, fed.RevealRequest{
 		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature,
@@ -198,7 +188,7 @@ func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string,
 	if c.transport == nil {
 		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
 	}
-	octx, cancel := context.WithTimeout(ctx, fedTaskListTimeout)
+	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
 	resp, err := c.transport.Transfer(octx, peerPublicKey, fed.TransferRequest{
 		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature, ID: p.ID,

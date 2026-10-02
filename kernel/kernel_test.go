@@ -2291,13 +2291,11 @@ type fakeFederationHTTP struct {
 	// announced is every paid transfer the kernel announced to the beneficiary's kernel (P11).
 	announced   []kernel.TransferPaidPayload
 	announceErr error
-	// Outbound task protocol (§13): the canned list/complete replies, and what the kernel sent.
-	taskListBody      string
+	// Outbound task protocol (P8): the canned reply, and every request the kernel sent.
 	taskBody          string
 	taskStatus        int
 	taskNotDispatched bool
-	taskInput         string
-	taskForUserID     string
+	taskSent          []kernel.TaskRequest
 }
 
 // signsAs makes the fake answer as the peer whose key priv is, for calls bought by k: the receipts
@@ -2348,21 +2346,10 @@ func (f *fakeFederationHTTP) Reveal(_ context.Context, _ string, p kernel.Reveal
 	return nil
 }
 
-// taskStatus/taskBody/taskNotDispatched drive the outbound task protocol (§13); zero values make
+// taskStatus/taskBody/taskNotDispatched drive the outbound task protocol (P8); zero values make
 // every unrelated test see an unreachable peer, which no call path consults.
-func (f *fakeFederationHTTP) CompletePeerTask(_ context.Context, _, _, _, _, _ string, input []byte, forUserID string, _ bool) (int, []byte, bool, error) {
-	f.taskInput, f.taskForUserID = string(input), forUserID
-	return f.taskReply()
-}
-
-func (f *fakeFederationHTTP) ListPeerTasks(_ context.Context, _, _, _, _ string) (int, []byte, bool, error) {
-	if f.taskListBody == "" {
-		return 0, nil, true, nil // no listing configured: peer unreachable, so no payment descriptor
-	}
-	return 200, []byte(f.taskListBody), false, nil
-}
-
-func (f *fakeFederationHTTP) taskReply() (int, []byte, bool, error) {
+func (f *fakeFederationHTTP) SendTask(_ context.Context, _ string, r kernel.TaskRequest) (int, []byte, bool, error) {
+	f.taskSent = append(f.taskSent, r)
 	if f.taskBody == "" {
 		return 0, nil, f.taskNotDispatched, kernel.ErrPeerUnreachable.Wrap("task transport failure")
 	}

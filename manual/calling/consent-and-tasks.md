@@ -152,18 +152,19 @@ executing it concurrently. Only the named party may do this. The result and
 transaction then record the completed work; a waiting task remains available
 across kernel restarts.
 
-## Work held for you on another kernel
-
-Work addressed to you may be held by another kernel. Specify that peer to list
-or complete its tasks through your own login:
+To refuse the work instead, decline it. Its reserved price returns to the
+process that set it aside:
 
 ```
-$ juice task list --peer beta-kernel
-$ juice task complete <id> '{}' --peer beta-kernel
+$ juice task cancel b75366d19c2e
 ```
 
-Your home kernel signs the completion request, which names your stable account
-ID as the party addressed by the task. The peer checks it before allowing
-completion. The
-listing returns the task's input requirements without disclosing the remote
-process owner's identity or other local execution details.
+## Work from another kernel
+
+A task addressed to you by a user of another kernel arrives in the same list,
+and you answer it with the same commands. Its `owner` is the kernel that holds
+it: that kernel withholds who funds the work and which actions are involved,
+and sends only the request, its input requirements and its state. Your kernel
+signs your completion or decline with your stable account ID, and the holder
+checks it against the task before acting. Its reply updates your list before
+the command returns.

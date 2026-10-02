@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"time"
 )
 
 // Test-only seam (the standard export_test.go idiom): the call engine and its request are private,
@@ -87,3 +88,11 @@ var testOwnKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize
 // CanCall exposes the visibility predicate so an external test can hold the store's SQL copy of it
 // to the same answers.
 var CanCall = canCall
+
+// SignTaskNoticeForTest signs a notice as the holder whose key is priv would, addressed to k (P8).
+func (k *Kernel) SignTaskNoticeForTest(priv ed25519.PrivateKey, n TaskNotice) *SignedTaskNotice {
+	ts := time.Now().UTC().Format(time.RFC3339)
+	holder := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	sig, _ := k.cfg.Network.sign(priv, sigDomainTaskNotice, taskNoticePayload{Counterparty: holder, Notice: n, Recipient: k.ourKeyB64(), Timestamp: ts})
+	return &SignedTaskNotice{Notice: n, Timestamp: ts, Signature: sig}
+}

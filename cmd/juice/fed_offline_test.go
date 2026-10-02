@@ -30,7 +30,6 @@ type fakeFed struct {
 	inspectDoc    json.RawMessage // non-nil → Inspect/Gossip succeed with this; nil → they fail (offline)
 	reachPath     string          // "direct" | "relayed" | "unreachable" (default unreachable)
 	taskBody      json.RawMessage // non-nil → Task succeeds with this; nil → offline
-	taskListBody  json.RawMessage // non-nil → a "list" Task answers with this instead of taskBody
 	taskStatus    int             // status Task returns alongside taskBody
 	taskMidStream bool            // Task fails after dispatch (may have executed remotely)
 	lastTask      fed.TaskRequest // the last outbound task request, for assertions
@@ -62,9 +61,6 @@ func (f *fakeFed) Task(_ context.Context, _ string, req fed.TaskRequest) (fed.Ta
 	// never sent anything. Only the latter is ErrNotDispatched (§13).
 	if f.taskMidStream {
 		return fed.TaskResponse{}, errors.New("fed: stream closed mid-request")
-	}
-	if req.Kind == "list" && f.taskListBody != nil {
-		return fed.TaskResponse{Status: 200, Body: f.taskListBody}, nil
 	}
 	if f.taskBody == nil {
 		return fed.TaskResponse{}, fmt.Errorf("%w: cannot resolve peer (offline)", fed.ErrNotDispatched)
@@ -379,24 +375,37 @@ func TestInspectWritesNothing(t *testing.T) {
 	}
 }
 
-// ---- completePeerTask: the failure paths the flow cannot reach ----
+// ---- completing a task held by a peer: the failure paths the flow cannot reach ----
 //
-// flow_fed_task_complete exercises this code when everything works. These three cover what happens
-// when it does not, which on this path is what actually matters: whether a caller can retry
-// safely, and whether it is told the truth about what the peer did with its money.
+// flow_fed_task_complete exercises this code when everything works. These cover what happens when
+// it does not, which on this path is what actually matters: whether a caller can retry safely, and
+// whether it is told the truth about what the peer did with its money.
 
-// peerTaskServer builds a server with one seeded peer, returning its @handle.
-func peerTaskServer(t *testing.T, f *fakeFed) (*server, string) {
+// peerTaskServer builds a server with one seeded peer and one local user, returning the peer's key
+// and a function that delivers a task held by the peer to that user, as its notice would (P8).
+func peerTaskServer(t *testing.T, f *fakeFed) (*server, string, func(taskID string) string) {
 	t.Helper()
-	k, _ := newRemoteTestKernel(t)
+	k, db := newRemoteTestKernel(t)
 	_, key := seedPeer(t, k, "peer-tasks")
-	// The outbound task protocol runs kernel-side over kernel.TaskCaller (§13), so the fake backs a
+	user, err := k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "tasker@" + k.OwnName(context.Background()), Password: "password1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The outbound task protocol runs kernel-side over kernel.TaskCaller (P8), so the fake backs a
 	// real fedAdapter: these tests exercise the whole path, not a stub of it.
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
 	adapter := newFedAdapter(self, nil, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
-	return &server{kernel: k, log: log.Discard(), fed: f}, key
+	deliver := func(taskID string) string {
+		t.Helper()
+		if err := db.RecordTaskNotice(context.Background(), key, user.ID, &kernel.TaskNotice{
+			ID: taskID, Revision: 1, Status: kernel.TaskWaiting, UserID: user.ID, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		return user.ID
+	}
+	return &server{kernel: k, log: log.Discard(), fed: f}, key, deliver
 }
 
 // A retry after a lost reply must present the SAME idempotency key, or the peer cannot recognise
@@ -404,14 +413,12 @@ func peerTaskServer(t *testing.T, f *fakeFed) (*server, string) {
 // unreachable. The key is derived from the request, so identical requests derive identical keys.
 func TestCompletePeerTask_DerivesTheIdempotencyKey(t *testing.T) {
 	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-9"}`), taskStatus: 200}
-	srv, peerKey := peerTaskServer(t, f)
+	srv, _, deliver := peerTaskServer(t, f)
 	ctx := context.Background()
 
 	sentKey := func(taskID string, input string) string {
 		t.Helper()
-		if _, err := srv.kernel.CompletePeerTask(ctx, peerKey, taskID, json.RawMessage(input), ""); err != nil {
-			t.Fatalf("CompletePeerTask: %v", err)
-		}
+		_, _ = srv.kernel.CompleteTask(ctx, deliver(taskID), taskID, json.RawMessage(input)) // the fake's reply carries no notice
 		return f.lastTask.IdempotencyKey
 	}
 
@@ -437,12 +444,10 @@ func TestCompletePeerTask_DerivesTheIdempotencyKey(t *testing.T) {
 // non-CLI client would fail verification. Driven with a pretty-printed body containing < and &.
 func TestCompletePeerTask_SignsTheBytesItSends(t *testing.T) {
 	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-9"}`), taskStatus: 200}
-	srv, key := peerTaskServer(t, f)
+	srv, key, deliver := peerTaskServer(t, f)
 
 	pretty := json.RawMessage("{\n  \"city\": \"Rio\",\n  \"note\": \"a<b&c\"\n}")
-	if _, err := srv.kernel.CompletePeerTask(context.Background(), key, "s1", pretty, ""); err != nil {
-		t.Fatalf("CompletePeerTask: %v", err)
-	}
+	_, _ = srv.kernel.CompleteTask(context.Background(), deliver("s1"), "s1", pretty) // the fake's reply carries no notice
 
 	// Round-trip the request as the transport does, then verify against what came out the far side.
 	wire, err := json.Marshal(f.lastTask)
@@ -457,37 +462,33 @@ func TestCompletePeerTask_SignsTheBytesItSends(t *testing.T) {
 		t.Fatalf("input is not a marshal fixed point:\n sent:     %s\n received: %s",
 			f.lastTask.Input, received.Input)
 	}
-	if err := testNet.VerifyTaskSignature(received.TaskID, received.Counterparty,
+	if err := testNet.VerifyTaskSignature("complete", received.TaskID, received.Counterparty,
 		key, received.IdempotencyKey, received.Timestamp,
 		sha256HexBytes(received.Input), received.ForUserID, received.UserSuperuser, received.Signature); err != nil {
 		t.Errorf("signature must verify over the bytes the peer receives: %v", err)
 	}
 }
 
-// A peer's task list is untrusted input on the path every payment task takes: the completion asks
-// for it to find its payment descriptor. A reply carrying a null entry — or an outright malformed
-// one — must degrade to "no payment advertised" and complete ordinarily, never take down the
-// caller mid-completion.
-func TestCompletePeerTask_SurvivesAMalformedTaskList(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		list string
-	}{
-		{"null entry", `{"tasks":[null]}`},
-		{"entry of the wrong type", `{"tasks":["not-an-object"]}`},
-		{"tasks is not a list", `{"tasks":{"id":"s1"}}`},
-		{"no tasks key", `{}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-9"}`), taskStatus: 200,
-				taskListBody: json.RawMessage(tc.list)}
-			srv, peerKey := peerTaskServer(t, f)
-			// Must not panic, and must still complete: the key is derived from the request alone.
-			if _, err := srv.kernel.CompletePeerTask(context.Background(), peerKey, "s1",
-				json.RawMessage(`{}`), ""); err != nil {
-				t.Fatalf("CompletePeerTask: %v", err)
-			}
-		})
+// A completion is reported as a success only once the entry here says so (P8): a reply without the
+// task's notice is the holder's work unrecorded here, reported with its transaction; and a holder this
+// kernel has suspended is sent nothing, since its reply could not be recorded after the work ran.
+func TestCompletePeerTask_SucceedsOnlyWhenRecorded(t *testing.T) {
+	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-9"}`), taskStatus: 200}
+	srv, key, deliver := peerTaskServer(t, f)
+	ctx := context.Background()
+	user := deliver("s1")
+	_, err := srv.kernel.CompleteTask(ctx, user, "s1", json.RawMessage(`{}`))
+	var ke *kernel.KernelError
+	if !errors.As(err, &ke) || !errors.Is(err, kernel.ErrExecutionFailed) || ke.Meta["tx_id"] != "tx-9" {
+		t.Fatalf("a reply without a notice: %v, want an execution failure naming tx-9", err)
+	}
+	sys, _ := srv.kernel.ReadUserByHandle(ctx, "sys")
+	if err := srv.kernel.SuspendKernel(ctx, sys.ID, key); err != nil {
+		t.Fatal(err)
+	}
+	f.lastTask = fed.TaskRequest{}
+	if _, err := srv.kernel.CancelTask(ctx, user, "s1"); !errors.Is(err, kernel.ErrUnauthorized) || f.lastTask.Kind != "" {
+		t.Errorf("declining at a suspended holder: %v, sent %q; want refused, nothing sent", err, f.lastTask.Kind)
 	}
 }
 
@@ -505,8 +506,8 @@ func TestCompletePeerTask_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 		{"failed after dispatch", &fakeFed{taskMidStream: true}, kernel.ErrTimeout, "offline"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, key := peerTaskServer(t, tc.fed)
-			_, err := srv.kernel.CompletePeerTask(context.Background(), key, "s1", json.RawMessage(`{}`), "")
+			srv, key, deliver := peerTaskServer(t, tc.fed)
+			_, err := srv.kernel.CompleteTask(context.Background(), deliver("s1"), "s1", json.RawMessage(`{}`))
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}

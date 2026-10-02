@@ -246,6 +246,49 @@ type Task struct {
 	CreatedAt         time.Time  `json:"created_at"`
 }
 
+// TaskNotice is a task as told to the party it is addressed to (P8). Every mailbox entry holds one,
+// so a task held here and one held by a peer read alike; a holder signs it afresh for each send.
+type TaskNotice struct {
+	ID       string     `json:"id"`
+	Revision int64      `json:"revision"`
+	Status   TaskStatus `json:"status"`
+	// UserID is the addressed principal's stable id on the receiving kernel, absent when the task is
+	// addressed to that kernel itself, which its operator answers for.
+	UserID       string          `json:"user_id,omitempty"`
+	PartialArgs  json.RawMessage `json:"partial_args"`
+	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
+	Price        int64           `json:"price"`
+	TxID         string          `json:"tx_id,omitempty"`
+	Outcome      TxStatus        `json:"outcome,omitempty"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	// The target and the creating action, kept on the holder's own entry and withheld from a peer.
+	ActionID    string `json:"action_id,omitempty"`
+	CreatedByID string `json:"created_by_id,omitempty"`
+}
+
+// ForPeer is the notice as a peer may see it: addressed to its principal, without the actions.
+func (n TaskNotice) ForPeer(remoteID string) TaskNotice {
+	n.UserID, n.ActionID, n.CreatedByID = remoteID, "", ""
+	return n
+}
+
+// TaskEntry is one mailbox entry: the task as delivered here, from whichever kernel holds it, with
+// who may complete it and, on the holder, who funds it.
+type TaskEntry struct {
+	TaskNotice
+	HolderKey      string
+	RequiredCaller Principal
+	OwnerUserID    string // the process owner; empty for a task held by a peer
+	ProcessID      string
+}
+
+// OutgoingNotice is a notice owed to the peer holding the task's addressee.
+type OutgoingNotice struct {
+	PeerKey string
+	Notice  TaskNotice
+}
+
 // OrphanRunningTask is one result row from Store.ListOrphanRunningTasks.
 // HasSettled is true when the completion trace has committed subcall transactions or locked funds,
 // meaning the trace cannot safely be re-parked and must instead be settled as failed.

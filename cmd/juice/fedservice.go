@@ -155,19 +155,30 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 	return fedOK(status, body)
 }
 
-// OnTask lists or completes the waiting tasks this peer is the required caller of (§10, §13).
-// The connection-key check and rate limit mirror OnCall: a task completion runs a funded call here.
+// OnTask answers /juice/fed/task/1 (P8): a holder's notice for one of our users, or a completion or
+// decline of a task held here for this peer. A completion or decline answers, success or not, with
+// the task's current notice, so the peer's entry is current when its command returns. The
+// connection-key check and rate limit mirror OnCall: a completion runs a funded call here.
 func (h *fedHandlers) OnTask(ctx context.Context, peerKey string, req fed.TaskRequest) fed.TaskResponse {
 	if rej := h.admit(req.Counterparty, peerKey, true); rej != nil {
 		return *rej
 	}
-
 	var status int
 	var body map[string]any
 	var err error
 	switch req.Kind {
-	case "list":
-		status, body, err = handleFederationTaskList(h.kernel, ctx, req.Counterparty, req.Timestamp, req.Signature, req.ForUserID)
+	case "notice":
+		if err := checkFederationTimestamp(req.Timestamp); err != nil {
+			return fedError(err)
+		}
+		var n kernel.TaskNotice
+		if json.Unmarshal(req.Notice, &n) != nil {
+			return fedError(kernel.ErrInvalidInput.Wrap("malformed task notice"))
+		}
+		if err := h.kernel.HandleTaskNotice(ctx, req.Counterparty, &kernel.SignedTaskNotice{Notice: n, Timestamp: req.Timestamp, Signature: req.Signature}); err != nil {
+			return fedError(err)
+		}
+		return fedOK(http.StatusOK, map[string]string{"id": n.ID})
 	case "complete":
 		input := []byte(req.Input)
 		if len(input) == 0 {
@@ -175,11 +186,18 @@ func (h *fedHandlers) OnTask(ctx context.Context, peerKey string, req fed.TaskRe
 		}
 		status, body, err = handleFederationTaskComplete(h.kernel, ctx, req.Counterparty, req.Timestamp,
 			req.IdempotencyKey, req.TaskID, req.Signature, input, req.ForUserID, req.UserSuperuser)
+	case "cancel":
+		status, body, err = handleFederationTaskCancel(h.kernel, ctx, req.Counterparty, req.Timestamp,
+			req.TaskID, req.Signature, req.ForUserID, req.UserSuperuser)
 	default:
 		return fedError(kernel.ErrInvalidInput.Wrap("unknown task request kind"))
 	}
 	if err != nil {
-		return fedError(err)
+		code, msg := wireError(err)
+		status, body = kernel.HTTPStatusFromCode(code), map[string]any{"error": msg, "code": code}
+	}
+	if n := h.kernel.TaskNoticeFor(ctx, req.TaskID, req.Counterparty); n != nil {
+		body["notice"] = n
 	}
 	return fedOK(status, body)
 }
@@ -307,10 +325,6 @@ func checkFederationTimestamp(tsStr string) error {
 	return nil
 }
 
-// maxPeerTaskPage bounds one task-list reply. Reaching it sets `truncated` rather than silently
-// dropping the tail: an operator must never read a capped page as "nothing is parked for you".
-const maxPeerTaskPage = 200
-
 // servedOutcome answers a request this kernel has already served. The answer is the receipt it
 // signed for that request and the reply its transaction recorded — both permanent — so a retry
 // after a lost reply returns what the first attempt produced, for as long as the receipt exists.
@@ -348,7 +362,7 @@ func takeExecutionLock(k *kernel.Kernel, ctx context.Context, key, counterpartyI
 	return rec, false, nil
 }
 
-// taskRequester authenticates a task request, listing or completing alike: its timestamp, then its
+// taskRequester authenticates a request to a task's holder, completing or declining alike: its timestamp, then its
 // signature, which verify checks against this kernel's own key as the recipient; then the peer's
 // account. A peer with no account comes back nil — what that means is the caller's to decide. A
 // store failure is an error, never an absent peer: that conclusion would leave funds stranded.
@@ -373,76 +387,60 @@ func taskRequester(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr string
 	return self, peer, nil
 }
 
-// handleFederationTaskList returns the waiting tasks whose required caller is the requesting peer
-// (§10, §13). Read-only: an unknown key gets an empty list rather than a lazily provisioned account
-// — provisioning is reserved for a call, which is what actually creates a billing relationship.
-func handleFederationTaskList(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, sigStr, forUserID string) (int, map[string]any, error) {
-	_, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
-		return k.Network().VerifyTaskListSignature(cpPubKey, self, tsStr, forUserID, sigStr)
-	})
-	if err != nil {
-		return 0, nil, err
-	}
+// taskScope admits a peer's completion or decline only in the task's own scope (P8): a task
+// addressed to one principal on the peer is answered by that principal, whose home kernel signed
+// its id into the request; a task addressed to the peer kernel itself by that kernel — its bare
+// signature, or a user it says is its operator. Neither scope reaches the other, and a read that
+// fails refuses rather than skips. A stranger holds no task here: CreateTask resolves the required
+// caller to an existing account, so an unknown key is the required caller of nothing.
+func taskScope(k *kernel.Kernel, ctx context.Context, peer *kernel.Account, taskID, forUserID string, userSuperuser bool) error {
 	if peer == nil {
-		return http.StatusOK, map[string]any{"tasks": []*kernel.PeerTaskView{}}, nil
+		return kernel.ErrUnauthorized.Wrap("unknown peer")
 	}
-	// Scoped in SQL, oldest first: ListTasks' predicate also matches every task inside a process
-	// this peer owns (its own inbound calls), which would crowd the completable ones out of the
-	// page. A suspended peer is refused by requireActiveUser inside the kernel call.
-	// One past the page: a page exactly full reports more only when there is more.
-	tasks, err := k.ListTasksAwaitingCaller(ctx, peer.ID, forUserID, maxPeerTaskPage+1)
-	if err != nil {
-		return 0, nil, err
-	}
-	truncated := len(tasks) > maxPeerTaskPage
-	if truncated {
-		tasks = tasks[:maxPeerTaskPage]
-	}
-	views := make([]*kernel.PeerTaskView, len(tasks))
-	for i, s := range tasks {
-		action, _ := k.ReadAction(ctx, s.ActionID)
-		views[i] = k.NewPeerTaskView(s, action)
-	}
-	body := map[string]any{"tasks": views}
-	// A full page means more may be waiting. One honest flag, no continuation: this queue holds
-	// pending cross-kernel approvals, not a corpus.
-	if truncated {
-		body["truncated"] = true
-	}
-	return http.StatusOK, body, nil
-}
-
-// handleFederationTaskComplete resumes a waiting task on behalf of the requesting peer (§10, §13).
-// Unlike a call, the requester parks nothing locally — the task's price was parked here at creation
-// — so failures are plain typed errors: there is no remote trace awaiting a signed rejection.
-func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, taskID, sigStr string, rawInput []byte, forUserID string, userSuperuser bool) (int, map[string]any, error) {
-	self, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
-		return k.Network().VerifyTaskSignature(taskID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), forUserID, userSuperuser, sigStr)
-	})
-	if err != nil {
-		return 0, nil, err
-	}
-	// A stranger can hold no task here: CreateTask resolves required_caller to an existing user,
-	// so an unknown key is necessarily not the required caller of anything.
-	if peer == nil {
-		return 0, nil, kernel.ErrUnauthorized.Wrap("unknown peer")
-	}
-
-	// Scope must match (P8): a task addressed to one principal on the peer is completed by that
-	// principal, whose home kernel signed its id into this request; a task addressed to the peer
-	// kernel itself is completed by that kernel — its bare signature, or a user it says is its
-	// operator. Neither scope reaches the other, and a read that fails refuses rather than skips.
 	remoteID, err := k.TaskRemoteRequiredCaller(ctx, taskID)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
 	switch {
 	case forUserID == "" && remoteID != nil:
-		return 0, nil, kernel.ErrUnauthorized.Wrap("this task is addressed to a user of your kernel; complete it as that user")
+		return kernel.ErrUnauthorized.Wrap("this task is addressed to a user of your kernel; answer it as that user")
 	case forUserID != "" && remoteID != nil && forUserID != *remoteID:
-		return 0, nil, kernel.ErrUnauthorized.Wrap("the signed user is not the task's required caller")
+		return kernel.ErrUnauthorized.Wrap("the signed user is not the task's required caller")
 	case forUserID != "" && remoteID == nil && !userSuperuser:
-		return 0, nil, kernel.ErrUnauthorized.Wrap("this task is addressed to your kernel; only its operator completes it")
+		return kernel.ErrUnauthorized.Wrap("this task is addressed to your kernel; only its operator answers it")
+	}
+	return nil
+}
+
+// handleFederationTaskCancel declines a waiting task on behalf of the requesting peer (P8).
+func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, taskID, sigStr, forUserID string, userSuperuser bool) (int, map[string]any, error) {
+	_, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
+		return k.Network().VerifyTaskSignature("cancel", taskID, cpPubKey, self, "", tsStr, "", forUserID, userSuperuser, sigStr)
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := taskScope(k, ctx, peer, taskID, forUserID, userSuperuser); err != nil {
+		return 0, nil, err
+	}
+	if err := k.CancelTaskHeld(ctx, peer.ID, taskID); err != nil {
+		return 0, nil, err
+	}
+	return http.StatusOK, map[string]any{"task_id": taskID}, nil
+}
+
+// handleFederationTaskComplete resumes a waiting task on behalf of the requesting peer (P8). The
+// task's price was parked here at creation, so failures are plain typed errors: there is no remote
+// trace awaiting a signed rejection.
+func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, taskID, sigStr string, rawInput []byte, forUserID string, userSuperuser bool) (int, map[string]any, error) {
+	self, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
+		return k.Network().VerifyTaskSignature("complete", taskID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), forUserID, userSuperuser, sigStr)
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := taskScope(k, ctx, peer, taskID, forUserID, userSuperuser); err != nil {
+		return 0, nil, err
 	}
 
 	// The key is derived, not chosen (§13): recompute what this completion must present and reject a

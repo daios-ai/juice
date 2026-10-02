@@ -35,8 +35,9 @@ sys@acme/message costs 0.00 fUSD. Run it? [y/N] y
   …
 ```
 
-Bob can now see the waiting task. Although `sys/message` has returned, its
-process remains open until the task completes or the owner cancels the work.
+Bob can now see the waiting task, on this kernel or his own. Although
+`sys/message` has returned, its process remains open until Bob completes or
+declines the task, or the owner cancels the work.
 
 ## Creating a task yourself
 

@@ -71,17 +71,23 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
 	check("fed_call_caller", "vLBwQW1n2e916IxZ8diC0HF5QEPjDiKg4YqPGolxOps-TLcsSoC7HLzZPfNz6eN0SNi2oYSNFkFQFE4fQJybAQ", sig, err)
 
-	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, "", false)
+	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, "", false)
 	check("task_complete", "pQgMwIylyms1yyzW95MqbooLqNe7VtlzVLIQnSs2JIgjRrBN2iyYNwzgFqfdIHtgJtNoK4aCk4B2CeuommkNDg", sig, err)
 
 	// A completion as a user signs the user into the same payload (P8), superuser or not.
-	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, userID, false)
+	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, userID, false)
 	check("task_complete_user", "VaTWccPhR88m1r1NXbXjG2fjPckeAjdWoFMa7uzcUisy0SLOKh0qKRir-6X70z2_jTK89lItwo3gqKQsmS8LCw", sig, err)
-	sig, err = net.SignTaskPayload(key, taskID, cp, recipient, ikey, ts, inputHash, userID, true)
+	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, userID, true)
 	check("task_complete_operator", "dSk8b4X90DqGB9n2z3bT5uuGGe94B_Y--aw2ERg36qlWBPIioLLK-JhW6ovjz-Xp_bGYQTXI7MKuzrKP7SIcCw", sig, err)
 
-	sig, err = net.SignTaskListPayload(key, cp, recipient, ts, "")
-	check("task_list", "l86tdguovNH-CsuoZkMsBw65nXGaOG0aezBA0EC8Jc_N4EqQnvIB8VvmR2w1IXs_fJo8g4rAeLDUv1eLSF1HDw", sig, err)
+	// A decline is a completion without input, in its own domain (P8).
+	sig, err = net.SignTaskPayload(key, "cancel", taskID, cp, recipient, "", ts, "", userID, false)
+	check("task_cancel", "PisQ2rh8G6awtrg33arenLFDQrX_3toEDRcNfF4nBWPGSMkg6FXWTrdSvOhLbLJ1YKv7s1lB9wcLyGAjbukRDw", sig, err)
+
+	sig, err = net.sign(key, sigDomainTaskNotice, taskNoticePayload{Counterparty: cp, Recipient: recipient, Timestamp: ts,
+		Notice: TaskNotice{ID: taskID, Revision: 2, Status: TaskWaiting, UserID: userID, PartialArgs: []byte(`{"message":"hi"}`),
+			AllowedInput: map[string]any{"type": "object"}, Price: 10, CreatedAt: fixedTime}})
+	check("task_notice", "3ErE3GKK8vh9XUmeScYrjpGtTlLvoKYyuaHKDjuAwxjKg0rEb_72lOgd-6UQMnOkDZQocikPothpV0-1lhhZAw", sig, err)
 
 	// The completion key is derived, and every stored completion is found again by it (P8): its
 	// derivation string is frozen, whatever the protocol is called.

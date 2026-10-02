@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -2334,7 +2335,7 @@ func TestListTasksPagination(t *testing.T) {
 	}
 
 	// The process owner sees all three; limit bounds the page.
-	page1, err := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 0})
+	page1, err := db.ListMailbox(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 0})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
@@ -2343,13 +2344,13 @@ func TestListTasksPagination(t *testing.T) {
 	}
 
 	// Offset skips the first page.
-	page2, _ := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 2})
+	page2, _ := db.ListMailbox(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 2, Offset: 2})
 	if len(page2) != 1 {
 		t.Fatalf("limit=2 offset=2: want 1 task, got %d", len(page2))
 	}
 
 	// A non-positive limit falls back to the default (50), returning all three.
-	all, _ := db.ListTasks(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 0, Offset: 0})
+	all, _ := db.ListMailbox(ctx, kernel.TaskFilter{CallerUserID: user.ID, ProcessID: "", Status: "", Superuser: false, All: true, Limit: 0, Offset: 0})
 	if len(all) != 3 {
 		t.Fatalf("limit=0 fallback: want all 3 tasks, got %d", len(all))
 	}
@@ -4032,67 +4033,6 @@ func TestListLedgerByUser(t *testing.T) {
 	}
 }
 
-// ListTasksAwaitingCaller must be scoped in SQL and oldest-first: the federation task list (§13)
-// relies on it, and filtering ListTasks' disjunction in Go after its row cap discarded exactly the
-// tasks a peer could complete.
-func TestListTasksAwaitingCaller(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	owner := newUser("owner", 1000)
-	assignee := newUser("assignee", 0)
-	other := newUser("other", 0)
-	for _, u := range []*kernel.Account{owner, assignee, other} {
-		if err := db.CreateUser(ctx, u); err != nil {
-			t.Fatal(err)
-		}
-	}
-	act := newAction(owner.ID, "await-act", 0, true)
-	if err := db.CreateAction(ctx, act); err != nil {
-		t.Fatal(err)
-	}
-	mkTask := func(processOwner, requiredCaller string) string {
-		t.Helper()
-		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: processOwner, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
-		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-		if err := db.BeginRun(ctx, p, root, processOwner, 0, 0, 0); err != nil {
-			t.Fatal(err)
-		}
-		ptID := root.ID
-		st := &kernel.Task{
-			ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: requiredCaller,
-			ActionID: act.ID, Price: 0, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC(),
-		}
-		if err := db.CreateTask(ctx, st); err != nil {
-			t.Fatal(err)
-		}
-		return st.ID
-	}
-
-	// The assignee's own task comes first in time; 60 tasks in processes it owns follow. Under the
-	// old "cap then filter in Go" shape those 60 would fill the page and hide this one.
-	mine := mkTask(owner.ID, assignee.ID)
-	for i := 0; i < 60; i++ {
-		mkTask(assignee.ID, other.ID)
-	}
-
-	got, err := db.ListTasksAwaitingCaller(ctx, assignee.ID, "", 200)
-	if err != nil {
-		t.Fatalf("ListTasksAwaitingCaller: %v", err)
-	}
-	if len(got) != 1 || got[0].ID != mine {
-		t.Fatalf("expected only the assignee's own waiting task, got %d rows", len(got))
-	}
-
-	// Oldest first: the longest-stranded task is what an operator needs to see.
-	second := mkTask(owner.ID, assignee.ID)
-	got, _ = db.ListTasksAwaitingCaller(ctx, assignee.ID, "", 200)
-	if len(got) != 2 || got[0].ID != mine || got[1].ID != second {
-		t.Errorf("expected oldest-first ordering, got %d rows in unexpected order", len(got))
-	}
-
-}
-
 // A settled remote failure releases the lock like any other outcome, and the receipt it wrote is
 // what a replaying peer is answered with — so a settled failure can never replay as a success
 // (P4, P5).
@@ -5211,7 +5151,7 @@ func TestListsNarrowByIDPrefixAndShowOpenByDefault(t *testing.T) {
 	ids := func(rows any) []string {
 		var out []string
 		switch rs := rows.(type) {
-		case []*kernel.Task:
+		case []*kernel.TaskEntry:
 			for _, r := range rs {
 				out = append(out, r.ID)
 			}
@@ -5243,12 +5183,12 @@ func TestListsNarrowByIDPrefixAndShowOpenByDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Close the second process and cancel its task directly: what is under test is the listing of a
-	// closed one, not the closing.
-	if _, err := db.db.ExecContext(ctx, `UPDATE processes SET status='closed' WHERE id=?`, closed.ID); err != nil {
+	// Decline the second process's task and close the process directly: what is under test is the
+	// listing of a closed one, not the closing (its root call never settled, so nothing closes it).
+	if err := db.CancelTask(ctx, closed.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.db.ExecContext(ctx, `UPDATE tasks SET status='cancelled' WHERE id=?`, closed.ID); err != nil {
+	if _, err := db.db.ExecContext(ctx, `UPDATE processes SET status='closed' WHERE id=?`, closed.ID); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -5283,7 +5223,7 @@ func TestListsNarrowByIDPrefixAndShowOpenByDefault(t *testing.T) {
 		{"prefix picks both", kernel.TaskFilter{CallerUserID: user.ID, All: true, IDPrefix: "aaaa"}, []string{closed.ID, open.ID}},
 		{"prefix picks none", kernel.TaskFilter{CallerUserID: user.ID, All: true, IDPrefix: "bbbb"}, nil},
 	} {
-		got, err := db.ListTasks(ctx, c.filter)
+		got, err := db.ListMailbox(ctx, c.filter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -5331,4 +5271,233 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// A peer's notice is kept iff it is newer than the one held (P8): the first creates the entry in
+// whatever state it carries, an older or equal one is acknowledged and changes nothing, and an id
+// another holder delivered, or an addressee that is no user here, is refused.
+func TestRecordTaskNoticeKeepsOnlyNewer(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	alice := newUser("notice-alice", 0)
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+	notice := func(rev int64, status kernel.TaskStatus) *kernel.TaskNotice {
+		return &kernel.TaskNotice{ID: "task-1", Revision: rev, Status: status, PartialArgs: json.RawMessage(`{}`), CreatedAt: time.Now().UTC()}
+	}
+	held := func() *kernel.TaskEntry {
+		t.Helper()
+		e, err := db.ReadMailbox(ctx, "task-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-h", alice.ID, notice(2, kernel.TaskWaiting)); err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []*kernel.TaskNotice{notice(2, kernel.TaskDone), notice(1, kernel.TaskCancelled)} {
+		if err := db.RecordTaskNotice(ctx, "holder-h", alice.ID, stale); err != nil {
+			t.Errorf("an old notice must be acknowledged: %v", err)
+		}
+		if e := held(); e.Revision != 2 || e.Status != kernel.TaskWaiting {
+			t.Errorf("revision %d moved the entry to %d %s", stale.Revision, e.Revision, e.Status)
+		}
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-h", alice.ID, notice(3, kernel.TaskDone)); err != nil {
+		t.Fatal(err)
+	}
+	if e := held(); e.Revision != 3 || e.Status != kernel.TaskDone || e.HolderKey != "holder-h" {
+		t.Errorf("a newer notice was not kept: %+v", e)
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-g", alice.ID, notice(9, kernel.TaskWaiting)); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("an id another holder delivered: %v, want ErrInvalidInput", err)
+	}
+	bob := newUser("notice-bob", 0)
+	if err := db.CreateUser(ctx, bob); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-h", bob.ID, notice(9, kernel.TaskWaiting)); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("a notice moving the task to another addressee: %v, want ErrInvalidInput", err)
+	}
+	if e := held(); e.Revision != 3 || e.RequiredCaller.AccountID != alice.ID {
+		t.Errorf("a refused notice changed the entry: %+v", e)
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-h", "nobody", &kernel.TaskNotice{ID: "task-2", Revision: 1, Status: kernel.TaskWaiting}); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("an addressee that is no user here: %v, want ErrNotFound", err)
+	}
+	// A task cancelled before its first notice went out is delivered cancelled, not stranded.
+	if err := db.RecordTaskNotice(ctx, "holder-h", alice.ID, &kernel.TaskNotice{ID: "task-3", Revision: 2, Status: kernel.TaskCancelled}); err != nil {
+		t.Errorf("a first notice in a terminal state: %v", err)
+	}
+}
+
+// Every change of a task bumps its revision and rewrites its entry in the same commit; what a peer
+// is owed is derived from the revision it acknowledged, which never moves back (P8).
+func TestTaskRevisionsAreToldUntilAcknowledged(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	if err := db.SetConfig(ctx, "signing_public_key", "self-key"); err != nil {
+		t.Fatal(err)
+	}
+	owner := newUser("rev-owner", 100)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	peer := newPeer(t, db, "rev-peer", "peer-key", 0, 0, time.Now().UTC())
+	act := newAction(owner.ID, "rev-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	remote := "alice-there"
+	task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &root.ID, RequiredCallerUserID: peer.ID,
+		RequiredCallerRemoteID: &remote, ActionID: act.ID, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	owed := func() []*kernel.OutgoingNotice {
+		t.Helper()
+		o, err := db.ListUndeliveredTasks(ctx, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	o := owed()
+	if len(o) != 1 || o[0].PeerKey != "peer-key" || o[0].Notice.Revision != 1 || o[0].Notice.UserID != remote || o[0].Notice.ActionID != "" {
+		t.Fatalf("owed = %+v; want revision 1 addressed to the remote user, its actions withheld", o)
+	}
+	if e, _ := db.ReadMailbox(ctx, task.ID); e == nil || e.HolderKey != "self-key" || e.OwnerUserID != owner.ID || e.ActionID != act.ID {
+		t.Errorf("the holder's own entry = %+v", e)
+	}
+	if err := db.MarkTaskTold(ctx, task.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(owed()) != 0 {
+		t.Fatal("an acknowledged revision is still owed")
+	}
+	act.InputSchema = map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string"}}}
+	if err := db.UpdateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	if o := owed(); len(o) != 1 || o[0].Notice.Revision != 2 || o[0].Notice.AllowedInput == nil {
+		t.Fatalf("after the schema moved, owed = %+v; want revision 2 with the new allowed input", o)
+	}
+	if err := db.CancelTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// An acknowledgement of revision 2 arriving after the decline does not mark revision 3 told.
+	if err := db.MarkTaskTold(ctx, task.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if o := owed(); len(o) != 1 || o[0].Notice.Revision != 3 || o[0].Notice.Status != kernel.TaskCancelled {
+		t.Fatalf("after the decline, owed = %+v; want revision 3 cancelled", o)
+	}
+	if err := db.MarkTaskTold(ctx, task.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkTaskTold(ctx, task.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(owed()) != 0 {
+		t.Error("a late acknowledgement moved what was told backwards")
+	}
+}
+
+// The one writer of a task's state: every statement that changes a task goes through reviseTasks,
+// which bumps the revision and rewrites the mailbox entry, or records what a peer acknowledged. A
+// statement anywhere else would leave the entry, and the notice a peer is owed, behind the task.
+func TestTaskStateHasOneWriter(t *testing.T) {
+	src, err := os.ReadFile("sqlite.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, "UPDATE tasks SET") {
+			continue
+		}
+		if !strings.Contains(line, "UPDATE tasks SET revision=revision+1") && !strings.Contains(line, "UPDATE tasks SET told_") {
+			t.Errorf("sqlite.go:%d writes a task outside reviseTasks: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// A task made before the mailbox existed is delivered once, at startup, by the one writer.
+func TestRedeliverTasksGivesEveryTaskAnEntry(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("redeliver-owner", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	act := newAction(owner.ID, "redeliver-act", 0, true)
+	if err := db.CreateAction(ctx, act); err != nil {
+		t.Fatal(err)
+	}
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &root.ID, RequiredCallerUserID: owner.ID,
+		ActionID: act.ID, Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
+	if err := db.CreateTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM mailbox`); err != nil { // as before the mailbox
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := db.RedeliverTasks(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e, err := db.ReadMailbox(ctx, task.ID); err != nil || e.Revision != 2 {
+		t.Errorf("redelivered entry = %+v %v; want revision 2, delivered once", e, err)
+	}
+}
+
+// A peer holding an open task for one of ours is kept (D16); once nothing is open, its purge takes
+// what it delivered with it.
+func TestPurgeKeepsAHolderAndTakesItsEntries(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	alice := newUser("purge-alice", 0)
+	if err := db.CreateUser(ctx, alice); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	holder := newPeer(t, db, "purge-holder", "holder-key", 0, 0, old)
+	if err := db.RecordTaskNotice(ctx, "holder-key", alice.ID, &kernel.TaskNotice{ID: "held-1", Revision: 1, Status: kernel.TaskWaiting}); err != nil {
+		t.Fatal(err)
+	}
+	purgeable := func() bool {
+		t.Helper()
+		ids, err := db.ListPurgeablePeers(ctx, time.Now().UTC().Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(ids) == 1 && ids[0] == holder.ID
+	}
+	if purgeable() {
+		t.Fatal("a peer holding an open task for one of ours was purgeable")
+	}
+	if err := db.RecordTaskNotice(ctx, "holder-key", alice.ID, &kernel.TaskNotice{ID: "held-1", Revision: 2, Status: kernel.TaskDone}); err != nil {
+		t.Fatal(err)
+	}
+	if !purgeable() {
+		t.Fatal("a peer whose task is done is not purgeable")
+	}
+	if err := db.PurgePeerCascade(ctx, holder.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ReadMailbox(ctx, "held-1"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("the purged peer's entry survived: %v", err)
+	}
 }

@@ -86,7 +86,21 @@ type Kernel struct {
 	railMu     sync.Mutex
 	lookupHost func(context.Context, string) ([]string, error)
 	ownName    atomic.Value // string: this kernel's own name, bound at boot (D15)
+	// tell wakes the worker that tells peers what they are owed — reveals, transfers, task notices —
+	// so news goes out at once rather than waiting out an interval.
+	tell chan struct{}
 }
+
+// WakeTell asks the telling worker for a pass now; a pass already asked for is enough.
+func (k *Kernel) WakeTell() {
+	select {
+	case k.tell <- struct{}{}:
+	default:
+	}
+}
+
+// TellWoken is what the telling worker waits on beside its interval.
+func (k *Kernel) TellWoken() <-chan struct{} { return k.tell }
 
 // ProcessOwnerID returns a process's owner user id, unauthorized — a display resolver like
 // ActionRef; "" if the process is unknown. The caller resolves the handle.
@@ -151,6 +165,7 @@ func New(deps Dependencies) *Kernel {
 		nativeHandlers: make(map[string]NativeFunc),
 		valueFuncs:     make(map[string]ValueFunc),
 		lookupHost:     net.DefaultResolver.LookupHost,
+		tell:           make(chan struct{}, 1),
 	}
 }
 

@@ -131,9 +131,10 @@ Another party's action can reserve a future call and address it to you. Its pric
 juice task list --json          # open tasks; --all adds finished ones
 juice task show <id> --json   # partial_args (already given), allowed_input (schema of what you add), action, created_by, owner
 juice task complete <id> '{...}' --json
+juice task cancel <id> --json   # decline it; its price returns to whoever reserved it
 ```
 
-An id may be given by its first characters, as the human view shows it; `--json` carries it whole. Only the named caller can complete it, once; a second completion is refused (exit 1). Tasks held for you on another kernel: `task list --peer <kernel>` and `task complete <id> '{...}' --peer <kernel>`.
+An id may be given by its first characters, as the human view shows it; `--json` carries it whole. Only the named caller can complete it, once; a second completion is refused (exit 1). A task from another kernel arrives in the same list and is answered with the same commands; its `owner` is that kernel.
 
 ## Consent for actions that use your own upstream account
 

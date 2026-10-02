@@ -399,12 +399,14 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 // revealsPerPass bounds one pass, so telling sellers never becomes the whole of a cycle.
 const revealsPerPass = 25
 
-// RevealPending tells the peers still waiting what this kernel's payments to them were: how each
-// draw came out (P10), and whom each transfer is for (P11). It keeps telling them until each has
-// heard: a losing draw the seller never learns about leaves it owed forever, and a transfer never
-// named leaves its money held. Those never tried come first and the rest longest-untried first, so
-// one unreachable peer delays the others by a pass rather than blocking them for good.
+// RevealPending tells the peers still waiting what they are owed: how each draw came out (P10),
+// whom each transfer is for (P11), and the state of each task addressed to them (P8). It keeps
+// telling them until each has heard: a losing draw the seller never learns about leaves it owed
+// forever, a transfer never named leaves its money held, a task never told is never seen. Those
+// never tried come first and the rest longest-untried first, so one unreachable peer delays the
+// others by a pass rather than blocking them for good.
 func (k *Kernel) RevealPending(ctx context.Context) {
+	k.announceTasks(ctx)
 	k.announceTransfers(ctx)
 	pending, err := k.store.ListPendingReveals(ctx, revealsPerPass)
 	if err != nil {

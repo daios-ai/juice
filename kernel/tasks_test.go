@@ -1823,7 +1823,7 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
 		t.Errorf("a trace was funded under a settled parent: %d traces", len(traces))
 	}
-	if tasks, _ := st.ListTasks(ctx, kernel.TaskFilter{CallerUserID: owner.ID, ProcessID: p.ID, Status: "", Superuser: true, All: true, Limit: 10, Offset: 0}); len(tasks) != 0 {
+	if tasks, _ := st.ListMailbox(ctx, kernel.TaskFilter{CallerUserID: owner.ID, ProcessID: p.ID, Status: "", Superuser: true, All: true, Limit: 10, Offset: 0}); len(tasks) != 0 {
 		t.Errorf("a task was parked in a closed process: %d", len(tasks))
 	}
 }
@@ -2564,4 +2564,141 @@ func TestTaskSettlementPostsToLedger(t *testing.T) {
 	}
 
 	assertLedgerExplainsBalances(t, st, payer.ID, worker.ID, testIssuerUserID)
+}
+
+// TestDeclineReturnsTheParkOnce: a waiting task is declined by its required caller or its process
+// owner (D6): cancelled, its parked price back in its process, once. Another party, a running task
+// and a second decline change nothing.
+func TestDeclineReturnsTheParkOnce(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "decline-owner", 100)
+	caller := setupUser(t, st, "decline-caller", 0)
+	stranger := setupUser(t, st, "decline-stranger", 0)
+	target := setupLocalAction(t, st, owner.ID, "decline-target", 30)
+	p, root := beginTestRun(t, st, owner.ID, setupLocalAction(t, st, owner.ID, "decline-root", 100))
+	task, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.Principal{AccountID: caller.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	money := func() (int64, int64) {
+		t.Helper()
+		tr, _ := st.ReadTrace(ctx, root.ID)
+		pr, _ := st.ReadProcess(ctx, p.ID)
+		return tr.Locked, pr.Available
+	}
+	parked, before := money()
+
+	if _, err := k.CancelTask(ctx, stranger.ID, task.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a stranger's decline: %v, want ErrUnauthorized", err)
+	}
+	e, err := k.CancelTask(ctx, caller.ID, task.ID)
+	if err != nil || e.Status != kernel.TaskCancelled {
+		t.Fatalf("the required caller's decline: %+v %v", e, err)
+	}
+	locked, available := money()
+	if locked != parked-30 || available != before+30 {
+		t.Errorf("after the decline: trace locked %d (was %d), process available %d (was %d); want the 30 parked back in the process",
+			locked, parked, available, before)
+	}
+	if _, err := k.CancelTask(ctx, owner.ID, task.ID); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a second decline: %v, want ErrInvalidState", err)
+	}
+	if l, a := money(); l != locked || a != available {
+		t.Errorf("a second decline moved money: locked %d→%d, available %d→%d", locked, l, available, a)
+	}
+
+	// The process owner may decline too.
+	own, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.Principal{AccountID: caller.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.CancelTask(ctx, owner.ID, own.ID); err != nil {
+		t.Errorf("the process owner's decline: %v", err)
+	}
+
+	// A running task's price funds a call in flight.
+	other := setupUser(t, st, "decline-other", 10)
+	running, _ := setupTaskWithCompletionTrace(t, st, k, other.ID, 10)
+	if err := k.CancelTaskHeld(ctx, other.ID, running.ID); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("declining a running task: %v, want ErrInvalidState", err)
+	}
+	if got, _ := st.ReadTask(ctx, running.ID); got.Status != kernel.TaskRunning {
+		t.Errorf("the running task became %q", got.Status)
+	}
+}
+
+// TestTaskReadsOneRecord: a task funded and addressed by one user is one entry in their list, and its
+// entry carries the allowed input the target's schema leaves open, re-delivered when that schema moves.
+func TestTaskReadsOneRecord(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "self-owner", 100)
+	target := setupLocalAction(t, st, owner.ID, "self-target", 0)
+	target.InputSchema = map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "number"}, "c": map[string]any{"type": "string"}}}
+	if err := st.UpdateAction(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	_, root := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
+	task, err := k.CreateTask(ctx, root.ID, target.ID, json.RawMessage(`{"a":1}`), kernel.Principal{AccountID: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := k.ListTasks(ctx, owner.ID, kernel.TaskFilter{All: true})
+	if err != nil || len(list) != 1 || list[0].ID != task.ID {
+		t.Fatalf("a self-addressed task lists %d times (%v), want once", len(list), err)
+	}
+	if list[0].AllowedInput == nil || list[0].Revision != 1 {
+		t.Errorf("entry %+v: want revision 1 with the allowed input", list[0])
+	}
+
+	target.InputSchema = map[string]any{"type": "object", "properties": map[string]any{"b": map[string]any{"type": "string"}}}
+	if err := st.UpdateAction(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := k.ReadTask(ctx, owner.ID, task.ID)
+	if props, _ := e.AllowedInput["properties"].(map[string]any); e.Revision != 2 || props["b"] == nil {
+		t.Errorf("after the schema moved: revision %d, allowed input %v; want 2 and the new property", e.Revision, e.AllowedInput)
+	}
+}
+
+// TestRemoteCompletionNeedsItsOwnNotice: a holder's reply counts only with the notice of the task
+// asked about (P8). A validly signed notice for another task is not that, so the command fails
+// naming the holder's transaction and records neither task.
+func TestRemoteCompletionNeedsItsOwnNotice(t *testing.T) {
+	st := newTestStore(t)
+	fake := &fakeFederationHTTP{taskStatus: 200}
+	k := newTestKernelWithHTTP(st, fake)
+	ctx := context.Background()
+	alice := setupUser(t, st, "notice-alice", 0)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	holder := base64.RawURLEncoding.EncodeToString(pub)
+	if err := st.RecordTaskNotice(ctx, holder, alice.ID, &kernel.TaskNotice{ID: "asked", Revision: 1, Status: kernel.TaskWaiting}); err != nil {
+		t.Fatal(err)
+	}
+	other := k.SignTaskNoticeForTest(priv, kernel.TaskNotice{ID: "other", Revision: 1, Status: kernel.TaskDone, UserID: alice.ID})
+	body, _ := json.Marshal(map[string]any{"tx_id": "tx-1", "notice": other})
+	fake.taskBody = string(body)
+
+	if _, err := k.CompleteTask(ctx, alice.ID, "asked", json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Fatalf("a reply carrying another task's notice: %v, want an execution failure", err)
+	}
+	if e, _ := k.ReadTask(ctx, alice.ID, "asked"); e.Status != kernel.TaskWaiting {
+		t.Errorf("the asked task moved to %q", e.Status)
+	}
+	if _, err := st.ReadMailbox(ctx, "other"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("the other task's notice was recorded: %v", err)
+	}
+
+	// Nor does an old notice for the right task: the entry, not the message, must show it done.
+	if err := st.RecordTaskNotice(ctx, holder, alice.ID, &kernel.TaskNotice{ID: "asked", Revision: 2, Status: kernel.TaskWaiting}); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal(map[string]any{"tx_id": "tx-1", "notice": k.SignTaskNoticeForTest(priv, kernel.TaskNotice{ID: "asked", Revision: 1, Status: kernel.TaskDone, UserID: alice.ID})})
+	fake.taskBody = string(stale)
+	if _, err := k.CompleteTask(ctx, alice.ID, "asked", json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Errorf("a reply carrying an old notice: %v, want an execution failure", err)
+	}
 }

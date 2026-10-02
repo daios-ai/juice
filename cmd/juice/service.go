@@ -27,18 +27,15 @@ import (
 // addresses. waiting_on_peer flags a waiting task whose required caller is a peer's account — work
 // parked on someone who may be offline (§13); its age is the task's created_at.
 type taskWithAction struct {
-	*kernel.Task
-	RequiredCallerUserID   string  `json:"required_caller_user_id,omitempty"`
-	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"`
-	RequiredCallerHandle   string  `json:"required_caller_handle,omitempty"`
-	Action                 string  `json:"action,omitempty"`
-	CreatedBy              string  `json:"created_by,omitempty"` // the creating action's address (from the parent trace)
-	Owner                  string  `json:"owner"`                // process owner (payer)
-	RequiredCaller         string  `json:"required_caller,omitempty"`
-	WaitingOnPeer          bool    `json:"waiting_on_peer,omitempty"`
-	// AllowedInput is the derived completion schema (input_schema \ keys(partial_args), §10) for a
-	// waiting task, so the required caller can complete it without reading a private target action.
-	AllowedInput map[string]any `json:"allowed_input,omitempty"`
+	kernel.TaskNotice
+	UserID         string `json:"user_id,omitempty"`       // shadow-dropped: the required caller names the party
+	ActionID       string `json:"action_id,omitempty"`     // shadow-dropped: the address below names it
+	CreatedByID    string `json:"created_by_id,omitempty"` // shadow-dropped: likewise
+	Action         string `json:"action,omitempty"`
+	CreatedBy      string `json:"created_by,omitempty"` // the creating action's address
+	Owner          string `json:"owner"`                // process owner (payer), or the kernel holding the task
+	RequiredCaller string `json:"required_caller,omitempty"`
+	WaitingOnPeer  bool   `json:"waiting_on_peer,omitempty"`
 }
 
 // processView enriches a process with its owner's address and awaiting-receipt state and age (§13): a
@@ -125,24 +122,20 @@ func isPeer(k *kernel.Kernel, ctx context.Context, id string) bool {
 	return err == nil && u != nil && u.KernelPublicKey != ""
 }
 
-func enrichTask(k *kernel.Kernel, ctx context.Context, task *kernel.Task, names *kernel.Names) *taskWithAction {
-	action, _ := k.ReadAction(ctx, task.ActionID)
-	v := &taskWithAction{Task: task, RequiredCaller: names.Address(ctx, task.RequiredCaller()), Action: names.Action(ctx, action)}
-	// The creating action (what produced this task) carries its meaning; the target action can be a
-	// generic sink (e.g. sys/message parks a sys/sink task). Resolve it from the parent trace.
-	if task.ParentTraceID != nil {
-		if tr, err := k.ReadTrace(ctx, *task.ParentTraceID); err == nil {
-			v.CreatedBy = k.ActionAddressByID(ctx, tr.ActionID)
-			// The task's process owner is the payer of the transaction it will settle into (§10).
-			v.Owner = names.Address(ctx, kernel.Principal{AccountID: k.ProcessOwnerID(ctx, tr.ProcessID)})
-		}
+// enrichTask renders a mailbox entry by address. The creating action carries the task's meaning —
+// the target can be a generic sink (sys/message parks a sys/sink task) — and the owner is the payer
+// of the transaction it settles into, or the kernel holding it, which withholds both (P8).
+func enrichTask(k *kernel.Kernel, ctx context.Context, e *kernel.TaskEntry, names *kernel.Names) *taskWithAction {
+	v := &taskWithAction{TaskNotice: e.TaskNotice, RequiredCaller: names.Address(ctx, e.RequiredCaller),
+		Owner: k.KernelName(ctx, e.HolderKey)}
+	if e.ActionID != "" {
+		action, _ := k.ReadAction(ctx, e.ActionID)
+		v.Action, v.CreatedBy = names.Action(ctx, action), k.ActionAddressByID(ctx, e.CreatedByID)
 	}
-	if task.Status == kernel.TaskWaiting {
-		v.WaitingOnPeer = isPeer(k, ctx, task.RequiredCallerUserID)
-		if action != nil {
-			v.AllowedInput = kernel.DeriveAllowedSchema(action.InputSchema, task.PartialArgs)
-		}
+	if e.OwnerUserID != "" {
+		v.Owner = names.Address(ctx, kernel.Principal{AccountID: e.OwnerUserID})
 	}
+	v.WaitingOnPeer = e.Status == kernel.TaskWaiting && isPeer(k, ctx, e.RequiredCaller.AccountID)
 	return v
 }
 

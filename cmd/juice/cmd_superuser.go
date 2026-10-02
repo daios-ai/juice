@@ -395,17 +395,6 @@ func peerInspectCmd() *cobra.Command {
 					} `json:"reachability"`
 					Source string `json:"source"`
 					Online bool   `json:"online"`
-					// Tasks this peer has parked for THIS kernel: work awaiting us, and the ids
-					// `task complete ID --peer` takes (§13). A peer account holds no session token,
-					// so this is the only place an operator sees them.
-					Tasks []struct {
-						ID           string          `json:"id"`
-						Price        int64           `json:"price"`
-						CreatedAt    time.Time       `json:"created_at"`
-						PartialArgs  json.RawMessage `json:"partial_args"`
-						AllowedInput json.RawMessage `json:"allowed_input"`
-					} `json:"tasks"`
-					TasksTruncated bool `json:"tasks_truncated"`
 				}
 				if err := json.Unmarshal(b, &out); err != nil {
 					return err
@@ -470,21 +459,6 @@ func peerInspectCmd() *cobra.Command {
 						subjectName = shortKey(out.PublicKey)
 					}
 					printEvidence(subjectName, out.PublicKey, out.Evidence)
-				}
-				if len(out.Tasks) > 0 {
-					fmt.Printf("\nTasks awaiting us (%d) — complete with: task complete ID --peer %s\n",
-						len(out.Tasks), args[0])
-					for _, st := range out.Tasks {
-						fmt.Printf("  %s  price=%s  %s\n", st.ID, net.Amount(st.Price), st.CreatedAt.Format(time.RFC3339))
-						if len(st.PartialArgs) > 0 && string(st.PartialArgs) != "{}" {
-							fmt.Printf("      %s\n", st.PartialArgs)
-						}
-						// The derived completion schema (§14): what this kernel may supply, without
-						// having to read a target action it cannot see.
-						if len(st.AllowedInput) > 0 {
-							fmt.Printf("      allowed_input: %s\n", st.AllowedInput)
-						}
-					}
 				}
 				return nil
 			}})

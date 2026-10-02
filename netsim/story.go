@@ -864,6 +864,47 @@ func (s *story) actTasks() error {
 	// refused rather than pay again.
 	s.n.MustRefuse("task.replay_settles_once", "already|complete|settled|not waiting|not found",
 		k1, "ben", "task", "complete", ids[0], `{"echo":"again"}`)
+	return s.tasksAcrossKernels()
+}
+
+// tasksAcrossKernels parks tasks on one kernel for a user of another (U41). The user names no
+// kernel: the tasks arrive in their own list, where one is declined and one completed with the
+// commands a local task takes, and both settle on the kernel that funds them.
+func (s *story) tasksAcrossKernels() error {
+	k1, k4 := s.k("k1"), s.k("k4")
+	var remote []string
+	for i := 0; i < 2; i++ {
+		out, _ := k1.Run("ana", "--json", "run", k1.At("sys/message"),
+			fmt.Sprintf(`{"to":%q,"message":"netsim remote task %d"}`, k4.At("gus"), i))
+		var m struct {
+			Result struct {
+				TaskID string `json:"task_id"`
+			} `json:"result"`
+		}
+		if json.Unmarshal([]byte(out), &m) == nil && m.Result.TaskID != "" {
+			remote = append(remote, m.Result.TaskID)
+		}
+	}
+	if !s.n.Check("task.remote_parked", len(remote) == 2, "sys/message did not park two tasks for a user of another kernel") {
+		return nil
+	}
+	delivered := false
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(time.Second) {
+		out, _ := k4.Run("gus", "--json", "task", "list")
+		if strings.Contains(out, remote[0]) && strings.Contains(out, remote[1]) {
+			delivered = true
+			break
+		}
+	}
+	if !s.n.Check("task.remote_delivered", delivered, "the tasks never reached the addressee's own list") {
+		return nil
+	}
+	s.n.MustWork("task.remote_declined", k4, "gus", "task", "cancel", remote[0])
+	s.n.MustWork("task.remote_completed", k4, "gus", "task", "complete", remote[1], `{}`)
+	s.n.Check("task.remote_settled_on_holder",
+		k1.Field("ana", "status", "task", "show", remote[0]) == "cancelled" && k1.Field("ana", "status", "task", "show", remote[1]) == "done",
+		"the holder does not show the decline and the completion")
+	s.n.MustRefuse("task.remote_replay_refused", "not waiting|invalid", k4, "gus", "task", "complete", remote[1], `{}`)
 	return nil
 }
 

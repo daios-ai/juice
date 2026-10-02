@@ -345,7 +345,6 @@ and trust verbs:
 ./juice admin peer list                # counterparties and discovered kernels, last seen
 ./juice admin peer inspect <key|petname>  # identity, catalog, trade evidence, reachability
 ./juice admin kernel show              # own key, addresses, rail position, money rules and credit
-./juice task complete <id> --peer <key>  # complete a task a peer parked for this kernel
 ```
 
 Every cross-kernel call is paid for on its own. A charge too small to be worth a rail

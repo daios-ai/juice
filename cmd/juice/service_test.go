@@ -134,8 +134,10 @@ func TestEnrichTask(t *testing.T) {
 		return a
 	}
 	action := createAction("greet", map[string]any{"type": "object"})
-	task := &kernel.Task{ID: "s1", RequiredCallerUserID: alice.ID, ActionID: action.ID}
-	v := enrichTask(k, ctx, task, k.NewNames())
+	entry := func(status kernel.TaskStatus, actionID string, rc kernel.Principal) *kernel.TaskEntry {
+		return &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s1", Status: status, ActionID: actionID}, RequiredCaller: rc}
+	}
+	v := enrichTask(k, ctx, entry(kernel.TaskDone, action.ID, kernel.Principal{AccountID: alice.ID}), k.NewNames())
 	if v.Action != "alice@k/greet" {
 		t.Errorf("enrichTask: Action = %q, want alice@k/greet", v.Action)
 	}
@@ -143,17 +145,13 @@ func TestEnrichTask(t *testing.T) {
 		t.Errorf("enrichTask: RequiredCaller = %q, want alice@k", v.RequiredCaller)
 	}
 	if v.CreatedBy != "" {
-		t.Errorf("enrichTask: CreatedBy = %q, want empty for a nil parent trace", v.CreatedBy)
+		t.Errorf("enrichTask: CreatedBy = %q, want empty with no creating action", v.CreatedBy)
 	}
 	if v.ID != "s1" {
-		t.Errorf("enrichTask: embedded Task.ID = %q, want s1", v.ID)
+		t.Errorf("enrichTask: embedded notice ID = %q, want s1", v.ID)
 	}
 	if v.WaitingOnPeer {
 		t.Error("enrichTask: WaitingOnPeer should be false")
-	}
-	// A non-waiting task carries no allowed_input.
-	if v.AllowedInput != nil {
-		t.Errorf("enrichTask: AllowedInput = %v, want nil for a non-waiting task", v.AllowedInput)
 	}
 
 	// No action → empty action field; a waiting task addressed to a peer kernel flags
@@ -167,10 +165,9 @@ func TestEnrichTask(t *testing.T) {
 	if _, err := k.BindPetname(ctx, peerKey, "peer", true); err != nil {
 		t.Fatal(err)
 	}
-	peerTask := &kernel.Task{ID: "s2", Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID}
-	v2 := enrichTask(k, ctx, peerTask, k.NewNames())
+	v2 := enrichTask(k, ctx, entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID}), k.NewNames())
 	if v2.Action != "" {
-		t.Errorf("enrichTask(nil action): Action = %q, want empty", v2.Action)
+		t.Errorf("enrichTask(no action): Action = %q, want empty", v2.Action)
 	}
 	if !v2.WaitingOnPeer {
 		t.Error("enrichTask: WaitingOnPeer should be true")
@@ -182,41 +179,14 @@ func TestEnrichTask(t *testing.T) {
 	// A task parked for a principal on a peer names that principal beneath the peer's local name.
 	// The handle it went by when the task was made is display; the stable id underneath is what
 	// authorises the completion, so a rename there leaves the task addressed and only this stales.
-	remoteID := "u-9f2c"
-	named := &kernel.Task{ID: "s3", Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID,
-		RequiredCallerRemoteID: &remoteID, RequiredCallerHandle: "bob"}
+	named := entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID, RemoteID: "u-9f2c", Handle: "bob"})
 	if got := enrichTask(k, ctx, named, k.NewNames()).RequiredCaller; got != "bob@peer" {
 		t.Errorf("enrichTask: RequiredCaller = %q, want bob@peer", got)
 	}
 	// A row parked before the handle was kept still renders, by the id it does hold.
-	unnamed := &kernel.Task{ID: "s4", Status: kernel.TaskWaiting, RequiredCallerUserID: peer.ID,
-		RequiredCallerRemoteID: &remoteID}
+	unnamed := entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID, RemoteID: "u-9f2c"})
 	if got := enrichTask(k, ctx, unnamed, k.NewNames()).RequiredCaller; got != "u-9f2c@peer" {
 		t.Errorf("enrichTask(no handle): RequiredCaller = %q, want u-9f2c@peer", got)
-	}
-
-	// A waiting task carries allowed_input = input_schema \ keys(partial_args): the target's declared
-	// property `units` is exposed for completion, while the pre-bound `city` is dropped. This lets a
-	// required caller who cannot read a private target action still see what to submit.
-	schemaAction := createAction("weather", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"city":  map[string]any{"type": "string", "description": "city"},
-			"units": map[string]any{"type": "string", "description": "units"},
-		},
-		"required": []any{"city", "units"},
-	})
-	waiting := &kernel.Task{ID: "s3", Status: kernel.TaskWaiting, RequiredCallerUserID: alice.ID, ActionID: schemaAction.ID, PartialArgs: json.RawMessage(`{"city":"NYC"}`)}
-	v3 := enrichTask(k, ctx, waiting, k.NewNames())
-	props, ok := v3.AllowedInput["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("enrichTask: AllowedInput has no properties: %v", v3.AllowedInput)
-	}
-	if _, bound := props["city"]; bound {
-		t.Error("enrichTask: pre-bound city must not be offered for completion")
-	}
-	if _, free := props["units"]; !free {
-		t.Error("enrichTask: units must be offered for completion")
 	}
 }
 
@@ -622,8 +592,8 @@ func TestCreateTask_SharedBehavior(t *testing.T) {
 	if view.Action != "svc-task-owner@k/svc-notify" {
 		t.Errorf("action field: got %q, want %q", view.Action, "svc-task-owner@k/svc-notify")
 	}
-	if view.Task.ActionID != actID {
-		t.Errorf("next_action_id: got %q, want %q", view.Task.ActionID, actID)
+	if view.TaskNotice.ActionID != actID {
+		t.Errorf("next_action_id: got %q, want %q", view.TaskNotice.ActionID, actID)
 	}
 
 	// Create task by raw action ID resolves to the same action.
@@ -638,8 +608,8 @@ func TestCreateTask_SharedBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createTask by action ID: %v", err)
 	}
-	if view2.Task.ActionID != actID {
-		t.Errorf("next_action_id by ID: got %q, want %q", view2.Task.ActionID, actID)
+	if view2.TaskNotice.ActionID != actID {
+		t.Errorf("next_action_id by ID: got %q, want %q", view2.TaskNotice.ActionID, actID)
 	}
 }
 
