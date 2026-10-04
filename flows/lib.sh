@@ -69,7 +69,7 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="$KERNEL_NAME" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs=""
+    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs="" metrics_listen_addr=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -82,6 +82,7 @@ write_config() {
         credit_limit=*)                  credit_limit=${a#*=} ;;
         import_bps=*)                    import_bps=${a#*=} ;;
         fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
+        metrics_listen_addr=*)           metrics_listen_addr=${a#*=} ;;
     esac; done
     # Whatever first boot minted stays minted: read it back before the file is replaced.
     local prev_key=""
@@ -109,6 +110,7 @@ except Exception:
   "allow_local_sources": true,
   "kernel_handle": "$kernel_handle",
   "fed_listen_addrs": $fl_json,
+  "metrics_listen_addr": "$metrics_listen_addr",
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
   "discovery_interval_seconds": $discovery_interval_seconds
 }

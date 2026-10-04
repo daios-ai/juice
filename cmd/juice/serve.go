@@ -213,7 +213,16 @@ func runServer(name string) error {
 	}
 	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
-	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world)
+	// The operator's metrics (D20), only when an address is configured. The registry exists before the
+	// transport because the transport reports into it; it is served only once the transport is up.
+	var m *metrics
+	var observe func(string, string, bool)
+	if globalCfg.MetricsListenAddr != "" {
+		m = newMetrics(k.Backlog)
+		k.SetMetrics(m)
+		observe = m.observeRequest
+	}
+	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world, observe)
 	// Every outbound contact records whether the peer answered (§13). Two integration points reach
 	// all of it: the adapter below (calls, resolves, tasks, settlement) and the discovery pass
 	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
@@ -244,7 +253,18 @@ func runServer(name string) error {
 	if perr != nil {
 		logger.Warn("remote.retry.snapshot_failed", "error", perr.Error())
 	}
-	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, k.RetryRemoteTrace, k.SettleReady, globalCfg.remoteRetryInterval())
+	retry := k.RetryRemoteTrace
+	if m != nil {
+		m.watchPeers(fedTransport.ConnectedPeers)
+		retry = m.countRetries(retry)
+		metricsSrv, addr, merr := serveMetrics(globalCfg.MetricsListenAddr, m.reg)
+		if merr != nil {
+			return merr
+		}
+		defer metricsSrv.Close()
+		logger.Info("metrics.ready", "addr", addr)
+	}
+	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, retry, k.SettleReady, globalCfg.remoteRetryInterval())
 
 	// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
 	// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
@@ -1672,7 +1692,7 @@ func writeErr(w http.ResponseWriter, err error) {
 // platform signing key from config (the same key bootstrap loaded) so the libp2p identity is the
 // kernel's Ed25519 identity (§12). AllowPrivateAddrs mirrors allow_local_sources so the flow
 // harness can run a whole network on loopback.
-func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World) (*fed.Transport, error) {
+func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World, observe func(protocol, direction string, ok bool)) (*fed.Transport, error) {
 	privB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
 	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
 	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
@@ -1689,6 +1709,7 @@ func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger
 		MaxInboundPeers:   int(globalCfg.MaxInboundPeers),
 		RelaySlots:        int(globalCfg.RelaySlots),
 		AgentVersion:      fed.AgentPrefix + version,
+		Observe:           observe,
 	})
 	if err != nil {
 		return nil, err

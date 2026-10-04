@@ -3911,7 +3911,7 @@ func TestServeBuildsTheTransportWithTheConfiguredLimits(t *testing.T) {
 	globalCfg.RelaySlots, globalCfg.MaxInboundPeers = 1, 2
 	globalCfg.AllowLocalSources = true
 	globalCfg.FedListenAddrs = []string{"/ip4/127.0.0.1/tcp/0"}
-	tr, err := startFedTransport(context.Background(), k, log.Discard(), rail.World{})
+	tr, err := startFedTransport(context.Background(), k, log.Discard(), rail.World{}, nil)
 	if err != nil {
 		t.Fatalf("startFedTransport: %v", err)
 	}

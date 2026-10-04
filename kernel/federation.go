@@ -853,6 +853,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if err := k.store.CommitRemoteSettlement(sctx, ktx, localReceipt, trace.ID, callerWalletID, callerWalletKind, k.cfg.FeeRecipientID, obligation, importFee, payout, stats, req.IdempotencyRecordID, req.TaskID); err != nil {
 		return nil, ErrInternal.Wrap("could not commit remote settlement")
 	}
+	k.observeSettled(action, ktx, req.IdempotencyRecordID)
 	k.SettleReady(sctx)
 
 	// Rule C (§8/§13): a settlement outcome proving the cached row wrong invalidates it, so the next

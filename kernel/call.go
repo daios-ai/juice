@@ -871,6 +871,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	}
 
 	logger.Info("call.success", "action", action.Name, "tx_id", txID, "latency_ms", latency*1000)
+	k.observeSettled(action, ktx, req.IdempotencyRecordID)
 	k.settleReady(sctx)
 
 	return &CallReply{
@@ -1225,6 +1226,7 @@ func (k *Kernel) settleFailedCall(ctx context.Context, logger *log.Logger, tx *T
 		logger.Error("call.settlement_failed", "action", action.Name, "error", callErr, "settlement_error", settlErr)
 		return nil, false, ErrInternal.Wrap("could not record failure transaction")
 	}
+	k.observeSettled(action, tx, req.IdempotencyRecordID)
 	k.settleReady(ctx)
 	return committed, false, nil
 }

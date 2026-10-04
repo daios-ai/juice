@@ -25,6 +25,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/record"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -201,6 +202,59 @@ func TestProbeDirect(t *testing.T) {
 	if len(r.Protocols) == 0 {
 		t.Error("expected the peer to advertise protocols")
 	}
+	// The connection is now held, so a second probe connects for free: what it reports is the
+	// ping's round trip, and a ping that answered reports no error. Loopback may round it to 0 ms.
+	if r2 := b.Probe(ctx, a.PublicKey()); r2.Error != "" || r2.Path != "direct" || r2.RTTmillis < 0 {
+		t.Errorf("second probe over a held connection: %+v", r2)
+	}
+	if n := b.ConnectedPeers(); n < 1 {
+		t.Errorf("connected peers after a probe: got %d, want at least 1", n)
+	}
+}
+
+// Every request is reported once on each side — out on the caller, in on the server — by protocol
+// and outcome, and one that never reached a peer is reported as an outbound failure. Nothing
+// reported names the peer.
+func TestRequestsAreObservedOnBothSides(t *testing.T) {
+	type seen struct {
+		proto, dir string
+		ok         bool
+	}
+	record := func() (func(string, string, bool), chan seen) {
+		ch := make(chan seen, 8)
+		return func(p, d string, ok bool) { ch <- seen{p, d, ok} }, ch
+	}
+	server := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
+	serverObs, serverSaw := record()
+	server.cfg.Observe = serverObs
+	caller := newTestTransport(t, &fakeHandlers{}, server.ListenAddrs())
+	callerObs, callerSaw := record()
+	caller.cfg.Observe = callerObs
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := caller.Call(ctx, server.PublicKey(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	want := func(ch chan seen, w seen) {
+		t.Helper()
+		select {
+		case got := <-ch:
+			if got != w {
+				t.Errorf("observed %+v, want %+v", got, w)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("nothing observed, want %+v", w)
+		}
+	}
+	want(callerSaw, seen{ProtocolCall, "out", true})
+	want(serverSaw, seen{ProtocolCall, "in", true})
+
+	unknown := caller.PublicKey()[:len(caller.PublicKey())-2] + "ZZ"
+	uctx, ucancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer ucancel()
+	_, _ = caller.Call(uctx, unknown, CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"})
+	want(callerSaw, seen{ProtocolCall, "out", false})
 }
 
 // A probe reports the version a Juice peer says it runs, and nothing for a peer that sends no
@@ -223,6 +277,21 @@ func TestProbeReportsTheVersionAJuicePeerSays(t *testing.T) {
 	}
 	if r := a.Probe(ctx, b.PublicKey()); r.Version != "" {
 		t.Errorf("version of b, which sends none: got %q, want empty", r.Version)
+	}
+}
+
+// A ping that ends without an answer — failed, or cut off when the probe's time ran out — is no
+// round trip, so the peer is not reported as answering.
+func TestFirstPingWithoutAnAnswerIsAnError(t *testing.T) {
+	closed := make(chan ping.Result)
+	close(closed)
+	if _, err := firstPing(closed); err == nil {
+		t.Error("a ping cut off without a result must not read as a round trip")
+	}
+	failed := make(chan ping.Result, 1)
+	failed <- ping.Result{Error: errors.New("stream reset")}
+	if _, err := firstPing(failed); err == nil {
+		t.Error("a failed ping must not read as a round trip")
 	}
 }
 

@@ -189,6 +189,31 @@ try: datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')); print('ok')
 except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 }
 
+# The operator's metrics (D20): off unless an address is configured; when on, a scrape of that
+# address names the build and counts a call the moment it settles, under fixed labels alone.
+flow_metrics() {
+    echo "=== FLOW metrics ==="
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    make_admin "$db" "$hs" metrics_listen_addr=127.0.0.1:0 || { fail "metrics.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    local maddr; maddr=$(sed -n 's/.*"msg":"metrics.ready".*"addr":"\([^"]*\)".*/\1/p' "$(server_log "$db")" | head -1)
+    assert_nonempty "metrics.listening" "$maddr"
+    # One local call settled: its count, read from the scrape by the series' exact name.
+    local series='juice_calls_total{outcome="success",scope="local"} '
+    local before; before=$(http_body GET "http://$maddr/metrics" | grep -F "$series" | awk '{print $2}')
+    assert_contains "metrics.build" 'juice_build_info{version=' "$(http_body GET "http://$maddr/metrics")"
+    jj "$db" "$ha" run sys@k/time '{}' >/dev/null
+    assert_eq "metrics.call_counted" "$(( ${before:-0} + 1 ))" \
+        "$(http_body GET "http://$maddr/metrics" | grep -F "$series" | awk '{print $2}')"
+    assert_not_contains "metrics.no_party_labels" 'alice' "$(http_body GET "http://$maddr/metrics")"
+    assert_eq "metrics.only_metrics" 404 "$(http_code GET "http://$maddr/health")"
+
+    # Without the key nothing listens for metrics at all.
+    local dir2 db2 hs2; dir2=$(new_dir); db2="$(kdb "$dir2")"; hs2=$(home "$dir2" sys)
+    make_admin "$db2" "$hs2" || { fail "metrics.off_boot" "server did not start"; return; }
+    assert_not_contains "metrics.off_by_default" 'metrics.ready' "$(cat "$(server_log "$db2")")"
+}
+
 flow_message() {
     echo "=== FLOW message ==="
     local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)

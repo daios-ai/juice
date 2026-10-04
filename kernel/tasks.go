@@ -184,6 +184,7 @@ func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) 
 	if err != nil {
 		return ErrInternal.Wrap("could not commit deferred transaction")
 	}
+	k.observeSettled(action, ktx, req.IdempotencyRecordID)
 	return nil
 }
 

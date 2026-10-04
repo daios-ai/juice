@@ -844,6 +844,52 @@ func (k *Kernel) RailInspect(ctx context.Context, operatorID string) (*RailRepor
 	return k.railReport(ctx)
 }
 
+// Backlog is what this kernel holds open on a peer's word, and whether its rail still works, read
+// from its own books alone for the operator's metrics. It never reads the chain, so a scrape cannot
+// wait on a node, and an error is returned rather than a zero that would read as a healthy kernel.
+type Backlog struct {
+	RemoteCalls      int       // calls dispatched abroad still awaiting the peer's signed receipt
+	OldestRemoteCall time.Time // zero when there are none
+	OldestObligation time.Time // the oldest call served to a peer and not yet paid for; zero when none
+	RailHalted       bool
+	SolvencyGap      int64 // liabilities − vault (D23); zero when every credit is backed
+}
+
+// Backlog reads the open work and the rail's standing. Obligations are read oldest first, so the
+// oldest is exact however many there are.
+func (k *Kernel) Backlog(ctx context.Context) (*Backlog, error) {
+	b := &Backlog{}
+	pending, err := k.store.ListPendingRemoteTraces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b.RemoteCalls = len(pending)
+	for _, tr := range pending {
+		if b.OldestRemoteCall.IsZero() || tr.CreatedAt.Before(b.OldestRemoteCall) {
+			b.OldestRemoteCall = tr.CreatedAt
+		}
+	}
+	owed, err := k.store.ListOwed(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(owed) > 0 {
+		b.OldestObligation = owed[0].CreatedAt
+	}
+	// A halt is a blocked row, whatever its reason says; its time is set exactly when one exists.
+	_, since, err := k.RailStop(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b.RailHalted = !since.IsZero()
+	pos, err := k.store.RailPosition(ctx, k.cfg.FeeRecipientID)
+	if err != nil {
+		return nil, err
+	}
+	b.SolvencyGap = pos.Gap()
+	return b, nil
+}
+
 // railReport is the audit itself, which the worker runs every pass and the operator reads on demand.
 func (k *Kernel) railReport(ctx context.Context) (*RailReport, error) {
 	pos, err := k.store.RailPosition(ctx, k.cfg.FeeRecipientID)

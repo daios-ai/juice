@@ -3984,3 +3984,96 @@ func assertLedgerExplainsBalances(t *testing.T, st kernel.Store, userIDs ...stri
 		}
 	}
 }
+
+// ---- Metrics hook ----
+
+type observedCall struct{ scope, outcome string }
+
+// recordingMetrics is the operator's metrics as the kernel sees them: one report per committed call.
+type recordingMetrics struct{ calls []observedCall }
+
+func (r *recordingMetrics) CallSettled(scope, outcome string, elapsed time.Duration) {
+	if elapsed < 0 {
+		scope += "(negative duration)"
+	}
+	r.calls = append(r.calls, observedCall{scope, outcome})
+}
+
+// failingHTTP is an upstream that is down: every execution fails.
+type failingHTTP struct{}
+
+func (failingHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+	return nil, kernel.ErrExecutionFailed.Wrap("upstream down")
+}
+
+// Every committed call is reported exactly once, and its scope is decided by the call: a remote call
+// that never left settles through the local failure path and is still outbound, and a call answering
+// a peer's request is inbound even when recovery settles it.
+func TestEveryCommittedCallIsObservedOnceByScope(t *testing.T) {
+	ctx := context.Background()
+	runLocal := func(t *testing.T, http kernel.HTTPExecutor) []observedCall {
+		st := newTestStore(t)
+		k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: http})
+		m := &recordingMetrics{}
+		k.SetMetrics(m)
+		alice := setupUser(t, st, "alice", 1000)
+		a := setupLocalAction(t, st, alice.ID, "act", 10)
+		a.Kind = kernel.KindHTTP // executed by the fake upstream, so its outcome is the upstream's
+		if err := st.UpdateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/act", Args: map[string]any{}})
+		return m.calls
+	}
+	check := func(t *testing.T, got []observedCall, want observedCall) {
+		t.Helper()
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("observed %v, want exactly [%v]", got, want)
+		}
+	}
+
+	t.Run("local success", func(t *testing.T) {
+		check(t, runLocal(t, &fakeSuccessHTTP{}), observedCall{"local", "success"})
+	})
+	t.Run("local failure", func(t *testing.T) {
+		check(t, runLocal(t, failingHTTP{}), observedCall{"local", "failure"})
+	})
+	t.Run("outbound never dispatched", func(t *testing.T) {
+		st := newTestStore(t)
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		fake := &fakeFederationHTTP{notDispatched: true}
+		k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
+		m := &recordingMetrics{}
+		k.SetMetrics(m)
+		_, _, caller := setupSettleProxyWithKernel(t, st, k, fake, priv, pub, "nd-action", 1000)
+		_, _ = k.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}})
+		check(t, m.calls, observedCall{"outbound", "failure"})
+	})
+	t.Run("inbound settled by recovery", func(t *testing.T) {
+		st := newTestStore(t)
+		k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: &fakeSuccessHTTP{}})
+		m := &recordingMetrics{}
+		k.SetMetrics(m)
+		owner := setupUser(t, st, "local-owner", 0)
+		peer, err := k.EnsureKernelAccount(ctx, testKernelKey(62))
+		if err != nil {
+			t.Fatal(err)
+		}
+		action := setupLocalAction(t, st, owner.ID, "local-act", 0)
+		rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "metrics-key",
+			CounterpartyUserID: peer.ID, CreatedAt: time.Now().UTC()}
+		if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: peer.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
+			CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC()}
+		if err := st.BeginRun(ctx, p, tr, peer.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := k.Recover(ctx); err != nil {
+			t.Fatalf("Recover: %v", err)
+		}
+		check(t, m.calls, observedCall{"inbound", "failure"})
+	})
+}

@@ -89,6 +89,38 @@ type Kernel struct {
 	// tell wakes the worker that tells peers what they are owed — reveals, transfers, task notices —
 	// so news goes out at once rather than waiting out an interval.
 	tell chan struct{}
+	// metrics observes each committed call for the operator's /metrics; nil observes nothing.
+	metrics Metrics
+}
+
+// Metrics observes calls as they settle. It sees only fixed-vocabulary facts — where the call
+// crossed and how it ended — never who made it or what it was, so nothing it exports names a party.
+type Metrics interface {
+	CallSettled(scope, outcome string, elapsed time.Duration)
+}
+
+// SetMetrics attaches the observer; serve installs one only when the operator asked for metrics.
+func (k *Kernel) SetMetrics(m Metrics) { k.metrics = m }
+
+// observeSettled reports one committed call. Scope is decided by the call, never by the commit that
+// ran: a remote call that never left settles through the local failure path and is still outbound.
+// A call answering a peer's request carries that request's record; every other call is local.
+func (k *Kernel) observeSettled(action *Action, tx *Transaction, idempotencyRecordID string) {
+	if k.metrics == nil {
+		return
+	}
+	scope := "local"
+	switch {
+	case action != nil && action.Kind == KindRemoteProxy:
+		scope = "outbound"
+	case idempotencyRecordID != "":
+		scope = "inbound"
+	}
+	ended := tx.EndedAt
+	if ended.IsZero() {
+		ended = time.Now().UTC()
+	}
+	k.metrics.CallSettled(scope, string(tx.Status), ended.Sub(tx.StartedAt))
 }
 
 // WakeTell asks the telling worker for a pass now; a pass already asked for is enough.

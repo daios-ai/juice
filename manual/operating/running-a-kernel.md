@@ -324,6 +324,31 @@ ok  acme  network play  fdlMi64P…  v0.14.46
 Health checks require no login and report the server's identity and version as
 well as its status. Clients use that identity to check they have reached the expected kernel.
 
+### Metrics
+
+A kernel can export its own counters to Prometheus. Set `metrics_listen_addr`
+in `config.json`, or pass `--metrics-listen-addr`:
+
+```
+$ juice kernel serve acme --metrics-listen-addr 127.0.0.1:9100
+```
+
+and point Prometheus at it:
+
+```yaml
+scrape_configs:
+  - job_name: juice
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+```
+
+The page reports the build, calls by outcome and how long they took, requests
+to and from peers, retries, calls still waiting for a peer's answer and the
+oldest of them, the oldest payment a peer still owes, whether outgoing payments
+are halted, and whether the books balance. It names no user, peer or action.
+It needs no login, so anyone who can reach the address can read it: keep it on
+loopback or a network only your monitoring reaches.
+
 ## Logs
 
 Logs are written to stderr and, if configured, a log file. Command response

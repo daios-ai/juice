@@ -4,6 +4,8 @@ package kernel_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -355,6 +357,44 @@ func TestBlockedPaymentHaltsOutgoingWorkOnly(t *testing.T) {
 	k.RailPass(ctx)
 	if reason, _, _ := k.RailStop(ctx); reason != "" {
 		t.Errorf("the halt must lift when the last blocked payment does, still %q", reason)
+	}
+}
+
+// The backlog an operator's metrics read is the books' own: nothing open on a fresh kernel, a halt
+// exactly while a payment is blocked, and a call parked abroad counted with its age.
+func TestBacklogReadsTheOpenWorkAndTheHalt(t *testing.T) {
+	k, st, fr, sys := railFixture(t)
+	ctx := context.Background()
+	b, err := k.Backlog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.RemoteCalls != 0 || !b.OldestRemoteCall.IsZero() || !b.OldestObligation.IsZero() || b.RailHalted || b.SolvencyGap != 0 {
+		t.Fatalf("a fresh kernel holds nothing open: %+v", b)
+	}
+	alice := setupUser(t, st, "alice", 0)
+	if _, err := k.Deposit(ctx, sys.ID, alice.ID, 500, "", "inv-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := k.SetBlockchainAddress(ctx, alice.ID, "password", "0xalice", "sig"); err != nil {
+		t.Fatal(err)
+	}
+	fr.outcome = kernel.RailOutcome{Blocked: "stablecoin too low, top up"}
+	if _, err := k.Withdraw(ctx, alice.ID, uuid.NewString(), 100, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, err = k.Backlog(ctx); err != nil || !b.RailHalted || b.SolvencyGap != 0 {
+		t.Errorf("a blocked payment halts the rail and leaves the books whole: %+v %v", b, err)
+	}
+
+	fst := newTestStore(t)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	fake := &fakeFederationHTTP{} // no receipt: the call parks awaiting one
+	fk := newKernel(testConfig(), kernel.Dependencies{Store: fst, HTTP: fake})
+	_, _, caller := setupSettleProxyWithKernel(t, fst, fk, fake, priv, pub, "parked-action", 1000)
+	_, _ = fk.Run(ctx, kernel.RunRequest{CallerID: caller.ID, ActionRef: "settle-peer@settle-peer/settleact", Args: map[string]any{}})
+	if b, err = fk.Backlog(ctx); err != nil || b.RemoteCalls != 1 || b.OldestRemoteCall.IsZero() {
+		t.Errorf("a parked call is open work with an age: %+v %v", b, err)
 	}
 }
 

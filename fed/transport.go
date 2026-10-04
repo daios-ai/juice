@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,7 @@ import (
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -312,6 +314,9 @@ func (t *Transport) ListenAddrs() []string {
 }
 
 // Close stops the DHT and host.
+// ConnectedPeers is how many peers this host holds a connection to right now.
+func (t *Transport) ConnectedPeers() int { return len(t.host.Network().Peers()) }
+
 func (t *Transport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -566,12 +571,15 @@ func relayResources(slots int) relayv2.Resources {
 
 // serveReq reads one request, answers it, and closes. The handler's context carries the stream's
 // own deadline and dies with the transport, so an answer nobody is waiting for — an abandoned
-// read, a shutdown — stops instead of running on against a closed stream.
-func serveReq[Req any](ctx context.Context, s network.Stream, handle func(context.Context, string, Req) any) {
+// read, a shutdown — stops instead of running on against a closed stream. A request counts as
+// served only once its answer is written.
+func serveReq[Req any](t *Transport, s network.Stream, handle func(context.Context, string, Req) any) {
 	defer s.Close()
+	ok := false
+	defer func() { t.observe(string(s.Protocol()), "in", ok) }()
 	deadline := time.Now().Add(streamDeadline)
 	_ = s.SetDeadline(deadline)
-	hctx, cancel := context.WithDeadline(ctx, deadline)
+	hctx, cancel := context.WithDeadline(t.ctx, deadline)
 	defer cancel()
 	var req Req
 	if err := readFrame(s, &req); err != nil {
@@ -580,36 +588,43 @@ func serveReq[Req any](ctx context.Context, s network.Stream, handle func(contex
 	// A handler with nothing to say says nothing: the stream closes with no frame, which the
 	// caller reads as a failed read rather than as an answer.
 	if reply := handle(hctx, peerKeyOf(s), req); reply != nil {
-		_ = writeFrame(s, reply)
+		ok = writeFrame(s, reply) == nil
+	}
+}
+
+// observe reports one request's end to the configured observer, if any.
+func (t *Transport) observe(proto, direction string, ok bool) {
+	if t.cfg.Observe != nil {
+		t.cfg.Observe(proto, direction, ok)
 	}
 }
 
 func (t *Transport) handleCall(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req CallRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req CallRequest) any {
 		return t.cfg.Handlers.OnCall(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleTask(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req TaskRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req TaskRequest) any {
 		return t.cfg.Handlers.OnTask(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleResolve(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req ResolveRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req ResolveRequest) any {
 		return t.cfg.Handlers.OnResolve(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleReveal(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req RevealRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req RevealRequest) any {
 		return t.cfg.Handlers.OnReveal(ctx, key, req)
 	})
 }
 
 func (t *Transport) handleTransfer(s network.Stream) {
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req TransferRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req TransferRequest) any {
 		return t.cfg.Handlers.OnTransfer(ctx, key, req)
 	})
 }
@@ -617,7 +632,7 @@ func (t *Transport) handleTransfer(s network.Stream) {
 func (t *Transport) handleGossip(s network.Stream) {
 	// Gossip carries the evidence cursor and the catalogue scan (§13). The reply frame is the JSON
 	// document; on handler error we close without a frame, which the client reads as empty.
-	serveReq(t.ctx, s, func(ctx context.Context, key string, req GossipRequest) any {
+	serveReq(t, s, func(ctx context.Context, key string, req GossipRequest) any {
 		body, err := t.cfg.Handlers.OnGossip(ctx, key, req)
 		if err != nil {
 			return nil
@@ -652,7 +667,14 @@ func (t *Transport) openStream(ctx context.Context, peerKey, proto string) (netw
 
 // roundTrip opens a stream for one request/response protocol, writes req, and reads the reply. On
 // any error it returns the zero Resp (e.g. an empty CallResponse the caller treats as pending).
+// Every request is reported to the observer once, here, whichever protocol carried it.
 func roundTrip[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto string, req Req) (Resp, error) {
+	resp, err := exchange[Req, Resp](ctx, t, peerKey, proto, req)
+	t.observe(proto, "out", err == nil)
+	return resp, err
+}
+
+func exchange[Req, Resp any](ctx context.Context, t *Transport, peerKey, proto string, req Req) (Resp, error) {
 	var resp Resp
 	s, err := t.openStream(ctx, peerKey, proto)
 	if err != nil {
@@ -725,21 +747,29 @@ func (t *Transport) Gossip(ctx context.Context, peerKey string, req GossipReques
 // operator sees via `admin inspect <key>` now that there is no browser-reachable endpoint.
 type Reachability struct {
 	Path      string   `json:"path"`              // "direct", "relayed", or "unreachable"
-	RTTmillis int64    `json:"rtt_millis"`        // round-trip time of the resolve+connect, milliseconds
+	RTTmillis int64    `json:"rtt_millis"`        // one libp2p ping round trip, milliseconds; a peer that does not answer is unreachable
 	Protocols []string `json:"protocols"`         // libp2p protocols the peer advertises
 	Version   string   `json:"version,omitempty"` // the Juice version the peer says it runs; empty when it says none
 	Error     string   `json:"error,omitempty"`
 }
 
-// Probe resolves and connects to a peer by key and reports the reachability path. It does not send
-// a federation call — it only establishes (or reuses) a connection and classifies it.
+// Probe resolves and connects to a peer by key, classifies the connection, and measures one round
+// trip with libp2p's ping. It does not send a federation call. Connecting is not the round trip: on
+// a connection already held it costs nothing, so the time reported is the ping's alone.
 func (t *Transport) Probe(ctx context.Context, peerKey string) Reachability {
-	start := time.Now()
 	pid, err := t.resolve(ctx, peerKey)
 	if err != nil {
-		return Reachability{Path: "unreachable", RTTmillis: time.Since(start).Milliseconds(), Error: err.Error()}
+		return Reachability{Path: "unreachable", Error: err.Error()}
 	}
-	r := Reachability{RTTmillis: time.Since(start).Milliseconds()}
+	// Ping repeats until its context ends; one answer is all a probe asks for. A peer that does not
+	// answer is unreachable, whatever connection is held to it.
+	pctx, stop := context.WithCancel(ctx)
+	rtt, err := firstPing(ping.Ping(pctx, t.host, pid))
+	stop()
+	if err != nil {
+		return Reachability{Path: "unreachable", Error: "ping: " + err.Error()}
+	}
+	r := Reachability{RTTmillis: rtt.Milliseconds()}
 	// Classify the live connection: a limited (relayed) connection routes through a relay.
 	r.Path = "direct"
 	for _, c := range t.host.Network().ConnsToPeer(pid) {
@@ -760,6 +790,16 @@ func (t *Transport) Probe(ctx context.Context, peerKey string) Reachability {
 		}
 	}
 	return r
+}
+
+// firstPing reads one ping result. A channel closed without one — the probe's time ran out mid-ping
+// — is no answer, not a round trip of zero.
+func firstPing(ch <-chan ping.Result) (time.Duration, error) {
+	res, ok := <-ch
+	if !ok {
+		return 0, errors.New("no answer")
+	}
+	return res.RTT, res.Error
 }
 
 // isRelayAddr reports whether a multiaddr string denotes a circuit-relay path.

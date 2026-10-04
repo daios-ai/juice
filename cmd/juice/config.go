@@ -114,6 +114,7 @@ type ServerConfig struct {
 	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds"`    // seconds between known-network discovery passes (§13); <=0 → default
 	MaxInboundPeers            int64        `json:"max_inbound_peers"`             // inbound connections accepted at once, a relay slot being one (D12); <=0 → default
 	RelaySlots                 int64        `json:"relay_slots"`                   // kernels behind NAT this host relays for at once (D12); <=0 → default
+	MetricsListenAddr          string       `json:"metrics_listen_addr"`           // where /metrics answers, host:port; "" ⇒ no metrics are served (D20)
 }
 
 // remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a

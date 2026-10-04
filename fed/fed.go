@@ -204,6 +204,10 @@ type Config struct {
 	// connection and read back by Probe. Empty leaves the library's own string. It is a label:
 	// nothing on the wire is decided by it, so a kernel that sends another one is not stranded.
 	AgentVersion string
+	// Observe is told how each federation request ended — the protocol it rode, "in" or "out", and
+	// whether it completed — for the operator's metrics. Nil observes nothing. It is given no peer,
+	// so nothing it records names one.
+	Observe func(protocol, direction string, ok bool)
 }
 
 // AgentPrefix opens every agent version a Juice kernel sends. Probe keeps a peer's string only
