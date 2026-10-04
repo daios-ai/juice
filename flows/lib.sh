@@ -561,7 +561,7 @@ deposit() {
 # _mkaction db home visibility name [action-create flags...] — create + enable (+ publish); echo id.
 _mkaction() {
     local db="$1" h="$2" vis="$3" name="$4"; shift 4
-    local id; id=$(strfield "$(jj "$db" "$h" action create "$name" "$@")" id)
+    local id; id=$(strfield "$(jj "$db" "$h" action create "$name" --title "$name" "$@")" id)
     [ -n "$id" ] || return 1
     j "$db" "$h" action enable "$id" >/dev/null 2>&1
     [ "$vis" = public ] && j "$db" "$h" action update "$id" --visibility public >/dev/null 2>&1

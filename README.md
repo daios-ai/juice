@@ -200,7 +200,7 @@ An action needs a name, a description, input/output schemas, and a price. It sta
 disabled and private, so nothing is callable by accident:
 
 ```bash
-./juice action create echo --kind http --source https://httpbin.org/post --price 5 \
+./juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post --price 5 \
   --description "Echo a message" \
   --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}}}'
 ./juice action enable alice@work/echo
@@ -241,7 +241,7 @@ kernel:
 ```bash
 ./juice run sys@work/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
   | jq -r .result.artifact | base64 -d > pipeline.wasm
-./juice action create pipeline --kind wasm --artifact pipeline.wasm --price 100
+./juice action create pipeline --title "Run the pipeline" --kind wasm --artifact pipeline.wasm --price 100
 ```
 
 An HTTP-backed action can compose too: each dispatch carries a capability header the

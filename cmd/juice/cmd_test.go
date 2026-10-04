@@ -456,6 +456,7 @@ func TestActionCreateAndToggle(t *testing.T) {
 
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "cli-action",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
@@ -499,6 +500,7 @@ func TestActionPriceUpdateDeactivates(t *testing.T) {
 	}
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "priced",
 		Kind:         kernel.KindHTTP,
 		Price:        10,
@@ -538,7 +540,7 @@ func TestActionDelete(t *testing.T) {
 		Handle: "delowner@k", Password: "pass",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "to-delete",
+		OwnerUserID: owner.ID, Title: "Test action", Name: "to-delete",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	if err := env.k.DeleteAction(ctx, owner.ID, a.ID); err != nil {
@@ -562,7 +564,7 @@ func TestActionShowPrivate(t *testing.T) {
 	_ = stranger
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "show-svc",
+		OwnerUserID: owner.ID, Title: "Test action", Name: "show-svc",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 
@@ -612,7 +614,7 @@ func TestActionCreateSchemasAndAuthFromFile(t *testing.T) {
 	}
 
 	out, err := execTestCmd(t, actionCreateCmd(), "/svc",
-		"--kind", "http", "--source", "https://example.com",
+		"--title", "Test action", "--kind", "http", "--source", "https://example.com",
 		"--description", "svc", "--price", "0",
 		"--input-schema", "@"+schemaFile,
 		"--auth", "@"+authFile)
@@ -657,7 +659,7 @@ func TestActionCreateFromArtifact(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString(wasm)
 
 	if _, err := execTestCmd(t, actionCreateCmd(), "/echo",
-		"--kind", "wasm", "--artifact", b64,
+		"--title", "Test action", "--kind", "wasm", "--artifact", b64,
 		"--description", "echo", "--price", "0"); err != nil {
 		t.Fatalf("action create --artifact: %v", err)
 	}
@@ -690,7 +692,7 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := execTestCmd(t, actionCreateCmd(), "/search",
-		"--kind", "http", "--source", "https://api.example.com/search",
+		"--title", "Test action", "--kind", "http", "--source", "https://api.example.com/search",
 		"--method", "GET", "--param", "q:query",
 		"--description", "search", "--price", "0"); err != nil {
 		t.Fatalf("action create with --method/--param: %v", err)
@@ -705,7 +707,7 @@ func TestActionCreateHTTPMethodParam(t *testing.T) {
 }
 
 func TestActionImportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","summary":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))
@@ -766,7 +768,7 @@ func TestActionTreeVerbsCLI(t *testing.T) {
 	}
 	mk := func(name string) *kernel.Action {
 		a, cerr := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP,
 			Source: "http://example.com", Description: "an action",
 			InputSchema: minSchema, OutputSchema: minSchema,
 		})
@@ -827,6 +829,7 @@ func TestActionListActive(t *testing.T) {
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "listed",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
@@ -862,6 +865,7 @@ func TestStatsInitializedOnActivation(t *testing.T) {
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "svc",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://x.com",
@@ -1068,7 +1072,8 @@ func createTaskAction(t *testing.T, srv *httptest.Server, backendURL, ownerTok, 
 	t.Helper()
 	emptySchema := map[string]any{"type": "object", "properties": map[string]any{}}
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": name, "kind": "http", "price": 0, "source": backendURL,
+		"title": "Test action",
+		"name":  name, "kind": "http", "price": 0, "source": backendURL,
 		"description":   "test task action",
 		"input_schema":  emptySchema,
 		"output_schema": emptySchema,
@@ -1479,7 +1484,7 @@ func TestTransactionRate(t *testing.T) {
 		Handle: "rateowner@k", Password: "p",
 	})
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "rateable",
+		OwnerUserID: owner.ID, Title: "Test action", Name: "rateable",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
@@ -1504,6 +1509,7 @@ func TestTransactionRating(t *testing.T) {
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "tx-rate-svc",
 		Kind:        kernel.KindHTTP,
 		Source:      "http://example.com",
@@ -1539,7 +1545,7 @@ func TestCallClosedProcess(t *testing.T) {
 	_ = env.k.EndProcess(ctx, owner.ID, p.ID)
 
 	a, _ := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "echo",
+		OwnerUserID: owner.ID, Title: "Test action", Name: "echo",
 		Kind: kernel.KindHTTP, Source: "http://example.com/echo",
 	})
 	_ = env.k.SetActive(ctx, owner.ID, a.ID, true)
@@ -1566,7 +1572,7 @@ func TestCallInsufficientFunds(t *testing.T) {
 	// Description and schemas are what make the action activatable (§7); without them SetActive
 	// fails and the run would be refused as inactive long before its price is ever weighed.
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "expensive",
+		OwnerUserID: owner.ID, Title: "Test action", Name: "expensive",
 		Kind: kernel.KindHTTP, Source: "http://x.com", Price: 100,
 		Description: "costs more than the caller has",
 		InputSchema: minSchema, OutputSchema: minSchema,
@@ -1611,6 +1617,7 @@ func TestRemoteImport(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     actionID,
 		OwnerHandle:  "import-remote",
+		Title:        "Test action",
 		Name:         "greet",
 		Description:  "says hello",
 		Kind:         kernel.KindHTTP,
@@ -1819,7 +1826,7 @@ func TestCLIActionRatings(t *testing.T) {
 	}
 
 	a, err := env.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP, Source: backend.URL,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "svc", Kind: kernel.KindHTTP, Source: backend.URL,
 		Description: "rate me", InputSchema: minSchema, OutputSchema: minSchema, Price: 5,
 	})
 	if err != nil {
@@ -1878,7 +1885,7 @@ func TestCLIActionRatings(t *testing.T) {
 // application, and every action subcommand reaches it by its own name — the reference travels
 // untouched to the server, so the CLI holds no naming rules of its own.
 func TestActionImportNameAndRootReference(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","summary":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","summary":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))
@@ -1918,7 +1925,7 @@ func TestActionImportNameAndRootReference(t *testing.T) {
 	}
 	ownerID := actions[0].OwnerUserID
 	if _, err := env.k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "index",
+		OwnerUserID: ownerID, Title: "Test action", Name: "index",
 		Kind: kernel.KindHTTP, Source: "http://example.com",
 	}); err != nil {
 		t.Fatal(err)
@@ -3064,5 +3071,120 @@ func TestListsAskForAllOnlyWhenTold(t *testing.T) {
 		if len(asked) != 1 || asked[0] != c.want {
 			t.Errorf("%s: asked %v, want %q", c.name, asked, c.want)
 		}
+	}
+}
+
+// ---- titles and the import report in the CLI ----
+
+// The catalogue reads by title first: the list's first column is the title the provider wrote,
+// beside the address that runs it.
+func TestActionListShowsTitles(t *testing.T) {
+	stubServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": "act-1", "title": "Weather forecast", "action": "bob@k/forecast", "price": 1},
+		})
+	})
+	out := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionListCmd())
+		return err
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "TITLE") || !strings.HasPrefix(lines[1], "Weather forecast") ||
+		!strings.Contains(lines[1], "bob@k/forecast") {
+		t.Errorf("action list =\n%s\nwant a TITLE column first, then the address", out)
+	}
+}
+
+// --title is sent on create and update, and the server's refusal of a missing one reaches the user.
+func TestActionTitleFlags(t *testing.T) {
+	var bodies []map[string]any
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		if title, _ := body["title"].(string); r.Method == "POST" && title == "" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "invalid_input", "error": "title is required: a short name a person reads in a list"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "title": body["title"], "action": "bob@k/echo"}})
+	})
+	if _, err := execTestCmd(t, actionCreateCmd(), "echo", "--source", "https://example.com"); err == nil ||
+		!strings.Contains(err.Error(), "title is required") {
+		t.Errorf("create without --title: got %v", err)
+	}
+	if _, err := execTestCmd(t, actionCreateCmd(), "echo", "--title", "Echo a message", "--source", "https://example.com"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if got := bodies[len(bodies)-1]["title"]; got != "Echo a message" {
+		t.Errorf("create sent title %v", got)
+	}
+	if _, err := execTestCmd(t, actionUpdateCmd(), "bob@k/echo", "--title", "Echo"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := bodies[len(bodies)-1]["title"]; got != "Echo" {
+		t.Errorf("update sent title %v", got)
+	}
+	if _, err := execTestCmd(t, actionUpdateCmd(), "bob@k/echo", "--price", "1"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if bodies[len(bodies)-1]["title"] != nil {
+		t.Errorf("an update without --title must leave the title alone, sent %v", bodies[len(bodies)-1]["title"])
+	}
+}
+
+// One import tells a coder what to fix and how the stored contract differs from the file, each
+// line naming the operation and where it is in the document, in the text view and under --json.
+func TestActionImportReportsLocationsAndNotes(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{
+		"/hello":{"get":{"operationId":"sayHello","summary":"Say hello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string","nullable":true}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},
+		"/bye":{"get":{"operationId":"sayBye","description":"says bye","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(spec))
+	}))
+	defer specSrv.Close()
+	env := newTestEnv(t)
+	t.Setenv("JUICE_ALLOW_LOCAL_SOURCES", "true")
+	if _, err := env.k.CreateUser(context.Background(), kernel.CreateUserRequest{Handle: "reporter@k", Password: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := loginTokenFor(env.k, context.Background(), "reporter", "pass")
+	if err := saveToken(tok); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionImportCmd(), "greet", specSrv.URL+"/spec.json")
+		return err
+	})
+	for _, want := range []string{
+		"imported greet/sayHello",
+		"note sayHello (GET /hello): input.properties.name: nullable folded",
+		"skipped sayBye (GET /bye): no summary: a title is required",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("import output lacks %q:\n%s", want, out)
+		}
+	}
+
+	flagJSON = true
+	t.Cleanup(func() { flagJSON = false })
+	raw := captureStdout(t, func() error {
+		_, err := execTestCmd(t, actionImportCmd(), "greet")
+		return err
+	})
+	var result struct {
+		Rejected []struct{ Key, Location, Reason string } `json:"rejected"`
+		Notices  []struct{ Key, Location, Note string }   `json:"notices"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("--json is not the reply: %v\n%s", err, raw)
+	}
+	if len(result.Rejected) != 1 || result.Rejected[0].Location != "GET /bye" {
+		t.Errorf("rejected = %+v", result.Rejected)
+	}
+	if len(result.Notices) != 1 || result.Notices[0].Key != "sayHello" || result.Notices[0].Location != "GET /hello" {
+		t.Errorf("notices = %+v", result.Notices)
 	}
 }

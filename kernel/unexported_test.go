@@ -295,6 +295,7 @@ func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
 		ActionID:     "act-1",
 		OwnerHandle:  "peer",
+		Title:        "Test action",
 		Name:         "svc",
 		Description:  "test",
 		Kind:         KindHTTP,
@@ -316,6 +317,13 @@ func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	newArtifact.ArtifactHash = "def456"
 	if remoteManifestHash(base) == remoteManifestHash(newArtifact) {
 		t.Error("artifact_hash change should produce different hash")
+	}
+
+	// The title is a contract field: a new one is a new contract (P6).
+	retitled := base
+	retitled.Title = "Another title"
+	if remoteManifestHash(base) == remoteManifestHash(retitled) {
+		t.Error("title change should produce different hash")
 	}
 
 	// Different action_id (execution identity) must produce a different hash.
@@ -374,7 +382,7 @@ func TestDocumentMovedDetectsBindingChange(t *testing.T) {
 
 func TestOpenAPIParamsAreNameOrdered(t *testing.T) {
 	spec := []byte(`{"openapi":"3.0.0","servers":[{"url":"http://api.example.com"}],"paths":{"/do":{"post":{
-		"operationId":"do","description":"do thing",
+		"operationId":"do","summary":"do","description":"do thing",
 		"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{
 			"zulu":{"type":"string"},"alpha":{"type":"string"},"mike":{"type":"string"}}}}}},
 		"responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`)
@@ -405,6 +413,7 @@ paths:
   /hello:
     get:
       operationId: sayHello
+      summary: sayHello
       description: says hello
       parameters:
         - name: name
@@ -438,7 +447,7 @@ func TestParseOpenAPISpecResolvesRefInResponseSchema(t *testing.T) {
 		"servers":[{"url":"http://api.example.com"}],
 		"components":{"schemas":{"Reply":{"type":"object","properties":{"id":{"type":"string","description":"the id"}}}}},
 		"paths":{"/op":{"post":{
-			"operationId":"doOp",
+			"operationId":"doOp","summary":"doOp",
 			"description":"does op",
 			"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"q":{"type":"string","description":"query"}}}}}},
 			"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Reply"}}}}}
@@ -466,7 +475,7 @@ func TestParseOpenAPISpecResolvesRefInRequestBodySchema(t *testing.T) {
 		"servers":[{"url":"http://api.example.com"}],
 		"components":{"schemas":{"Body":{"type":"object","properties":{"name":{"type":"string","description":"the name"}},"required":["name"]}}},
 		"paths":{"/op":{"post":{
-			"operationId":"doOp",
+			"operationId":"doOp","summary":"doOp",
 			"description":"does op",
 			"requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Body"}}}},
 			"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}
@@ -490,7 +499,7 @@ func TestParseOpenAPISpecResolvesRefInRequestBodySchema(t *testing.T) {
 
 func TestParseOpenAPISpecAllowsSecurityRequirement(t *testing.T) {
 	// Operations with security requirements are imported inactive (not rejected).
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"post":{"operationId":"sayHello","description":"says hello","security":[{"apiKey":[]}],"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string"}}}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"post":{"operationId":"sayHello","summary":"sayHello","description":"says hello","security":[{"apiKey":[]}],"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string"}}}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	ops, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
@@ -506,7 +515,7 @@ func TestParseOpenAPISpecAllowsSecurityRequirement(t *testing.T) {
 }
 
 func TestParseOpenAPISpecRejectsMultipartOnlyBody(t *testing.T) {
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/upload":{"post":{"operationId":"upload","description":"upload file","requestBody":{"content":{"multipart/form-data":{"schema":{"type":"object"}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/upload":{"post":{"operationId":"upload","summary":"upload","description":"upload file","requestBody":{"content":{"multipart/form-data":{"schema":{"type":"object"}}}},"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
@@ -517,7 +526,7 @@ func TestParseOpenAPISpecRejectsMultipartOnlyBody(t *testing.T) {
 }
 
 func TestParseOpenAPISpecRejectsAmbiguous2xxSchemas(t *testing.T) {
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/create":{"post":{"operationId":"create","description":"create item","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}},"201":{"description":"created","content":{"application/json":{"schema":{"type":"integer"}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/create":{"post":{"operationId":"create","summary":"create","description":"create item","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"string"}}}},"201":{"description":"created","content":{"application/json":{"schema":{"type":"integer"}}}}}}}}}`
 	_, rejected, _, err := parseOpenAPISpec([]byte(spec), "https://spec.example.com/api.json")
 	if err != nil {
 		t.Fatalf("parseOpenAPISpec: %v", err)
@@ -603,7 +612,7 @@ func TestUnionScopesCoverage(t *testing.T) {
 }
 
 func TestParseOpenAPISpecRejectsInvalidPrice(t *testing.T) {
-	opTpl := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","description":"an op","x-juice-price":%s,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	opTpl := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/op":{"get":{"operationId":"getOp","summary":"getOp","description":"an op","x-juice-price":%s,"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	for _, tc := range []struct{ price, reason string }{
 		{"-5", "price must be a non-negative integer"},
 		{"1.5", "price must be a non-negative integer"},
@@ -939,7 +948,7 @@ func manifestFixtures() []struct {
 	}
 	base := ActionManifest{
 		ActionID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", OwnerID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-		OwnerHandle: "alice", Name: "greet", Description: "greets a caller", Price: 100, Kind: KindWasm,
+		OwnerHandle: "alice", Title: "Greet a caller", Name: "greet", Description: "greets a caller", Price: 100, Kind: KindWasm,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "deadbeef",
 	}
@@ -954,11 +963,11 @@ func manifestFixtures() []struct {
 		m    ActionManifest
 		want string
 	}{
-		{"zero-bps", base, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
-		{"remote-bps-500", withBPS, "ebed5d1fc13f043ece714a5e341c69d37255eddca9f2ca8d79f35761ef6f4252"},
-		{"nested-schemas", withNested, "ec8e5e5f130550f733f4e45e56ce552dc87b35a1517b01537f4bf1edc4e0793e"},
+		{"zero-bps", base, "ab6fee84f46e06901cfb01f231ebb64fdb87da745846bd7941732bd6faeb892d"},
+		{"remote-bps-500", withBPS, "eac149b7a75b655744c83a3353f0783020e90397d58e462a86dac00d3e46b62e"},
+		{"nested-schemas", withNested, "5edc02010440d6c2fe260dd02efb7026a4a8d9790e12063e5c2bda45ffa16619"},
 		// A display-only handle rename must hash identically to the base fixture.
-		{"owner-handle-renamed", renamed, "b909e43f663733f19c202805bda8be0b3ce5fb2f4285de1d5135eb0198c0012b"},
+		{"owner-handle-renamed", renamed, "ab6fee84f46e06901cfb01f231ebb64fdb87da745846bd7941732bd6faeb892d"},
 	}
 }
 

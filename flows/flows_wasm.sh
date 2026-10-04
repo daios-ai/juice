@@ -222,7 +222,7 @@ flow_tinygo_compile() {
     assert_eq "tinygo_compile.bad_source_failure" failure "$(python3 -c "import json;print(json.load(open('$dir/bad.json')).get('result',{}).get('status',''))" 2>/dev/null)"
 
     # Register the compiled artifact as a wasm action and run it: doubles(21)=42.
-    jj "$db" "$ha" action create doubler --kind wasm --artifact "$dir/doubler.b64" --price "$(units 5)" --description "doubles n" \
+    jj "$db" "$ha" action create doubler --title "Doubler" --kind wasm --artifact "$dir/doubler.b64" --price "$(units 5)" --description "doubles n" \
         --input-schema '{"type":"object","properties":{"n":{"type":"number","description":"number to double"}}}' \
         --output-schema '{"type":"object","properties":{"doubled":{"type":"number","description":"twice n"}}}' > "$dir/create.json"
     local act_id; act_id=$(python3 -c "import json;print(json.load(open('$dir/create.json')).get('id',''))" 2>/dev/null)

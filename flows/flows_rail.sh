@@ -471,7 +471,7 @@ flow_one_output_policy() {
     make_admin "$db" "$hs" || { fail "output.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 500
-    aid=$(strfield "$(jj "$db" "$ha" action create greet --kind http --source "http://127.0.0.1:1/greet" --price "$(units 5)")" id)
+    aid=$(strfield "$(jj "$db" "$ha" action create greet --title "Greet" --kind http --source "http://127.0.0.1:1/greet" --price "$(units 5)")" id)
     assert_nonempty "output.created" "$aid"
 
     # A price given the way this kernel writes money reads back that way wherever a person sees it,

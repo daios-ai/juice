@@ -12,6 +12,7 @@ import (
 func Embed(embedder kernel.Embedder) Spec {
 	return Spec{
 		Name:         "llm/embed",
+		Title:        "Embed text",
 		Description:  "Returns a text embedding vector from the configured embedding model",
 		InputSchema:  obj(map[string]any{"text": str("Text to embed")}, "text"),
 		OutputSchema: obj(map[string]any{"embedding": arrayOf(map[string]any{"type": "number"}, "Embedding vector")}),

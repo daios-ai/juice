@@ -659,9 +659,9 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.OwnerUserID, a.Name, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
+		 (id,owner_user_id,name,title,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.OwnerUserID, a.Name, a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
 		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
@@ -670,7 +670,7 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 
 // actionCols is the canonical column list for action SELECT statements.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.title,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -691,9 +691,9 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 		return dbErr(err, "update action: read schema")
 	}
 	_, err := tx.ExecContext(ctx,
-		`UPDATE actions SET kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
+		`UPDATE actions SET title=?,kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
 		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
-		string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
+		a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
 		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
@@ -849,7 +849,7 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var deletedAt sql.NullString
 	var remoteBPS, basePrice sql.NullInt64
 	var active, ownerSuspended int
-	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &kind, &active, &visibility, &a.Price,
+	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &a.Title, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
 		&a.RemoteOwnerID, &remoteBPS, &basePrice, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
@@ -3341,14 +3341,14 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
-				 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO discovery_docs (kernel_public_key,handle,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT (kernel_public_key, action_id) DO UPDATE SET
-				   handle=excluded.handle, description=excluded.description, name=excluded.name,
+				   handle=excluded.handle, title=excluded.title, description=excluded.description, name=excluded.name,
 				   input_schema=excluded.input_schema, output_schema=excluded.output_schema,
 				   serving_price=excluded.serving_price, embed_vec=excluded.embed_vec,
 				   generation=excluded.generation, observed_at=excluded.observed_at`,
-				kernelPublicKey, d.Handle, d.Description, d.ActionID, d.Name,
+				kernelPublicKey, d.Handle, d.Title, d.Description, d.ActionID, d.Name,
 				string(inJSON), string(outJSON), d.ServingPrice, embed, generation,
 				timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
@@ -3357,7 +3357,7 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key = ?`, key); err != nil {
 				return dbErr(err, "clear discovery_fts row")
 			}
-			text := d.Handle + " " + d.Name + " " + d.Description
+			text := d.Handle + " " + d.Name + " " + d.Title + " " + d.Description
 			if _, err := tx.ExecContext(ctx, `INSERT INTO discovery_fts(doc_key, text) VALUES (?, ?)`, key, text); err != nil {
 				return dbErr(err, "insert discovery_fts")
 			}
@@ -3401,16 +3401,17 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 }
 
 // DiscoveryEmbedding returns the embedding already held for one discovered action when the text it
-// was computed from has not changed, so an unchanged description costs no model call.
+// was computed from — its title and description — has not changed, so unchanged words cost no
+// model call.
 func (s *DB) DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, text string) ([]float32, bool) {
-	var name, description string
+	var title, description string
 	var embed *string
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT name, description, embed_vec FROM discovery_docs WHERE kernel_public_key=? AND action_id=?`,
-		kernelPublicKey, actionID).Scan(&name, &description, &embed); err != nil || embed == nil {
+		`SELECT title, description, embed_vec FROM discovery_docs WHERE kernel_public_key=? AND action_id=?`,
+		kernelPublicKey, actionID).Scan(&title, &description, &embed); err != nil || embed == nil {
 		return nil, false
 	}
-	if name+" "+description != text {
+	if title+" "+description != text {
 		return nil, false
 	}
 	var vec []float32
@@ -3436,7 +3437,7 @@ func (s *DB) CatalogScan(ctx context.Context, kernelPublicKey string) (string, i
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kernel_public_key,handle,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
+		`SELECT kernel_public_key,handle,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
 		 FROM discovery_docs`)
 	if err != nil {
 		return nil, dbErr(err, "list discovery docs")
@@ -3445,7 +3446,7 @@ func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, err
 		var d kernel.DiscoveryDoc
 		var inJSON, outJSON, observedAt string
 		var embed sql.NullString
-		if err := scan(&d.KernelPublicKey, &d.Handle, &d.Description, &d.ActionID, &d.Name,
+		if err := scan(&d.KernelPublicKey, &d.Handle, &d.Title, &d.Description, &d.ActionID, &d.Name,
 			&inJSON, &outJSON, &d.ServingPrice, &embed, &observedAt); err != nil {
 			return nil, err
 		}

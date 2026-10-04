@@ -13,6 +13,7 @@ import (
 func Time() Spec {
 	return Spec{
 		Name:        "time",
+		Title:       "Current time",
 		Description: "Returns the current UTC time",
 		InputSchema: obj(map[string]any{}),
 		OutputSchema: obj(map[string]any{

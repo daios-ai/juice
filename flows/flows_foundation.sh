@@ -56,7 +56,7 @@ flow_signup_errors() {
     # The same contract on a second caller-supplied unique key: (owner, name) on actions.
     local tok; tok=$(token "$base" alice userpass)
     assert_nonempty "signup_errors.token" "$tok"
-    local act='{"name":"dup","kind":"http","price":0,"description":"d","source":"http://127.0.0.1:9/x"}'
+    local act='{"name":"dup","title":"Dup","kind":"http","price":0,"description":"d","source":"http://127.0.0.1:9/x"}'
     assert_status "signup_errors.first_action"     201 POST "$base/v1/actions" "$act" "$tok"
     assert_status "signup_errors.duplicate_action" 422 POST "$base/v1/actions" "$act" "$tok"
     assert_not_contains "signup_errors.action_no_sql_leak" "constraint" \
@@ -194,10 +194,17 @@ flow_action_lifecycle() {
 
     # Create — inactive by default.
     local cr aid
-    cr=$(jj "$db" "$ha" action create greet --kind http --source "http://127.0.0.1:1/greet" --description "hello world" --price "$(units 5)")
+    cr=$(jj "$db" "$ha" action create greet --title "Greet" --kind http --source "http://127.0.0.1:1/greet" --description "hello world" --price "$(units 5)")
     aid=$(strfield "$cr" id)
     assert_nonempty "action_lifecycle.created" "$aid"
     assert_json "action_lifecycle.inactive_by_default" "$cr" active False
+    assert_json "action_lifecycle.title_stored" "$cr" title Greet
+    assert_fails "action_lifecycle.title_required" "title is required" -- j "$db" "$ha" action create untitled --kind http --source "http://127.0.0.1:1/x"
+    j "$db" "$ha" action update "$aid" --title "Greet someone" >/dev/null 2>&1
+    assert_json "action_lifecycle.title_updated" "$(jj "$db" "$ha" action show "$aid")" title "Greet someone"
+    local listed; listed=$(j "$db" "$ha" action list --all)
+    assert_contains "action_lifecycle.list_title_column" "TITLE" "$listed"
+    assert_contains "action_lifecycle.list_shows_title" "Greet someone" "$listed"
 
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     assert_json "action_lifecycle.enabled" "$(jj "$db" "$ha" action show "$aid")" active True
@@ -212,13 +219,13 @@ flow_action_lifecycle() {
 
     # Non-owner cannot delete someone else's action.
     local hello_id
-    hello_id=$(strfield "$(jj "$db" "$ha" action create hello --kind http --source "http://127.0.0.1:1/hello")" id)
+    hello_id=$(strfield "$(jj "$db" "$ha" action create hello --title "Hello" --kind http --source "http://127.0.0.1:1/hello")" id)
     assert_fails "action_lifecycle.owner_enforced" "unauthorized\|not found\|error" -- j "$db" "$hb" action delete "$hello_id"
 
     # Name reuse after delete.
     j "$db" "$ha" action delete "$hello_id" >/dev/null 2>&1
     local reuse_id
-    reuse_id=$(strfield "$(jj "$db" "$ha" action create hello --kind http --source "http://127.0.0.1:1/hello2" --description "reused")" id)
+    reuse_id=$(strfield "$(jj "$db" "$ha" action create hello --title "Hello" --kind http --source "http://127.0.0.1:1/hello2" --description "reused")" id)
     assert_nonempty "action_lifecycle.name_reuse_after_delete" "$reuse_id"
 
     # action_name is captured in a transaction and survives action deletion.
@@ -237,7 +244,7 @@ flow_action_owner_visibility() {
     make_user "$db" "$hs" "$ha" alice
 
     # A private, inactive action (no enable, no --visibility public).
-    j "$db" "$ha" action create secret-op --kind http --source "http://127.0.0.1:1/secret" --description "private" >/dev/null 2>&1
+    j "$db" "$ha" action create secret-op --title "Secret op" --kind http --source "http://127.0.0.1:1/secret" --description "private" >/dev/null 2>&1
 
     # Unauthenticated listing must NOT include the owner's private action; the owner's does.
     # (Raw HTTP: exercises the auth-conditional ?owner= visibility the CLI abstracts over.)

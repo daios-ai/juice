@@ -61,12 +61,12 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 	k.RegisterNativeHandler("echo", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
-	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Name: "echo", Kind: kernel.KindNative})
+	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Title: "Test action", Name: "echo", Kind: kernel.KindNative})
 	if err != nil {
 		t.Fatal(err)
 	}
 	obj := map[string]any{"type": "object"}
-	if err := k.ActivateNativeAction(ctx, a.ID, "echo native", obj, obj, 0, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", "echo native", obj, obj, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 

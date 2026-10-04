@@ -14,12 +14,14 @@ import (
 func Lookup() Spec {
 	return Spec{
 		Name:        "lookup",
+		Title:       "Search actions",
 		Description: "Semantic search over active actions",
 		InputSchema: searchQuerySchema(),
 		OutputSchema: obj(map[string]any{
 			"results": arrayOf(obj(map[string]any{
 				"action_id":              str("Unique action identifier"),
 				"action":                 str("Action address as owner@kernel/name"),
+				"title":                  str("Short name of the action, for a person reading a list"),
 				"description":            str("Human-readable description of the action"),
 				"price":                  integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
 				"score":                  num("Relevance score between 0 and 1"),
@@ -81,16 +83,16 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		// Each hit also carries the record a person reads on the action itself, so an agent
 		// choosing between candidates weighs what a person would (U10, U46). Ranking stays
 		// relevance only: a rank by evidence would be the opaque score U39 excludes.
-		var actionID, ref, description, observedAt string
+		var actionID, ref, title, description, observedAt string
 		var in, out map[string]any
 		var record *kernel.ActionRecord
 		if d := r.Discovered; d != nil {
-			actionID, description, in, out = d.ActionID, d.Description, d.InputSchema, d.OutputSchema
+			actionID, title, description, in, out = d.ActionID, d.Title, d.Description, d.InputSchema, d.OutputSchema
 			ref = kernel.Address{Handle: d.Handle, Kernel: k.KernelName(ctx, d.KernelPublicKey), Name: d.Name}.String()
 			observedAt = d.ObservedAt.UTC().Format(time.RFC3339)
 			record = k.DiscoveredRecord(ctx, d)
 		} else {
-			actionID, ref, description, in, out = r.Action.ID, names.Action(ctx, r.Action), r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
+			actionID, ref, title, description, in, out = r.Action.ID, names.Action(ctx, r.Action), r.Action.Title, r.Action.Description, r.Action.InputSchema, r.Action.OutputSchema
 			if r.Action.Kind == kernel.KindRemoteProxy {
 				observedAt = r.Action.UpdatedAt.UTC().Format(time.RFC3339)
 			}
@@ -99,6 +101,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		item := map[string]any{
 			"action_id":     actionID,
 			"action":        ref,
+			"title":         title,
 			"description":   description,
 			"price":         r.Price,
 			"score":         float64(r.Score),

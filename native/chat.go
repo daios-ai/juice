@@ -14,6 +14,7 @@ import (
 func Chat(chatter kernel.Chatter) Spec {
 	return Spec{
 		Name:        "llm/chat",
+		Title:       "Chat with the model",
 		Description: "Chat completion via the configured language model",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(messageSchema(), "Conversation history"),

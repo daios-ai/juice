@@ -2476,7 +2476,7 @@ func TestCreateTaskHealsLegacyProxy(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-task-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-task-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),

@@ -234,7 +234,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 
 	good := &kernel.ActionManifest{
-		ActionID: "act-good", OwnerID: "u1", OwnerHandle: "prov", Name: "translate",
+		ActionID: "act-good", OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: "translate",
 		Description: "translate icelandic contracts", Kind: kernel.KindHTTP, Price: 5,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC(),
@@ -249,7 +249,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	// authenticated, so a manifest that does not verify is its fault: indexing the rest of the
 	// page would keep whatever it chose to sign correctly and quietly drop the rest (P9).
 	bad := &kernel.ActionManifest{
-		ActionID: "act-bad", OwnerID: "u1", OwnerHandle: "prov", Name: "forged",
+		ActionID: "act-bad", OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: "forged",
 		Description: "should never be indexed", Kind: kernel.KindHTTP, Price: 5,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		Signature: sig, // signature is for `good`, not `bad`
@@ -427,7 +427,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 
 	manifest := func(id string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
-			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id, Description: "d " + id,
+			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: id, Description: "d " + id,
 			Kind: kernel.KindHTTP, Price: 5,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			UpdatedAt: time.Now().UTC(),
@@ -510,7 +510,7 @@ func TestABuyerSeesTheEvidenceAboutARemoteAction(t *testing.T) {
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: remoteAction, OwnerHandle: "provider", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: remoteAction, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC(),
@@ -666,7 +666,7 @@ func TestAGossipPageOverTheProtocolsSizeIsRefusedWhole(t *testing.T) {
 
 	manifest := func(id string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
-			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id, Description: "d",
+			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: id, Description: "d",
 			Kind: kernel.KindHTTP, Price: 5,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			UpdatedAt: time.Now().UTC(),
@@ -710,7 +710,7 @@ func TestTheRatingsSurfaceAndTheActionRecordAgree(t *testing.T) {
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: remoteAction, OwnerHandle: "provider", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: remoteAction, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: now,
@@ -769,7 +769,7 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: action, OwnerHandle: "provider", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: action, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: now,
@@ -802,5 +802,90 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 		if r.IssuerPublicKey == buyer && r.RatingCount != 0 {
 			t.Errorf("the record counted %d trade-backed ratings on an unlinked claim", r.RatingCount)
 		}
+	}
+}
+
+// A catalogue indexes only contracts a buyer could resolve: a manifest without a title, or with a
+// schema outside the canonical subset, is skipped while the rest of the page lands, and a discovered
+// action carries its provider's title.
+func TestGossipIndexesOnlyHoldableContracts(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	manifest := func(id, title string, in map[string]any) *kernel.ActionManifest {
+		m := &kernel.ActionManifest{
+			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id, Title: title,
+			Description: "translates contracts", Kind: kernel.KindHTTP, Price: 5,
+			InputSchema: in, OutputSchema: map[string]any{"type": "object"}, UpdatedAt: time.Now().UTC(),
+		}
+		sig, err := testNet.SignManifest(peerPriv, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Signature = sig
+		return m
+	}
+	open := map[string]any{"type": "object"}
+	g := &kernel.GossipResponse{
+		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		ActionManifests: []*kernel.ActionManifest{
+			manifest("titled", "Translate a contract", open),
+			manifest("untitled", "", open),
+			manifest("legacy", "Legacy", map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string", "nullable": true}}}),
+		},
+	}
+	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := k.DiscoveryDocsForKernel(ctx, peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ActionID != "titled" || docs[0].Title != "Translate a contract" {
+		t.Fatalf("want only the holdable contract, with its title; got %d docs", len(docs))
+	}
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "translate", Limit: 5, CallerID: setupUser(t, st, "reader", 0).ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range results {
+		found = found || (r.Discovered != nil && r.Discovered.Title == "Translate a contract")
+	}
+	if !found {
+		t.Error("a discovered action must reach lookup with its title")
+	}
+}
+
+// An operator inspecting a peer reads its catalogue by title, live or from the cache, in one shape.
+func TestPeerCatalogCarriesTitles(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	m := &kernel.ActionManifest{
+		ActionID: "a1", OwnerID: "u1", OwnerHandle: "prov", Name: "translate", Title: "Translate a contract",
+		Description: "translates", Kind: kernel.KindHTTP, Price: 5,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}, UpdatedAt: time.Now().UTC(),
+	}
+	sig, err := testNet.SignManifest(peerPriv, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+	live := k.PeerCatalog(ctx, peerKey, []*kernel.ActionManifest{m})
+	if len(live) != 1 || live[0].Title != "Translate a contract" {
+		t.Fatalf("live catalogue = %+v", live)
+	}
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey,
+		Handle: "peerk", ActionManifests: []*kernel.ActionManifest{m}}, peerKey); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := k.PeerCatalogCached(ctx, peerKey)
+	if err != nil || len(cached) != 1 || cached[0].Title != live[0].Title {
+		t.Errorf("cached catalogue = %+v, %v; want the live title", cached, err)
 	}
 }

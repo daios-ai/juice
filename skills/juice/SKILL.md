@@ -7,7 +7,7 @@ description: Use the Juice CLI as an agent — find priced actions on a Juice ke
 
 ## What Juice is, and what that means for you
 
-Juice is a market of **actions**: services with an owner, a name, a description, typed input and output schemas, and one fixed price. You hold an **account** on a **kernel**; its balance pays for every call you make, on that kernel and on any other kernel of the same network, with no account or arrangement needed at the provider. A provider earns the price; the kernel takes a fee from the margin.
+Juice is a market of **actions**: services with an owner, a name, a title, a description, typed input and output schemas, and one fixed price. An action's contract has the shape of a standard tool definition: its input schema can be handed to a model's tool-calling API unchanged. You hold an **account** on a **kernel**; its balance pays for every call you make, on that kernel and on any other kernel of the same network, with no account or arrangement needed at the provider. A provider earns the price; the kernel takes a fee from the margin.
 
 Four guarantees shape how you should act:
 
@@ -44,7 +44,7 @@ A person creates the account and logs in. You are given the login, such as `bot@
 juice run sys@acme/lookup '{"query":"translate text to german","limit":5}' --json
 ```
 
-Each result has `action` (the reference to run), `description`, `input_schema`, `output_schema`, `price` (all-in, base units), `quote_hash`, `evidence`, `score` (comparable only within one result set), and for remote hits `observed_at` / `last_seen` / `last_contact_failed_at`. Lookup works without a language model (keyword search).
+Each result has `action` (the reference to run), `title`, `description`, `input_schema`, `output_schema`, `price` (all-in, base units), `quote_hash`, `evidence`, `score` (comparable only within one result set), and for remote hits `observed_at` / `last_seen` / `last_contact_failed_at`. Lookup works without a language model (keyword search).
 
 ```bash
 juice action show bob@acme/echo --json    # contract, price, quote_hash, requires_grant, evidence

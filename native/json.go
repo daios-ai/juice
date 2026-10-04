@@ -12,6 +12,7 @@ import (
 func JSON(chatter kernel.JSONChatter) Spec {
 	return Spec{
 		Name:        "llm/json",
+		Title:       "Structured model output",
 		Description: "Structured JSON output from the configured language model, locally validated against a schema",
 		InputSchema: obj(map[string]any{
 			"messages":      arrayOf(messageSchema(), "Conversation history"),
@@ -45,7 +46,10 @@ func executeJSON(ctx context.Context, args map[string]any, chatter kernel.JSONCh
 	if !ok {
 		return nil, kernel.ErrInvalidInput.Wrap("output_schema must be an object")
 	}
-	if err := kernel.ValidateSchema(outputSchema); err != nil {
+	// The caller's schema is read in the canonical form, so the model is asked for, and the
+	// answer checked against, exactly what any action's schema means (D4).
+	outputSchema, _, err = kernel.NormalizeSchema("output_schema", outputSchema)
+	if err != nil {
 		return nil, err
 	}
 

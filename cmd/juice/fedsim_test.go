@@ -579,6 +579,7 @@ func (s *simNode) publish(t *testing.T, owner *kernel.Account, name string, pric
 	schema := map[string]any{"type": "object"}
 	a, err := s.k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         name,
 		Kind:         kernel.KindHTTP,
 		Source:       s.net.backend.URL + "/" + name,
@@ -1143,7 +1144,7 @@ func TestSimStoreFaultOnFailureCommitLeavesNoMoneyBehind(t *testing.T) {
 			ctx := context.Background()
 			schema := map[string]any{"type": "object"}
 			a, err := seller.k.CreateAction(ctx, cara.ID, kernel.CreateActionRequest{
-				OwnerUserID: cara.ID, Name: "broken", Kind: kernel.KindHTTP,
+				OwnerUserID: cara.ID, Title: "Test action", Name: "broken", Kind: kernel.KindHTTP,
 				Source:      "http://127.0.0.1:1/nothing-listens-here",
 				Description: "an action whose upstream is gone", Price: 25,
 				InputSchema: schema, OutputSchema: schema,

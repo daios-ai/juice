@@ -12,6 +12,7 @@ import (
 func Sink() Spec {
 	return Spec{
 		Name:         "sink",
+		Title:        "Acknowledge",
 		Description:  "Universal no-op sink; accepts any input and returns {}",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},

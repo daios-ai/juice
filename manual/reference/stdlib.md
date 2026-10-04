@@ -22,7 +22,7 @@ named `acme`, `sys/time` is called as `sys@acme/time`.
 
 **`sys/lookup`** — `{query, limit=10}` → `{results: [...]}`
 
-Returns ranked candidates with `action`, `action_id`, `description`,
+Returns ranked candidates with `action`, `action_id`, `title`, `description`,
 `input_schema`, `output_schema`, `price`, `quote_hash`, `evidence`, and `score`.
 Evidence is the same view returned by `action show`. Remote
 results may include observation and contact timestamps. Ranking combines
@@ -41,7 +41,8 @@ without charging for the request.
 **`sys/llm/embed`** — `{text}` → `{embedding}`
 
 **`sys/llm/json`** — `{messages, system?, output_schema}` → `{value}`, validated
-locally against the schema.
+locally against the schema. The schema follows the rules of
+[Action schemas](schemas.html), so its top level is an object.
 
 **`sys/llm/decide`** — `{messages, actions}` → `{action, args, message?}`
 
@@ -101,6 +102,6 @@ point. Source errors return `status: "failure"` with diagnostics as the paid
 compilation result. An unavailable toolchain produces `ErrInvalidState`
 without charging.
 
-Register the decoded module using `action create --kind wasm --artifact <file>`.
+Register the decoded module using `action create NAME --title TITLE --kind wasm --artifact <file>`.
 See
 [Composition](../providing/composition.html#composing-from-webassembly).

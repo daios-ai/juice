@@ -369,7 +369,7 @@ func TestSuspendedSubjectRejectedBySupervisionOps(t *testing.T) {
 
 	// CreateAction: requireSelf rejects suspended subject.
 	_, err := k.CreateAction(ctx, u.ID, kernel.CreateActionRequest{
-		OwnerUserID: u.ID, Name: "x", Kind: kernel.KindHTTP, Price: 0,
+		OwnerUserID: u.ID, Title: "Test action", Name: "x", Kind: kernel.KindHTTP, Price: 0,
 	})
 	if !errors.Is(err, kernel.ErrUnauthenticated) {
 		t.Errorf("CreateAction: got %v, want ErrUnauthenticated", err)

@@ -90,7 +90,7 @@ func seedAction(t *testing.T, st kernel.Store, ownerID, name, desc string, price
 		p = price[0]
 	}
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name,
+		ID: uuid.New().String(), OwnerUserID: ownerID, Name: name, Title: "About " + name,
 		Kind: kernel.KindHTTP, Active: true, Visibility: kernel.VisibilityPublic, Description: desc,
 		Price:     p,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -138,6 +138,9 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 	first, _ := items[0].(map[string]any)
 	if first["action"] != "alice@k/weather" {
 		t.Errorf("expected alice@k/weather first, got %v", first["action"])
+	}
+	if first["title"] != "About weather" {
+		t.Errorf("a hit carries the action's title, got %v", first["title"])
 	}
 	for _, required := range []string{"action_id", "score", "input_schema", "output_schema"} {
 		if _, ok := first[required]; !ok {

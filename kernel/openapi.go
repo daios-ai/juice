@@ -45,9 +45,12 @@ func normalizeYAML(v any) any {
 // rawOp is one parsed OpenAPI operation before it is bound to an owner.
 type rawOp struct {
 	key           string
+	location      string // "METHOD /path" in the document
+	title         string
 	description   string
-	inputSchema   map[string]any
-	outputSchema  map[string]any
+	inputSchema   map[string]any // canonical (D4)
+	outputSchema  map[string]any // canonical (D4)
+	notes         []string       // folds that make the stored contract differ from the document
 	price         int64
 	priceDeclared bool // the document set x-juice-price; an absent price leaves it to the owner (§8)
 	source        HTTPSource
@@ -69,48 +72,23 @@ func resolveJSONPointer(doc map[string]any, ptr string) any {
 	return curr
 }
 
-// resolveRefsValue recursively inlines local #/... $ref values found anywhere in node.
-// External $ref values (not starting with "#/") are left as-is.
-// depth limits recursion to prevent infinite loops from circular schemas.
-func resolveRefsValue(doc map[string]any, node any, depth int) any {
-	if depth > 10 {
-		return node
-	}
-	switch v := node.(type) {
-	case map[string]any:
-		if ref, ok := v["$ref"].(string); ok && strings.HasPrefix(ref, "#/") {
-			target := resolveJSONPointer(doc, strings.TrimPrefix(ref, "#/"))
-			if target == nil {
-				return v
-			}
-			return resolveRefsValue(doc, target, depth+1)
+// derefObject follows a local $ref on a document object that is not a schema — a parameter, a
+// request body, a response — which OpenAPI lets authors share under components. Schema references
+// are left to the normalizer, which inlines them with cycle detection (D4).
+func derefObject(doc map[string]any, v any) map[string]any {
+	m, _ := v.(map[string]any)
+	for i := 0; i < 8 && m != nil; i++ { // a chain of references ends; a loop of them is no object
+		ref, ok := m["$ref"].(string)
+		if !ok {
+			return m
 		}
-		out := make(map[string]any, len(v))
-		for k, val := range v {
-			out[k] = resolveRefsValue(doc, val, depth+1)
+		ptr, local := strings.CutPrefix(ref, "#/")
+		if !local {
+			return nil
 		}
-		return out
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			out[i] = resolveRefsValue(doc, item, depth+1)
-		}
-		return out
-	default:
-		return v
+		m, _ = resolveJSONPointer(doc, ptr).(map[string]any)
 	}
-}
-
-// resolveRefsMap resolves all local $ref values in schema using doc as the root document.
-func resolveRefsMap(doc, schema map[string]any) map[string]any {
-	if schema == nil {
-		return nil
-	}
-	resolved := resolveRefsValue(doc, schema, 0)
-	if m, ok := resolved.(map[string]any); ok {
-		return m
-	}
-	return schema
+	return nil
 }
 
 // looksLikeJSON reports whether b (ignoring leading whitespace) starts with '{' or '['.
@@ -129,9 +107,10 @@ func looksLikeJSON(b []byte) bool {
 }
 
 // parseOpenAPISpec parses specBytes (already-fetched JSON or YAML) and returns one rawOp per
-// supported operation (GET/POST/PUT/PATCH/DELETE). specURL is stored in provenance only; no HTTP
-// is performed. The third return value is the base URL extracted from the spec's servers array.
-// Local $ref values (#/components/schemas/…) in parameter and response schemas are resolved inline.
+// supported operation (GET/POST/PUT/PATCH/DELETE), each with canonical schemas, and one rejection
+// per operation that cannot become an action — never one failure for the whole document. specURL is
+// stored in provenance only; no HTTP is performed. The third return value is the base URL
+// extracted from the spec's servers array.
 func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportRejection, string, error) {
 	jsonBytes := specBytes
 	if !looksLikeJSON(specBytes) {
@@ -169,50 +148,56 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			continue
 		}
 		for _, method := range []string{"get", "post", "put", "patch", "delete"} {
-			opRaw, ok := pathItem[method]
+			op, ok := pathItem[method].(map[string]any)
 			if !ok {
 				continue
 			}
-			op, ok := opRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-
 			key := openAPIOperationKey(op, method, path)
+			location := strings.ToUpper(method) + " " + path
+			reject := func(reason string) {
+				rejected = append(rejected, ImportRejection{Key: key, Location: location, Reason: reason})
+			}
 
 			// Require an explicit name field; slug fallback is not a valid match key.
 			_, hasJuiceName := op["x-juice-name"].(string)
 			_, hasOpID := op["operationId"].(string)
 			if !hasJuiceName && !hasOpID {
-				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing operationId or x-juice-name"})
+				reject("missing operationId or x-juice-name")
+				continue
+			}
+
+			title, err := openAPITitle(op)
+			if err != nil {
+				reject(err.Error())
 				continue
 			}
 
 			desc := openAPIDescription(op)
 			if desc == "" {
-				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing description and summary"})
+				reject("missing description and summary")
 				continue
 			}
 
-			outputSchema, ok := openAPIOutputSchema(op, spec)
+			rawOutput, ok := openAPIOutputSchema(op, spec)
 			if !ok {
-				rejected = append(rejected, ImportRejection{Key: key, Reason: "no 2xx JSON response schema"})
+				reject("no 2xx JSON response schema")
 				continue
 			}
 
-			_, hasBody := op["requestBody"].(map[string]any)
-			if hasBody {
-				rb := op["requestBody"].(map[string]any)
+			var body map[string]any
+			if rb := derefObject(spec, op["requestBody"]); rb != nil {
 				if content, ok := rb["content"].(map[string]any); ok && len(content) > 0 {
-					if _, hasJSON := content["application/json"]; !hasJSON {
-						rejected = append(rejected, ImportRejection{Key: key, Reason: "requestBody has no application/json content"})
+					jc, hasJSON := content["application/json"].(map[string]any)
+					if !hasJSON {
+						reject("requestBody has no application/json content")
 						continue
 					}
+					body, _ = jc["schema"].(map[string]any)
 				}
 			}
 
 			if ambig, reason := openAPIAmbiguous2xxSchema(op, spec); ambig {
-				rejected = append(rejected, ImportRejection{Key: key, Reason: reason})
+				reject(reason)
 				continue
 			}
 
@@ -221,25 +206,36 @@ func parseOpenAPISpec(specBytes []byte, specURL string) ([]rawOp, []ImportReject
 			if v, ok := op["x-juice-price"]; ok {
 				f, isNum := v.(float64)
 				if !isNum || f < 0 || f != float64(int64(f)) {
-					rejected = append(rejected, ImportRejection{Key: key, Reason: "price must be a non-negative integer"})
+					reject("price must be a non-negative integer")
 					continue
 				}
 				price, priceDeclared = int64(f), true
 			}
 
-			inputSchema, params := openAPICompileOperation(op, pathItem, spec)
-
+			inputSchema, params, inNotes, err := openAPICompileOperation(op, pathItem, body, spec)
+			if err != nil {
+				reject(err.Error())
+				continue
+			}
 			// Require at least one input parameter or a requestBody schema.
-			if len(params) == 0 && !hasBody {
-				rejected = append(rejected, ImportRejection{Key: key, Reason: "missing parameters and requestBody schema"})
+			if len(params) == 0 && body == nil {
+				reject("missing parameters and requestBody schema")
+				continue
+			}
+			outputSchema, outNotes, err := normalizeIn("output", rawOutput, spec)
+			if err != nil {
+				reject(err.Error())
 				continue
 			}
 
 			ops = append(ops, rawOp{
 				key:           key,
+				location:      location,
+				title:         title,
 				description:   desc,
 				inputSchema:   inputSchema,
 				outputSchema:  outputSchema,
+				notes:         append(inNotes, outNotes...),
 				price:         price,
 				priceDeclared: priceDeclared,
 				source: HTTPSource{
@@ -266,6 +262,20 @@ func openAPIOperationKey(op map[string]any, method, path string) string {
 		return v
 	}
 	return openAPISlug(method + "-" + path)
+}
+
+// openAPITitle is the operation's title: x-juice-title, else the summary OpenAPI already has for
+// exactly this purpose. Nothing is derived — an operation key is as technical as an address — so
+// an operation with neither is refused, naming what to add.
+func openAPITitle(op map[string]any) (string, error) {
+	title, _ := op["x-juice-title"].(string)
+	if strings.TrimSpace(title) == "" {
+		title, _ = op["summary"].(string)
+	}
+	if strings.TrimSpace(title) == "" {
+		return "", ErrInvalidInput.Wrap("no summary: a title is required (summary or x-juice-title)")
+	}
+	return ValidateTitle(title)
 }
 
 func openAPIDescription(op map[string]any) string {
@@ -298,18 +308,16 @@ func openAPIOutputSchema(op, doc map[string]any) (map[string]any, bool) {
 	return nil, false
 }
 
+// openAPIJSONSchema is a response's JSON schema as written, its references unresolved.
 func openAPIJSONSchema(respRaw any, doc map[string]any) map[string]any {
-	resp, ok := respRaw.(map[string]any)
-	if !ok {
-		return nil
-	}
+	resp := derefObject(doc, respRaw)
 	content, _ := resp["content"].(map[string]any)
 	jsonContent, _ := content["application/json"].(map[string]any)
 	schema, _ := jsonContent["schema"].(map[string]any)
 	if len(schema) == 0 {
 		return nil
 	}
-	return resolveRefsMap(doc, schema)
+	return schema
 }
 
 func openAPIAmbiguous2xxSchema(op, doc map[string]any) (bool, string) {
@@ -338,19 +346,22 @@ func openAPIAmbiguous2xxSchema(op, doc map[string]any) (bool, string) {
 	return false, ""
 }
 
-// openAPICompileOperation builds both the validation input schema and the HTTP parameter
-// binding list for one operation in a single pass, resolving local $ref values throughout.
-// This is the single source of truth for what fields an operation accepts and where they go.
-func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[string]any, params []HTTPParam) {
+// openAPICompileOperation builds both the canonical input schema and the HTTP parameter binding
+// list for one operation in a single pass: path and query parameters and the JSON body's
+// properties become one object (D4). It is the single source of truth for what fields an operation
+// accepts and where they go. The notes are the folds normalization made.
+func openAPICompileOperation(op, pathItem, body, doc map[string]any) (map[string]any, []HTTPParam, []string, error) {
 	properties := map[string]any{}
-	var required []string
+	var required []any
+	var params []HTTPParam
+	var notes []string
 	seen := map[string]struct{}{}
 
 	for _, source := range []map[string]any{pathItem, op} {
 		ps, _ := source["parameters"].([]any)
 		for _, pRaw := range ps {
-			p, ok := pRaw.(map[string]any)
-			if !ok {
+			p := derefObject(doc, pRaw)
+			if p == nil {
 				continue
 			}
 			in, _ := p["in"].(string)
@@ -365,11 +376,12 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 				continue
 			}
 			seen[name] = struct{}{}
-			schema, _ := p["schema"].(map[string]any)
-			if schema == nil {
-				schema = map[string]any{"type": "string"}
-			} else {
-				schema = resolveRefsMap(doc, schema)
+			schema := map[string]any{"type": "string"}
+			if s, ok := p["schema"].(map[string]any); ok {
+				schema = make(map[string]any, len(s)+1)
+				for k, v := range s {
+					schema[k] = v
+				}
 			}
 			if desc, ok := p["description"].(string); ok && desc != "" {
 				schema["description"] = desc
@@ -382,39 +394,39 @@ func openAPICompileOperation(op, pathItem, doc map[string]any) (inputSchema map[
 		}
 	}
 
-	if rb, ok := op["requestBody"].(map[string]any); ok {
-		content, _ := rb["content"].(map[string]any)
-		jc, _ := content["application/json"].(map[string]any)
-		if rawSchema, ok := jc["schema"].(map[string]any); ok {
-			bodySchema := resolveRefsMap(doc, rawSchema)
-			if props, ok := bodySchema["properties"].(map[string]any); ok {
-				for name, v := range props {
-					if _, dup := seen[name]; !dup {
-						seen[name] = struct{}{}
-						properties[name] = v
-						params = append(params, HTTPParam{Name: name, In: "body"})
-					}
-				}
-			}
-			if reqs, ok := bodySchema["required"].([]any); ok {
-				for _, r := range reqs {
-					if s, ok := r.(string); ok {
-						required = append(required, s)
-					}
-				}
+	if body != nil {
+		// The body is normalized on its own first, so a shared body schema ($ref) is read as the
+		// one object it is before its fields join the parameters.
+		canon, bodyNotes, err := normalizeIn("input", body, doc)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		notes = append(notes, bodyNotes...)
+		props, _ := canon["properties"].(map[string]any)
+		for name, v := range props {
+			if _, dup := seen[name]; !dup {
+				seen[name] = struct{}{}
+				properties[name] = v
+				params = append(params, HTTPParam{Name: name, In: "body"})
 			}
 		}
+		reqs, _ := canon["required"].([]any)
+		required = append(required, reqs...)
 	}
 
 	result := map[string]any{"type": "object", "properties": properties}
 	if len(required) > 0 {
 		result["required"] = required
 	}
+	inputSchema, paramNotes, err := normalizeIn("input", result, doc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	// Body fields come out of a map, so their order varies between parses of one document. Bindings
 	// are looked up by name and never by position, so ordering them by name costs nothing and makes
 	// a stored source compare equal to itself on the next import (§8).
 	sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
-	return result, params
+	return inputSchema, params, append(notes, paramNotes...), nil
 }
 
 func openAPISlug(s string) string {
@@ -536,7 +548,7 @@ func documentMoved(existing *Action, raw rawOp) bool {
 	if err := json.Unmarshal([]byte(existing.Source), &src); err != nil {
 		return true
 	}
-	if existing.Description != raw.description ||
+	if existing.Title != raw.title || existing.Description != raw.description ||
 		src.BaseURL != raw.source.BaseURL || src.Method != raw.source.Method || src.Path != raw.source.Path ||
 		src.SpecURL != raw.source.SpecURL || src.PriceDeclared != raw.priceDeclared {
 		return true
@@ -635,33 +647,24 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 	seenName := map[string]struct{}{}
 	byKey := map[string]rawOp{}
 	var incoming []incomingOp
+	reject := func(raw rawOp, reason string) {
+		rejected = append(rejected, ImportRejection{Key: raw.key, Location: raw.location, Reason: reason})
+	}
 	for _, raw := range rawOps {
 		raw := raw
 		actionName := name + "/" + raw.key
 		if _, dup := seenKey[raw.key]; dup {
-			rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "duplicate operation key in document"})
+			reject(raw, "duplicate operation key in document")
 			continue
 		}
 		if _, dup := seenName[actionName]; dup {
-			rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "duplicate action name in document"})
+			reject(raw, "duplicate action name in document")
 			continue
-		}
-		if raw.inputSchema != nil {
-			if err := ValidateSchema(raw.inputSchema); err != nil {
-				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "invalid input schema: " + err.Error()})
-				continue
-			}
-		}
-		if raw.outputSchema != nil {
-			if err := ValidateSchema(raw.outputSchema); err != nil {
-				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "invalid output schema: " + err.Error()})
-				continue
-			}
 		}
 		// A name already held by an action outside this application is not ours to take.
 		if _, held := existingByKey[raw.key]; !held {
 			if other, rerr := k.store.ReadActionByOwnerName(ctx, ownerID, actionName); rerr == nil && other != nil {
-				rejected = append(rejected, ImportRejection{Key: raw.key, Reason: "name collision with existing action"})
+				reject(raw, "name collision with existing action")
 				continue
 			}
 		}
@@ -691,6 +694,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 		a, perr := k.prepareCreateAction(ctx, CreateActionRequest{
 			OwnerUserID:  ownerID,
 			Name:         op.name,
+			Title:        raw.title,
 			Kind:         KindHTTP,
 			Price:        raw.price,
 			Description:  raw.description,
@@ -700,7 +704,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 			Auth:         auth,
 		})
 		if perr != nil {
-			rejected = append(rejected, ImportRejection{Key: op.key, Reason: perr.Error()})
+			reject(raw, perr.Error())
 			continue
 		}
 		creates = append(creates, a)
@@ -710,6 +714,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 		raw := byKey[ch.op.key]
 		src := raw.source
 		req := UpdateActionRequest{
+			Title:        &raw.title,
 			Description:  &raw.description,
 			InputSchema:  raw.inputSchema,
 			OutputSchema: raw.outputSchema,
@@ -724,7 +729,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 		}
 		resetStats, revokeGrants, perr := k.prepareUpdateAction(ctx, ch.existing, req)
 		if perr != nil {
-			rejected = append(rejected, ImportRejection{Key: ch.op.key, Reason: perr.Error()})
+			reject(raw, perr.Error())
 			continue
 		}
 		updates = append(updates, pendingUpdate{a: ch.existing, resetStats: resetStats, revokeGrants: revokeGrants})
@@ -737,7 +742,7 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 		if auth != nil {
 			resetStats, revokeGrants, perr := k.prepareUpdateAction(ctx, ch.existing, UpdateActionRequest{Auth: auth})
 			if perr != nil {
-				rejected = append(rejected, ImportRejection{Key: ch.op.key, Reason: perr.Error()})
+				reject(byKey[ch.op.key], perr.Error())
 				continue
 			}
 			updates = append(updates, pendingUpdate{a: ch.existing, resetStats: resetStats, revokeGrants: revokeGrants})
@@ -750,7 +755,23 @@ func (k *Kernel) ImportOpenAPI(ctx context.Context, subjectID, ownerID, name, sp
 	// Rejections come out of a map-ordered parse; order them so one document always reports the
 	// same way.
 	sort.Slice(rejected, func(i, j int) bool { return rejected[i].Key < rejected[j].Key })
-	result := &ImportResult{Unchanged: unchangedRows, Rejected: rejected}
+	// Every operation that lands carries its notes, on every import: the stored contract differs
+	// from the document in those places for as long as the document says what it says.
+	refused := map[string]bool{}
+	for _, r := range rejected {
+		refused[r.Key] = true
+	}
+	var notices []ImportNotice
+	for _, op := range incoming {
+		if refused[op.key] {
+			continue
+		}
+		raw := byKey[op.key]
+		for _, note := range raw.notes {
+			notices = append(notices, ImportNotice{Key: raw.key, Location: raw.location, Note: note})
+		}
+	}
+	result := &ImportResult{Unchanged: unchangedRows, Rejected: rejected, Notices: notices}
 	// Commit. Deactivations first, so a document that renamed an operation frees nothing it still
 	// needs; then updates and creates in name order.
 	for _, a := range plan.Stale {

@@ -22,6 +22,7 @@ type WebDeps struct {
 func Web(deps WebDeps) Spec {
 	return Spec{
 		Name:        "web",
+		Title:       "Fetch a web page",
 		Description: "Fetch a public web page (read-only HTTP GET); returns status, body, content type, and final URL",
 		InputSchema: obj(map[string]any{
 			"url": str("Public URL to fetch; a scheme-less URL defaults to https"),

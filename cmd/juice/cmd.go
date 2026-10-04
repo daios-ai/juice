@@ -937,13 +937,16 @@ const (
 )
 
 func actionCreateCmd() *cobra.Command {
-	var kind, source, description, artifact, method, price string
+	var kind, source, title, description, artifact, method, price string
 	var params []string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "create NAME",
 		Short: "Create an action",
-		Args:  cobra.ExactArgs(1),
+		Long: "Create an action, inactive and private. NAME is its path under your account; --title is the " +
+			"short name people read in a list. The schemas are JSON Schema in the subset the manual's " +
+			"Action schemas page describes.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			name := args[0]
 			inputSchema := map[string]any{}
@@ -980,7 +983,7 @@ func actionCreateCmd() *cobra.Command {
 				}
 			}
 			return cli.emit("POST", "/v1/actions", kernel.CreateActionRequest{
-				Name: name, Kind: kernel.ActionKind(kind), Price: amount, Description: description,
+				Name: name, Title: title, Kind: kernel.ActionKind(kind), Price: amount, Description: description,
 				InputSchema: inputSchema, OutputSchema: outputSchema,
 				Source: srcData, WasmArtifact: artData,
 				Method: method, Params: httpParams, Auth: auth,
@@ -992,6 +995,7 @@ func actionCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&method, "method", "", "HTTP verb (default POST)")
 	cmd.Flags().StringArrayVar(&params, "param", nil, "HTTP field binding name:in (path|query|body); repeatable")
 	cmd.Flags().StringVar(&artifact, "artifact", "", "Base64 WASM artifact or file path")
+	cmd.Flags().StringVar(&title, "title", "", "Short name people read in a list, up to 80 characters (required)")
 	cmd.Flags().StringVar(&description, "description", "", "Description")
 	cmd.Flags().StringVar(&price, "price", "", "Price, written the way this kernel shows money (for example 1.50)")
 	cmd.Flags().StringVar(&inputSchemaStr, "input-schema", "", "JSON Schema for inputs (or @file.json)")
@@ -1001,19 +1005,22 @@ func actionCreateCmd() *cobra.Command {
 }
 
 func actionUpdateCmd() *cobra.Command {
-	var description, source, method, artifact, price string
+	var title, description, source, method, artifact, price string
 	var params []string
 	var visibility string
 	var inputSchemaStr, outputSchemaStr, authStr string
 	cmd := &cobra.Command{
 		Use:   "update ACTION|PATH",
 		Short: "Update an action or a path",
-		Long:  "Update an action or a path.\n\n" + actionPathHelp + "\n\nVisibility, price, and auth may target a whole path; a description, schema, or source needs a target naming exactly one action. Changing source, schema, or price disables the action until re-enabled.",
+		Long:  "Update an action or a path.\n\n" + actionPathHelp + "\n\nVisibility, price, and auth may target a whole path; a title, description, schema, or source needs a target naming exactly one action. Changing source, schema, or price disables the action until re-enabled.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			// Pointer fields carry the absent/set distinction the contract defines (§14): a flag the
 			// user did not pass stays nil, so the server leaves that term alone.
 			var req kernel.UpdateActionRequest
+			if c.Flags().Changed("title") {
+				req.Title = &title
+			}
 			if c.Flags().Changed("description") {
 				req.Description = &description
 			}
@@ -1067,6 +1074,7 @@ func actionUpdateCmd() *cobra.Command {
 			return cli.emit("PUT", "/v1/actions", targetRequest{Target: args[0], UpdateActionRequest: req}, reportActions("updated"))
 		},
 	}
+	cmd.Flags().StringVar(&title, "title", "", "New title")
 	cmd.Flags().StringVar(&description, "description", "", "New description")
 	cmd.Flags().StringVar(&source, "source", "", "New source URL or file path")
 	cmd.Flags().StringVar(&artifact, "artifact", "", "New base64 WASM artifact or file path")
@@ -1111,6 +1119,7 @@ func reportActions(verb string) output {
 		}
 		if err := list(
 			column{"CHANGE", func(json.RawMessage) string { return verb }},
+			column{"TITLE", text("title")},
 			column{"ACTION", text("action")},
 			column{"PRICE", money("price", net)},
 			column{"ACTIVE", func(row json.RawMessage) string {
@@ -1225,7 +1234,7 @@ func actionListCmd() *cobra.Command {
 			}
 			// Whether a row is live and whether it needs the caller's own credential are columns
 			// like any other, rather than marks the reader has to have been told about.
-			cols := []column{{"ACTION", text("action")}, {"PRICE", money("price", net)}}
+			cols := []column{{"TITLE", text("title")}, {"ACTION", text("action")}, {"PRICE", money("price", net)}}
 			if all {
 				cols = append(cols, column{"ACTIVE", func(row json.RawMessage) string {
 					if strField(row, "active") == "true" {
@@ -1427,8 +1436,11 @@ func actionImportCmd() *cobra.Command {
 						counts = append(counts, fmt.Sprintf("%d %s", len(group.rows), group.verb))
 					}
 				}
+				for _, n := range result.Notices {
+					fmt.Printf("note %s (%s): %s\n", n.Key, n.Location, n.Note)
+				}
 				for _, r := range result.Rejected {
-					fmt.Printf("skipped %s: %s\n", r.Key, r.Reason)
+					fmt.Printf("skipped %s (%s): %s\n", r.Key, r.Location, r.Reason)
 				}
 				if len(result.Rejected) > 0 {
 					counts = append(counts, fmt.Sprintf("%d skipped", len(result.Rejected)))

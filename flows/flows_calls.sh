@@ -197,7 +197,7 @@ flow_input_schema_failure() {
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 300
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --kind http --source "http://127.0.0.1:1/x" --price "$(units 0)" --description "schema" \
+    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-in --title "Schema in" --kind http --source "http://127.0.0.1:1/x" --price "$(units 0)" --description "schema" \
         --input-schema '{"type":"object","properties":{"x":{"type":"string","description":"the x parameter"}},"required":["x"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -217,7 +217,7 @@ flow_output_schema_failure() {
     make_user "$db" "$hs" "$hb" bob
     deposit "$db" "$hs" bob 300
 
-    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --kind http --source "http://127.0.0.1:${bport}/schema-out" --price "$(units 50)" --description "schema out" \
+    local aid; aid=$(strfield "$(jj "$db" "$ha" action create schema-out --title "Schema out" --kind http --source "http://127.0.0.1:${bport}/schema-out" --price "$(units 50)" --description "schema out" \
         --output-schema '{"type":"object","properties":{"id":{"type":"string","description":"the record id"}},"required":["id"]}')" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -245,7 +245,7 @@ flow_grant() {
 
     # A delegated-OAuth action; provider endpoints are loopback stubs (never dialed on the
     # reject path — consent is required before any funds lock).
-    aid=$(strfield "$(jj "$db" "$ha" action create inbox --kind http --source "http://127.0.0.1:9/api" --price "$(units 100)" --description "delegated inbox" --auth '{"scheme":"oauth_delegated","config":{"auth_url":"http://127.0.0.1:9/auth","token_url":"http://127.0.0.1:9/token","client_id":"cid","scopes":"read"}}')" id)
+    aid=$(strfield "$(jj "$db" "$ha" action create inbox --title "Inbox" --kind http --source "http://127.0.0.1:9/api" --price "$(units 100)" --description "delegated inbox" --auth '{"scheme":"oauth_delegated","config":{"auth_url":"http://127.0.0.1:9/auth","token_url":"http://127.0.0.1:9/token","client_id":"cid","scopes":"read"}}')" id)
     assert_nonempty "grant.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
 
@@ -270,8 +270,8 @@ flow_grant_bearer() {
     make_user "$db" "$hs" "$ha" alice
 
     # Two actions under the inbox/ directory sharing one upstream host → one connection.
-    a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
-    a2=$(strfield "$(jj "$db" "$ha" action create inbox/read --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer read" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    a1=$(strfield "$(jj "$db" "$ha" action create inbox/send --title "Inbox send" --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer send" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
+    a2=$(strfield "$(jj "$db" "$ha" action create inbox/read --title "Inbox read" --kind http --source "http://127.0.0.1:${bport}/api" --price "$(units 0)" --description "bearer read" --auth '{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}')" id)
     assert_nonempty "grant_bearer.a1_created" "$a1"
     assert_nonempty "grant_bearer.a2_created" "$a2"
     j "$db" "$ha" action enable "$a1" >/dev/null 2>&1

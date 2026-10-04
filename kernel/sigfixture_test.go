@@ -100,12 +100,12 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	check("reveal", "hjdLt6kUB26CIp1ODDCEtfsjYQUGZ4ymN6duaxbur9BicucTq3cKqNJJlc_DfcehEnfd-oYxEAPMfSD4v5n3CA", sig, err)
 
 	m := &ActionManifest{
-		ActionID: actionID, OwnerID: "owner-1", OwnerHandle: "alice", Name: "greet",
+		ActionID: actionID, OwnerID: "owner-1", OwnerHandle: "alice", Title: "Greet a caller", Name: "greet",
 		Description: "greets", Price: 10, RemoteBPS: 500, Kind: "wasm", ArtifactHash: "af-1",
 		UpdatedAt:   fixedTime,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
 	sig, err = net.SignManifest(key, m)
-	check("manifest", "7k-HbWrpAUquGLUS0WxsXObXe_KfFuxSSwXHaXlma83pN4bROkK4n0SvDfLnUnmdRjuU_UNdDKcUXPj4Hs5iBw", sig, err)
+	check("manifest", "V3RnuJwK7EqEAYfBNc0NLWPYpfiYpPS5E3XqguPwVTBHv06iLhbIntdXJY14mKW5rD99ihkkjrqvvWPZssefDw", sig, err)
 
 }

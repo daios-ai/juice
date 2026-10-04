@@ -1295,6 +1295,7 @@ func (k *Kernel) VerifyToken(token string) (string, error) {
 type CreateActionRequest struct {
 	OwnerUserID  string         `json:"-"`
 	Name         string         `json:"name"`
+	Title        string         `json:"title"` // required: the short name a person reads in a list (D4)
 	Kind         ActionKind     `json:"kind"`
 	Price        int64          `json:"price"`
 	Effect       string         `json:"-"` // privileged execution effect ("transfer"); empty for an ordinary action (§13)
@@ -1563,6 +1564,10 @@ func (k *Kernel) prepareCreateAction(ctx context.Context, req CreateActionReques
 	if req.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
+	title, err := ValidateTitle(req.Title)
+	if err != nil {
+		return nil, err
+	}
 	if req.Kind == KindHTTP {
 		switch {
 		case req.HTTP != nil:
@@ -1580,12 +1585,12 @@ func (k *Kernel) prepareCreateAction(ctx context.Context, req CreateActionReques
 		}
 	}
 	if req.InputSchema != nil {
-		if err := ValidateSchema(req.InputSchema); err != nil {
+		if req.InputSchema, _, err = NormalizeSchema("input", req.InputSchema); err != nil {
 			return nil, err
 		}
 	}
 	if req.OutputSchema != nil {
-		if err := ValidateSchema(req.OutputSchema); err != nil {
+		if req.OutputSchema, _, err = NormalizeSchema("output", req.OutputSchema); err != nil {
 			return nil, err
 		}
 	}
@@ -1595,6 +1600,7 @@ func (k *Kernel) prepareCreateAction(ctx context.Context, req CreateActionReques
 		ID:           uuid.New().String(),
 		OwnerUserID:  req.OwnerUserID,
 		Name:         req.Name,
+		Title:        title,
 		Kind:         req.Kind,
 		Active:       false,
 		Visibility:   VisibilityPrivate,
@@ -1627,11 +1633,16 @@ func (k *Kernel) prepareCreateAction(ctx context.Context, req CreateActionReques
 // RegisterNativeAction creates a native action for bootstrap use.
 // Unlike CreateAction, it does not reject KindNative. Call only from bootstrap.
 func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionRequest) (*Action, error) {
+	title, err := ValidateTitle(req.Title)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	a := &Action{
 		ID:           uuid.New().String(),
 		OwnerUserID:  req.OwnerUserID,
 		Name:         req.Name,
+		Title:        title,
 		Kind:         KindNative,
 		Active:       false,
 		Visibility:   VisibilityPrivate, // promoted to local by ActivateNativeAction
@@ -1658,6 +1669,9 @@ func (k *Kernel) RegisterNativeAction(ctx context.Context, req CreateActionReque
 // application can be validated before anything is written (validateActivation).
 // Errors from validateSchemaDescriptions are returned as-is (ErrSchemaViolation).
 func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error {
+	if err := canonicalizeSchemas(a); err != nil {
+		return err
+	}
 	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
 		return err
 	}
@@ -1665,6 +1679,22 @@ func (k *Kernel) validateAndInitActivation(ctx context.Context, a *Action) error
 		return err
 	}
 	return k.initStats(ctx, a)
+}
+
+// canonicalizeSchemas puts both of an action's schemas in the canonical form (D4), so whatever
+// becomes callable is held to, hashed over and served in that one form. Activation is the gate: a
+// row written before this release, or by a path that skipped create, is folded here.
+func canonicalizeSchemas(a *Action) error {
+	in, _, err := NormalizeSchema("input", a.InputSchema)
+	if err != nil {
+		return err
+	}
+	out, _, err := NormalizeSchema("output", a.OutputSchema)
+	if err != nil {
+		return err
+	}
+	a.InputSchema, a.OutputSchema = in, out
+	return nil
 }
 
 // initStats creates the action's stats row when it has none.
@@ -1679,15 +1709,18 @@ func (k *Kernel) initStats(ctx context.Context, a *Action) error {
 }
 
 // ActivateNativeAction reconciles spec fields and activates a native action for bootstrap use. It
-// overwrites price, effect, description, inputSchema, and outputSchema so drift is corrected on every boot.
+// overwrites price, effect, title, description, inputSchema, and outputSchema so drift is corrected on every boot.
 // Natives are the platform stdlib, present identically on every kernel, so they are local and never
 // public (§9): serving them across federation would give away scarce local resources — model, bandwidth,
 // compiler, a write into a local user's task list — at a price this kernel's credit limit cannot bound (a
 // price-0 call adds no exposure, §13), and would put a duplicate of every native in every peer's
 // discovery cache. Local visibility keeps the whole stdlib callable by this kernel's own users (§4).
-func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
+func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, title, description string, inputSchema, outputSchema map[string]any, price int64, effect string) error {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil {
+		return err
+	}
+	if title, err = ValidateTitle(title); err != nil {
 		return err
 	}
 	if a.Kind != KindNative {
@@ -1696,11 +1729,11 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	// Every boot reconciles every native, so the write is a no-op on all but the boot that
 	// corrects something. That boot is the one an operator needs to read: a row whose price,
 	// contract or state this build changed says so at info, an unchanged one is bookkeeping (§14).
-	changed := !a.Active || a.Price != price || a.Effect != effect || a.Description != description ||
-		a.Visibility != VisibilityLocal || !jsonEqual(a.InputSchema, inputSchema) ||
-		!jsonEqual(a.OutputSchema, outputSchema)
+	// The comparison is made after the declared schemas are folded, as the stored ones were.
+	before := *a
 	a.Price = price
 	a.Effect = effect
+	a.Title = title
 	a.Description = description
 	a.InputSchema = inputSchema
 	a.OutputSchema = outputSchema
@@ -1708,6 +1741,9 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 	if err := k.validateAndInitActivation(ctx, a); err != nil {
 		return err
 	}
+	changed := !before.Active || before.Price != price || before.Effect != effect || before.Title != title ||
+		before.Description != description || before.Visibility != VisibilityLocal ||
+		!jsonEqual(before.InputSchema, a.InputSchema) || !jsonEqual(before.OutputSchema, a.OutputSchema)
 	a.Active = true
 	a.UpdatedAt = time.Now().UTC()
 	if err := k.store.UpdateAction(ctx, a); err != nil {
@@ -1720,6 +1756,53 @@ func (k *Kernel) ActivateNativeAction(ctx context.Context, actionID, description
 		k.log.With(ctx).Debug("action.native_enabled", "action_id", a.ID, "name", a.Name)
 	}
 	return nil
+}
+
+// CanonicalizeStoredSchemas rewrites every stored action schema into the canonical form (D4), so
+// the validator, the hashes and the manifests read one form whatever release wrote a row. It runs at
+// every boot and writes only rows that change. A row whose schema the subset refuses — a nested
+// untyped field, which an earlier release accepted as "any value" — is disabled and logged rather
+// than served under a contract no strict decoder accepts; its owner fixes the schema and re-enables.
+func (k *Kernel) CanonicalizeStoredSchemas(ctx context.Context) error {
+	const page = 200
+	for offset := 0; ; offset += page {
+		rows, err := k.store.ListAllActions(ctx, page, offset)
+		if err != nil {
+			return err
+		}
+		for _, a := range rows {
+			if err := k.canonicalizeRow(ctx, a); err != nil {
+				return err
+			}
+		}
+		if len(rows) < page {
+			return nil
+		}
+	}
+}
+
+func (k *Kernel) canonicalizeRow(ctx context.Context, a *Action) error {
+	in, out := a.InputSchema, a.OutputSchema
+	var nerr error
+	if in != nil {
+		in, _, nerr = NormalizeSchema("input", in)
+	}
+	if nerr == nil && out != nil {
+		out, _, nerr = NormalizeSchema("output", out)
+	}
+	if nerr != nil {
+		if !a.Active {
+			return nil
+		}
+		a.Active = false
+		k.log.With(ctx).Warn("action.schema_refused", "action_id", a.ID, "name", a.Name, "error", nerr.Error())
+		return k.store.UpdateAction(ctx, a)
+	}
+	if jsonEqual(in, a.InputSchema) && jsonEqual(out, a.OutputSchema) {
+		return nil
+	}
+	a.InputSchema, a.OutputSchema = in, out
+	return k.store.UpdateAction(ctx, a)
 }
 
 // ReadAction returns the action with the given ID (no authorization check).
@@ -1901,6 +1984,7 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 type UpdateActionRequest struct {
 	ID           string            `json:"-"`
 	Price        *int64            `json:"price"`
+	Title        *string           `json:"title"`
 	Description  *string           `json:"description"`
 	InputSchema  map[string]any    `json:"input_schema"`
 	OutputSchema map[string]any    `json:"output_schema"`
@@ -1917,9 +2001,9 @@ type UpdateActionRequest struct {
 
 // rowSpecific reports whether the request carries a field whose value belongs to one action rather
 // than uniformly to every action beneath a path: a description, a schema, or an execution source
-// (§14). Visibility, price, and auth are uniform and apply to a whole subtree.
+// (§14). Visibility, price, and auth are uniform and apply to a whole subtree; a title names one action.
 func (r UpdateActionRequest) rowSpecific() bool {
-	return r.Description != nil || r.InputSchema != nil || r.OutputSchema != nil ||
+	return r.Title != nil || r.Description != nil || r.InputSchema != nil || r.OutputSchema != nil ||
 		r.Source != nil || r.Method != nil || r.Params != nil || r.WasmArtifact != "" || r.HTTP != nil
 }
 
@@ -1951,6 +2035,17 @@ func (k *Kernel) prepareUpdateAction(ctx context.Context, a *Action, req UpdateA
 			resetStats, executionMoved = true, true
 		}
 	}
+	if req.Title != nil {
+		// The title is quoted, not executed: like the description it resets stats only.
+		title, err := ValidateTitle(*req.Title)
+		if err != nil {
+			return false, false, err
+		}
+		if title != a.Title {
+			a.Title = title
+			resetStats = true
+		}
+	}
 	if req.Description != nil {
 		// An active action must carry a description (it is the quoted terms and the lookup text), so
 		// emptying one is refused rather than silently deactivating it.
@@ -1963,17 +2058,19 @@ func (k *Kernel) prepareUpdateAction(ctx context.Context, a *Action, req UpdateA
 		}
 	}
 	if req.InputSchema != nil {
-		if err := ValidateSchema(req.InputSchema); err != nil {
+		schema, _, err := NormalizeSchema("input", req.InputSchema)
+		if err != nil {
 			return false, false, err
 		}
-		a.InputSchema = req.InputSchema
+		a.InputSchema = schema
 		resetStats, executionMoved = true, true
 	}
 	if req.OutputSchema != nil {
-		if err := ValidateSchema(req.OutputSchema); err != nil {
+		schema, _, err := NormalizeSchema("output", req.OutputSchema)
+		if err != nil {
 			return false, false, err
 		}
-		a.OutputSchema = req.OutputSchema
+		a.OutputSchema = schema
 		resetStats, executionMoved = true, true
 	}
 	if a.Kind == KindHTTP && (req.HTTP != nil || req.Source != nil || req.Method != nil || req.Params != nil) {
@@ -2234,11 +2331,8 @@ func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
 	if a.Source == "" && a.Kind != KindNative && !(a.Kind == KindWasm && a.WasmArtifact != "") {
 		return ErrInvalidState.Wrap("cannot activate action with no source")
 	}
-	if err := ValidateSchema(a.InputSchema); err != nil {
-		return ErrInvalidState.Wrapf("invalid input schema: %v", err)
-	}
-	if err := ValidateSchema(a.OutputSchema); err != nil {
-		return ErrInvalidState.Wrapf("invalid output schema: %v", err)
+	if err := canonicalizeSchemas(a); err != nil {
+		return ErrInvalidState.Wrapf("invalid schema: %v", err)
 	}
 	if err := validateSchemaDescriptions(a.InputSchema, "input"); err != nil {
 		return err
@@ -3119,10 +3213,10 @@ func (k *Kernel) indexForLookup(ctx context.Context, a *Action) {
 	if err := k.store.UpsertLookupText(ctx, a.ID, lookupText(a)); err != nil {
 		k.log.With(ctx).Warn("lookup.index_failed", "action_id", a.ID, "error", err.Error())
 	}
-	k.storeEmbedding(ctx, a.ID, a.Description)
+	k.storeEmbedding(ctx, a.ID, a.Title+" "+a.Description)
 }
 
-// lookupText assembles an action's lexical-index text: owner handle, name, description, and the
+// lookupText assembles an action's lexical-index text: owner handle, name, title, description, and the
 // property names + descriptions from its input/output schemas (§3 requires those descriptions to be
 // sufficient for lookup). The owner handle is included because an action's real name is owner@kernel/name.
 // Unknown schema shapes simply contribute nothing.
@@ -3133,6 +3227,8 @@ func lookupText(a *Action) string {
 		b.WriteByte(' ')
 	}
 	b.WriteString(a.Name)
+	b.WriteByte(' ')
+	b.WriteString(a.Title)
 	b.WriteByte(' ')
 	b.WriteString(a.Description)
 	schemaText(&b, a.InputSchema)
@@ -3154,12 +3250,12 @@ func schemaText(b *strings.Builder, schema map[string]any) {
 	}
 }
 
-// storeEmbedding embeds the description and persists the vector. Best-effort: logs on failure, never returns an error.
-func (k *Kernel) storeEmbedding(ctx context.Context, actionID, description string) {
-	if k.llm == nil || strings.TrimSpace(description) == "" {
+// storeEmbedding embeds an action's title and description and persists the vector. Best-effort: logs on failure, never returns an error.
+func (k *Kernel) storeEmbedding(ctx context.Context, actionID, text string) {
+	if k.llm == nil || strings.TrimSpace(text) == "" {
 		return
 	}
-	vec, err := k.llm.Embed(ctx, description)
+	vec, err := k.llm.Embed(ctx, text)
 	if err != nil {
 		k.log.With(ctx).Warn("lookup.embed_failed", "action_id", actionID, "error", err.Error())
 		return

@@ -108,19 +108,20 @@ non-interactive confirmation.
 
 | Command | |
 |---|---|
-| `juice action create NAME` | create an action, inactive and private ([Publishing](../providing/publishing.html)) |
+| `juice action create NAME --title TITLE` | create an action, inactive and private ([Publishing](../providing/publishing.html)) |
 | `juice action show ACTION` | full detail, including `quote_hash` and evidence of the action's conduct |
-| `juice action update ACTION\|PATH` | change price, schemas, source, visibility, credentials |
+| `juice action update ACTION\|PATH` | change title, price, schemas, source, visibility, credentials |
 | `juice action enable ACTION\|PATH` | make callable |
 | `juice action disable ACTION\|PATH` | make uncallable, reversibly |
 | `juice action delete ACTION\|PATH` | retire; history survives |
-| `juice action list` | active actions within your access; `--all` includes inactive actions in your scope |
+| `juice action list` | active actions within your access, by title; `--all` includes inactive actions in your scope |
 | `juice action import NAME [SPEC_URL]` | install an OpenAPI document ([Wrapping a web API](../providing/web-apis.html)) |
 | `juice action ratings ACTION` | the public ratings |
 
-`create` and `update` take `--kind`, `--source`, `--artifact`, `--method`,
-`--param`, `--description`, `--price`, `--input-schema`, `--output-schema`,
-`--auth`; `update` also takes `--visibility`.
+`create` and `update` take `--title`, `--kind`, `--source`, `--artifact`,
+`--method`, `--param`, `--description`, `--price`, `--input-schema`,
+`--output-schema`, `--auth`; `update` also takes `--visibility`. `create`
+requires `--title`. The schemas follow [Action schemas](schemas.html).
 
 ## tx
 

@@ -11,11 +11,13 @@ import (
 )
 
 type stubJSONChatter struct {
-	value any
-	err   error
+	value  any
+	err    error
+	schema map[string]any // what the model was asked for
 }
 
-func (s *stubJSONChatter) ChatJSON(_ context.Context, _ []kernel.ChatMessage, _ map[string]any) (any, error) {
+func (s *stubJSONChatter) ChatJSON(_ context.Context, _ []kernel.ChatMessage, schema map[string]any) (any, error) {
+	s.schema = schema
 	return s.value, s.err
 }
 
@@ -101,5 +103,28 @@ func TestExecuteJSON_Success(t *testing.T) {
 	v, ok := result["value"].(map[string]any)
 	if !ok || v["name"] != "alice" {
 		t.Errorf("unexpected result: %v", result)
+	}
+}
+
+// The caller's schema is read in the canonical form: the model is asked for that form, and the
+// answer is checked against what the caller's spelling means.
+func TestExecuteJSON_ReadsTheCanonicalForm(t *testing.T) {
+	chatter := &stubJSONChatter{value: map[string]any{"name": nil}}
+	result, err := executeJSON(context.Background(), map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"output_schema": map[string]any{
+			"properties": map[string]any{"name": map[string]any{"type": "string", "nullable": true}},
+			"required":   []any{"name"},
+		},
+	}, chatter)
+	if err != nil {
+		t.Fatalf("a nullable field must admit null: %v", err)
+	}
+	if v, _ := result["value"].(map[string]any); v == nil {
+		t.Errorf("unexpected result: %v", result)
+	}
+	name, _ := chatter.schema["properties"].(map[string]any)["name"].(map[string]any)
+	if chatter.schema["additionalProperties"] != false || len(name["type"].([]any)) != 2 {
+		t.Errorf("the model must be asked for the canonical form, got %v", chatter.schema)
 	}
 }

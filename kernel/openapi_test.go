@@ -16,7 +16,7 @@ import (
 
 // appOpenAPISpec has two operations, one of them named index, so an installed application has a
 // root that is an ordinary imported action.
-const appOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"what this application is","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+const appOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","summary":"index","description":"what this application is","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","summary":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 // pricedSpec renders the one-operation spec with an x-juice-price extension, or without one when
 // price is empty, so a test can say whether the document declares a price at all.
@@ -25,7 +25,7 @@ func pricedSpec(price string) string {
 	if price != "" {
 		ext = `"x-juice-price":` + price + `,`
 	}
-	return `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello",` + ext +
+	return `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","summary":"sayHello",` + ext +
 		`"description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 }
 
@@ -283,8 +283,8 @@ func TestImportOpenAPIRejectsDuplicateKeys(t *testing.T) {
 	owner := setupUser(t, st, "acme", 0)
 
 	dup := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{
-		"/a":{"get":{"operationId":"same","description":"first","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},
-		"/b":{"get":{"operationId":"same","description":"second","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+		"/a":{"get":{"operationId":"same","summary":"same","description":"first","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},
+		"/b":{"get":{"operationId":"same","summary":"same","description":"second","parameters":[{"name":"q","in":"query","description":"q","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 	res, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "dup", "http://api.example.com/dup.json", []byte(dup), nil)
 	if err != nil {
@@ -334,7 +334,7 @@ func TestImportOpenAPIAuthParity(t *testing.T) {
 		}
 		// A manual create must accept the same configuration.
 		if _, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: "manual-" + name, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: "manual-" + name, Kind: kernel.KindHTTP,
 			Source: "https://api.example.com/x", Method: "POST", Auth: auth,
 		}); err != nil {
 			t.Errorf("create rejects what import accepted (%s): %v", auth.Scheme, err)
@@ -348,7 +348,7 @@ func TestImportOpenAPIAuthParity(t *testing.T) {
 			t.Errorf("import accepted an invalid auth config (%s)", auth.Scheme)
 		}
 		_, cerr := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: "manual-" + name, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: "manual-" + name, Kind: kernel.KindHTTP,
 			Source: "https://api.example.com/x", Method: "POST", Auth: auth,
 		})
 		if cerr == nil {
@@ -399,7 +399,7 @@ func TestImportOpenAPILeavesManualHTTPUntouched(t *testing.T) {
 	specURL := "https://spec.example.com/api.json"
 
 	manual, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "mail/manual-svc", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "mail/manual-svc", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com/manual", Method: "POST",
 	})
 	if err != nil {
@@ -541,7 +541,7 @@ func TestOpenAPIRejectMissingInputContract(t *testing.T) {
 	owner := setupUser(t, st, "oapi-no-input", 0)
 
 	// Operation has operationId and description but no parameters and no requestBody.
-	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/ping":{"get":{"operationId":"ping","description":"ping the server","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	spec := `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/ping":{"get":{"operationId":"ping","summary":"ping","description":"ping the server","responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 	result, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "mail", "https://spec.example.com/api.json", []byte(spec), nil)
 	if err != nil {
@@ -589,7 +589,7 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 		"paths": {
 			"/items/{id}": {
 				"post": {
-					"operationId": "createItem",
+					"operationId": "createItem","summary":"createItem",
 					"description": "Create an item",
 					"parameters": [{"name": "id", "in": "path", "required": true, "description": "item id", "schema": {"type": "string"}}],
 					"requestBody": {
@@ -623,5 +623,304 @@ func TestOpenAPIBodyRefParamsIncluded(t *testing.T) {
 	}
 	if paramsByName["count"] != "body" {
 		t.Errorf("expected count param in=body, got %q", paramsByName["count"])
+	}
+}
+
+// ---- the contract an import produces (D4, D21) ----
+
+// openAPIDoc renders a document from its paths and shared components, so a test states only the
+// operations it is about.
+func openAPIDoc(t *testing.T, paths, components map[string]any) []byte {
+	t.Helper()
+	doc := map[string]any{
+		"openapi": "3.0.0", "info": map[string]any{"title": "T", "version": "1"},
+		"servers": []any{map[string]any{"url": "http://api.example.com"}},
+		"paths":   paths,
+	}
+	if components != nil {
+		doc["components"] = components
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// getOp is a GET operation with one described query parameter and the given response schema;
+// extra fields override or add to it.
+func getOp(id string, response map[string]any, extra map[string]any) map[string]any {
+	op := map[string]any{
+		"operationId": id, "summary": "Run " + id, "description": "does " + id,
+		"parameters": []any{map[string]any{"name": "q", "in": "query", "description": "query", "schema": map[string]any{"type": "string"}}},
+		"responses": map[string]any{"200": map[string]any{"description": "ok", "content": map[string]any{
+			"application/json": map[string]any{"schema": response}}}},
+	}
+	for k, v := range extra {
+		op[k] = v
+	}
+	return op
+}
+
+func importDoc(t *testing.T, k *kernel.Kernel, owner *kernel.Account, name string, doc []byte) *kernel.ImportResult {
+	t.Helper()
+	result, err := k.ImportOpenAPI(context.Background(), owner.ID, owner.ID, name, "https://spec.example.com/"+name+".json", doc, nil)
+	if err != nil {
+		t.Fatalf("ImportOpenAPI: %v", err)
+	}
+	return result
+}
+
+func rejection(result *kernel.ImportResult, key string) *kernel.ImportRejection {
+	for i := range result.Rejected {
+		if result.Rejected[i].Key == key {
+			return &result.Rejected[i]
+		}
+	}
+	return nil
+}
+
+func createdNamed(result *kernel.ImportResult, name string) *kernel.Action {
+	for _, a := range result.Created {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// The title is x-juice-title, else the summary; an operation with neither is refused naming what to
+// add, since an operation key is no more readable than an address.
+func TestImportOpenAPITitle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "oapi-title", 0)
+	obj := map[string]any{"type": "object"}
+	doc := openAPIDoc(t, map[string]any{
+		"/a": map[string]any{"get": getOp("both", obj, map[string]any{"x-juice-title": "Juice title", "summary": "Summary title"})},
+		"/b": map[string]any{"get": getOp("summaryOnly", obj, nil)},
+		"/c": map[string]any{"get": getOp("neither", obj, map[string]any{"summary": nil})},
+		"/d": map[string]any{"get": getOp("tooLong", obj, map[string]any{"summary": strings.Repeat("s", kernel.MaxTitleLength+1)})},
+	}, nil)
+	result := importDoc(t, k, owner, "titles", doc)
+
+	if a := createdNamed(result, "titles/both"); a == nil || a.Title != "Juice title" {
+		t.Errorf("x-juice-title must win over summary: %+v", a)
+	}
+	if a := createdNamed(result, "titles/summaryOnly"); a == nil || a.Title != "Run summaryOnly" {
+		t.Errorf("summary must become the title: %+v", a)
+	}
+	if r := rejection(result, "neither"); r == nil || r.Location != "GET /c" || !strings.Contains(r.Reason, "no summary") {
+		t.Errorf("an operation without a summary must be refused at its location: %+v", r)
+	}
+	if r := rejection(result, "tooLong"); r == nil || r.Location != "GET /d" || !strings.Contains(r.Reason, "longer than") {
+		t.Errorf("an over-long summary must be refused: %+v", r)
+	}
+}
+
+// One import reports every operation that cannot land, each at its location and with the schema
+// path and rule it broke, while the rest of the document lands.
+func TestImportOpenAPIReportsEveryOperation(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "oapi-report", 0)
+	obj := map[string]any{"type": "object"}
+	union := []any{map[string]any{"type": "string"}, map[string]any{"type": "integer"}}
+	doc := openAPIDoc(t, map[string]any{
+		"/ok":    map[string]any{"get": getOp("ok", obj, nil)},
+		"/union": map[string]any{"get": getOp("union", map[string]any{"type": "object", "properties": map[string]any{"v": map[string]any{"oneOf": union}}}, nil)},
+		"/list":  map[string]any{"get": getOp("list", map[string]any{"type": "array", "items": obj}, nil)},
+		"/tree":  map[string]any{"get": getOp("tree", map[string]any{"$ref": "#/components/schemas/Node"}, nil)},
+		"/param": map[string]any{"post": map[string]any{
+			"operationId": "param", "summary": "Param", "description": "bad parameter",
+			"parameters": []any{map[string]any{"name": "id", "in": "path", "description": "id", "schema": map[string]any{"anyOf": union}}},
+			"responses":  map[string]any{"200": map[string]any{"description": "ok", "content": map[string]any{"application/json": map[string]any{"schema": obj}}}},
+		}},
+	}, map[string]any{"schemas": map[string]any{"Node": map[string]any{
+		"type": "object", "properties": map[string]any{"child": map[string]any{"$ref": "#/components/schemas/Node"}},
+	}}})
+	result := importDoc(t, k, owner, "report", doc)
+
+	if len(result.Created) != 1 || result.Created[0].Name != "report/ok" {
+		t.Errorf("the valid operation must land beside the refused ones: created %d", len(result.Created))
+	}
+	want := map[string]struct{ location, reason string }{
+		"union": {"GET /union", "output.properties.v: oneOf is not supported"},
+		"list":  {"GET /list", "output: the top level must be an object, not array"},
+		"tree":  {"GET /tree", "is recursive"},
+		"param": {"POST /param", "input.properties.id: anyOf is not supported"},
+	}
+	for key, w := range want {
+		r := rejection(result, key)
+		if r == nil {
+			t.Errorf("%s: not reported", key)
+			continue
+		}
+		if r.Location != w.location || !strings.Contains(r.Reason, w.reason) {
+			t.Errorf("%s: got %q at %q, want %q at %q", key, r.Reason, r.Location, w.reason, w.location)
+		}
+	}
+}
+
+// OpenAPI 3.0's nullable and 3.1's type list mean one thing and are stored as one thing; the fold is
+// reported, the canonical spelling is not, and anyOf-with-null is refused like every combinator.
+func TestImportOpenAPINullableSpellingsAgree(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "oapi-null", 0)
+	resp := func(field map[string]any) map[string]any {
+		field["description"] = "count"
+		return map[string]any{"type": "object", "properties": map[string]any{"n": field}}
+	}
+	doc := openAPIDoc(t, map[string]any{
+		"/v30":   map[string]any{"get": getOp("v30", resp(map[string]any{"type": "integer", "nullable": true}), nil)},
+		"/v31":   map[string]any{"get": getOp("v31", resp(map[string]any{"type": []any{"integer", "null"}}), nil)},
+		"/anyOf": map[string]any{"get": getOp("anyOf", resp(map[string]any{"anyOf": []any{map[string]any{"type": "integer"}, map[string]any{"type": "null"}}}), nil)},
+	}, nil)
+	result := importDoc(t, k, owner, "nulls", doc)
+	if r := rejection(result, "anyOf"); r == nil || r.Location != "GET /anyOf" || !strings.Contains(r.Reason, "output.properties.n: anyOf is not supported") {
+		t.Errorf("anyOf with null must be refused at its location: %+v", r)
+	}
+	if len(result.Created) != 2 {
+		t.Fatalf("created %d, rejected %+v", len(result.Created), result.Rejected)
+	}
+	want := map[string]any{"type": []any{"integer", "null"}, "description": "count"}
+	for _, a := range result.Created {
+		props, _ := a.OutputSchema["properties"].(map[string]any)
+		got, _ := json.Marshal(props["n"])
+		w, _ := json.Marshal(want)
+		if string(got) != string(w) {
+			t.Errorf("%s stored %s, want %s", a.Name, got, w)
+		}
+	}
+	noted := map[string]string{}
+	for _, n := range result.Notices {
+		noted[n.Key] = n.Location + " " + n.Note
+	}
+	if !strings.Contains(noted["v30"], "GET /v30 output.properties.n: nullable folded") {
+		t.Errorf("the 3.0 fold must be reported at its location: %q", noted["v30"])
+	}
+	if _, reported := noted["v31"]; reported {
+		t.Errorf("the canonical spelling changes nothing and is not reported: %q", noted["v31"])
+	}
+}
+
+// A body, a response and a schema shared under components are followed, the schema's annotations
+// survive, its fields bind to the body; a body composed with allOf is refused at its location.
+func TestImportOpenAPISharedBody(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "oapi-shared", 0)
+	doc := openAPIDoc(t, map[string]any{
+		"/pets": map[string]any{"post": map[string]any{
+			"operationId": "addPet", "summary": "Add a pet", "description": "adds a pet",
+			"requestBody": map[string]any{"$ref": "#/components/requestBodies/NewPet"},
+			"responses":   map[string]any{"201": map[string]any{"$ref": "#/components/responses/Pet"}},
+		}},
+		"/composed": map[string]any{"post": map[string]any{
+			"operationId": "composed", "summary": "Composed", "description": "allOf body",
+			"requestBody": map[string]any{"content": map[string]any{"application/json": map[string]any{
+				"schema": map[string]any{"allOf": []any{map[string]any{"$ref": "#/components/schemas/Pet"}}},
+			}}},
+			"responses": map[string]any{"201": map[string]any{"$ref": "#/components/responses/Pet"}},
+		}},
+	}, map[string]any{
+		"requestBodies": map[string]any{"NewPet": map[string]any{"content": map[string]any{"application/json": map[string]any{
+			"schema": map[string]any{"$ref": "#/components/schemas/Pet"},
+		}}}},
+		"responses": map[string]any{"Pet": map[string]any{"description": "the pet", "content": map[string]any{"application/json": map[string]any{
+			"schema": map[string]any{"$ref": "#/components/schemas/Pet"},
+		}}}},
+		"schemas": map[string]any{"Pet": map[string]any{
+			"type": "object", "required": []any{"name"},
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string", "default": "Rex", "description": "name"},
+				"born": map[string]any{"type": "string", "format": "date", "title": "Birthday", "description": "birth date", "example": "2020-01-01"},
+			},
+		}},
+	})
+	result := importDoc(t, k, owner, "pets", doc)
+	a := createdNamed(result, "pets/addPet")
+	if a == nil {
+		t.Fatalf("not imported: %+v", result.Rejected)
+	}
+	props, _ := a.InputSchema["properties"].(map[string]any)
+	born, _ := props["born"].(map[string]any)
+	if born["format"] != "date" || born["title"] != "Birthday" {
+		t.Errorf("annotations must survive import: %v", born)
+	}
+	if ex, _ := born["examples"].([]any); len(ex) != 1 || ex[0] != "2020-01-01" {
+		t.Errorf("example must become examples: %v", born)
+	}
+	if name, _ := props["name"].(map[string]any); name["default"] != "Rex" {
+		t.Errorf("the referenced field must be inlined with its default: %v", props["name"])
+	}
+	if req, _ := a.InputSchema["required"].([]any); len(req) != 1 || req[0] != "name" {
+		t.Errorf("required must carry over from the shared body: %v", a.InputSchema["required"])
+	}
+	bound := map[string]string{}
+	for _, p := range sourceOf(t, a).Params {
+		bound[p.Name] = p.In
+	}
+	if bound["name"] != "body" || bound["born"] != "body" {
+		t.Errorf("shared body fields must bind to the body: %v", bound)
+	}
+	if _, ok := a.OutputSchema["properties"].(map[string]any)["name"]; !ok {
+		t.Errorf("a shared response must resolve to its schema: %v", a.OutputSchema)
+	}
+	if r := rejection(result, "composed"); r == nil || r.Location != "POST /composed" || !strings.Contains(r.Reason, "input: allOf is not supported") {
+		t.Errorf("an allOf body must be refused at its location: %+v", r)
+	}
+}
+
+// A shared parameter is followed like an inline one.
+func TestImportOpenAPISharedParameter(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "oapi-param", 0)
+	op := getOp("list", map[string]any{"type": "object"}, map[string]any{
+		"parameters": []any{map[string]any{"$ref": "#/components/parameters/Limit"}},
+	})
+	doc := openAPIDoc(t, map[string]any{"/items": map[string]any{"get": op}}, map[string]any{"parameters": map[string]any{
+		"Limit": map[string]any{"name": "limit", "in": "query", "description": "page size", "schema": map[string]any{"type": "integer", "maximum": 100}},
+	}})
+	result := importDoc(t, k, owner, "items", doc)
+	a := createdNamed(result, "items/list")
+	if a == nil {
+		t.Fatalf("not imported: %+v", result.Rejected)
+	}
+	limit, _ := a.InputSchema["properties"].(map[string]any)["limit"].(map[string]any)
+	if limit["type"] != "integer" || limit["maximum"] != float64(100) {
+		t.Errorf("shared parameter not followed: %v", a.InputSchema)
+	}
+}
+
+// The title is document-owned (D21): a changed summary updates the row on re-import, and a title
+// edited by hand is restored from the document, as every document-owned field is.
+func TestImportOpenAPITitleIsDocumentOwned(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "oapi-retitle", 0)
+	doc := func(summary string) []byte {
+		return openAPIDoc(t, map[string]any{"/a": map[string]any{"get": getOp("op", map[string]any{"type": "object"}, map[string]any{"summary": summary})}}, nil)
+	}
+	importDoc(t, k, owner, "app", doc("First title"))
+	if result := importDoc(t, k, owner, "app", doc("Second title")); len(result.Updated) != 1 {
+		t.Fatalf("a changed summary must update the row: updated %d unchanged %d", len(result.Updated), len(result.Unchanged))
+	}
+	a := mustResolve(t, k, ctx, owner.ID, "app/op")
+	if a.Title != "Second title" {
+		t.Errorf("title %q, want the document's new summary", a.Title)
+	}
+	edited := "Edited by hand"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Title: &edited}); err != nil {
+		t.Fatal(err)
+	}
+	if result := importDoc(t, k, owner, "app", doc("Second title")); len(result.Updated) != 1 {
+		t.Fatalf("a hand-edited title must count as a moved document field: updated %d", len(result.Updated))
+	}
+	if a := mustResolve(t, k, ctx, owner.ID, "app/op"); a.Title != "Second title" {
+		t.Errorf("title %q, want the document's restored", a.Title)
 	}
 }

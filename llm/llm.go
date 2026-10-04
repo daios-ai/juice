@@ -211,33 +211,23 @@ func (o *OllamaChatter) ChatDecide(ctx context.Context, messages []kernel.Decide
 	}
 	msgs = append(msgs, ollamaMsgWithTools{Role: "user", Content: "Call the appropriate tool now."})
 
-	type fnParams struct {
-		Type       string         `json:"type"`
-		Properties map[string]any `json:"properties,omitempty"`
-		Required   []string       `json:"required,omitempty"`
-	}
 	type fn struct {
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Parameters  fnParams `json:"parameters"`
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Parameters  map[string]any `json:"parameters"`
 	}
 	type ollamaTool struct {
 		Type     string `json:"type"`
 		Function fn     `json:"function"`
 	}
 
+	// An action's input schema is a standard tool parameter schema (D4), so the model receives it
+	// whole — bounds, enums, nullability and closed objects included — and never a lossy copy.
 	var ollamaTools []ollamaTool
 	for _, t := range tools {
-		params := fnParams{Type: "object"}
-		if props, ok := t.InputSchema["properties"].(map[string]any); ok {
-			params.Properties = props
-		}
-		if req, ok := t.InputSchema["required"].([]any); ok {
-			for _, r := range req {
-				if s, ok := r.(string); ok {
-					params.Required = append(params.Required, s)
-				}
-			}
+		params := t.InputSchema
+		if params == nil {
+			params = map[string]any{"type": "object"}
 		}
 		ollamaTools = append(ollamaTools, ollamaTool{
 			Type:     "function",

@@ -10,7 +10,8 @@ import (
 )
 
 // Spec is one native action's self-description: everything the platform stdlib entry declares
-// about itself (§9) — its name, privileged effect, natural-language description, schemas, and the
+// about itself (§9) — its name, title, privileged effect, natural-language description, schemas
+// (written in canonical form, D4), and the
 // handler that runs it. Each native's own file supplies its Spec through a constructor, so a
 // contract change lands in exactly one file instead of being restated in bootstrap and main.
 //
@@ -18,6 +19,7 @@ import (
 // and bootstrap reconciles each Spec against the configured price on every boot.
 type Spec struct {
 	Name         string
+	Title        string // the short name a person reads in a list (D4)
 	Effect       string // privileged execution effect ("transfer"); empty for an ordinary native (§13)
 	Description  string
 	InputSchema  map[string]any
@@ -85,9 +87,10 @@ func Register(k *kernel.Kernel, specs []Spec) {
 
 // ---- shared schema fragments ----
 
-// obj builds an object schema from property pairs, with the named keys required.
+// obj builds a closed object schema from property pairs, with the named keys required. It states
+// additionalProperties: false, as the canonical form does for every object with declared fields.
 func obj(props map[string]any, required ...string) map[string]any {
-	s := map[string]any{"type": "object", "properties": props}
+	s := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
 	if len(required) > 0 {
 		s["required"] = required
 	}
@@ -107,7 +110,7 @@ func integer(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }
 func num(desc string) map[string]any    { return map[string]any{"type": "number", "description": desc} }
-func object(desc string) map[string]any { return map[string]any{"type": "object", "description": desc} }
+func object(desc string) map[string]any { return map[string]any{"type": "object", "description": desc} } // an open object
 func arrayOf(items map[string]any, desc string) map[string]any {
 	return map[string]any{"type": "array", "description": desc, "items": items}
 }

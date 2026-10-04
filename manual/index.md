@@ -12,7 +12,7 @@ connect an HTTP endpoint or import an API described by an OpenAPI document;
 the service itself continues to use the web infrastructure it already runs on.
 
 The unit of service in Juice is an **action**. An action has an owner, a name,
-a description, input and output schemas, and a fixed price. A schema describes
+a title, a description, input and output schemas, and a fixed price. A schema describes
 the structure and types of the data exchanged with the service. Together, these
 elements provide a common interface: what the action does, what information it
 needs, what it returns, and what it costs. People and agents can use that
@@ -37,7 +37,7 @@ reach your account and can be spent on other services or withdrawn.
 ## Finding and using capabilities
 
 Juice provides natural-language search over the actions available on your kernel
-and those it has discovered on other kernels. Each result includes a description,
+and those it has discovered on other kernels. Each result includes a title and description,
 the input and output schemas, and an advertised price. These let you compare
 candidates before deciding which one to run. Remote results are checked against
 their home kernel when resolved for use, since a discovery entry may be out of

@@ -100,7 +100,8 @@ func runAction(t *testing.T, srv *httptest.Server, tok, actionRef string, args m
 func createEnabledPublicAction(t *testing.T, srv *httptest.Server, ownerTok, name, kind, source, description string, price int64) string {
 	t.Helper()
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": name, "kind": kind, "price": price, "source": source,
+		"title": "Test action",
+		"name":  name, "kind": kind, "price": price, "source": source,
 		"description":   description,
 		"input_schema":  minSchema,
 		"output_schema": minSchema,
@@ -274,6 +275,7 @@ func TestFlow_UpstreamAuthSecrecy(t *testing.T) {
 
 	// Create action with bearer auth credentials via HTTP API.
 	createResp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
+		"title":         "Test action",
 		"name":          "secured-action",
 		"kind":          "http",
 		"price":         0,

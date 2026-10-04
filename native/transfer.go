@@ -18,6 +18,7 @@ import (
 func Transfer() Spec {
 	return Spec{
 		Name:        "transfer",
+		Title:       "Transfer credits",
 		Effect:      "transfer",
 		Description: "Transfers credits from the caller to a user on this kernel or another. The amount is paid from the immediate caller's own balance and delivered whole: a recipient here is credited when the call settles, a recipient on another kernel when the payment reaches that kernel.",
 		InputSchema: obj(map[string]any{

@@ -15,6 +15,7 @@ import (
 func Random() Spec {
 	return Spec{
 		Name:         "random",
+		Title:        "Random number",
 		Description:  "Returns a cryptographically secure random float in [0, 1)",
 		InputSchema:  obj(map[string]any{}),
 		OutputSchema: obj(map[string]any{"value": num("Random float in [0, 1)")}),

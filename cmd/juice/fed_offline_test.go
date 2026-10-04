@@ -94,7 +94,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: handle, Name: "greet", Description: "greet",
+		ActionID: "act-1", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x",
 		UpdatedAt: time.Now(),
@@ -210,7 +210,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 	const mp, wantAllIn = int64(20), float64(23)
 	rbps := kernel.DefaultEconomy().RemoteBPS
 	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: handle, Name: "greet", Description: "greet",
+		ActionID: "act-1", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: mp, RemoteBPS: rbps,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}

@@ -23,6 +23,7 @@ at `https://greeter.example.com/openapi.json`:
   "paths": {
     "/": {"post": {
       "operationId": "index",
+      "summary": "About the greeter",
       "description": "What this application does",
       "requestBody": {"content": {"application/json": {"schema": {"type": "object", "properties": {}}}}},
       "responses": {"200": {"content": {"application/json": {"schema": {
@@ -30,6 +31,7 @@ at `https://greeter.example.com/openapi.json`:
     }},
     "/greet": {"post": {
       "operationId": "greet",
+      "summary": "Greet someone",
       "description": "Greet someone by name",
       "x-juice-price": 500000,
       "requestBody": {"content": {"application/json": {"schema": {
@@ -41,7 +43,9 @@ at `https://greeter.example.com/openapi.json`:
 }
 ```
 
-The optional `x-juice-price` extension gives an operation's price in base units.
+Each operation's `summary` becomes the action's title, the short name people read
+in a list. The optional `x-juice-price` extension gives an operation's price in
+base units.
 Import the document under the application name `greeter`:
 
 ```
@@ -60,9 +64,9 @@ path, then set the visibility required for their intended audience:
 
 ```
 $ juice action enable bob@acme/greeter
-CHANGE   ACTION                  PRICE      ACTIVE  AUDIENCE
-enabled  bob@acme/greeter/greet  0.50 fUSD  yes     private
-enabled  bob@acme/greeter/index  0.00 fUSD  yes     private
+CHANGE   TITLE              ACTION                  PRICE      ACTIVE  AUDIENCE
+enabled  Greet someone      bob@acme/greeter/greet  0.50 fUSD  yes     private
+enabled  About the greeter  bob@acme/greeter/index  0.00 fUSD  yes     private
 ```
 
 ## What the document must declare
@@ -70,18 +74,45 @@ enabled  bob@acme/greeter/index  0.00 fUSD  yes     private
 To produce a usable action, an operation must provide:
 
 - an `operationId`, or an `x-juice-name`;
+- a title: an `x-juice-title`, or else a `summary`, of at most 80 characters;
 - a description or a summary;
 - parameters, a request body schema, or both;
 - exactly one unambiguous 2xx JSON response schema;
 - an `x-juice-price` that is a non-negative integer, if it declares a price at all.
 
 Supported HTTP methods are `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`.
-Non-JSON responses, streaming, multipart data, ambiguous success schemas, and
-unsupported authentication cannot produce an activatable action.
+Non-JSON responses, streaming, multipart data, ambiguous success schemas,
+unsupported authentication, and schemas outside the rules of
+[Action schemas](../reference/schemas.html) cannot produce an action. A
+response must be a JSON object.
 
 The importer combines path parameters, query parameters, and the request body
 into the action's input schema. It preserves the bindings needed to reconstruct
 the HTTP request, and uses the selected success response as the output schema.
+Parameters, request bodies, responses and schemas shared under `components`
+are followed.
+
+## What an import reports
+
+One import reports every operation, so a single run tells you everything to
+fix. An operation that cannot become an action is skipped, naming the
+operation, where it is in the document, and the rule it breaks. A change Juice
+made in storing a schema, such as writing `nullable: true` in its standard
+form, is listed as a note:
+
+```
+$ juice action import shop https://shop.example.com/openapi.json
+imported shop/addPet
+note addPet (POST /pets): input.properties.tag: nullable folded into type [T, "null"]
+skipped findPets (GET /pets): output.properties.pet: oneOf is not supported: a field has one type, a choice among strings is an enum, and a field that may be empty is "type": [T, "null"]
+skipped ping (GET /ping): no summary: a title is required (summary or x-juice-title)
+shop: 1 imported, 2 skipped.
+```
+
+With `--json`, the same report is the `rejected` list, each entry
+`{key, location, reason}`, and the `notices` list, each entry
+`{key, location, note}`. Notes are repeated on every import for as long as the
+document is written that way.
 
 ## The root of an application
 
@@ -127,7 +158,7 @@ Reconciliation preserves historical transactions, receipts, and ratings, and
 affects only actions belonging to this import. Manually registered actions and
 other applications are outside its scope.
 
-The document controls descriptions, schemas, HTTP routing, and any price
+The document controls titles, descriptions, schemas, HTTP routing, and any price
 explicitly declared by `x-juice-price`. Re-importing restores these fields if
 you edited them manually. Visibility and credentials remain under your control,
 as does the price of an operation whose document declares none.

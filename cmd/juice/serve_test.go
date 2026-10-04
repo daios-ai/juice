@@ -500,7 +500,8 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	_, tok := makeUser(t, k, "srv-actowner")
 
 	resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "http-action", "kind": "http",
+		"title": "Test action",
+		"name":  "http-action", "kind": "http",
 		"price": 0, "source": "http://example.com",
 	}, tok)
 	if resp.StatusCode != http.StatusCreated {
@@ -542,7 +543,8 @@ func TestServeListActions(t *testing.T) {
 	_, tok := makeUser(t, k, "list-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "list-me", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "list-me", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
@@ -596,7 +598,8 @@ func TestServeListPagination(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-			"name": fmt.Sprintf("page-%d", i), "kind": "http", "price": 0,
+			"title": "Test action",
+			"name":  fmt.Sprintf("page-%d", i), "kind": "http", "price": 0,
 			"source": "http://x.example", "description": "test action",
 			"input_schema": minSchema, "output_schema": minSchema, "visibility": "public",
 		}, tok)
@@ -636,7 +639,8 @@ func TestServeListActionsExcludesSuspendedOwner(t *testing.T) {
 
 	ownerID, tok := makeUser(t, k, "susp-owner")
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "svc", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "svc", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
@@ -674,7 +678,8 @@ func TestServeCreateWasmActionFromArtifact(t *testing.T) {
 	// A base64 artifact with no source — mirrors @sys/tinygo/compile output.
 	b64 := base64.StdEncoding.EncodeToString([]byte("fake-wasm-artifact-bytes"))
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "from-artifact", "kind": "wasm", "price": 0,
+		"title": "Test action",
+		"name":  "from-artifact", "kind": "wasm", "price": 0,
 		"wasm_artifact": b64,
 		"description":   "registered from a precompiled artifact",
 		"input_schema":  minSchema, "output_schema": minSchema,
@@ -753,7 +758,8 @@ func TestServeEnableDisableAction(t *testing.T) {
 	_, tok := makeUser(t, k, "toggle-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "toggle-me", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
@@ -795,7 +801,8 @@ func TestServeDeleteAction(t *testing.T) {
 	_, tok := makeUser(t, k, "del-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "delete-me", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "delete-me", "kind": "http", "price": 0, "source": "http://x.example",
 	}, tok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -902,7 +909,8 @@ func TestServeCall(t *testing.T) {
 
 	// Create and activate a free public HTTP action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "answer", "kind": "http", "price": 0, "source": backend.URL,
+		"title": "Test action",
+		"name":  "answer", "kind": "http", "price": 0, "source": backend.URL,
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
@@ -975,7 +983,8 @@ func TestServeListAndGetTransaction(t *testing.T) {
 	_, callerTok := makeUser(t, k, "tx-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "tx-action", "kind": "http", "price": 0, "source": backend.URL,
+		"title": "Test action",
+		"name":  "tx-action", "kind": "http", "price": 0, "source": backend.URL,
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
@@ -1032,7 +1041,8 @@ func TestServeRateTransaction(t *testing.T) {
 	_, callerTok := makeUser(t, k, "rate-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "rate-action", "kind": "http", "price": 0, "source": backend.URL,
+		"title": "Test action",
+		"name":  "rate-action", "kind": "http", "price": 0, "source": backend.URL,
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
@@ -1086,7 +1096,8 @@ func TestServeListActionRatings(t *testing.T) {
 	_, callerTok := makeUser(t, k, "list-ratings-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "list-ratings-action", "kind": "http", "price": 0, "source": backend.URL,
+		"title": "Test action",
+		"name":  "list-ratings-action", "kind": "http", "price": 0, "source": backend.URL,
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
@@ -1195,7 +1206,8 @@ func TestServeActionReadCarriesItsOwnExperience(t *testing.T) {
 	_, callerTok := makeUser(t, k, "stats-caller")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "stats-action", "kind": "http", "price": 0, "source": backend.URL,
+		"title": "Test action",
+		"name":  "stats-action", "kind": "http", "price": 0, "source": backend.URL,
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var action kernel.Action
@@ -1272,7 +1284,8 @@ func TestServeUpdateAction(t *testing.T) {
 	_, tok := makeUser(t, k, "upd-owner")
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "upd-action", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "upd-action", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, tok)
 	var action kernel.Action
@@ -1575,7 +1588,8 @@ func TestGetActionReadPermission(t *testing.T) {
 	_ = k
 
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "ra-action", "kind": "http", "price": 0, "source": "http://example.com",
+		"title": "Test action",
+		"name":  "ra-action", "kind": "http", "price": 0, "source": "http://example.com",
 	}, ownerTok)
 	var action kernel.Action
 	decodeResponse(t, cr, &action)
@@ -1636,6 +1650,7 @@ func TestFederationCall(t *testing.T) {
 	// Register a public ping action on @sys pointing to the backend.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "ping",
 		Kind:         kernel.KindHTTP,
 		Source:       backend.URL,
@@ -1732,7 +1747,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 
 	ownerID, _ := makeUser(t, k, "provider")
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "greet", Kind: kernel.KindHTTP,
+		OwnerUserID: ownerID, Title: "Test action", Name: "greet", Kind: kernel.KindHTTP,
 		Source: backend.URL, Price: 0, Description: "greet",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
@@ -1759,7 +1774,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 
 	// A cached proxy row is never re-served, even when named by its id.
 	m := kernel.ActionManifest{
-		ActionID: "remote-act", OwnerHandle: "far", Name: "far-act", Kind: kernel.KindHTTP,
+		ActionID: "remote-act", OwnerHandle: "far", Title: "Test action", Name: "far-act", Kind: kernel.KindHTTP,
 		Price: 0, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "far",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-far", UpdatedAt: time.Now(),
@@ -1803,6 +1818,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	// Create a private inactive action owned by @sys.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "secret",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://127.0.0.1:19871",
@@ -2083,6 +2099,7 @@ func TestFederationCallAuth(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "authtest",
 		Kind:         kernel.KindHTTP,
 		Source:       backend.URL,
@@ -2180,6 +2197,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "replay-ping",
 		Kind:         kernel.KindHTTP,
 		Source:       backend.URL,
@@ -2255,7 +2273,7 @@ func TestHealthCmdHonorsServer(t *testing.T) {
 }
 
 func TestServeImportOpenAPI(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","summary":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))
@@ -2343,7 +2361,7 @@ func TestServeActionTargets(t *testing.T) {
 	ctx := context.Background()
 	mk := func(name string) *kernel.Action {
 		a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-			OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP,
+			OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP,
 			Source: "http://api.example.com", Description: "an action",
 			InputSchema:  map[string]any{"type": "object", "description": "in"},
 			OutputSchema: map[string]any{"type": "object", "description": "out"},
@@ -2434,6 +2452,7 @@ func TestFederationReplay(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "fed-greet",
 		Kind:         kernel.KindHTTP,
 		Price:        0,
@@ -2509,7 +2528,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "strict", Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "strict", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "strict schema action",
 		InputSchema: map[string]any{
 			"type":       "object",
@@ -2572,7 +2591,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	_, _ = k.EnsureKernelAccount(ctx, pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "fail-exec", Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "fail-exec", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "always-failing action",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -2623,7 +2642,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "chash-act", Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "chash-act", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "chash",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
@@ -2671,7 +2690,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "hash-check", Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "hash-check", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "hash-check",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
@@ -2711,7 +2730,7 @@ func TestReceiptVerificationEndpoint(t *testing.T) {
 
 	// Create a local HTTP action and make a call via /v1/run to get a transaction.
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "vrr-http", Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "vrr-http", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "vrr-http",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})
@@ -2820,7 +2839,8 @@ func TestServeListActionsOwnerAuth(t *testing.T) {
 
 	// Create a private (inactive, non-public) action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "la-auth-priv", "kind": "http", "price": 0, "source": "http://x.example",
+		"title": "Test action",
+		"name":  "la-auth-priv", "kind": "http", "price": 0, "source": "http://x.example",
 		"description": "private test action", "input_schema": minSchema, "output_schema": minSchema,
 	}, ownerTok)
 	var created map[string]any
@@ -2889,7 +2909,8 @@ func TestSuperuserScopeOverTCP(t *testing.T) {
 
 	// @alice creates a private, inactive action.
 	cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-		"name": "secret", "kind": "http", "price": 0, "source": "http://127.0.0.1:1/x",
+		"title": "Test action",
+		"name":  "secret", "kind": "http", "price": 0, "source": "http://127.0.0.1:1/x",
 		"description": "private", "input_schema": minSchema, "output_schema": minSchema,
 	}, aliceTok)
 	var action kernel.Action
@@ -3356,7 +3377,8 @@ func TestServeActionsRefMode(t *testing.T) {
 	ownerHandle := "app-owner"
 	mk := func(name string) string {
 		cr := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-			"name": name, "kind": "http", "price": 0, "source": "http://x.example",
+			"title": "Test action",
+			"name":  name, "kind": "http", "price": 0, "source": "http://x.example",
 			"description": "an action", "input_schema": minSchema, "output_schema": minSchema,
 			"visibility": "public",
 		}, tok)
@@ -3426,7 +3448,7 @@ func TestServeActionsRefMode(t *testing.T) {
 // TestServeImportOpenAPIName: the import endpoint takes the application's name, one document per
 // name, and the operation keyed index becomes its root.
 func TestServeImportOpenAPIName(t *testing.T) {
-	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+	const spec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/":{"get":{"operationId":"index","summary":"index","description":"the application","parameters":[{"name":"q","in":"query","description":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}},"/hello":{"get":{"operationId":"greet","summary":"greet","description":"says hello","parameters":[{"name":"name","in":"query","description":"who","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 	specSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(spec))
@@ -3494,7 +3516,8 @@ func TestServeRunReportsCharge(t *testing.T) {
 	create := func(name, path string) kernel.Action {
 		t.Helper()
 		resp := httpDo(t, srv, "POST", "/v1/actions", map[string]any{
-			"name": name, "kind": "http", "price": 500, "source": backend.URL + path,
+			"title": "Test action",
+			"name":  name, "kind": "http", "price": 500, "source": backend.URL + path,
 			"description": "priced action", "input_schema": minSchema, "output_schema": minSchema,
 		}, ownerTok)
 		var a kernel.Action
@@ -3702,7 +3725,7 @@ func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
 
 	mk := func(name string, public bool) *kernel.Action {
 		a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-			OwnerUserID: sys.ID, Name: name, Kind: kernel.KindHTTP, Price: 0, Description: "d",
+			OwnerUserID: sys.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Price: 0, Description: "d",
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Source: backend.URL,
 		})
@@ -3882,7 +3905,7 @@ func TestAnUpstreamReplyOverTheBoundIsRefusedNotTruncated(t *testing.T) {
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "verbose-upstream", Kind: kernel.KindHTTP, Price: 0,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "verbose-upstream", Kind: kernel.KindHTTP, Price: 0,
 		Description: "returns more than can be carried", Source: backend.URL,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})

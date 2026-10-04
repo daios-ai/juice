@@ -101,7 +101,7 @@ flow_lookup() {
     # Hybrid lookup degrades to the lexical (BM25) leg with no Ollama, so a distinctively-named
     # action is discoverable by keyword — the offline happy path, untestable before.
     local aid
-    aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --kind http --source "https://api.example/x" --price "$(units 0)" --description "zqxwvprobe lexical lookup probe")" id)
+    aid=$(strfield "$(jj "$db" "$ha" action create zqxwvprobe --title "Zqxwvprobe" --kind http --source "https://api.example/x" --price "$(units 0)" --description "zqxwvprobe lexical lookup probe")" id)
     assert_nonempty "lookup.action_created" "$aid"
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     assert_contains "lookup.lexical_hit" "alice@k/zqxwvprobe" "$(jj "$db" "$ha" run sys@k/lookup '{"query":"zqxwvprobe"}')"
@@ -138,7 +138,7 @@ import json,sys
 port,f,desc=sys.argv[1],sys.argv[2],sys.argv[3]
 json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},
   "servers":[{"url":f"http://127.0.0.1:{port}"}],
-  "paths":{"/greet":{"post":{"operationId":"greet","description":desc,"x-juice-price":5,
+  "paths":{"/greet":{"post":{"operationId":"greet","summary":"Greet someone","description":desc,"x-juice-price":5,
     "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
     "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"message":{"type":"string","description":"reply"}}}}}}}}}}},open(f,"w"))
 PY
@@ -152,7 +152,7 @@ import json,sys
 port,f,desc=sys.argv[1],sys.argv[2],sys.argv[3]
 json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},
   "servers":[{"url":f"http://127.0.0.1:{port}"}],
-  "paths":{"/greet":{"post":{"operationId":"greet","description":desc,
+  "paths":{"/greet":{"post":{"operationId":"greet","summary":"Greet someone","description":desc,
     "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
     "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"message":{"type":"string","description":"reply"}}}}}}}}}}},open(f,"w"))
 PY
@@ -182,6 +182,43 @@ flow_openapi_import_execute() {
     assert_nonempty "openapi_import.call_succeeds" "$(strfield "$(jj "$db" "$hb" run "alice@k/$name" '{}')" tx_id)"
 }
 
+# One import reports every operation: where the stored contract differs from the document (a fold)
+# and which operations could not land, each named with its place in the document (D21).
+flow_openapi_import_report() {
+    echo "=== FLOW openapi_import_report ==="
+    local dir db hs ha aport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    aport=$(backend_port)
+    python3 - "$aport" "$dir/spec.json" <<'PY'
+import json,sys
+port,f=sys.argv[1],sys.argv[2]
+ok={"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}
+def op(oid,body,**extra):
+    o={"operationId":oid,"summary":"Run "+oid,"description":"does "+oid,
+       "requestBody":{"content":{"application/json":{"schema":body}}},"responses":ok}
+    o.update(extra); return {"post":o}
+named={"type":"object","properties":{"name":{"type":"string","description":"who","nullable":True}}}
+json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},
+  "servers":[{"url":f"http://127.0.0.1:{port}"}],
+  "paths":{
+    "/folded":op("folded",named),
+    "/composed":op("composed",{"allOf":[named]}),
+    "/union":op("union",{"type":"object","properties":{"v":{"description":"v","oneOf":[{"type":"string"},{"type":"integer"}]}}}),
+    "/untitled":op("untitled",named,summary=None)}},open(f,"w"))
+PY
+    start_api_server "$aport" "$dir/spec.json"
+    make_admin "$db" "$hs" || { fail "openapi_report.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+
+    local out; out=$(j "$db" "$ha" action import api "http://127.0.0.1:${aport}/" 2>&1)
+    assert_contains "openapi_report.imported" "imported api/folded" "$out"
+    assert_contains "openapi_report.note_nullable" "note folded (POST /folded): input.properties.name: nullable folded" "$out"
+    assert_contains "openapi_report.skipped_allof" "skipped composed (POST /composed): input: allOf is not supported" "$out"
+    assert_contains "openapi_report.skipped_union" "skipped union (POST /union): input.properties.v: oneOf is not supported" "$out"
+    assert_contains "openapi_report.skipped_untitled" "skipped untitled (POST /untitled): no summary" "$out"
+    # The summary is the title a person reads in the catalogue.
+    assert_json "openapi_report.title_from_summary" "$(jj "$db" "$ha" action show alice@k/api/folded)" title "Run folded"
+}
+
 flow_openapi_application() {
     echo "=== FLOW openapi_application ==="
     local dir db hs ha hb aport; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
@@ -189,7 +226,7 @@ flow_openapi_application() {
     python3 - "$aport" "$dir/spec.json" <<'PY'
 import json,sys
 port,f=sys.argv[1],sys.argv[2]
-op=lambda oid,desc:{"post":{"operationId":oid,"description":desc,
+op=lambda oid,desc:{"post":{"operationId":oid,"summary":oid.capitalize(),"description":desc,
   "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
   "responses":{"200":{"content":{"application/json":{"schema":{"type":"object","properties":{"message":{"type":"string","description":"reply"}}}}}}}}}
 json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},
@@ -261,7 +298,7 @@ flow_openapi_disable_tree() {
     python3 - "$aport" "$dir/spec.json" <<'PY'
 import json,sys
 port,f=sys.argv[1],sys.argv[2]
-op=lambda oid,desc:{"post":{"operationId":oid,"description":desc,
+op=lambda oid,desc:{"post":{"operationId":oid,"summary":oid.capitalize(),"description":desc,
   "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string","description":"who"}}}}}},
   "responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}
 json.dump({"openapi":"3.0.0","info":{"title":"T","version":"1"},

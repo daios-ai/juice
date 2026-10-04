@@ -47,8 +47,8 @@ federate only within the same network.
 
 ## Actions
 
-An **action** is a service that can be called through Juice. Its description
-states what it does, its input and output schemas describe the data it accepts
+An **action** is a service that can be called through Juice. Its title is the
+short name people read in a list, its description states what it does, its input and output schemas describe the data it accepts
 and returns, and its price states the execution budget. Together with its owner
 and name, these form the interface a caller uses to find and select the service.
 

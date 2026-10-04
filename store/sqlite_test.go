@@ -5501,3 +5501,89 @@ func TestPurgeKeepsAHolderAndTakesItsEntries(t *testing.T) {
 		t.Errorf("the purged peer's entry survived: %v", err)
 	}
 }
+
+// TestMigration058TitlesExistingRows: every action carries a title, and one written before titles
+// existed takes the last segment of its name verbatim, cut to the title limit. A cached remote
+// action is disabled, so its next call re-resolves and takes the title its provider wrote.
+func TestMigration058TitlesExistingRows(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	long := strings.Repeat("s", kernel.MaxTitleLength+20)
+	rows := map[string]struct{ name, kind, want string }{
+		"a1": {"mail/send-draft", "http", "send-draft"},
+		"a2": {"echo", "wasm", "echo"},
+		"a3": {"x/y/x/z", "http", "z"},
+		"a4": {"mail/mail", "http", "mail"},
+		"a5": {"app/" + long, "http", long[:kernel.MaxTitleLength]},
+		"p1": {"bob/forecast", "remote_proxy", "forecast"},
+	}
+	path := preValueMigrationDB(t, func(raw *sql.DB) {
+		for id, r := range rows {
+			if _, err := raw.Exec(`INSERT INTO actions (id,owner_user_id,name,kind,active,created_at,updated_at) VALUES (?,?,?,?,1,?,?)`,
+				id, "u1", r.name, r.kind, now, now); err != nil {
+				t.Fatalf("seed %s: %v", id, err)
+			}
+		}
+	})
+	db := openAt(t, path)
+	ctx := context.Background()
+	for id, r := range rows {
+		var title string
+		var active bool
+		if err := db.db.QueryRowContext(ctx, `SELECT title, active FROM actions WHERE id=?`, id).Scan(&title, &active); err != nil {
+			t.Fatal(err)
+		}
+		if title != r.want {
+			t.Errorf("%s (%s): title %q, want %q", id, r.name, title, r.want)
+		}
+		if wantActive := r.kind != "remote_proxy"; active != wantActive {
+			t.Errorf("%s: active %v, want %v", id, active, wantActive)
+		}
+	}
+}
+
+// A title is stored and read back with the action, and a discovered action's title with its doc.
+func TestTitlesRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("titler", 0)
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	a := newAction(owner.ID, "svc", 0, false)
+	a.Title = "First"
+	if err := db.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.ReadAction(ctx, a.ID); got.Title != "First" {
+		t.Errorf("created title %q", got.Title)
+	}
+	a.Title = "Second"
+	if err := db.UpdateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.ReadAction(ctx, a.ID); got.Title != "Second" {
+		t.Errorf("updated title %q", got.Title)
+	}
+
+	key := "peer-key"
+	doc := &kernel.DiscoveryDoc{Handle: "prov", ActionID: "r1", Name: "translate", Title: "Translate a contract",
+		Description: "translates", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Embedding: []float32{1, 0}, ObservedAt: time.Now().UTC()}
+	if err := db.ApplyCatalogPage(ctx, key, []*kernel.DiscoveryDoc{doc}, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := db.ListDiscoveryDocs(ctx)
+	if err != nil || len(docs) != 1 || docs[0].Title != "Translate a contract" {
+		t.Fatalf("discovery title did not round-trip: %+v %v", docs, err)
+	}
+	if hits, _ := db.SearchDiscoveryLexical(ctx, "contract", 5); len(hits) != 1 {
+		t.Errorf("a discovered action must be found by a word in its title, got %v", hits)
+	}
+	// The embedding is reused while the title and description stand, and recomputed when they move.
+	if _, ok := db.DiscoveryEmbedding(ctx, key, "r1", "Translate a contract translates"); !ok {
+		t.Error("an unchanged title and description must reuse the embedding")
+	}
+	if _, ok := db.DiscoveryEmbedding(ctx, key, "r1", "Another title translates"); ok {
+		t.Error("a new title must not reuse the old embedding")
+	}
+}

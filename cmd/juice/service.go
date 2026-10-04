@@ -651,11 +651,20 @@ type importResp struct {
 	Updated     []actionResp      `json:"updated"`
 	Deactivated []actionResp      `json:"deactivated"`
 	Rejected    []importRejection `json:"rejected"`
+	Notices     []importNotice    `json:"notices"`
 }
 
 type importRejection struct {
-	Key    string `json:"key"`
-	Reason string `json:"reason"`
+	Key      string `json:"key"`
+	Location string `json:"location"`
+	Reason   string `json:"reason"`
+}
+
+// importNotice is a fold: where the stored contract differs from what the document wrote (D4).
+type importNotice struct {
+	Key      string `json:"key"`
+	Location string `json:"location"`
+	Note     string `json:"note"`
 }
 
 func enrichImport(k *kernel.Kernel, ctx context.Context, r *kernel.ImportResult) importResp {
@@ -665,9 +674,13 @@ func enrichImport(k *kernel.Kernel, ctx context.Context, r *kernel.ImportResult)
 		Updated:     enrichActions(k, ctx, r.Updated),
 		Deactivated: enrichActions(k, ctx, r.Deactivated),
 		Rejected:    make([]importRejection, 0, len(r.Rejected)),
+		Notices:     make([]importNotice, 0, len(r.Notices)),
 	}
 	for _, rj := range r.Rejected {
-		out.Rejected = append(out.Rejected, importRejection{Key: rj.Key, Reason: rj.Reason})
+		out.Rejected = append(out.Rejected, importRejection{Key: rj.Key, Location: rj.Location, Reason: rj.Reason})
+	}
+	for _, n := range r.Notices {
+		out.Notices = append(out.Notices, importNotice{Key: n.Key, Location: n.Location, Note: n.Note})
 	}
 	return out
 }

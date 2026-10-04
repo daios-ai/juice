@@ -2019,6 +2019,7 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 type PeerAction struct {
 	ActionID     string         `json:"action_id"`
 	Name         string         `json:"name"` // the action's address, owner@<the peer's name here>/name
+	Title        string         `json:"title"`
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema,omitempty"`
 	OutputSchema map[string]any `json:"output_schema,omitempty"`
@@ -2050,7 +2051,7 @@ func (k *Kernel) PeerCatalog(ctx context.Context, publicKey string, manifests []
 			continue
 		}
 		out = append(out, &PeerAction{ActionID: m.ActionID, Name: Address{Handle: m.OwnerHandle, Kernel: host, Name: m.Name}.String(),
-			Description: m.Description, InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
+			Title: m.Title, Description: m.Description, InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
 	}
 	return out
 }
@@ -2070,7 +2071,7 @@ func (k *Kernel) PeerCatalogCached(ctx context.Context, publicKey string) ([]*Pe
 		if !ok {
 			continue
 		}
-		out = append(out, &PeerAction{ActionID: d.ActionID, Name: Address{Handle: d.Handle, Kernel: host, Name: d.Name}.String(), Description: d.Description,
+		out = append(out, &PeerAction{ActionID: d.ActionID, Name: Address{Handle: d.Handle, Kernel: host, Name: d.Name}.String(), Title: d.Title, Description: d.Description,
 			InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price, Indicative: true})
 	}
 	return out, nil
@@ -2209,9 +2210,15 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		if perr != nil {
 			continue
 		}
+		// A contract a buyer could not resolve is not indexed: no title, or a schema outside the
+		// canonical subset, which a peer on this release never signs (D4, P6).
+		if !manifestContractValid(m) {
+			continue
+		}
 		// The peer and the scan are the page's, not each document's: ApplyCatalogPage stamps them.
 		d := &DiscoveryDoc{
 			Handle:       m.OwnerHandle,
+			Title:        m.Title,
 			Description:  m.Description,
 			ActionID:     m.ActionID,
 			Name:         m.Name,
@@ -2222,9 +2229,9 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 		// Embedding a description costs a model call, so it is reused unless the words moved.
 		if k.llm != nil {
-			if vec, ok := k.store.DiscoveryEmbedding(ctx, gossip.PublicKey, m.ActionID, m.Name+" "+m.Description); ok {
+			if vec, ok := k.store.DiscoveryEmbedding(ctx, gossip.PublicKey, m.ActionID, m.Title+" "+m.Description); ok {
 				d.Embedding = vec
-			} else if vec, eerr := k.llm.Embed(ctx, m.Name+" "+m.Description); eerr == nil {
+			} else if vec, eerr := k.llm.Embed(ctx, m.Title+" "+m.Description); eerr == nil {
 				d.Embedding = vec
 			}
 		}
@@ -2342,9 +2349,9 @@ func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
 // ---- Federation import (uses reconcileImport from kernel.go) ----
 
 // remoteManifestHash returns the manifest hash for a remote_proxy action: a hex-encoded
-// SHA-256 over the manifest contract fields defined in §12.2 (description, input/output
-// schemas, price, kind, artifact_hash, and execution identity: action_id, name,
-// owner_handle). Stats and updated_at are excluded because they are not contract fields.
+// SHA-256 over the manifest contract fields (P6: title, description, input/output schemas, price,
+// kind, artifact_hash, and execution identity: action_id, name, owner_id, remote_bps). Stats,
+// owner_handle and updated_at are excluded because they are not contract fields.
 func remoteManifestHash(m ActionManifest) string {
 	inputJSON, _ := CanonicalJSON(m.InputSchema)
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
@@ -2365,6 +2372,7 @@ func remoteManifestHash(m ActionManifest) string {
 		"owner_id":      m.OwnerID,
 		"price":         m.Price,
 		"remote_bps":    m.RemoteBPS,
+		"title":         m.Title,
 	})
 	h := sha256.Sum256(payload)
 	return hex.EncodeToString(h[:])
@@ -2430,6 +2438,8 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		// owner_handle is concatenated into the proxy name/source below; a sigil or slash would
 		// corrupt the reference, so a bare handle is required (§3, §14) — not silently rewritten.
 		return nil, ErrInvalidInput.Wrap("manifest owner_handle must be a bare handle")
+	case m.Title == "":
+		return nil, ErrInvalidInput.Wrap("manifest missing title")
 	case m.Description == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing description")
 	case m.InputSchema == nil:
@@ -2441,10 +2451,13 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	case m.UpdatedAt.IsZero():
 		return nil, ErrInvalidInput.Wrap("manifest missing updated_at")
 	}
-	if err := ValidateSchema(m.InputSchema); err != nil {
+	if _, err := ValidateTitle(m.Title); err != nil {
+		return nil, ErrInvalidInput.Wrapf("manifest title invalid: %v", err)
+	}
+	if err := ValidateSchema("input", m.InputSchema); err != nil {
 		return nil, ErrInvalidInput.Wrapf("manifest input_schema invalid: %v", err)
 	}
-	if err := ValidateSchema(m.OutputSchema); err != nil {
+	if err := ValidateSchema("output", m.OutputSchema); err != nil {
 		return nil, ErrInvalidInput.Wrapf("manifest output_schema invalid: %v", err)
 	}
 	if m.Price < 0 {
@@ -2485,6 +2498,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			a.Name = name
 			a.Source = source
 			a.Price = proxyPrice
+			a.Title = m.Title
 			a.Description = m.Description
 			a.InputSchema = m.InputSchema
 			a.OutputSchema = m.OutputSchema
@@ -2527,6 +2541,15 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		k.log.With(ctx).Info("action.remote_unchanged", "remote_action_id", m.ActionID, "status", "success")
 	}
 	return result, nil
+}
+
+// manifestContractValid reports whether a manifest's contract is one this kernel can hold: a valid
+// title and canonical schemas. The resolve path refuses the same manifest with the reason.
+func manifestContractValid(m *ActionManifest) bool {
+	if _, err := ValidateTitle(m.Title); err != nil {
+		return false
+	}
+	return ValidateSchema("input", m.InputSchema) == nil && ValidateSchema("output", m.OutputSchema) == nil
 }
 
 // GetActionManifest returns a signed manifest for a public active action.
@@ -2606,6 +2629,7 @@ func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (
 		OwnerID:      owner.ID,
 		OwnerHandle:  owner.Handle,
 		Name:         a.Name,
+		Title:        a.Title,
 		RemoteBPS:    k.econ.RemoteBPS,
 		Description:  a.Description,
 		InputSchema:  a.InputSchema,

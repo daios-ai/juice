@@ -82,7 +82,7 @@ Register the decoded module as a WebAssembly action, then enable it and choose
 its audience:
 
 ```
-$ juice action create stamp --kind wasm --artifact stamp.wasm --price 1 \
+$ juice action create stamp --title "Stamp a note" --kind wasm --artifact stamp.wasm --price 1 \
     --description "Stamp a note with the current time" \
     --input-schema '{"type":"object","properties":{"note":{"type":"string","description":"text to stamp"}},"required":["note"]}'
 $ juice action enable bob@acme/stamp

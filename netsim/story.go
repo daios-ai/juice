@@ -395,7 +395,7 @@ func (s *story) publish(kernel, owner, name, visibility, route, desc string) {
 	k, credits := s.k(kernel), actionPrices[owner+"/"+name]
 	s.prices[owner+"/"+name] = credits
 	s.owners[owner+"/"+name] = kernel
-	_, _ = k.Run(owner, "action", "create", name, "--kind", "http", "--source", s.n.Backend+route,
+	_, _ = k.Run(owner, "action", "create", name, "--title", name, "--kind", "http", "--source", s.n.Backend+route,
 		"--description", desc, "--price", cr(credits), "--input-schema", schemaIn, "--output-schema", schemaOut)
 	_, _ = k.Run(owner, "action", "enable", k.At(owner+"/"+name))
 	if visibility != "private" {
@@ -528,14 +528,14 @@ func (s *story) actCatalogue() error {
 		return err
 	}
 	s.n.MustWork("catalogue.composite_across_kernels", s.k("k3"), "dan", "action", "create", "chain",
-		"--kind", "wasm", "--source", chain, "--price", cr(actionPrices["dan/chain"]),
+		"--title", "Chain across kernels", "--kind", "wasm", "--source", chain, "--price", cr(actionPrices["dan/chain"]),
 		"--description", "A composite that buys a service on another kernel")
 	_, _ = s.k("k3").Run("dan", "action", "enable", s.k("k3").At("dan/chain"))
 	// A composite nobody but its owner may call is a composite that never composes: the cross-
 	// kernel trade below buys this one, and so does another user on its own kernel.
 	_, _ = s.k("k3").Run("dan", "action", "update", s.k("k3").At("dan/chain"), "--visibility", "public")
 	s.n.MustWork("catalogue.composite_partial", s.k("k2"), "cara", "action", "create", "pair",
-		"--kind", "wasm", "--source", pair, "--price", cr(actionPrices["cara/pair"]),
+		"--title", "Quote and service pair", "--kind", "wasm", "--source", pair, "--price", cr(actionPrices["cara/pair"]),
 		"--description", "Buys a quote, then a service that returns the wrong shape")
 	_, _ = s.k("k2").Run("cara", "action", "enable", s.k("k2").At("cara/pair"))
 	_, _ = s.k("k2").Run("cara", "action", "update", s.k("k2").At("cara/pair"), "--visibility", "public")
@@ -966,7 +966,7 @@ func (s *story) actDelegated() error {
 	// takes effect at once.
 	k2 := s.k("k2")
 	auth := `{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}`
-	s.n.MustWork("auth.published", k2, "cara", "action", "create", "vault/read", "--kind", "http",
+	s.n.MustWork("auth.published", k2, "cara", "action", "create", "vault/read", "--title", "Read my vault", "--kind", "http",
 		"--source", s.n.Backend+"/headers", "--price", cr(15),
 		"--description", "Reads the caller's own upstream account", "--auth", auth)
 	_, _ = k2.Run("cara", "action", "enable", s.k("k2").At("cara/vault/read"))

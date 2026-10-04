@@ -116,3 +116,37 @@ func TestOllamaUnreachableServer(t *testing.T) {
 		t.Error("Embed against a closed server: got nil error, want failure")
 	}
 }
+
+// An action's input schema is a standard tool parameter schema, so the model receives it whole —
+// bounds, enums, nullability, closed objects — and the chosen call is mapped back to the action.
+func TestOllamaDecideSendsTheWholeSchema(t *testing.T) {
+	srv, got := ollamaStub(t, http.StatusOK,
+		`{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"bob_at_k__forecast","arguments":{"days":3}}}]}}`)
+	c := &OllamaChatter{URL: srv.URL, Model: "gemma4:26b"}
+	schema := map[string]any{
+		"type": "object", "additionalProperties": false, "required": []any{"days"},
+		"properties": map[string]any{
+			"days": map[string]any{"type": "integer", "minimum": float64(1), "maximum": float64(7), "description": "days ahead"},
+			"unit": map[string]any{"type": []any{"string", "null"}, "enum": []any{"c", "f", nil}, "description": "unit"},
+		},
+	}
+	call, _, err := c.ChatDecide(context.Background(),
+		[]kernel.DecideMessage{{Role: "user", Content: "forecast"}},
+		[]kernel.ToolDefinition{{Action: "bob@k/forecast", Description: "a forecast", InputSchema: schema}})
+	if err != nil {
+		t.Fatalf("ChatDecide: %v", err)
+	}
+	if call == nil || call.Action != "bob@k/forecast" {
+		t.Fatalf("call = %+v, want bob@k/forecast", call)
+	}
+	tools, _ := (*got)["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools sent = %v", (*got)["tools"])
+	}
+	params := tools[0].(map[string]any)["function"].(map[string]any)["parameters"]
+	sent, _ := json.Marshal(params)
+	want, _ := json.Marshal(schema)
+	if string(sent) != string(want) {
+		t.Errorf("parameters sent\n %s\nwant\n %s", sent, want)
+	}
+}

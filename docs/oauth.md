@@ -105,6 +105,7 @@ We'll build a "summarize my inbox" action against Gmail.
 
 ```bash
 juice action create inbox \
+  --title "Read my inbox" \
   --kind http \
   --source "https://gmail.googleapis.com/gmail/v1/users/me/messages" \
   --price 10 \
@@ -149,7 +150,7 @@ Many multi-user APIs don't do OAuth — they let each user mint a personal acces
 
 ```bash
 # owner: create + enable, pointing config at the header the API expects
-juice action create issues --kind http \
+juice action create issues --title "My GitHub issues" --kind http \
   --source "https://api.github.com/issues" --price 0 \
   --description "My GitHub issues" \
   --auth '{"scheme":"delegated_bearer","config":{"template":"token {token}"}}'

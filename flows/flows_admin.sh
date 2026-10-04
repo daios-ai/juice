@@ -21,7 +21,7 @@ flow_transaction_access() {
 
     # alice (seller) publishes a paid action (price=10) callable by anyone.
     local aid
-    aid=$(strfield "$(jj "$db" "$ha" action create pvd-action --kind http \
+    aid=$(strfield "$(jj "$db" "$ha" action create pvd-action --title "Pvd action" --kind http \
         --source "http://127.0.0.1:${bport}/pvd" --price "$(units 10)" --description "tx access test")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -73,7 +73,7 @@ flow_list_projections() {
     # A wasm action carries the largest thing an action owns: its compiled artifact.
     make_echo_wasm "$dir/echo.wasm"
     local aid
-    aid=$(strfield "$(jj "$db" "$ha" action create wasm-big --kind wasm --artifact "$dir/echo.wasm" \
+    aid=$(strfield "$(jj "$db" "$ha" action create wasm-big --title "Wasm big" --kind wasm --artifact "$dir/echo.wasm" \
         --description "a compiled action" --price "$(units 1)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
@@ -94,7 +94,7 @@ flow_list_projections() {
     local bport; bport=$(backend_port)
     start_backend "$bport" 200 "{\"blob\":\"$(head -c 20000 /dev/zero | tr '\0' 'x')\"}"
     local hid
-    hid=$(strfield "$(jj "$db" "$ha" action create bulky --kind http --source "http://127.0.0.1:${bport}/b" \
+    hid=$(strfield "$(jj "$db" "$ha" action create bulky --title "Bulky" --kind http --source "http://127.0.0.1:${bport}/b" \
         --description "returns a large reply" --price "$(units 1)")" id)
     j "$db" "$ha" action enable "$hid" >/dev/null 2>&1
     local i; for i in 1 2 3 4 5; do j "$db" "$ha" run alice@k/bulky '{}' >/dev/null 2>&1; done
@@ -144,7 +144,7 @@ flow_admin_supervision() {
     # and may disable any action, all over the standard TCP API (no separate admin surface).
     bport=$(backend_port); start_backend "$bport" 200 '{"ok":true}'
     local aid
-    aid=$(strfield "$(jj "$db" "$ha" action create test --kind http \
+    aid=$(strfield "$(jj "$db" "$ha" action create test --title "Test" --kind http \
         --source "http://127.0.0.1:$bport" --description "alice's action" --price "$(units 0)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1

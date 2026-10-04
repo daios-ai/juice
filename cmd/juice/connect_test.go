@@ -19,7 +19,7 @@ func createDelegatedCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name stri
 	t.Helper()
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Price: 0,
+		OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Price: 0,
 		Source: "https://provider.example/api", Description: "delegated",
 		InputSchema: minSchema, OutputSchema: minSchema,
 		Auth: &kernel.AuthInput{
@@ -126,7 +126,7 @@ func createBearerCLIAction(t *testing.T, k *kernel.Kernel, ownerID, name, source
 	t.Helper()
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Price: 0,
+		OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Price: 0,
 		Source: source, Description: "bearer", InputSchema: minSchema, OutputSchema: minSchema,
 		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
 	})

@@ -153,6 +153,7 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "remote-action-id-1",
 		OwnerHandle:  "remote-peer",
+		Title:        "Test action",
 		Name:         "sum",
 		Description:  "sum action",
 		Kind:         kernel.KindHTTP,
@@ -205,6 +206,7 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "reimp-action-id",
 		OwnerHandle:  "reimp-peer",
+		Title:        "Test action",
 		Name:         "calc",
 		Description:  "calc action",
 		Kind:         kernel.KindHTTP,
@@ -263,6 +265,7 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "stable-action-id",
 		OwnerHandle:  "stable-peer",
+		Title:        "Test action",
 		Name:         "stable",
 		Kind:         kernel.KindHTTP,
 		Price:        5,
@@ -319,6 +322,7 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "idem-action-id",
 		OwnerHandle:  "idem-peer",
+		Title:        "Test action",
 		Name:         "svc",
 		Description:  "svc action",
 		Kind:         kernel.KindHTTP,
@@ -381,6 +385,7 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "bad-sig-action",
 		OwnerHandle:  "bad-sig-peer",
+		Title:        "Test action",
 		Name:         "greet",
 		Kind:         kernel.KindHTTP,
 		Price:        0,
@@ -410,6 +415,7 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "neg-price-action",
 		OwnerHandle:  "neg-price-peer",
+		Title:        "Test action",
 		Name:         "cheap",
 		Kind:         kernel.KindHTTP,
 		Price:        -1,
@@ -444,6 +450,7 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	base := kernel.ActionManifest{
 		ActionID:     "mrf-action-1",
 		OwnerHandle:  "mrf-peer",
+		Title:        "Test action",
 		Name:         "mrf-svc",
 		Description:  "mrf desc",
 		Kind:         kernel.KindHTTP,
@@ -605,6 +612,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	m := kernel.ActionManifest{
 		ActionID:     "proxy-action-1",
 		OwnerHandle:  "proxy-peer",
+		Title:        "Test action",
 		Name:         "add",
 		Kind:         kernel.KindHTTP,
 		Price:        0,
@@ -692,7 +700,7 @@ func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel,
 		t.Fatalf("EnsureKernelAccount: %v", err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: remoteActionID, OwnerHandle: "settle-peer", Name: "settleact",
+		ActionID: remoteActionID, OwnerHandle: "settle-peer", Title: "Test action", Name: "settleact",
 		Kind: kernel.KindHTTP, Price: proxyPrice, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "s",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", UpdatedAt: time.Now(),
@@ -1361,7 +1369,7 @@ func TestProxyMutationsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "mut-act", OwnerHandle: "mut-peer", Name: "svc", Description: "svc",
+		ActionID: "mut-act", OwnerHandle: "mut-peer", Title: "Test action", Name: "svc", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now(),
 	}
@@ -1398,7 +1406,7 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 	}
 	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mp-peer")
 	m := kernel.ActionManifest{
-		ActionID: "mp-act", OwnerHandle: "mp-owner", Name: "act", Description: "svc",
+		ActionID: "mp-act", OwnerHandle: "mp-owner", Title: "Test action", Name: "act", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now(),
 	}
@@ -1434,7 +1442,7 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "sig-act", OwnerHandle: "@bob", Name: "act", Description: "svc",
+		ActionID: "sig-act", OwnerHandle: "@bob", Title: "Test action", Name: "act", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now(),
 	}
@@ -1486,7 +1494,7 @@ func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "d-act", OwnerHandle: "d-peer", Name: "svc", Description: "svc",
+		ActionID: "d-act", OwnerHandle: "d-peer", Title: "Test action", Name: "svc", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now(),
 	}
@@ -1519,7 +1527,7 @@ func TestImportRemoteActionSourceIsActionRef(t *testing.T) {
 	}
 
 	m := kernel.ActionManifest{
-		ActionID: "ref-action-1", OwnerHandle: "ref-peer", Name: "act",
+		ActionID: "ref-action-1", OwnerHandle: "ref-peer", Title: "Test action", Name: "act",
 		Kind: kernel.KindHTTP, Price: 0, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", UpdatedAt: time.Now(),
@@ -1558,7 +1566,7 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	bindPetnameForTest(t, k, ctx, peerKey, peerPetname)
 	imp := func(owner, actionID string) {
 		m := kernel.ActionManifest{
-			ActionID: actionID, OwnerHandle: owner, Name: "greet",
+			ActionID: actionID, OwnerHandle: owner, Title: "Test action", Name: "greet",
 			Kind: kernel.KindHTTP, Price: 0, Description: "g",
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -1646,7 +1654,7 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-1", OwnerID: "remote-bob-id", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-1", OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -1713,7 +1721,7 @@ func TestColdResolveIndexesAndBinds(t *testing.T) {
 		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 		key := base64.RawURLEncoding.EncodeToString(pub)
 		m := kernel.ActionManifest{
-			ActionID: "ra-" + handle, OwnerID: "remote-" + handle, OwnerHandle: "bob", Name: "greet",
+			ActionID: "ra-" + handle, OwnerID: "remote-" + handle, OwnerHandle: "bob", Title: "Test action", Name: "greet",
 			RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -1798,7 +1806,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	}
 
 	m := kernel.ActionManifest{
-		ActionID: "verify-action-1", OwnerHandle: "verify-peer", Name: "vact",
+		ActionID: "verify-action-1", OwnerHandle: "verify-peer", Title: "Test action", Name: "vact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "v",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", UpdatedAt: time.Now(),
@@ -1948,6 +1956,7 @@ func TestVerifyLocalReceipt(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
+		Title:        "Test action",
 		Name:         "vrr-local",
 		Kind:         kernel.KindHTTP,
 		Source:       "https://local.example.com/api",
@@ -2045,7 +2054,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 
 	remoteUser, _ := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
 	m := kernel.ActionManifest{
-		ActionID: "tamper-action-1", OwnerHandle: "tamper-peer", Name: "tact",
+		ActionID: "tamper-action-1", OwnerHandle: "tamper-peer", Title: "Test action", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", UpdatedAt: time.Now(),
@@ -2104,7 +2113,7 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	}
 
 	m := kernel.ActionManifest{
-		ActionID: "del-action-1", OwnerHandle: "del-peer", Name: "dact",
+		ActionID: "del-action-1", OwnerHandle: "del-peer", Title: "Test action", Name: "dact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-deadbeef", UpdatedAt: time.Now(),
@@ -2327,7 +2336,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "c-act-1", OwnerHandle: "peer-c", Name: "sum", Description: "c sum",
+		ActionID: "c-act-1", OwnerHandle: "peer-c", Title: "Test action", Name: "sum", Description: "c sum",
 		Kind: kernel.KindHTTP, Price: 50, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-c",
 		UpdatedAt: time.Now(),
@@ -3175,7 +3184,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 
 	signed := func(id string, price, rbps int64) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
-			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id,
+			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: id,
 			Description: "a priced remote action", Kind: kernel.KindHTTP,
 			Price: price, RemoteBPS: rbps,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}, UpdatedAt: time.Now().UTC(),
@@ -3229,7 +3238,7 @@ func TestProxyRepricesOnImportBPSChange(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-price", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-price", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3293,7 +3302,7 @@ func TestLegacyProxyHealsOnNextFundedUse(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3412,7 +3421,7 @@ func TestEveryReadPathReprices(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	m := kernel.ActionManifest{
-		ActionID: "ra-paths", OwnerID: "remote-bob", OwnerHandle: "bob", Name: "greet",
+		ActionID: "ra-paths", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3505,7 +3514,8 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 
 	m := kernel.ActionManifest{
 		ActionID: "quote-parity-action", OwnerID: "remote-owner-id", OwnerHandle: "carol",
-		Name: "forecast", Description: "distinctive barometric forecasting service",
+		Title: "Test action",
+		Name:  "forecast", Description: "distinctive barometric forecasting service",
 		Kind: kernel.KindHTTP, Price: 100, RemoteBPS: 500,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -3577,7 +3587,7 @@ func TestResolveRemoteApplicationRoot(t *testing.T) {
 	}
 	manifest := func(name string) *kernel.ActionManifest {
 		return sign(&kernel.ActionManifest{
-			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Name: name,
+			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: name,
 			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3639,7 +3649,7 @@ func TestResolveRemoteManifestBoundToRequest(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	manifest := func(owner, name string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
-			ActionID: "ra-x", OwnerID: "remote-id", OwnerHandle: owner, Name: name,
+			ActionID: "ra-x", OwnerID: "remote-id", OwnerHandle: owner, Title: "Test action", Name: name,
 			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3695,7 +3705,7 @@ func TestStaleExactProxyReResolvesBeforeIndex(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	manifest := func(name string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
-			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Name: name,
+			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: name,
 			RemoteBPS: 500, Description: "d", Kind: kernel.KindHTTP, Price: 100,
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			ArtifactHash: "h", UpdatedAt: time.Now(),
@@ -3819,7 +3829,7 @@ func TestAPaidCallIsRefusedWhenThePeerCannotBePaid(t *testing.T) {
 	caller := setupUser(t, st, "buyer", 100000)
 
 	priced := &kernel.ActionManifest{
-		ActionID: "remote-priced", OwnerID: "seller-1", OwnerHandle: "sam", Name: "advice",
+		ActionID: "remote-priced", OwnerID: "seller-1", OwnerHandle: "sam", Title: "Test action", Name: "advice",
 		Description: "advice", Price: 100, RemoteBPS: 500, Kind: kernel.KindHTTP,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC().Truncate(time.Second),
@@ -4114,5 +4124,104 @@ func TestEvidenceEligibilityIsFixedWhenTheCallRuns(t *testing.T) {
 	}
 	if !subjects[wentPrivate.ID] {
 		t.Error("a call made while the action was public stays evidence after it is made private")
+	}
+}
+
+// ---- the title and canonical schemas across kernels (P6, D13) ----
+
+// signedManifest is a peer's manifest for one action, signed by that peer.
+func signedManifest(t *testing.T, priv ed25519.PrivateKey, edit func(*kernel.ActionManifest)) kernel.ActionManifest {
+	t.Helper()
+	m := kernel.ActionManifest{
+		ActionID: "remote-titled", OwnerID: "remote-owner", OwnerHandle: "remote-peer", Name: "forecast",
+		Title: "Weather forecast", Description: "forecast for a city", Kind: kernel.KindHTTP, Price: 10,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		ArtifactHash: "h", UpdatedAt: time.Now().UTC(),
+	}
+	if edit != nil {
+		edit(&m)
+	}
+	sig, err := testNet.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+	return m
+}
+
+// A resolve holds what a peer signed only when it is a contract this kernel can hold: a valid title
+// and canonical schemas. The proxy carries the provider's title, and a new one re-keys it.
+func TestResolveCarriesTheTitle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	setupSys(t, k, st)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peer, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refused := map[string]func(*kernel.ActionManifest){
+		"no title":   func(m *kernel.ActionManifest) { m.Title = "" },
+		"long title": func(m *kernel.ActionManifest) { m.Title = strings.Repeat("t", kernel.MaxTitleLength+1) },
+		"not canonical": func(m *kernel.ActionManifest) {
+			m.InputSchema = map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}
+		},
+		"outside subset": func(m *kernel.ActionManifest) {
+			m.OutputSchema = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+		},
+	}
+	for name, edit := range refused {
+		if _, err := k.ImportPeerAction(ctx, peer.ID, signedManifest(t, priv, edit)); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("%s: got %v, want ErrInvalidInput", name, err)
+		}
+	}
+
+	m := signedManifest(t, priv, nil)
+	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.Title != "Weather forecast" {
+		t.Errorf("proxy title %q, want the provider's", proxy.Title)
+	}
+	retitled := signedManifest(t, priv, func(m *kernel.ActionManifest) { m.Title = "City forecast" })
+	again, err := k.ImportPeerAction(ctx, peer.ID, retitled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != proxy.ID || again.Title != "City forecast" || again.ArtifactHash == proxy.ArtifactHash {
+		t.Errorf("a new title must update the same proxy under a new contract hash: id %v title %q", again.ID == proxy.ID, again.Title)
+	}
+}
+
+// What a kernel serves abroad carries the title it holds, under its signature.
+func TestServedManifestCarriesTheTitle(t *testing.T) {
+	st := newTestStore(t)
+	su := setupUser(t, st, "sys", 0)
+	k := newTestKernel(st)
+	k.SetSigningKey(testSigningKey(), su.ID)
+	ctx := context.Background()
+	owner := setupUser(t, st, "served-owner", 0)
+	a := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "svc", Title: "Served title", Kind: kernel.KindHTTP,
+		Active: true, Visibility: kernel.VisibilityPublic, Description: "d",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Source: "https://example.com/call", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	m, err := k.GetActionManifest(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Title != "Served title" {
+		t.Errorf("manifest title %q", m.Title)
+	}
+	m.Title = "Tampered"
+	if err := testNet.VerifyManifestSignature(base64.RawURLEncoding.EncodeToString(testSigningKey().Public().(ed25519.PublicKey)), m); err == nil {
+		t.Error("the signature must cover the title")
 	}
 }

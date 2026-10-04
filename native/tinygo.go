@@ -40,6 +40,7 @@ type CompileResult struct {
 func TinyGo(deps CompileDeps, sdk string) Spec {
 	return Spec{
 		Name:        "tinygo/compile",
+		Title:       "Compile TinyGo",
 		Description: "Compiles TinyGo source (a Handle function written against the Juice SDK) to a WASM artifact, ready to register with action create --kind wasm --artifact",
 		InputSchema: obj(map[string]any{
 			"source": str("TinyGo source: a func Handle(in map[string]any) (map[string]any, error) plus any private helpers; the SDK (package, imports, alloc, run, main) is prepended automatically"),

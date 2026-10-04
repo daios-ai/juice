@@ -7,8 +7,8 @@ nav_order: 2
 # Finding an action
 
 You can find a service by searching for what it does or by reading a known
-action reference. In either case, inspect its description, input requirements,
-and price before running it.
+action reference. In either case, inspect its title and description, input
+requirements, and price before running it.
 
 ## Search
 
@@ -23,15 +23,17 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
       {
         "action": "bob@acme/echo",
         "action_id": "bb7fe1a8-…",
+        "title": "Echo a message",
         "description": "Echo a message back to the caller",
         "input_schema": {
           "type": "object",
           "properties": {
             "msg": { "type": "string", "description": "text to echo" }
           },
-          "required": ["msg"]
+          "required": ["msg"],
+          "additionalProperties": false
         },
-        "output_schema": {},
+        "output_schema": { "type": "object" },
         "price": 500000,
         "quote_hash": "4965342976414282…",
         "evidence": { … },
@@ -48,8 +50,9 @@ call. The main fields are:
 | Field | Meaning |
 |---|---|
 | `action` | the reference to pass to `run` |
+| `title` | the short name the provider gave it |
 | `description` | what the provider says it does |
-| `input_schema`, `output_schema` | the contract: what it takes and returns |
+| `input_schema`, `output_schema` | the contract: what it takes and returns, as described in [Action schemas](../reference/schemas.html) |
 | `price` | the all-in price, in base units |
 | `quote_hash` | a fingerprint of the terms shown, for pinning |
 | `evidence` | this kernel's experience, the provider's reports, and other kernels' observations |
@@ -96,13 +99,14 @@ directly:
 $ juice action show bob@acme/echo
   id: bb7fe1a8-…
   name: echo
+  title: Echo a message
   kind: http
   active: true
   visibility: local
   price: 0.50 fUSD
   description: Echo a message back to the caller
   input_schema: { … }
-  output_schema: {}
+  output_schema: {"type": "object"}
   action: bob@acme/echo
   quote_hash: 4965342976414282…
   requires_grant: false
@@ -136,14 +140,15 @@ by each report. Verification confirms a matching record of trade, not quality.
 
 ```
 $ juice action list
-ACTION                      PRICE       AUTHORIZE
-bob@acme/mail               0.00 fUSD   your own login
-dave@beta-kernel/summarize  2.205 fUSD
-bob@acme/stamp              1.00 fUSD
-bob@acme/echo               0.50 fUSD
+TITLE                 ACTION                      PRICE       AUTHORIZE
+Read my mail          bob@acme/mail               0.00 fUSD   your own login
+Summarize a document  dave@beta-kernel/summarize  2.205 fUSD
+Stamp a note          bob@acme/stamp              1.00 fUSD
+Echo a message        bob@acme/echo               0.50 fUSD
   …
 ```
 
+Each row leads with the action's title and gives the reference that runs it.
 The default list shows active actions within your access: your own actions,
 local and public actions hosted here, and cached remote actions. `your own login`
 in the `AUTHORIZE` column means an upstream connection is required. Use `--all`

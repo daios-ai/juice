@@ -6,8 +6,8 @@ nav_order: 1
 
 # Publishing
 
-Publishing gives an existing service a Juice interface: a name, a description,
-typed input and output, a price, and an audience. Registration and activation
+Publishing gives an existing service a Juice interface: a name, a title, a
+description, typed input and output, a price, and an audience. Registration and activation
 are separate, so you can prepare that interface before allowing calls.
 
 ## Creating an action
@@ -17,11 +17,12 @@ input schema describes the `msg` field, and its price is 0.50 fUSD on
 `play`:
 
 ```
-$ juice action create echo --kind http --source https://httpbin.org/post \
+$ juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: bb7fe1a8-…
   name: echo
+  title: Echo a message
   kind: http
   active: false
   visibility: private
@@ -35,6 +36,10 @@ $ juice action create echo --kind http --source https://httpbin.org/post \
 Choose a name that is unique among your actions. Slashes let you organize related
 operations under a shared path, such as `mail/send` and `mail/inbox`.
 The shared path also allows later changes to be applied to the group.
+
+The title is what people read in a list of actions, where the full reference
+`bob@acme/mail/send` would say little. It is required: one line of at most 80
+characters, such as "Send an email".
 
 The `--kind` option determines where the implementation runs:
 
@@ -53,15 +58,19 @@ loopback endpoints but refuses private, link-local, and reserved networks.
 An operator can widen that policy. Redirects remain subject to the same checks,
 including redirects from an initially permitted loopback endpoint.
 
-## Description and schemas are the contract
+## Title, description and schemas are the contract
 
-The description and schemas serve both people and software. A buyer uses them
-to judge whether the action suits a task; search uses the description to find
-it; and an agent uses the input schema to construct arguments. Explain what
-the service does and describe each field sufficiently for someone unfamiliar
-with your implementation to use it.
+The title, description and schemas serve both people and software, in the form
+agents already use to call tools. A buyer reads them to judge whether the action
+suits a task; search uses the title and description to find it; and an agent
+uses the input schema to construct arguments. Explain what the service does and
+describe each field sufficiently for someone unfamiliar with your
+implementation to use it.
 
-Activation requires a nonempty description and valid schemas. The input schema
+The schemas use one part of JSON Schema, set out in
+[Action schemas](../reference/schemas.html), together with what Juice rewrites
+when you save and what it refuses. Activation requires a nonempty description
+and valid schemas. The input schema
 is checked before funds are reserved, and the output schema before the provider
 is paid. A result that violates the output schema causes a failed call.
 
@@ -110,8 +119,8 @@ $ juice action update bob@acme/echo --price 0.75
 $ juice action enable bob@acme/echo
 ```
 
-Changing only the description resets statistics but preserves activity and
-grants. Changing visibility preserves both activity and statistics. Every `run`
+Changing only the title or the description resets statistics but preserves
+activity and grants. Changing visibility preserves both activity and statistics. Every `run`
 pins the terms it reads, or an earlier quote supplied by the caller. Changed
 terms are refused before charging. See
 [Pinning the terms you saw](../calling/running.html#pinning-the-terms-you-saw).
@@ -163,7 +172,7 @@ When an upstream service uses your provider account, attach its credential
 to the action. The kernel will apply it when sending requests to the endpoint:
 
 ```
-$ juice action create weather --kind http --source https://api.example.com/v1/forecast \
+$ juice action create weather --title "City forecast" --kind http --source https://api.example.com/v1/forecast \
     --price 1 --description "Forecast for a city" \
     --input-schema '…' \
     --auth '{"scheme":"bearer","secrets":{"token":"…"}}'

@@ -13,6 +13,7 @@ import (
 func Decide(chatter kernel.DecideChatter) Spec {
 	return Spec{
 		Name:        "llm/decide",
+		Title:       "Choose an action",
 		Description: "LLM-driven action selection; returns chosen action and args without executing",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(obj(map[string]any{

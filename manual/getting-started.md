@@ -224,15 +224,16 @@ Password:
 bob@acme
 ```
 
-As Bob, register the endpoint with a description, a price of 0.50 fUSD, and
-an input schema requiring a text field named `msg`:
+As Bob, register the endpoint with a title, a description, a price of
+0.50 fUSD, and an input schema requiring a text field named `msg`:
 
 ```
-$ juice action create echo --kind http --source https://httpbin.org/post \
+$ juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
   id: 6a9e04ce-…
   name: echo
+  title: Echo a message
   kind: http
   active: false
   visibility: private
@@ -250,11 +251,11 @@ it:
 
 ```
 $ juice action enable bob@acme/echo
-CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
-enabled  bob@acme/echo  0.50 fUSD  yes     private
+CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
+enabled  Echo a message  bob@acme/echo  0.50 fUSD  yes     private
 $ juice action update bob@acme/echo --visibility local
-CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
-updated  bob@acme/echo  0.50 fUSD  yes     local
+CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
+updated  Echo a message  bob@acme/echo  0.50 fUSD  yes     local
 ```
 
 ### Alice finds it and buys it
@@ -269,9 +270,10 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
       {
         "action": "bob@acme/echo",
         "action_id": "6a9e04ce-…",
+        "title": "Echo a message",
         "description": "Echo a message back to the caller",
         "input_schema": { … },
-        "output_schema": {},
+        "output_schema": { "type": "object" },
         "price": 500000,
         "quote_hash": "1f8ec43b…",
         "evidence": { … },
@@ -283,7 +285,7 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   …
 ```
 
-The search result contains the reference to call, its description and schemas,
+The search result contains the reference to call, its title, description and schemas,
 its price, and the evidence this kernel holds about it. Because this is an
 action's JSON result, `price` uses integer
 base units: `500000` represents `0.50 fUSD`. Use the returned reference to

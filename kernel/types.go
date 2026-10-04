@@ -98,6 +98,7 @@ type Action struct {
 	OwnerHandle    string           `json:"owner_handle,omitempty"`    // populated via JOIN; empty if not loaded
 	OwnerSuspended bool             `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
 	Name           string           `json:"name"`
+	Title          string           `json:"title"` // the short name a person reads in a list (D4); the address names it for software
 	Kind           ActionKind       `json:"kind"`
 	Active         bool             `json:"active"`
 	Visibility     ActionVisibility `json:"visibility"`
@@ -642,12 +643,23 @@ type ImportResult struct {
 	Updated     []*Action // rewritten: a contract change also deactivates; an auth-only change does not
 	Deactivated []*Action // deactivated: removed from the source
 	Rejected    []ImportRejection
+	Notices     []ImportNotice
 }
 
-// ImportRejection records one operation that could not be imported.
+// ImportRejection records one operation that could not be imported: which, where in the document,
+// and the rule it broke, so one import tells a coder everything to fix.
 type ImportRejection struct {
-	Key    string // operation_key or action name
-	Reason string
+	Key      string // operation_key or action name
+	Location string // "METHOD /path" in the document
+	Reason   string
+}
+
+// ImportNotice records how a stored contract differs from what the document wrote: a fold into the
+// canonical schema form (D4).
+type ImportNotice struct {
+	Key      string
+	Location string
+	Note     string
 }
 
 // HTTPParam records where one input field is sent in the HTTP request.
@@ -681,6 +693,7 @@ type ActionManifest struct {
 	OwnerID      string         `json:"owner_id"`     // stable owner user_id on the serving kernel (identity half of PrincipalID)
 	OwnerHandle  string         `json:"owner_handle"` // owner's current display handle (mutable metadata, not identity/contract)
 	Name         string         `json:"name"`
+	Title        string         `json:"title"`
 	RemoteBPS    int64          `json:"remote_bps"` // provider premium (bps) on inbound remote calls (§13)
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema"`
@@ -928,6 +941,7 @@ type EvidenceRow struct {
 type DiscoveryDoc struct {
 	KernelPublicKey string         `json:"kernel_public_key"`
 	Handle          string         `json:"handle,omitempty"`
+	Title           string         `json:"title,omitempty"`
 	Description     string         `json:"description,omitempty"`
 	ActionID        string         `json:"action_id,omitempty"` // remote action id
 	Name            string         `json:"name,omitempty"`

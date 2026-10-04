@@ -40,7 +40,7 @@ _fed_setup() {
     FED_LKEY=$(kernel_key "$FED_DBL" "$FED_HL")
     [ -n "$FED_RKEY" ] && [ -n "$FED_LKEY" ] || return 1
 
-    FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price "$(units 0)")" id)
+    FED_RID=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create greet --title "Greet" --kind http --source "http://127.0.0.1:$FED_BPORT" --description "greet" --price "$(units 0)")" id)
     [ -n "$FED_RID" ] || return 1
     j "$FED_DBR" "$FED_HR" action enable "$FED_RID" >/dev/null 2>&1
     j "$FED_DBR" "$FED_HR" action update "$FED_RID" --visibility public >/dev/null 2>&1
@@ -97,6 +97,8 @@ flow_federation_import_execute() {
 
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/greet '{}')" tx_id)
     assert_nonempty "fed_import.call_succeeds" "$tx_id"
+    # The proxy carries the title its provider wrote, signed into the manifest (P6).
+    assert_json "fed_import.proxy_title" "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" title Greet
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_nonempty "fed_import.remote_receipt_hash" "$(strfield "$tx" remote_receipt_hash)"
     assert_nonempty "fed_import.remote_receipt_json" "$(strfield "$tx" remote_receipt_json)"
@@ -380,7 +382,7 @@ flow_fed_gossip_discovery() {
     # (U7, U9). R serves a second action to its own users only, uses it, and publishes it
     # afterwards: those calls were private business and stay private, however the action is
     # advertised later.
-    local late; late=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create late --kind http \
+    local late; late=$(strfield "$(jj "$FED_DBR" "$FED_HR" action create late --title "Late" --kind http \
         --source "http://127.0.0.1:$FED_BPORT" --description "served at home first" --price "$(units 0)")" id)
     j "$FED_DBR" "$FED_HR" action enable "$late" >/dev/null 2>&1
     assert_nonempty "fed_gossip.private_call_runs" "$(strfield "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/late '{}')" tx_id)"

@@ -336,6 +336,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	}
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  u.ID,
+		Title:        "Test action",
 		Name:         "lookup",
 		Kind:         kernel.KindNative,
 		Price:        0,
@@ -346,7 +347,7 @@ func TestEnsureSysNativeReconcilesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "old description", stale, stale, 0, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", "old description", stale, stale, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -387,7 +388,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 		return k
 	}
 	schema := map[string]any{"type": "object"}
-	spec := native.Spec{Name: "widget", Description: "a widget native", InputSchema: schema, OutputSchema: schema,
+	spec := native.Spec{Title: "Test native", Name: "widget", Description: "a widget native", InputSchema: schema, OutputSchema: schema,
 		Handler: func(native.Host) kernel.NativeFunc { return nil }}
 	const widgetPrice int64 = 7
 

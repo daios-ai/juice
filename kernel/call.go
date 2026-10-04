@@ -133,6 +133,7 @@ func (r *CallReply) Deferred() bool { return r != nil && r.TxID == "" }
 type quoteTerms struct {
 	ActionID     string         `json:"action_id"` // stable identity: the remote id for a proxy
 	Effect       string         `json:"effect"`
+	Title        string         `json:"title"`
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema"`
 	OutputSchema map[string]any `json:"output_schema"`
@@ -153,7 +154,7 @@ func quoteTermsOfAction(a *Action) quoteTerms {
 		id = a.ID
 	}
 	return quoteTerms{
-		ActionID: id, Effect: a.Effect, Description: a.Description,
+		ActionID: id, Effect: a.Effect, Title: a.Title, Description: a.Description,
 		InputSchema: a.InputSchema, OutputSchema: a.OutputSchema, Price: a.Price,
 	}
 }
@@ -164,7 +165,7 @@ func quoteTermsOfDoc(d *DiscoveryDoc, price int64) quoteTerms {
 	// Effect stays at its zero value: the value channel is local to a kernel, so no manifest declares
 	// one and a discovered action is never effect-bearing (§13).
 	return quoteTerms{
-		ActionID: d.ActionID, Description: d.Description,
+		ActionID: d.ActionID, Title: d.Title, Description: d.Description,
 		InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price,
 	}
 }

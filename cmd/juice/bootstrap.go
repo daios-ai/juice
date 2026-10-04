@@ -192,6 +192,11 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 	// Retry any remote proxy calls that were pending at last shutdown.
 	k.RetryPendingRemoteDispatches(ctx)
 
+	// Every stored schema is read in one form, whatever release wrote it (D4).
+	if err := k.CanonicalizeStoredSchemas(ctx); err != nil {
+		return fmt.Errorf("canonicalize schemas: %w", err)
+	}
+
 	for _, spec := range specs {
 		if err := ensureSysNative(ctx, k, handle, spec, nativeCfg.PriceOf(spec.Name)); err != nil {
 			return err
@@ -241,6 +246,7 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 		a, err = k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 			OwnerUserID: su.ID,
 			Name:        spec.Name,
+			Title:       spec.Title,
 			Kind:        kernel.KindNative,
 			Price:       price,
 			Effect:      spec.Effect,
@@ -249,7 +255,7 @@ func ensureSysNative(ctx context.Context, k *kernel.Kernel, superuserHandle stri
 			return fmt.Errorf("create @sys/%s: %w", spec.Name, err)
 		}
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, spec.Description, spec.InputSchema, spec.OutputSchema, price, spec.Effect); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, spec.Title, spec.Description, spec.InputSchema, spec.OutputSchema, price, spec.Effect); err != nil {
 		return fmt.Errorf("activate @sys/%s: %w", spec.Name, err)
 	}
 	return nil

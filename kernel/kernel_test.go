@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -370,6 +371,7 @@ func TestCreateNativeActionRejected(t *testing.T) {
 	owner := setupUser(t, st, "owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "native-attempt",
 		Kind:        kernel.KindNative,
 	})
@@ -386,6 +388,7 @@ func TestNativeActionNormalLifecycleRejected(t *testing.T) {
 	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "native",
 		Kind:        kernel.KindNative,
 	})
@@ -425,6 +428,7 @@ func TestAuthCredentialsRequireSecretBox(t *testing.T) {
 	owner := setupUser(t, st, "svcowner", 0)
 	req := kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "svc",
 		Kind:         kernel.KindHTTP,
 		Source:       "https://example.com",
@@ -467,6 +471,7 @@ func TestActivateWasmActionFromArtifactOnly(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "from-artifact",
 		Kind:         kernel.KindWasm,
 		Price:        0,
@@ -505,6 +510,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "native",
 		Kind:        kernel.KindNative,
 	})
@@ -517,7 +523,7 @@ func TestActivateNativeActionBootstrapPath(t *testing.T) {
 	desc := "A native action"
 	in := map[string]any{"type": "object", "properties": map[string]any{"x": map[string]any{"type": "string", "description": "x"}}}
 	out := map[string]any{"type": "object"}
-	if err := k.ActivateNativeAction(ctx, a.ID, desc, in, out, 0, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", desc, in, out, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	active, err := k.ReadAction(ctx, a.ID)
@@ -550,11 +556,11 @@ func TestPruneOrphanedNativeActions(t *testing.T) {
 	in := map[string]any{"type": "object"}
 	out := map[string]any{"type": "object"}
 	register := func(name string) string {
-		a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: owner.ID, Name: name, Kind: kernel.KindNative})
+		a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindNative})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := k.ActivateNativeAction(ctx, a.ID, name+" native", in, out, 0, ""); err != nil {
+		if err := k.ActivateNativeAction(ctx, a.ID, "Test native", name+" native", in, out, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 		return a.ID
@@ -614,7 +620,7 @@ func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
 		k := newKernel(testConfig(), kernel.Dependencies{Store: st, Logger: logger})
 		owner := setupUser(t, st, "sys", 0)
 		a, err := k.RegisterNativeAction(context.Background(), kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: "native-log", Kind: kernel.KindNative,
+			OwnerUserID: owner.ID, Title: "Test action", Name: "native-log", Kind: kernel.KindNative,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -636,7 +642,7 @@ func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
 		t.Errorf("registering a native logged %d info lines, want 1", got)
 	}
 	// Activating an inactive row is a state change, so the first boot reports it.
-	if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 0, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, id, "Test native", "desc", in, out, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(t, logPath, "action.native_enabled"); got != 1 {
@@ -647,7 +653,7 @@ func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
 	}
 	// Every later boot passes the same spec and must say nothing at info.
 	for i := 0; i < 3; i++ {
-		if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 0, ""); err != nil {
+		if err := k.ActivateNativeAction(ctx, id, "Test native", "desc", in, out, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -655,13 +661,13 @@ func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
 		t.Errorf("unchanged reconciliation logged %d info lines, want 1", got)
 	}
 	// A build that changes a price or a contract has changed the row, and says so.
-	if err := k.ActivateNativeAction(ctx, id, "desc", in, out, 7, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, id, "Test native", "desc", in, out, 7, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(t, logPath, "action.native_enabled"); got != 2 {
 		t.Errorf("price correction logged %d info lines, want 2", got)
 	}
-	if err := k.ActivateNativeAction(ctx, id, "desc", newIn, out, 7, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, id, "Test native", "desc", newIn, out, 7, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(t, logPath, "action.native_enabled"); got != 3 {
@@ -671,7 +677,7 @@ func TestNativeBootLogsOnlyDurableChanges(t *testing.T) {
 	// The quiet reconciliation is still recorded, one level down.
 	kd, idd, debugPath := setup(t, "debug")
 	for i := 0; i < 2; i++ {
-		if err := kd.ActivateNativeAction(ctx, idd, "desc", in, out, 0, ""); err != nil {
+		if err := kd.ActivateNativeAction(ctx, idd, "Test native", "desc", in, out, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -688,6 +694,7 @@ func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "native-reconcile",
 		Kind:         kernel.KindNative,
 		Description:  "old",
@@ -700,7 +707,7 @@ func TestActivateNativeActionReconcilesSchema(t *testing.T) {
 
 	newIn := map[string]any{"type": "object", "properties": map[string]any{"y": map[string]any{"type": "integer", "description": "y"}}}
 	newOut := map[string]any{"type": "object", "properties": map[string]any{"z": map[string]any{"type": "string", "description": "z"}}}
-	if err := k.ActivateNativeAction(ctx, a.ID, "new desc", newIn, newOut, 0, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", "new desc", newIn, newOut, 0, ""); err != nil {
 		t.Fatalf("ActivateNativeAction: %v", err)
 	}
 
@@ -727,6 +734,7 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 	owner := setupUser(t, st, "sys", 0)
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "native-bad",
 		Kind:        kernel.KindNative,
 	})
@@ -739,7 +747,7 @@ func TestActivateNativeActionRejectsSchemaWithoutDescriptions(t *testing.T) {
 			"x": map[string]any{"type": "string"}, // missing description
 		},
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "desc", badIn, nil, 0, ""); !errors.Is(err, kernel.ErrSchemaViolation) {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", "desc", badIn, nil, 0, ""); !errors.Is(err, kernel.ErrSchemaViolation) {
 		t.Fatalf("ActivateNativeAction with missing schema descriptions: got %v, want ErrSchemaViolation", err)
 	}
 }
@@ -754,6 +762,7 @@ func TestActivateNativeActionReconcilesPrice(t *testing.T) {
 	out := map[string]any{"type": "object"}
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "native-price",
 		Kind:        kernel.KindNative,
 		Price:       0,
@@ -761,7 +770,7 @@ func TestActivateNativeActionReconcilesPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.ActivateNativeAction(ctx, a.ID, "desc", in, out, 5, ""); err != nil {
+	if err := k.ActivateNativeAction(ctx, a.ID, "Test native", "desc", in, out, 5, ""); err != nil {
 		t.Fatalf("ActivateNativeAction: %v", err)
 	}
 	got, err := k.ReadAction(ctx, a.ID)
@@ -1106,6 +1115,7 @@ func TestCreateHTTPActionRejectsSSRFURL(t *testing.T) {
 	owner := setupUser(t, st, "owner", 0)
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "webhook",
 		Kind:        kernel.KindHTTP,
 		Source:      "http://169.254.169.254/latest/meta-data/",
@@ -1993,6 +2003,7 @@ func TestCreateHTTPActionBuildsStructuredSource(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID: owner.ID,
+		Title:       "Test action",
 		Name:        "weather",
 		Kind:        kernel.KindHTTP,
 		Source:      "https://api.example.com/weather/{city}",
@@ -2027,7 +2038,7 @@ func TestCreateHTTPActionDefaultsToPOST(t *testing.T) {
 	owner := setupUser(t, st, "hpost-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "hook", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "hook", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com/hook",
 	})
 	if err != nil {
@@ -2045,7 +2056,7 @@ func TestCreateHTTPActionRejectsBadMethodAndParam(t *testing.T) {
 	owner := setupUser(t, st, "hbad-owner", 0)
 
 	_, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "bad-method", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "bad-method", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com", Method: "FETCH",
 	})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
@@ -2053,7 +2064,7 @@ func TestCreateHTTPActionRejectsBadMethodAndParam(t *testing.T) {
 	}
 
 	_, err = k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "bad-param", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "bad-param", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com", Params: []kernel.HTTPParam{{Name: "x", In: "header"}},
 	})
 	if !errors.Is(err, kernel.ErrInvalidInput) {
@@ -2068,7 +2079,7 @@ func TestUpdateHTTPActionMergesSource(t *testing.T) {
 	owner := setupUser(t, st, "hmerge-owner", 0)
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-		OwnerUserID: owner.ID, Name: "svc", Kind: kernel.KindHTTP,
+		OwnerUserID: owner.ID, Title: "Test action", Name: "svc", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com/v1", Method: "GET",
 	})
 	if err != nil {
@@ -2101,6 +2112,7 @@ func TestSetActiveRequiresDescription(t *testing.T) {
 
 	a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "nodesc",
 		Kind:         kernel.KindHTTP,
 		Source:       "http://example.com",
@@ -2169,6 +2181,7 @@ func TestSetActiveValidatesWasm(t *testing.T) {
 	// WASM action with placeholder source.
 	a, err := newTestKernel(st).CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
 		OwnerUserID:  owner.ID,
+		Title:        "Test action",
 		Name:         "wasm-act",
 		Kind:         kernel.KindWasm,
 		Source:       "invalid-wasm",
@@ -2209,7 +2222,7 @@ func TestSetActiveValidatesSchemas(t *testing.T) {
 // minOpenAPISpec is a valid minimal OpenAPI 3.x spec with one GET /hello operation.
 // servers[0].url is a public hostname so activation SSRF checks pass without AllowLocalSources.
 // The operation includes a query parameter to satisfy the input-contract requirement.
-const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
+const minOpenAPISpec = `{"openapi":"3.0.0","info":{"title":"T","version":"1"},"servers":[{"url":"http://api.example.com"}],"paths":{"/hello":{"get":{"operationId":"sayHello","summary":"sayHello","description":"says hello","parameters":[{"name":"name","in":"query","description":"who to greet","schema":{"type":"string"}}],"responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object"}}}}}}}}}`
 
 // ---- #12 supervision authority tests ----
 
@@ -2223,6 +2236,7 @@ func TestCreateActionSubjectMismatchRejected(t *testing.T) {
 
 	_, err := k.CreateAction(ctx, userA.ID, kernel.CreateActionRequest{
 		OwnerUserID: userB.ID,
+		Title:       "Test action",
 		Name:        "action",
 		Kind:        kernel.KindHTTP,
 		Source:      "http://example.com",
@@ -3145,6 +3159,7 @@ func createDelegatedAction(t *testing.T, k *kernel.Kernel, ownerID, name string,
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
 		OwnerUserID:  ownerID,
+		Title:        "Test action",
 		Name:         name,
 		Kind:         kernel.KindHTTP,
 		Price:        price,
@@ -3183,7 +3198,7 @@ func TestValidateAuthInputSchemes(t *testing.T) {
 
 	base := func(auth *kernel.AuthInput) kernel.CreateActionRequest {
 		return kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: "svc-" + auth.Scheme, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: "svc-" + auth.Scheme, Kind: kernel.KindHTTP,
 			Source: "https://provider.example/api", Description: "d",
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Auth: auth,
@@ -3424,6 +3439,7 @@ func createBearerAction(t *testing.T, k *kernel.Kernel, ownerID, name string, pr
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
 		OwnerUserID:  ownerID,
+		Title:        "Test action",
 		Name:         name,
 		Kind:         kernel.KindHTTP,
 		Price:        price,
@@ -3455,7 +3471,7 @@ func TestDelegatedBearerValidation(t *testing.T) {
 
 	base := func(name string, auth *kernel.AuthInput) kernel.CreateActionRequest {
 		return kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP,
 			Source: "https://provider.example/api", Description: "d",
 			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Auth: auth,
@@ -3590,7 +3606,7 @@ func TestActionAuthInfo(t *testing.T) {
 
 	mk := func(name string, auth *kernel.AuthInput) *kernel.Action {
 		a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP, Source: "https://provider.example/api",
+			OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Source: "https://provider.example/api",
 			Description: "d", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Auth: auth,
 		})
@@ -3625,7 +3641,7 @@ func createBearerActionSrc(t *testing.T, k *kernel.Kernel, ownerID, name, source
 	t.Helper()
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: source,
+		OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Source: source,
 		Description: "bearer svc", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer},
 	})
@@ -3652,7 +3668,7 @@ func createOAuthActionSrc(t *testing.T, k *kernel.Kernel, ownerID, name, scopes,
 	t.Helper()
 	ctx := context.Background()
 	a, err := k.CreateAction(ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: source,
+		OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Source: source,
 		Description: "oauth svc", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		Auth: &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated, Config: map[string]any{
 			"auth_url": "https://provider.example/auth", "token_url": "https://provider.example/token",
@@ -3876,7 +3892,7 @@ func TestUpdateRevokesGrantsRegardlessOfActiveState(t *testing.T) {
 
 	newDelegatedAction := func(name string) *kernel.Action {
 		a, err := k.CreateAction(ctx, owner.ID, kernel.CreateActionRequest{
-			OwnerUserID: owner.ID, Name: name, Kind: kernel.KindHTTP,
+			OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP,
 			Source: "https://api.example.com/one", Description: "delegated",
 			InputSchema:  map[string]any{"type": "object", "description": "in"},
 			OutputSchema: map[string]any{"type": "object", "description": "out"},
@@ -4076,4 +4092,209 @@ func TestEveryCommittedCallIsObservedOnceByScope(t *testing.T) {
 		}
 		check(t, m.calls, observedCall{"inbound", "failure"})
 	})
+}
+
+// ---- the action contract: title and canonical schemas (D4) ----
+
+// createDescribedHTTP creates an http action an owner can enable: described, with described fields.
+func createDescribedHTTP(t *testing.T, k *kernel.Kernel, owner *kernel.Account, name, title string, in map[string]any) (*kernel.Action, error) {
+	t.Helper()
+	return k.CreateAction(context.Background(), owner.ID, kernel.CreateActionRequest{
+		OwnerUserID: owner.ID, Name: name, Title: title, Kind: kernel.KindHTTP,
+		Source: "https://api.example.com/" + name, Description: "does " + name,
+		InputSchema: in, OutputSchema: map[string]any{"type": "object"},
+	})
+}
+
+func TestActionTitleIsRequired(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "title-owner", 0)
+	for _, bad := range []string{"", "  ", "two\nlines", strings.Repeat("t", kernel.MaxTitleLength+1)} {
+		if _, err := createDescribedHTTP(t, k, owner, "a", bad, nil); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("title %q: got %v, want ErrInvalidInput", bad, err)
+		}
+	}
+	a, err := createDescribedHTTP(t, k, owner, "a", "  Fetch a forecast  ", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Title != "Fetch a forecast" {
+		t.Errorf("title %q, want it trimmed", a.Title)
+	}
+	stored, _ := st.ReadAction(context.Background(), a.ID)
+	if stored.Title != "Fetch a forecast" {
+		t.Errorf("stored title %q", stored.Title)
+	}
+}
+
+// A title is quoted, not executed: changing it moves the quote and resets the action's track record,
+// but leaves a live action live. It names one action, so a path covering several is refused.
+func TestActionTitleUpdate(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "retitle-owner", 0)
+	in := map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string", "description": "query"}}}
+	a, err := createDescribedHTTP(t, k, owner, "app/one", "One", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createDescribedHTTP(t, k, owner, "app/two", "Two", in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.SetActiveMany(ctx, owner.ID, "retitle-owner@k/app", true); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = st.ReadAction(ctx, a.ID)
+	quoted := kernel.QuoteHash(a)
+	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: a.ID, Uses: 5, Successes: 5}); err != nil {
+		t.Fatal(err)
+	}
+
+	title := "One, renamed"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Title: &title}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = st.ReadAction(ctx, a.ID)
+	if a.Title != title || !a.Active {
+		t.Errorf("title %q active %v; want the new title on a live action", a.Title, a.Active)
+	}
+	if kernel.QuoteHash(a) == quoted {
+		t.Error("a new title must move the quote: a pin taken under the old one is refused")
+	}
+	if stats, _ := st.ReadStats(ctx, a.ID); stats == nil || stats.Uses != 0 {
+		t.Errorf("a new title must reset the track record: %+v", stats)
+	}
+
+	bad := strings.Repeat("x", kernel.MaxTitleLength+1)
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Title: &bad}); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("an over-long title: got %v", err)
+	}
+	same := "Same"
+	if _, err := k.UpdateActionMany(ctx, owner.ID, "retitle-owner@k/app", kernel.UpdateActionRequest{Title: &same}); err == nil {
+		t.Error("a title targeting a whole path must be refused")
+	}
+}
+
+// Create stores the canonical form, whatever spelling the author used.
+func TestCreateActionStoresCanonicalSchemas(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	owner := setupUser(t, st, "canon-owner", 0)
+	a, err := createDescribedHTTP(t, k, owner, "a", "A", map[string]any{
+		"properties": map[string]any{"n": map[string]any{"type": "integer", "nullable": true, "description": "n"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := st.ReadAction(context.Background(), a.ID)
+	want := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+		"n": map[string]any{"type": []any{"integer", "null"}, "description": "n"}}}
+	got, _ := json.Marshal(stored.InputSchema)
+	w, _ := json.Marshal(want)
+	if string(got) != string(w) {
+		t.Errorf("stored %s, want %s", got, w)
+	}
+	if _, err := createDescribedHTTP(t, k, owner, "b", "B", map[string]any{"type": "object", "properties": map[string]any{
+		"v": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "integer"}}},
+	}}); !errors.Is(err, kernel.ErrSchemaViolation) || !strings.Contains(err.Error(), "input.properties.v: oneOf") {
+		t.Errorf("a union must be refused at create with its path: %v", err)
+	}
+}
+
+// Activation is the gate: a row that reached the store in another spelling is folded when it
+// becomes callable, and one outside the subset never becomes callable.
+func TestActivationFoldsStoredSchemas(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "fold-owner", 0)
+	row := func(name string, in map[string]any) *kernel.Action {
+		a := &kernel.Action{ID: uuid.NewString(), OwnerUserID: owner.ID, Name: name, Title: name, Kind: kernel.KindHTTP,
+			Source: `{"type":"http","base_url":"https://api.example.com","method":"POST","path":"/x"}`, Description: "d",
+			InputSchema: in, OutputSchema: map[string]any{}, Visibility: kernel.VisibilityPrivate,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	legacy := row("legacy", map[string]any{"type": "object", "properties": map[string]any{"s": map[string]any{"type": "string", "nullable": true, "description": "s"}}})
+	union := row("union", map[string]any{"type": "object", "properties": map[string]any{"s": map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "integer"}}, "description": "s"}}})
+
+	if _, err := k.SetActiveMany(ctx, owner.ID, legacy.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.ReadAction(ctx, legacy.ID)
+	if err := kernel.ValidateSchema("input", got.InputSchema); err != nil || got.OutputSchema["type"] != "object" {
+		t.Errorf("activation must store the canonical form: %v %v %v", got.InputSchema, got.OutputSchema, err)
+	}
+	if _, err := k.SetActiveMany(ctx, owner.ID, union.ID, true); !errors.Is(err, kernel.ErrInvalidState) || !strings.Contains(err.Error(), "anyOf") {
+		t.Errorf("a union must not become callable: %v", err)
+	}
+}
+
+// Every boot reads stored schemas in one form: a row in another spelling is rewritten and stays
+// live, a row outside the subset is disabled rather than served, and a second pass changes nothing.
+func TestCanonicalizeStoredSchemas(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "boot-owner", 0)
+	row := func(name string, in map[string]any) *kernel.Action {
+		a := &kernel.Action{ID: uuid.NewString(), OwnerUserID: owner.ID, Name: name, Title: name, Kind: kernel.KindHTTP, Active: true,
+			Source: `{"type":"http","base_url":"https://api.example.com","method":"POST","path":"/x"}`, Description: "d",
+			InputSchema: in, OutputSchema: map[string]any{"type": "object"}, Visibility: kernel.VisibilityPrivate,
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	legacy := row("legacy", map[string]any{"type": "object", "properties": map[string]any{"s": map[string]any{"type": "string", "nullable": true}}})
+	untyped := row("untyped", map[string]any{"type": "object", "properties": map[string]any{"anything": map[string]any{"description": "any value"}}})
+	canonical := row("canonical", map[string]any{"type": "object"})
+	bare := setupAction(t, st, owner.ID, "no-schema", 0) // nil schemas: never callable, left alone
+
+	for pass := 0; pass < 2; pass++ {
+		if err := k.CanonicalizeStoredSchemas(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.ReadAction(ctx, legacy.ID)
+		if !got.Active || kernel.ValidateSchema("input", got.InputSchema) != nil {
+			t.Errorf("pass %d: a legacy spelling must be rewritten and stay live: %v active=%v", pass, got.InputSchema, got.Active)
+		}
+		if got, _ := st.ReadAction(ctx, untyped.ID); got.Active {
+			t.Errorf("pass %d: a schema outside the subset must be disabled", pass)
+		}
+		if got, _ := st.ReadAction(ctx, canonical.ID); !got.Active || !reflect.DeepEqual(got.InputSchema, map[string]any{"type": "object"}) {
+			t.Errorf("pass %d: a canonical row must be untouched: %v", pass, got.InputSchema)
+		}
+		if got, _ := st.ReadAction(ctx, bare.ID); !got.Active || got.InputSchema != nil {
+			t.Errorf("pass %d: a row without schemas must be left alone", pass)
+		}
+	}
+}
+
+// Lookup reads the title: a word that appears only there finds the action.
+func TestLookupSearchesTheTitle(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	owner := setupUser(t, st, "lookup-title", 0)
+	a, err := createDescribedHTTP(t, k, owner, "svc", "Zanzibar weather", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.SetActiveMany(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	results, err := k.Lookup(ctx, kernel.LookupRequest{Query: "zanzibar", Limit: 5, CallerID: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAction(results, a.ID) {
+		t.Error("a word in the title must find the action")
+	}
 }

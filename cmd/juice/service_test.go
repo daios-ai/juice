@@ -126,7 +126,7 @@ func TestEnrichTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	createAction := func(name string, input map[string]any) *kernel.Action {
-		a, err := k.CreateAction(ctx, alice.ID, kernel.CreateActionRequest{OwnerUserID: alice.ID, Name: name,
+		a, err := k.CreateAction(ctx, alice.ID, kernel.CreateActionRequest{OwnerUserID: alice.ID, Title: "Test action", Name: name,
 			Kind: kernel.KindHTTP, InputSchema: input, OutputSchema: map[string]any{"type": "object"}, Source: "http://example.com"})
 		if err != nil {
 			t.Fatal(err)
@@ -334,6 +334,7 @@ func TestCreateAction_ServiceEnrichment(t *testing.T) {
 
 	a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
 		OwnerUserID: ownerID,
+		Title:       "Test action",
 		Name:        "svc-make",
 		Kind:        kernel.KindHTTP,
 		Source:      backend.URL,
@@ -357,7 +358,7 @@ func TestGetAction_EnrichesRef(t *testing.T) {
 	backend := newTaskBackend(t)
 
 	a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "svc-lookup", Kind: kernel.KindHTTP, Source: backend.URL,
+		OwnerUserID: ownerID, Title: "Test action", Name: "svc-lookup", Kind: kernel.KindHTTP, Source: backend.URL,
 	})
 	if err != nil {
 		t.Fatalf("createAction: %v", err)
@@ -382,7 +383,7 @@ func TestActionAuthFieldsExposed(t *testing.T) {
 
 	mk := func(name string, auth *kernel.AuthInput) actionResp {
 		a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
-			OwnerUserID: ownerID, Name: name, Kind: kernel.KindHTTP, Source: backend.URL,
+			OwnerUserID: ownerID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Source: backend.URL,
 			Description: "d", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 			Auth: auth,
 		})
@@ -424,7 +425,7 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	backend := newTaskBackend(t)
 
 	a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "svc-pub", Kind: kernel.KindHTTP,
+		OwnerUserID: ownerID, Title: "Test action", Name: "svc-pub", Kind: kernel.KindHTTP,
 		Source: backend.URL, Description: "public test action",
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -637,7 +638,7 @@ func TestManualHTTPActionRoundTrip(t *testing.T) {
 	ownerID, _ := makeUser(t, k, "svc-httpview")
 
 	resp, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "weather", Kind: kernel.KindHTTP,
+		OwnerUserID: ownerID, Title: "Test action", Name: "weather", Kind: kernel.KindHTTP,
 		Source: "https://api.example.com/weather/{city}", Method: "GET",
 		Params: []kernel.HTTPParam{{Name: "city", In: "path"}},
 	})
@@ -733,7 +734,7 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 	ownerID, _ := makeUser(t, k, "svc-inact")
 	backend := newTaskBackend(t)
 	a, err := createAction(k, ctx, ownerID, kernel.CreateActionRequest{
-		OwnerUserID: ownerID, Name: "dead", Kind: kernel.KindHTTP, Source: backend.URL,
+		OwnerUserID: ownerID, Title: "Test action", Name: "dead", Kind: kernel.KindHTTP, Source: backend.URL,
 		Description: "inactive action", InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 	})

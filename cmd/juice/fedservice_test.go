@@ -98,7 +98,7 @@ func parkTaskAction(t *testing.T, k *kernel.Kernel) string {
 	t.Cleanup(backend.Close)
 
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
-		OwnerUserID: sys.ID, Name: "approve-" + uuid.New().String()[:8], Kind: kernel.KindHTTP,
+		OwnerUserID: sys.ID, Title: "Test action", Name: "approve-" + uuid.New().String()[:8], Kind: kernel.KindHTTP,
 		Source: backend.URL, Price: 0, Description: "approval sink",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	})

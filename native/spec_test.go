@@ -31,6 +31,9 @@ func TestAllShipsCompleteContracts(t *testing.T) {
 		if s.InputSchema == nil || s.OutputSchema == nil {
 			t.Errorf("%s: input/output schema missing", s.Name)
 		}
+		if title, err := kernel.ValidateTitle(s.Title); err != nil || title != s.Title {
+			t.Errorf("%s: title %q is not a valid title as written: %v", s.Name, s.Title, err)
+		}
 		if s.Handler == nil {
 			t.Errorf("%s: no handler", s.Name)
 		}
@@ -102,8 +105,8 @@ func TestSchemaFragmentsAreNotShared(t *testing.T) {
 
 func TestObjHelpersProduceValidSchemas(t *testing.T) {
 	s := obj(map[string]any{"a": str("an a")}, "a")
-	if s["type"] != "object" {
-		t.Errorf("type = %v, want object", s["type"])
+	if s["type"] != "object" || s["additionalProperties"] != false {
+		t.Errorf("obj = %v, want a closed object", s)
 	}
 	if got := s["required"].([]string); len(got) != 1 || got[0] != "a" {
 		t.Errorf("required = %v, want [a]", got)
@@ -126,5 +129,24 @@ func TestObjHelpersProduceValidSchemas(t *testing.T) {
 	arr := arrayOf(str("item"), "a list")
 	if arr["type"] != "array" || arr["items"] == nil {
 		t.Errorf("arrayOf = %v, want a typed array with items", arr)
+	}
+}
+
+// Every native declares its contract in the canonical form (D4) exactly as written: what the kernel
+// stores, hashes and hands a model is what the native's own file says, and a native is held to the
+// subset like any other action.
+func TestNativeSchemasAreCanonical(t *testing.T) {
+	titles := map[string]string{}
+	for _, s := range All(Deps{}) {
+		if err := kernel.ValidateSchema("input", s.InputSchema); err != nil {
+			t.Errorf("%s: %v", s.Name, err)
+		}
+		if err := kernel.ValidateSchema("output", s.OutputSchema); err != nil {
+			t.Errorf("%s: %v", s.Name, err)
+		}
+		if other, dup := titles[s.Title]; dup {
+			t.Errorf("%s and %s share the title %q; a list would not tell them apart", s.Name, other, s.Title)
+		}
+		titles[s.Title] = s.Name
 	}
 }

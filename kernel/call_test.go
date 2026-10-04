@@ -2253,17 +2253,17 @@ func quoteFixtures() []struct {
 		a    *kernel.Action
 		want string
 	}{
-		{"local", &kernel.Action{ID: "11111111-1111-1111-1111-111111111111", Description: "a plain local action", Price: 100,
-			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "d1cce6267a6aabb0ac45bac2cff24ac30f444f1ab35a9db317bd9693ef518383"},
-		{"proxy-stable-id", &kernel.Action{ID: "22222222-2222-2222-2222-222222222222", RemoteActionID: "33333333-3333-3333-3333-333333333333",
+		{"local", &kernel.Action{ID: "11111111-1111-1111-1111-111111111111", Title: "Plain action", Description: "a plain local action", Price: 100,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "8199783ed00af8a99226abca06b17dfe616090b84e19caa20e899601df54e591"},
+		{"proxy-stable-id", &kernel.Action{ID: "22222222-2222-2222-2222-222222222222", Title: "Cached action", RemoteActionID: "33333333-3333-3333-3333-333333333333",
 			Description: "a cached remote action", Price: 552,
-			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "a8d61c31665ca328a7e9a8a5de51fedbfb2358a3356d6f66996849409ec2ae8f"},
-		{"transfer-effect", &kernel.Action{ID: "44444444-4444-4444-4444-444444444444", Effect: "transfer", Description: "value bearing", Price: 0,
-			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "8bdea08ddc9f546e5647004ee53fbd0adb99004f139235c8a89585e81d2365db"},
-		{"nested-schemas", &kernel.Action{ID: "55555555-5555-5555-5555-555555555555", Description: "nested", Price: 7,
-			InputSchema: nested, OutputSchema: nested}, "105035b3625ac2a47b526e1782255617e699f08af20b777c2381f86cd3b5ec49"},
-		{"non-ascii", &kernel.Action{ID: "66666666-6666-6666-6666-666666666666", Description: "análise de preços — ação", Price: 42,
-			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "05c56b53026e786abd9603b445bf485ecae4a782582fdb21b2cac1793ad6a3e8"},
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "bc7df6489391d2e5897933f7c308235acfd1afd2c36b9b0563c7484fd9b96f55"},
+		{"transfer-effect", &kernel.Action{ID: "44444444-4444-4444-4444-444444444444", Title: "Send value", Effect: "transfer", Description: "value bearing", Price: 0,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "cf6a82bd363a4bb3318ecb8d06e9e007d958498a4a3b47b446e2e7df9d114e4c"},
+		{"nested-schemas", &kernel.Action{ID: "55555555-5555-5555-5555-555555555555", Title: "Nested", Description: "nested", Price: 7,
+			InputSchema: nested, OutputSchema: nested}, "3496de61516c86d0443c13967cb61882ecd6e51877ba1e2c1061542c45099f3f"},
+		{"non-ascii", &kernel.Action{ID: "66666666-6666-6666-6666-666666666666", Title: "Análise de preços", Description: "análise de preços — ação", Price: 42,
+			InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}, "1564f9b1e42cc55d1ee2970b3e1f556a217b6d65e2a3ff718ba778dec75bc498"},
 	}
 }
 

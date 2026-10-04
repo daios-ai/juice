@@ -13,6 +13,7 @@ import (
 func Message() Spec {
 	return Spec{
 		Name:        "message",
+		Title:       "Send a message",
 		Description: "Sends a message to another platform user and creates a Task they must acknowledge",
 		InputSchema: obj(map[string]any{
 			"to":      str("Recipient, as handle@kernel"),
