@@ -104,11 +104,15 @@ fails before execution, the task returns to `waiting` with its reservation
 intact. The target must still be active and its owner unsuspended, although
 narrowing visibility after creation does not prevent completion.
 
-Waiting tasks survive restarts. Interrupted local completions with no committed
-transaction are re-parked for another attempt; work awaiting a remote receipt
-continues through the remote retry mechanism. Ending the process or failing the
-creating call cancels waiting tasks and returns their funds. Running work must
-settle before its parent can close.
+Waiting tasks survive restarts. An interrupted local completion returns to
+`waiting` if no transaction was committed. Work awaiting a remote receipt
+continues through the remote retry mechanism.
+
+The named caller can decline a waiting task with `juice task cancel ID`. The
+process owner can use the same command to cancel a task it funds. In both
+cases, the reserved price returns to the process. Ending the process or failing
+the creating call also cancels its waiting tasks. Work already running must
+settle before the process can close.
 
 ## Processes
 
@@ -119,8 +123,8 @@ the process owner.
 
 ```
 $ juice process list
-PROCESS     STATUS  AVAILABLE   LOCKED      AWAITING SINCE
-e3539f75-…  open    0.00 fUSD  0.00 fUSD
+PROCESS       STATUS  AVAILABLE  LOCKED     AWAITING SINCE
+e3539f75a421  open    0.00 fUSD  0.00 fUSD
 ```
 
 ### Ending a process
@@ -128,8 +132,8 @@ e3539f75-…  open    0.00 fUSD  0.00 fUSD
 The process owner can end work that is no longer wanted:
 
 ```
-$ juice process end e3539f75-…
-Process e3539f75-… ended.
+$ juice process end e3539f75a421
+Process e3539f75a421 ended.
 ```
 
 Ending cancels waiting tasks and returns their reserved funds. It is useful for

@@ -128,6 +128,7 @@ operations directly.
 $ juice action show bob@acme/greeter
   id: 31004d30-…
   name: greeter/index
+  title: About the greeter
   kind: http
   description: What this application does
   …

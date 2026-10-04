@@ -107,9 +107,16 @@ $ juice action show bob@acme/echo
   description: Echo a message back to the caller
   input_schema: { … }
   output_schema: {"type": "object"}
+  created_at: 2026-09-14T12:05:00Z
+  updated_at: 2026-09-14T12:05:00Z
   action: bob@acme/echo
-  quote_hash: 4965342976414282…
+  http: {
+    "method": "POST",
+    "url": "https://httpbin.org/post"
+  }
   requires_grant: false
+  quote_hash: 4965342976414282…
+  evidence: { … }
 
 This kernel's own calls
   3 calls, 3 succeeded  ~399ms  rating 1.00 from 1

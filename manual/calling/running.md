@@ -24,10 +24,10 @@ bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
     "json": { "msg": "hello" },
     …
   }
-  tx_id: 116fd3a6-…
+  tx_id: 116fd3a64b0e
   trace_id: 009b8dc1-…
   receipt_id: b69abbd8-…
-  process_id: a394b5c5-…
+  process_id: a394b5c5e206
   charge: 0.50 fUSD
 ```
 
@@ -201,7 +201,7 @@ If the peer never answers, the funds remain reserved.
 To follow the process:
 
 ```
-$ juice process show 01d1da53-…
+$ juice process show 01d1da53c418
 ```
 
 ### Actions are not re-sold

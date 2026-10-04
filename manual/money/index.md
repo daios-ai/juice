@@ -12,21 +12,23 @@ is settled between the kernels, so you do not need to hold an account with each
 provider.
 
 The balance itself belongs to one account on one kernel. If you use two kernels,
-you have separate balances to fund and manage. Juice provides transfers between
-local accounts; it does not provide a direct account transfer across kernels.
+you have separate balances to fund and manage. You can transfer credits to
+another account on either kernel, provided both kernels belong to the same
+network. A recipient on another kernel is credited when the payment reaches it.
 
-An account receives funds through deposits, local transfers, and earnings from
+An account receives funds through deposits, transfers, and earnings from
 actions it owns. A provider's earnings are the margin remaining after the work
 it purchased and the kernel's fee, as explained in
 [Earnings](../providing/earnings.html). Once credited, those earnings are part
 of the ordinary balance and can be spent or withdrawn.
 
-## What differs between the three networks
+## What differs between the four networks
 
-The account model and command syntax are shared by `play`, `arbitrum-sepolia`, and `arbitrum-one`.
-Each uses six decimal places, and each records local transfers and call charges
-in the same way. Their differences concern the value of the balance and the
-external payment system that supports deposits, withdrawals, and settlement:
+The account model and command syntax are shared by `play`, `arbitrum-sepolia`,
+`arbitrum-one`, and `polygon`. All four use six decimal places and record
+transfers and call charges in the same way. Their differences concern the value
+of the balance and the external payment system that supports deposits,
+withdrawals, and settlement:
 
 | | `play` | `arbitrum-sepolia` | `arbitrum-one` | `polygon` |
 |---|---|---|---|---|
@@ -38,14 +40,14 @@ external payment system that supports deposits, withdrawals, and settlement:
 | What the operator credits against | a payment they received and recorded themselves | a payment the chain has already shown them | a payment the chain has already shown them | a payment the chain has already shown them |
 | How you withdraw | an entry in the kernel's books, done at once | a token transfer to your registered address | a token transfer to your registered address | a token transfer to your registered address |
 | Does the kernel need its own fuel | no | ETH, for every payment it makes | ETH, for every payment it makes | POL, for every payment it makes |
-| How kernels settle with each other | the buyer's signed message is the payment | a finalised token transfer | a finalised token transfer |
+| How kernels settle with each other | the buyer's signed message is the payment | a finalised token transfer | a finalised token transfer | a finalised token transfer |
 
 The operator's responsibilities for transaction fees and remote settlement are
 covered in [Funding the kernel](../operating/running-a-kernel.html#funding-the-kernel)
 and [The network economy](../operating/network-economy.html).
 
 [Funds](funds.html) explains available and locked balances, what local and
-remote actions cost, local transfers, and the account ledger.
+remote actions cost, transfers, and the account ledger.
 [Deposits and withdrawals](deposits-and-withdrawals.html) then follows payments
 entering and leaving the kernel.
 

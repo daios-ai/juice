@@ -100,8 +100,8 @@ are not sent across federation or exposed to sandboxed code.
 
 Changes to the action's source, schemas, or price revoke its grants, as do
 credential replacement and deletion. Disabling the action or changing its
-description alone does not revoke them. After revocation, reconnect before
-using the action with your upstream account again.
+title or description alone does not revoke them. After revocation, reconnect
+before using the action with your upstream account again.
 
 ## Completing work addressed to you
 
@@ -113,39 +113,44 @@ Use `task list` and `task show` to inspect the work addressed to you:
 
 ```
 $ juice task list
-TASK          STATUS   CREATED BY        COMPLETES      CALLER
-b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  bob@acme
+TASK          STATUS   CREATED BY        COMPLETES      OWNER       CALLER
+b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  alice@acme  bob@acme
 $ juice task show b75366d19c2e
   id: b75366d19c2e
+  revision: 1
+  status: waiting
   partial_args: {
     "message": "approve the order?"
   }
+  allowed_input: {
+    "type": "object"
+  }
   price: 0.00 fUSD
-  status: waiting
   created_at: 2026-09-14T12:05:35Z
   action: sys@acme/sink
   created_by: sys@acme/message
   owner: alice@acme
   required_caller: bob@acme
-  allowed_input: {
-    "type": "object"
-  }
 ```
 
 The `created_by` field identifies the action that created the task, while
 `action` identifies the service that will execute when you complete it.
-`owner` names the process owner funding the work. Read `partial_args`
-for the information already supplied and `allowed_input` for the schema of
-the remaining input:
+`owner` names the process owner funding the work. The `revision` increases
+whenever the task changes. Read `partial_args` for the information already
+supplied and `allowed_input` for the schema of the remaining input:
 
 ```
-$ juice task complete b75366d1-… '{}'
+$ juice task complete b75366d19c2e '{}'
   result: {}
   tx_id: 4a908ead-…
   trace_id: 3129b306-…
   receipt_id: 6954ae74-…
-  task_id: b75366d1-…
+  charge: 0
+  task_id: b75366d19c2e
 ```
+
+The completion reply prints `charge` in base units and its transaction, trace
+and receipt IDs in full, abbreviated here with `…`.
 
 Completion claims the task for execution, preventing a second caller from
 executing it concurrently. Only the named party may do this. The result and
@@ -168,3 +173,7 @@ and sends only the request, its input requirements and its state. Your kernel
 signs your completion or decline with your stable account ID, and the holder
 checks it against the task before acting. Its reply updates your list before
 the command returns.
+
+A task that transfers money, such as one calling `sys/transfer`, cannot be
+completed from another kernel. Completion would run as the account representing
+your kernel there, and that account holds no funds to pay the transfer.

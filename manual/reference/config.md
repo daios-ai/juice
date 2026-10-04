@@ -23,14 +23,16 @@ stored with mode 0600.
 | `listen_addr` | `:4040` | where this kernel answers clients, as `host:port`. Omit the host to answer on every interface; use port `0` to let the system choose one |
 | `fed_listen_addrs` | port 31313 | where this kernel answers peers. Empty binds the standard port on both transports; set it to give this kernel its own addresses |
 | `metrics_listen_addr` | empty | where this kernel serves `/metrics` for Prometheus, as `host:port`. Empty serves no metrics. Anyone who can reach the address can read them, so bind it to loopback or a monitoring network |
+| `max_inbound_peers` | `64` | how many connections started by other kernels this kernel accepts at once; zero or a negative value uses the default |
+| `relay_slots` | `128` | how many kernels behind routers this kernel carries traffic for at once; zero or a negative value uses the default |
 
 The network itself is not configured here. It is the world named on
 `juice kernel serve`, whose file in `~/.juice/worlds/` carries the money, the
 node a chain world is reached through (`rpc`), and the `seeds` where peers are
-met — the only place a meeting point is named. `arbitrum-one` names this
-project's seed; `play` and `arbitrum-sepolia` name none, so write one in to
-connect kernels on them. The network a kernel was created on is
-recorded in its database, and a boot offering it another is refused.
+met. The shipped `play`, `arbitrum-one`, and `polygon` files include project
+seeds. For `arbitrum-sepolia`, add the address of a kernel already serving that
+network. The network a kernel was created on is recorded in its database, and
+a boot offering it another is refused.
 See [Configuring worlds](../operating/worlds.html) for the file's contents and
 how to configure a network of your own.
 
@@ -42,7 +44,7 @@ own with `SO_REUSEPORT`: its bind would succeed against a held port and the two
 kernels would share it. To run a second kernel on one machine, give this one
 its own addresses, for example `["/ip4/0.0.0.0/tcp/31314", "/ip4/0.0.0.0/udp/31314/quic-v1"]`.
 
-Every key on this page is also an option of `juice kernel serve`, written as the
+Each kernel configuration key is also an option of `juice kernel serve`, written as the
 key with underscores replaced by dashes, and a nested key as a path:
 `--listen-addr :4141`, `--fee-bps 500`, `--native.llm.url http://localhost:11434`.
 An option given on the command line applies to that run only and is not written
@@ -97,16 +99,17 @@ actions default to zero.
 ### Fuel, on a chain network
 
 The world file supplies the rail's fuel policy. These settings determine when
-the rail buys ETH, the balance it targets, and the limits applied to that
-purchase. They are not keys in the kernel's `config.json`.
+it buys fuel, how much it buys, and the limits on the purchase. Fuel is ETH on
+Arbitrum and POL on Polygon. These are world settings, stored outside the
+kernel's `config.json`.
 
-| Key | Arbitrum One | Arbitrum Sepolia | |
-|---|---|---|---|
-| `gas.min` | 0.001 ETH | 0.0002 ETH | buy more below this |
-| `gas.max` | 0.003 ETH | 0.0004 ETH | buy up to this |
-| `gas.feeBound` | 0.0003 ETH | 0.0001 ETH | most it will pay for one purchase |
-| `gas.slippageBps` | 100 | 500 | tolerance above the quoted price |
-| `venue` | — | — | the exchange it buys at: a Uniswap V3 router, quoter, wrapped-ETH address and fee tier |
+| Key | Arbitrum One | Arbitrum Sepolia | Polygon | |
+|---|---|---|---|---|
+| `gas.min` | 0.001 ETH | 0.0002 ETH | 5 POL | buy more below this |
+| `gas.max` | 0.003 ETH | 0.0004 ETH | 15 POL | buy up to this |
+| `gas.feeBound` | 0.0003 ETH | 0.0001 ETH | 4 POL | most it will pay for one purchase |
+| `gas.slippageBps` | 100 | 500 | 100 | tolerance above the quoted price |
+| `venue` | Uniswap V3 | Uniswap V3 | Uniswap V3 | the exchange used to buy fuel; its contract addresses and fee tier are set in the world file |
 
 See
 [How the kernel keeps itself in fuel](../operating/duties.html#how-the-kernel-keeps-itself-in-fuel).

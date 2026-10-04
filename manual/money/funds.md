@@ -7,8 +7,9 @@ nav_order: 1
 # Funds
 
 Once money has reached your account, you can spend it on actions or transfer it
-to another user of the same kernel. This chapter explains how the balance
-reflects those commitments and where their records appear. The next chapter,
+to another user in the same network, whether on your kernel or another. This
+chapter explains how the balance reflects those commitments and where their
+records appear. The next chapter,
 [Deposits and withdrawals](deposits-and-withdrawals.html), covers payments
 between your account and the outside world.
 
@@ -31,15 +32,15 @@ that was not consumed. A task can keep funds reserved after the creating action
 has returned, because its future execution still needs a budget.
 
 If funds remain locked, inspect `juice process list` to find outstanding work.
-The process owner can end abandoned work and recover unused reservations,
-although a remote call awaiting a receipt is normally best left to settle.
-See [Tasks and processes](../providing/tasks.html) before forcing closure.
+The process owner can end abandoned work and recover unused reservations.
+A process awaiting a remote receipt cannot be closed until the call settles.
+See [Tasks and processes](../providing/tasks.html) for the conditions of closure.
 
 ## Amounts
 
 The command line accepts amounts in the network's display unit, such as
 `0.50 fUSD` on `play`. The HTTP API and action JSON use integer base units.
-All three shipped networks use six decimal places, so `500000` base units
+All four shipped networks use six decimal places, so `500000` base units
 represent 0.50 fUSD on `play`. Equal numeric amounts on different networks do
 not imply equal monetary value.
 
@@ -180,11 +181,11 @@ Use `user ledger` to read entries involving your account:
 
 ```
 $ juice user ledger
-WHEN                  AMOUNT       FROM   TO     WHY
-2026-09-14T12:05:54Z  0.40 fUSD   alice  bob    e989c5e1-…
-2026-09-14T12:05:54Z  0.10 fUSD   alice  sys    e989c5e1-…
-2026-09-14T12:05:34Z  1.00 fUSD   alice  bob    3f0a91c2-…
-2026-09-14T12:04:54Z  10.00 fUSD  sys    alice
+WHEN                  AMOUNT      FROM        TO          WHY
+2026-09-14T12:05:54Z  0.40 fUSD   alice@acme  bob@acme    e989c5e1d21a
+2026-09-14T12:05:54Z  0.10 fUSD   alice@acme  sys@acme    e989c5e1d21a
+2026-09-14T12:05:34Z  1.00 fUSD   alice@acme  bob@acme    3f0a91c2e842
+2026-09-14T12:04:54Z  10.00 fUSD  sys@acme    alice@acme
 ```
 
 Deposits, withdrawals, transfers, and value delivered by an action appear in

@@ -17,7 +17,7 @@ the exit status is still nonzero.
 
 | Code | Exit | HTTP | Meaning and what to do |
 |---|---|---|---|
-| `unauthenticated` | 2 | 401 | No valid session, or the account is suspended. Check the credentials or refresh the session; contact the operator if suspension is reported. |
+| `unauthenticated` | 2 | 401 | No valid session, an incorrect password where one is required, or a suspended account. Check the credentials or refresh the session; contact the operator if suspension is reported. |
 | `unauthorized` | 3 | 403 | Authenticated, but not permitted. You are not the owner, the payer, or the named party. |
 | `not_found` | 4 | 404 | No such action, transaction, task or process — or you may not see it. A reference that names nothing and has no `index` child lands here. |
 | `invalid_input` | 5 | 422 | The request is malformed: a bad handle, a duplicate name, a non-positive amount. Nothing happened. |

@@ -128,9 +128,9 @@ This kernel's own calls
 ```
 
 The duration is the mean execution time, and the rating is the mean of the
-recorded assessments. Current statistics
-reset when the description, price, schemas, or source changes. Historical
-transactions and ratings remain available.
+recorded assessments. Current statistics reset when the title, description,
+price, schemas, or source changes. Historical transactions and ratings remain
+available.
 
 Only a call's payer may rate it, once, and executing action code has no rating
 authority. This does not make ratings proof of quality: an account holder can

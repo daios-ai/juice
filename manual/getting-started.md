@@ -12,9 +12,11 @@ kernel on the `play` network and create accounts for both participants. Since
 requires no blockchain wallet or payment.
 
 The examples include the commands, their output, and the answers to interactive
-prompts. Keep the complete identifiers returned by your kernel; the printed
-examples abbreviate them with `…`. If you intend to use a kernel run by someone
-else, the final section explains how that changes the setup.
+prompts. Use the identifiers returned by your own kernel when following them.
+The CLI shows task, process and transaction IDs as twelve hex digits where it
+accepts those digits in a later command. In the examples, `…` marks text omitted
+for space. If you intend to use a kernel run by someone else, the final section
+explains how that changes the setup.
 
 ## Install
 
@@ -41,9 +43,9 @@ it afresh.
 ## Start a kernel
 
 This walkthrough uses `play` and requires no blockchain funding. To operate on
-Arbitrum, follow [Setting up on a chain](operating/running-a-kernel.html#setting-up-on-a-chain),
-which explains the kernel's address, initial ETH funding, and the operator's
-USDT0 balance.
+Arbitrum or Polygon, follow [Setting up on a chain](operating/running-a-kernel.html#setting-up-on-a-chain),
+which explains the kernel's address, the currency used to pay transaction fees,
+and the operator's USDT0 balance.
 
 A kernel serves one network, named when it is started. A network is a **world**:
 a file in `~/.juice/worlds/` describing the money it uses and the servers to meet
@@ -116,9 +118,9 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
+  address: alice@acme
   available: 0.00 fUSD
   description:
-  address: alice@acme
   id: 5b984930-…
   locked: 0.00 fUSD
 ```
@@ -139,11 +141,11 @@ confirm its identity and initial balance:
 
 ```
 $ juice user me
+  address: alice@acme
   available: 0.00 fUSD
   connections: []
   connectors: []
   description:
-  address: alice@acme
   id: 5b984930-…
   locked: 0.00 fUSD
 ```
@@ -159,10 +161,10 @@ sys@acme/time costs 0.00 fUSD. Run it? [y/N] y
     "iso": "2026-09-14T15:05:36Z",
     "unix": 1789398336
   }
-  tx_id: ed7c98e8-…
+  tx_id: ed7c98e8a412
   trace_id: 7f5bd164-…
   receipt_id: 13382701-…
-  process_id: 8816e98e-…
+  process_id: 8816e98e3421
   charge: 0.00 fUSD
 ```
 
@@ -300,10 +302,10 @@ bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
     },
     …
   }
-  tx_id: e989c5e1-…
+  tx_id: e989c5e1d21a
   trace_id: 709b18e0-…
   receipt_id: d2b67088-…
-  process_id: 5027b6df-…
+  process_id: 5027b6df639a
   charge: 0.50 fUSD
 ```
 
@@ -319,9 +321,9 @@ $ juice user me
 ### What the call cost, and rating it
 
 ```
-$ juice tx show e989c5e1-…
-  id: e989c5e1-…
-  action: bob@acme/echo
+$ juice tx show e989c5e1d21a
+  id: e989c5e1d21a
+  …
   args: { "msg": "hello" }
   result: { … }
   status: success
@@ -329,12 +331,14 @@ $ juice tx show e989c5e1-…
   net: 0.40 fUSD
   fee: 0.10 fUSD
   refund: 0.00 fUSD
+  reason:
   started_at: 2026-09-14T15:05:54Z
   ended_at: 2026-09-14T15:05:54Z
   rating: null
   owner: alice@acme
   caller: alice@acme
   target: bob@acme
+  action: bob@acme/echo
 ```
 
 The transaction accounts for the 0.50 fUSD Alice paid: Bob receives `0.40`,
@@ -346,11 +350,13 @@ Alice can now rate the call because she paid for it. A rating can be submitted
 only once and may include a note:
 
 ```
-$ juice tx rate e989c5e1-… 1 --note "did what it said"
+$ juice tx rate e989c5e1d21a 1 --note "did what it said"
   id: c84133a1-…
   rated_tx_id: e989c5e1-…
+  rated_receipt_id: d2b67088-…
   rating: 1
   note: did what it said
+  rated_receipt_hash: 21b9b76b70bcc212…
   created_at: 2026-09-14T15:06:11Z
   signature: Tl8Nz00hxO5v…
 $ juice action ratings bob@acme/echo
@@ -386,7 +392,7 @@ before sending funds.
 
 - [Concepts](concepts.html) defines the terms used from here on.
 - [Money](money/) covers balances, deposits and withdrawals in full, including
-  putting real money into an account on `arbitrum-sepolia` or `arbitrum-one`.
+  putting real money into an account on `arbitrum-one` or `polygon`.
 - [Calling actions](calling/) covers finding, running, paying and rating.
 - [Providing actions](providing/) covers publishing, pricing and composition.
 - [Operating a kernel](operating/) covers running the kernel you started above.

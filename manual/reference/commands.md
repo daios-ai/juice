@@ -10,9 +10,12 @@ Commands generally follow `juice [admin] <noun> <verb>`. The exception is
 `run`, which executes an action directly. This reference summarizes the
 commands and common options; the linked chapters provide worked examples.
 
-A task, process or transaction is shown by the first twelve hex digits of its id,
-such as `b75366d19c2e`, and any command that takes one accepts those digits in
-place of the whole id. `--json` and `--quiet` print ids whole.
+A task, process or transaction is shown by the first twelve hex digits of its
+ID, such as `b75366d19c2e`, in lists, detail reads, and the replies of `run` and
+`user transfer`. Commands accept those digits in place of the whole ID when they
+identify one record you may read. A completion reply keeps its transaction ID
+whole, since the transaction may belong to another kernel. `--json` and
+`--quiet` always print IDs whole.
 
 The `admin` prefix requires superuser authority. Its noun distinguishes user
 accounts from peers, so a target is interpreted in the intended namespace.
@@ -57,7 +60,8 @@ key for a new purchase ([Retries](../programs.html#retries)).
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |
 | `juice kernel forget NAME` | drop the record and its logins' credentials |
 
-For `kernel serve`, every setting of the kernel's `config.json` is also an option,
+For `kernel serve`, each setting of the kernel's `config.json` except
+`credentials_key` is also an option,
 written as the key with underscores replaced by dashes and a nested key as a path:
 `--listen-addr :4141` selects the address clients reach, `--fed-listen-addrs` the
 addresses peers dial, `--native.llm.url` the language-model endpoint. An option
@@ -118,10 +122,11 @@ non-interactive confirmation.
 | `juice action import NAME [SPEC_URL]` | install an OpenAPI document ([Wrapping a web API](../providing/web-apis.html)) |
 | `juice action ratings ACTION` | the public ratings |
 
-`create` and `update` take `--title`, `--kind`, `--source`, `--artifact`,
+`create` takes `--title`, `--kind`, `--source`, `--artifact`,
 `--method`, `--param`, `--description`, `--price`, `--input-schema`,
-`--output-schema`, `--auth`; `update` also takes `--visibility`. `create`
-requires `--title`. The schemas follow [Action schemas](schemas.html).
+`--output-schema`, `--auth`. `update` takes these except `--kind`, and also
+takes `--visibility`. `create` requires `--title`. The schemas follow
+[Action schemas](schemas.html).
 
 ## tx
 
@@ -172,6 +177,6 @@ requires `--title`. The schemas follow [Action schemas](schemas.html).
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
 
-Peer targets use a public key or petname. User targets use a handle or account
-ID. Keeping these namespaces separate avoids ambiguity when a handle and a
-petname happen to be the same.
+Peer targets use a public key or petname. User targets use a `handle@kernel`
+address or an account ID. The separate commands avoid ambiguity when a handle
+and a petname happen to be the same.

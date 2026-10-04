@@ -102,7 +102,7 @@ of quality.
 A kernel belongs to one network, named when it is created. This determines the
 money it uses and cannot be changed later. A network is a **world**: a file in
 `~/.juice/worlds/` naming its money and the servers to meet it through, so a
-network this build does not ship is a file you add. The three shipped ones serve
+network this build does not ship is a file you add. The four shipped ones serve
 different stages of use:
 
 - **`play`** counts in fUSD (fake dollars), with six decimal places and no real

@@ -25,8 +25,8 @@ Confirm password:
 Recovery phrase (write this down; it is shown only once and cannot be recovered):
   prepare divorce absurd cabin series excite lunar vicious approve brown fossil window
 Press Enter once you have written it down:
-  available: 0.00 fUSD
   address: alice@acme
+  available: 0.00 fUSD
   …
 ```
 
@@ -104,7 +104,7 @@ $ juice kernel list
 KERNEL  NETWORK  ADDRESS                     IN USE  KEY
 acme    play     https://kernel.example.org          fdlMi64P…
 $ juice kernel health acme
-ok  acme  network play  fdlMi64P…
+ok  acme  network play  fdlMi64P…  v0.14.46
 ```
 
 Registration records the public key and network returned by the address you

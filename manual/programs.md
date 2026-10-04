@@ -224,6 +224,8 @@ value named in its arguments.
 | Interactive | Non-interactive |
 |---|---|
 | password prompt on `auth login`, `user create` | `--password` |
+| password prompt on `user blockchain-address` | `--password` (with `--signature`) |
+| recovery prompt on `auth recover` | `--phrase` and `--password` |
 | first-boot questions | a `config.json` written in advance, plus `JUICE_BOOTSTRAP_PASSWORD` |
 | confirmation on a money command | `--yes` |
 | the selected login | `--as` or `JUICE_AS` |
@@ -270,7 +272,7 @@ the key and network you expect:
 $ curl -s localhost:4040/health
 {"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
  "handle":"acme","network":"play","network_fingerprint":"baed18ae…",
- "public_key":"fdlMi64P…","blockchain_address":"","status":"ok","symbol":"fUSD","token":""}
+ "public_key":"fdlMi64P…","blockchain_address":"","status":"ok","symbol":"fUSD","token":"","version":"v0.14.46"}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

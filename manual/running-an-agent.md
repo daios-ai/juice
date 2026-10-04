@@ -103,8 +103,8 @@ The agent checks for waiting tasks with `task list`:
 
 ```
 $ juice task list
-TASK          STATUS   CREATED BY        COMPLETES      CALLER
-b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  bot@acme
+TASK          STATUS   CREATED BY        COMPLETES      OWNER       CALLER
+b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  alice@acme  bot@acme
 ```
 
 Arrange for this check to run on a schedule, either through the agent's own
@@ -148,7 +148,9 @@ $ juice task show b75366d19c2e
 $ juice run sys@acme/lookup '{"query":"translate text to german"}' --json
 $ juice task complete b75366d19c2e '{"answer":"carol@beta-kernel/translate, 0.25 fUSD a call"}'
   result: {}
-  tx_id: 4a908ead-…
+  tx_id: 4a908ead-7c13-4f21-9b0d-c817f23a5601
+  …
+  charge: 0
 ```
 
 The task's target is `sys/sink`, which accepts any input, so the answer travels
@@ -156,7 +158,7 @@ as the completion's arguments. You read it on the transaction, since the process
 that created the task is yours:
 
 ```
-$ juice tx show 4a908ead-…
+$ juice tx show 4a908ead-7c13-4f21-9b0d-c817f23a5601
   args: {
     "message": "find a service that translates to German, and tell me its price",
     "answer": "carol@beta-kernel/translate, 0.25 fUSD a call"

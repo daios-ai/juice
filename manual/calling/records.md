@@ -24,7 +24,6 @@ $ juice tx show 116fd3a64b0e
   trace_id: 29dde7d6-…
   parent_trace_id:
   action_id: bb7fe1a8-…
-  action: bob@acme/echo
   args: { "msg": "hello" }
   result: { … }
   status: success
@@ -39,6 +38,7 @@ $ juice tx show 116fd3a64b0e
   owner: alice@acme
   caller: alice@acme
   target: bob@acme
+  action: bob@acme/echo
 ```
 
 The three party fields distinguish the participants, each an address. `owner` names the
@@ -67,7 +67,7 @@ checked without including their full contents in the receipt. Use `tx verify`
 to inspect the verification result:
 
 ```
-$ juice tx verify 116fd3a6-…
+$ juice tx verify 116fd3a64b0e
   transaction_id: 116fd3a6-…
   valid: true
   checks: {
@@ -105,7 +105,7 @@ with the transaction. It can therefore verify the charge after losing contact
 with the peer or removing that peer from its local roster:
 
 ```
-$ juice tx verify 6cd9f6b6-…
+$ juice tx verify 6cd9f6b68b20
   transaction_id: 6cd9f6b6-…
   valid: true
   remote_kernel_handle: beta-kernel
@@ -144,11 +144,13 @@ The payer may submit one assessment of a completed call. Use its transaction
 identifier to associate the rating with the work you purchased:
 
 ```
-$ juice tx rate 116fd3a6-… 1 --note "did what it said"
+$ juice tx rate 116fd3a64b0e 1 --note "did what it said"
   id: e599904f-…
   rated_tx_id: 116fd3a6-…
+  rated_receipt_id: 15f83c40-…
   rating: 1
   note: did what it said
+  rated_receipt_hash: 21b9b76b70bcc212…
   created_at: 2026-09-14T12:05:17Z
   signature: rx8TNj531MkA…
 ```
@@ -187,10 +189,10 @@ the latter condition and its age. An open process can have a zero balance when
 its outstanding work is free.
 
 The owner can end abandoned work to cancel waiting tasks and recover their
-reserved funds. A process awaiting a remote receipt should normally be allowed
-to settle through the retry mechanism. See
-[Ending a process](../providing/tasks.html#ending-a-process) for the consequences
-of forced closure.
+reserved funds. Closure is refused while a process awaits a remote receipt;
+the kernel keeps trying to obtain the peer's answer. See
+[Ending a process](../providing/tasks.html#ending-a-process) for the conditions
+of closure.
 
 ## What you can reconstruct
 

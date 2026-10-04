@@ -81,11 +81,11 @@ who may call it by setting its visibility:
 
 ```
 $ juice action enable bob@acme/echo
-CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
-enabled  bob@acme/echo  0.50 fUSD  yes     private
+CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
+enabled  Echo a message  bob@acme/echo  0.50 fUSD  yes     private
 $ juice action update bob@acme/echo --visibility local
-CHANGE   ACTION         PRICE      ACTIVE  AUDIENCE
-updated  bob@acme/echo  0.50 fUSD  yes     local
+CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
+updated  Echo a message  bob@acme/echo  0.50 fUSD  yes     local
 ```
 
 | Visibility | Who can call it |
@@ -146,14 +146,14 @@ application:
 
 ```
 $ juice action enable bob@acme/greeter
-CHANGE   ACTION                  PRICE      ACTIVE  AUDIENCE
-enabled  bob@acme/greeter/greet  0.50 fUSD  yes     private
-enabled  bob@acme/greeter/index  0.00 fUSD  yes     private
+CHANGE   TITLE              ACTION                  PRICE      ACTIVE  AUDIENCE
+enabled  Greet someone      bob@acme/greeter/greet  0.50 fUSD  yes     private
+enabled  About the greeter  bob@acme/greeter/index  0.00 fUSD  yes     private
 ```
 
 Price, visibility, and credentials can be updated across the selected path.
-Description, schema, and source changes require a selection resolving to one
-action, since those fields describe a particular service interface.
+Changes to the title, description, schema, or source require a selection
+resolving to one action, since those fields describe a particular service.
 
 ## Groups and the index convention
 

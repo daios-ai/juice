@@ -20,7 +20,7 @@ $ juice kernel serve play --listen-addr :4040
 The argument names the network to serve. It is a world: a file in
 `~/.juice/worlds/` describing one network — the money it uses and the servers to
 meet it through. The worlds this build ships (`play`, `arbitrum-sepolia`,
-`arbitrum-one`) are written there the first time you serve, to read and to edit,
+`arbitrum-one`, `polygon`) are written there the first time you serve, to read and to edit,
 and a network juice does not ship is a file you add. One installation runs one
 kernel per world, in `~/.juice/kernels/<world>/`. See
 [Configuring worlds](worlds.html) to edit a world or create one of your own.
@@ -80,10 +80,9 @@ identifying the kernel, network, and public key.
 
 ## Setting up on a chain
 
-A kernel on `arbitrum-sepolia`, `arbitrum-one` or `polygon` has one address on that chain.
-Both USDT0 deposits and fuel go to this address, but the two currencies
-serve different purposes. The fuel is ETH on the Arbitrum networks and POL on
-Polygon. The rest of this chapter says ETH; on Polygon, read POL.
+A kernel on `arbitrum-sepolia`, `arbitrum-one` or `polygon` has one address on
+that chain. Both USDT0 deposits and fuel go to this address, but the two
+currencies serve different purposes.
 
 USDT0 backs the balances inside the kernel. Each deposit is credited to the
 account that registered the sending address, including `sys` when the operator
@@ -93,28 +92,28 @@ balance outside these accounts. All balances must remain backed, including
 funds reserved for work or payments; money held for an outgoing payment or
 awaiting attribution is unavailable for operator spending.
 
-ETH pays the blockchain's transaction fees, also called gas. Arbitrum charges
-these fees in ETH even when the transaction transfers USDT0. The kernel therefore
-needs ETH to send withdrawals and settlement payments. Receiving a deposit does
-not consume the kernel's ETH: the sender pays that transaction's fee. ETH sent
-to the kernel supplies gas and credits no internal account.
+Fuel pays the blockchain's transaction fees, also called gas. Arbitrum charges
+these fees in ETH; Polygon charges them in POL. The kernel needs that currency
+to send withdrawals and settlement payments. Receiving a deposit does not use
+the kernel's fuel, since the sender pays the fee. Fuel sent to the kernel
+credits no internal account.
 
-The kernel can replenish its ETH by buying more with available `sys` USDT0.
-Other accounts' backing cannot fund that purchase. The purchase itself is a
-blockchain transaction and also requires ETH, so the operator must supply the
-initial ETH and replenish it directly if too little remains to make a purchase.
+The kernel can buy more fuel with available `sys` USDT0. Other accounts'
+backing cannot fund that purchase. The purchase itself is a blockchain
+transaction and also needs fuel, so the operator must supply the first amount
+and replenish it directly if too little remains to make a purchase.
 The setup sequence is:
 
-**1. Decide which node to use.** Both shipped chain worlds name a public one, so
-there is nothing to do here. The kernel reads payments and submits transactions
-through it. To use a hosted node or your own instead, edit `rpc` in that world's
+**1. Decide which node to use.** All three shipped chain worlds name a public
+node, so there is nothing to do here. The kernel reads payments and submits
+transactions through it. To use a hosted node or your own instead, edit `rpc` in that world's
 file in `~/.juice/worlds/`, which is where the node belongs and may be changed
 at any time.
 
-The first boot must reach that node, and everything it checks there must answer:
-the chain is the one named, the token and its decimals match, and the configured
-venue supports the fuel purchase. These checks validate the configuration;
-funding follows below. Creating a kernel fixes its network
+On first boot, the kernel checks that it can reach the node, that the chain,
+token and decimals match the world file, and that the configured exchange
+supports fuel purchases. These checks validate the configuration; funding
+follows below. Creating a kernel fixes its network
 for life and publishes the address people pay to, and it records the block from
 which payments are watched for, which cannot be guessed afterwards. So a first
 boot that cannot reach the chain, or finds any of that wrong, creates no kernel:
@@ -132,16 +131,17 @@ say what is unready.
 $ juice kernel serve arbitrum-one
 ```
 
-Use `arbitrum-sepolia` for the test network. First boot generates `rail.key` in
-the kernel's home. This key controls its account on the chain.
+Use `arbitrum-sepolia` for the test network or `polygon` for Polygon. First boot
+generates `rail.key` in the kernel's home. This key controls its account on the
+chain.
 
 {: .warning }
 > `rail.key` controls the kernel's money on the chain. It is created once and
 > never regenerated. Back it up with the rest of the home, and lose it and you
 > lose what the kernel holds.
 
-**3. Read the kernel's address.** After registering the kernel with your client
-and logging in as `sys`, inspect its blockchain address:
+**3. Read the kernel's address.** The serving machine's client already knows
+the kernel. Log in as `sys` and inspect its blockchain address:
 
 ```
 $ juice admin kernel show
@@ -155,10 +155,11 @@ Holdings:   0.00 USDT0 (gas 0.00) as of block 13
 `juice user deposit` reports the same destination, together with the accepted
 USDT0 contract and the current account's registered sender address.
 
-**4. Supply initial ETH.** From an external wallet, send ETH to the `Paid at:`
-address on the kernel's chain. ETH on another chain cannot pay this kernel's
-transaction fees. The amount must cover outgoing transactions and leave enough
-to submit a refill; the configured thresholds are explained below.
+**4. Supply initial fuel.** From an external wallet, send ETH on Arbitrum or
+POL on Polygon to the `Paid at:` address on the kernel's chain. Fuel on another
+chain cannot pay this kernel's transaction fees. The amount must cover outgoing
+transactions and leave enough to submit a refill; the configured thresholds
+are explained below.
 
 **5. Fund the operator's USDT0 balance.** To provide funds for automatic refills
 before fees have accumulated, remain logged in as `sys` and register the external
@@ -170,14 +171,14 @@ $ juice user deposit
 ```
 
 The first command asks for a signature proving control of your wallet, and for
-your password. Follow
-the second command's instructions to send the specified USDT0 from that wallet
-to the kernel's address, the same destination used for ETH. Once the payment
+your password. Follow the second command's instructions to send the specified
+USDT0 from that wallet to the kernel's address, the same destination used for
+fuel. Once the payment
 is final and processed, it credits `sys`. The full signing and deposit procedure
 is covered in [Deposits and withdrawals](../money/deposits-and-withdrawals.html#step-1-register-the-address-you-will-pay-from).
 
 **6. Verify funding.** Run `juice user me` to check the available `sys` balance
-and `juice admin kernel show` to inspect finalized USDT0 and ETH holdings,
+and `juice admin kernel show` to inspect finalized USDT0 and fuel holdings,
 accounting checks, and any payment halt. Wait for the kernel to process the
 payments before expecting the figures to reflect them. The solvency difference
 should be zero; custody is compared when the scan and payments allow a settled
@@ -185,29 +186,29 @@ comparison, as explained in [Operator duties](duties.html#the-one-view-to-read-f
 
 ## Funding the kernel
 
-Continued operation requires enough ETH to send payments and, when a refill is
+Continued operation requires enough fuel to send payments and, when a refill is
 needed, enough available `sys` USDT0 to buy it. There is no fixed minimum `sys`
 balance or separate solvency requirement for that account. A zero balance is
 valid, but cannot fund a refill. The required USDT0 depends on the purchase quote
 and its allowed slippage, while the transaction fee must fit the configured
 fee limit. Solvency concerns the backing of all internal balances; it does not
-establish that the kernel has enough ETH to transact.
+establish that the kernel has enough fuel to transact.
 
 The shipped Arbitrum One settings trigger a refill below 0.001 ETH and target
-0.003 ETH; Arbitrum Sepolia uses 0.0002 and 0.0004 ETH respectively. These
-thresholds describe the configured refill policy, rather than a guarantee of
-how much a particular transaction will cost.
+0.003 ETH; Arbitrum Sepolia uses 0.0002 and 0.0004 ETH respectively.
+Polygon triggers below 5 POL and targets 15 POL. These thresholds describe the
+configured refill policy, rather than a guarantee of a transaction's cost.
 
 Fees replenish `sys`, but whether they cover fuel depends on activity and costs.
-The operator can add USDT0 through the deposit procedure above or supply ETH
+The operator can add USDT0 through the deposit procedure above or supply fuel
 directly. Automatic refilling still requires a reachable chain node, a working
 swap venue, and a purchase within the configured limits. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 {: .warning }
-> Without sufficient ETH, outgoing payments cannot proceed. Deposits and calls
+> Without sufficient fuel, outgoing payments cannot proceed. Deposits and calls
 > can continue, but a blocked withdrawal or settlement payment requires the
-> shortage to be resolved. Buying ETH also requires a transaction fee.
+> shortage to be resolved. Buying fuel also requires a transaction fee.
 
 Ticket settlement has its own funding rules and imposes no minimum operator
 balance. See [Who funds a ticket](network-economy.html#who-funds-a-ticket) for
@@ -286,15 +287,18 @@ the records and keys needed to resolve them.
 
 ## Joining the network
 
-The world file supplies the seeds used to find peers and exchange public
-catalogs, and is the only place a meeting point is named: to use another, edit
-`seeds` in that file. `arbitrum-one` names this project's seed; on `play` and
-`arbitrum-sepolia`, write in a peer of the same network to connect them. Eligible public actions then become
-available to remote callers without another registration step.
+The world file's `seeds` are addresses of kernels to contact when joining the
+network. Through them, kernels find peers and exchange public catalogues.
+`play`, `arbitrum-one`, and `polygon` include project seeds. On
+`arbitrum-sepolia`, add the address of a kernel already serving that network.
+To use a different seed on any world, edit `seeds` in its world file. Eligible
+public actions then become available to remote callers without another
+registration step.
 
 Peers are identified by public key. A kernel behind a home router can be reached
-directly, through hole punching, or through a relay, without configuring port
-forwarding. Publicly reachable kernels also support routing and relay traffic;
+directly, by hole punching through the router, or through another kernel
+carrying its traffic as a relay, without configuring port forwarding. Publicly
+reachable kernels also help route traffic;
 every kernel listens on port 31313 unless its configuration says otherwise, so
 a seed is dialable at a known address with nothing to configure.
 
@@ -330,7 +334,7 @@ A kernel can export its own counters to Prometheus. Set `metrics_listen_addr`
 in `config.json`, or pass `--metrics-listen-addr`:
 
 ```
-$ juice kernel serve acme --metrics-listen-addr 127.0.0.1:9100
+$ juice kernel serve play --metrics-listen-addr 127.0.0.1:9100
 ```
 
 and point Prometheus at it:
@@ -342,10 +346,11 @@ scrape_configs:
       - targets: ["127.0.0.1:9100"]
 ```
 
-The page reports the build, calls by outcome and how long they took, requests
-to and from peers, retries, calls still waiting for a peer's answer and the
-oldest of them, the oldest payment a peer still owes, whether outgoing payments
-are halted, and whether the books balance. It names no user, peer or action.
+The page reports the build, the number of connected peers, calls by outcome
+and how long they took, and requests to and from peers. It also reports retries,
+calls still waiting for a peer's answer and the oldest of them, the oldest
+payment a peer still owes, whether outgoing payments are halted, and whether
+the books balance. It names no user, peer or action.
 It needs no login, so anyone who can reach the address can read it: keep it on
 loopback or a network only your monitoring reaches.
 

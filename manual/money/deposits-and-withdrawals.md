@@ -13,7 +13,7 @@ to token payments confirmed by the blockchain.
 
 This chapter first covers `play`, then follows a chain deposit from address
 registration to the resulting account credit. See
-[What differs between the three networks](index.html#what-differs-between-the-three-networks)
+[What differs between the four networks](index.html#what-differs-between-the-four-networks)
 for an overview of their payment arrangements.
 
 ## On `play`
@@ -46,17 +46,18 @@ than the local demonstration chain.
 
 ### The two assets
 
-Your wallet needs the network's token for the deposit and ETH for the
-transaction fee. They serve different purposes.
+Your wallet needs two currencies: the token you deposit and the currency that
+pays the blockchain's transaction fee. The latter is often called fuel.
 
 **USDT0** is the unit used for account balances on `arbitrum-one` and `polygon`. A deposit of
 `250.00 USDT0` credits that amount to the account, and a withdrawal pays USDT0
 back to the registered address. The `arbitrum-sepolia` network uses a test token with no
 real monetary value.
 
-**ETH** pays the blockchain fee for sending the deposit. This fee is spent by
-your wallet in addition to the token amount and is not credited to your Juice
-balance. The kernel pays its own blockchain fees when sending withdrawals.
+**ETH** is the fuel on Arbitrum; **POL** serves the same purpose on Polygon.
+Your wallet spends it on the transaction fee in addition to the tokens you
+send. That fee is not credited to your Juice balance. The kernel pays its own
+blockchain fees when sending withdrawals.
 
 ### What you need before you start
 
@@ -142,12 +143,12 @@ address still needs to be registered.
 ### Step 3: send the USDT0
 
 From your own wallet, on that chain, send USDT0 to the kernel's address. You pay
-the transaction fee in ETH, as you would for any transfer.
+the transaction fee in ETH on Arbitrum or POL on Polygon.
 
 {: .warning }
 > Select the token by the contract address `juice user deposit` printed, not by
-> its symbol. Your wallet will also spend ETH on the transaction fee, but ETH sent
-> directly to the kernel supplies its fuel and does not credit your account.
+> its symbol. ETH or POL sent directly to the kernel supplies its fuel and does
+> not credit your account.
 
 {: .warning }
 > Send from your registered address. A direct withdrawal from an exchange names
@@ -164,9 +165,9 @@ After sending the token, the kernel detects the payment and waits for the
 network's required confirmation. It then credits the account registered to the
 sender address without a further command from you.
 
-The shipped `arbitrum-sepolia` world accepts a payment once it is included in a block.
-The `arbitrum-one` world waits for finality, so confirmation takes longer. Actual
-waiting times depend on the chain and the kernel's progress reading it.
+The shipped `arbitrum-sepolia` world accepts a payment once it is included in a
+block. The `arbitrum-one` and `polygon` worlds wait until the chain reports it
+as final. Waiting times depend on the chain and the kernel's progress reading it.
 
 ```
 $ juice user me
@@ -224,7 +225,7 @@ for an example.
 > confirmation line before answering it.
 
 For unattended withdrawals, `--yes` supplies the confirmation in advance.
-This is the same convention used for local transfers. Calls to value-bearing
+This is the same convention used for transfers. Calls to value-bearing
 actions differ: issuing `run` itself authorizes the value named in its input.
 
 ## When a payment does not go out
@@ -237,7 +238,7 @@ A kernel that cannot pay reports it on the withdrawal itself:
           — send native currency to 0xcAf2a882aF8730C6ad92D76361b1952C71C0453F
 ```
 
-In this example, the kernel lacks enough ETH to pay its transaction fees.
+In this Arbitrum example, the kernel lacks enough ETH to pay its transaction fees.
 The withdrawal remains reserved and is retried when the cause clears; you
 should not submit a second withdrawal to replace it. The operator can inspect
 and address the cause using the procedures in

@@ -116,8 +116,9 @@ same funding requirements in that role. An outgoing payment is temporarily
 held on `sys` while in transit, but this reservation is not operator earnings
 and cannot be spent on fuel.
 
-On a chain network, sending the payment also consumes ETH. Available `sys`
-USDT0 funds automatic ETH purchases, so a shortage of operator funds can prevent
+On a chain network, sending the payment also consumes fuel: ETH on Arbitrum,
+POL on Polygon. Available `sys` USDT0 funds automatic fuel purchases, so a
+shortage of operator funds can prevent
 a refill even though the ticket's USDT0 payment is fully reserved. Initial
 funding and the conditions for refilling are described in
 [Funding the kernel](running-a-kernel.html#funding-the-kernel).
