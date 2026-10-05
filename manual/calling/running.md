@@ -9,7 +9,7 @@ nav_order: 3
 Once you have selected an action and prepared its input, use `run` to execute
 it under the current login:
 
-```
+```console
 $ juice run ACTION [JSON]
 ```
 
@@ -17,7 +17,7 @@ $ juice run ACTION [JSON]
 alike, or a raw action id. `JSON` is the argument object, `{}` if omitted.
 `@file.json` reads the arguments from a file.
 
-```
+```console
 $ juice run bob@acme/echo '{"msg":"hello"}'
 bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
@@ -57,7 +57,7 @@ The kernel checks input against the action's schema before reserving funds.
 If a required argument is absent or has the wrong type, the request is rejected
 without charge:
 
-```
+```console
 $ juice run bob@acme/echo '{}'
 bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
 error: field msg: required field missing
@@ -72,7 +72,7 @@ Some actions require permission to use an upstream account belonging to you.
 If that consent is missing, the kernel rejects the call before charging and
 identifies the action to connect:
 
-```
+```console
 $ juice run bob@acme/mail '{"body":"hi"}'
 bob@acme/mail costs 0.00 fUSD. Run it? [y/N] y
 error: grant required for bob@acme/mail
@@ -89,7 +89,7 @@ remote actions, including free ones.
 To use terms you read earlier, pass the `quote_hash` returned by search or
 `action show`. The client sends it unchanged, without another read or prompt:
 
-```
+```console
 $ juice run bob@acme/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
@@ -109,7 +109,7 @@ times, particularly in programs that prepare work in advance.
 Give a purchase a key before starting it if you may need to repeat the request
 after a lost connection:
 
-```
+```console
 $ juice run bob@acme/echo '{"msg":"hi"}' --external-key echo-2026-09-14-001
 ```
 
@@ -127,7 +127,7 @@ purchase; adding a key afterwards cannot recover an earlier unkeyed run.
 To reach a remote provider, include its kernel in the action reference. This
 can be a petname known to your kernel or the remote kernel's public key:
 
-```
+```console
 $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
 dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
 ```
@@ -200,7 +200,7 @@ If the peer never answers, the funds remain reserved.
 
 To follow the process:
 
-```
+```console
 $ juice process show 01d1da53c418
 ```
 

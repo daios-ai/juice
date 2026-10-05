@@ -15,7 +15,7 @@ between your account and the outside world.
 
 ## Available and locked
 
-```
+```console
 $ juice user me
   available: 9.50 fUSD
   …
@@ -146,7 +146,7 @@ may be a user of your kernel or of another; the command is the same. It
 debits the amount and the action's price from your balance, and the recipient
 receives exactly the amount:
 
-```
+```console
 $ juice user transfer bob@acme 1
 Send 1.00 fUSD to bob@acme, for a price of 0.00 fUSD, acting as alice@acme? This cannot be undone. [y/N] y
 ```
@@ -179,7 +179,7 @@ an unknown recipient costs nothing.
 The account ledger records money entering, leaving, and moving between accounts.
 Use `user ledger` to read entries involving your account:
 
-```
+```console
 $ juice user ledger
 WHEN                  AMOUNT      FROM        TO          WHY
 2026-09-14T12:05:54Z  0.40 fUSD   alice@acme  bob@acme    e989c5e1d21a
@@ -203,7 +203,7 @@ transaction history; they are not backfilled into the ledger.
 An action may deliver money in addition to charging for its execution. The
 built-in `sys/transfer` illustrates the distinction:
 
-```
+```console
 $ juice run sys@acme/transfer '{"target":"bob@acme","amount":1500000}'
 ```
 

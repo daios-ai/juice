@@ -15,7 +15,7 @@ requirements, and price before running it.
 `sys/lookup` accepts a description of the service you need and returns ranked
 action candidates. For example, a search for an echo service might return:
 
-```
+```console
 $ juice run sys@acme/lookup '{"query":"echo a message"}'
 sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
@@ -95,7 +95,7 @@ the serving kernel checks them again when admitting a call. Use the
 If you already know an action's reference, `action show` reads its interface
 directly:
 
-```
+```console
 $ juice action show bob@acme/echo
   id: bb7fe1a8-…
   name: echo
@@ -145,7 +145,7 @@ by each report. Verification confirms a matching record of trade, not quality.
 
 ## Listing
 
-```
+```console
 $ juice action list
 TITLE                 ACTION                      PRICE       AUTHORIZE
 Read my mail          bob@acme/mail               0.00 fUSD   your own login
@@ -164,7 +164,7 @@ to include inactive actions within your permitted scope; it also adds an
 
 ## What other buyers thought
 
-```
+```console
 $ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said

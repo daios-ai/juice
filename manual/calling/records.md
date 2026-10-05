@@ -16,7 +16,7 @@ produced it.
 Use `tx list` to find calls you are entitled to read and `tx show` to inspect one
 in detail. The list's `CHARGED` column shows `gross − refund`:
 
-```
+```console
 $ juice tx list
 $ juice tx show 116fd3a64b0e
   id: 116fd3a64b0e
@@ -66,7 +66,7 @@ It contains hashes of the arguments and result, allowing those values to be
 checked without including their full contents in the receipt. Use `tx verify`
 to inspect the verification result:
 
-```
+```console
 $ juice tx verify 116fd3a64b0e
   transaction_id: 116fd3a6-…
   valid: true
@@ -104,7 +104,7 @@ For a remote call, your kernel retains the remote receipt and its signing key
 with the transaction. It can therefore verify the charge after losing contact
 with the peer or removing that peer from its local roster:
 
-```
+```console
 $ juice tx verify 6cd9f6b68b20
   transaction_id: 6cd9f6b6-…
   valid: true
@@ -143,7 +143,7 @@ A receipt signed before buyer and request binding was introduced reports
 The payer may submit one assessment of a completed call. Use its transaction
 identifier to associate the rating with the work you purchased:
 
-```
+```console
 $ juice tx rate 116fd3a64b0e 1 --note "did what it said"
   id: e599904f-…
   rated_tx_id: 116fd3a6-…
@@ -160,7 +160,7 @@ may add context, up to 1024 bytes. Once submitted, the rating cannot be changed
 or withdrawn and has no effect on the payment. Readers who can see the action
 can also see its ratings, without the payer's identity:
 
-```
+```console
 $ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said
@@ -176,7 +176,7 @@ automatically after all calls have settled and no tasks remain outstanding.
 Use the process commands to follow work that has not yet finished. The list shows
 open processes; `--all` adds the closed ones:
 
-```
+```console
 $ juice process list
 PROCESS       STATUS  AVAILABLE  LOCKED     AWAITING SINCE
 e3539f7502ad  open    0.00 fUSD  0.00 fUSD

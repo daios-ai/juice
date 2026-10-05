@@ -97,26 +97,25 @@ and outputs. This gives participants a record of experience with a service,
 while preserving the distinction between evidence of a trade and an assurance
 of quality.
 
-## The shipped networks
+## Worlds
 
-A kernel belongs to one network, named when it is created. This determines the
-money it uses and cannot be changed later. A network is a **world**: a file in
-`~/.juice/worlds/` naming its money and the servers to meet it through, so a
-network this build does not ship is a file you add. The four shipped ones serve
-different stages of use:
+Every kernel lives in a **world**. A world is a network with a single
+currency, in which all balances, prices and payments are counted. Kernels trade
+only with kernels in their own world; two worlds never interact, and a kernel
+stays for life in the world it was created in.
 
-- **`play`** counts in fUSD (fake dollars), with six decimal places and no real
-  monetary value. The operator records deposits, and no blockchain payment is required. It is suitable for learning
-  Juice and developing services.
-- **`arbitrum-sepolia`** uses a test token on Arbitrum Sepolia. It lets you rehearse deposits,
-  withdrawals, and settlement on a blockchain without using real money.
-- **`arbitrum-one`** uses USDT0 on Arbitrum One. Accounts and prices are denominated in
-  USDT0, and external payments settle on that chain.
-- **`polygon`** uses USDT0 on Polygon. Accounts and prices are denominated in USDT0,
-  external payments settle on that chain, and the kernel pays its transaction fees in POL.
+Juice comes with two standard worlds:
 
-Kernels federate within their own network. All four use six decimal places, but
-their balances remain separate and have different monetary value. [Money](money/) explains funding and withdrawals for each.
+- **`play`** counts in fUSD, fake dollars with no value. The operator records
+  deposits by hand. It suits learning, testing, and services offered for free.
+- **`polygon`** counts in USDT0, [Tether](https://tether.to)'s dollar
+  stablecoin, on the [Polygon](https://polygon.technology) blockchain. Its money
+  is real.
+
+Two further worlds, `arbitrum-sepolia` and `arbitrum-one`, show the same
+arrangement on Arbitrum. Anyone can define a world of their own
+([Configuring worlds](operating/worlds.html)). [Money](money/) explains how to
+fund an account and withdraw from it in each.
 
 ## Where to start
 

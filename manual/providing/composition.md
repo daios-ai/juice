@@ -73,7 +73,7 @@ The supplied imports include `encoding/json`, `strings`, `strconv`, `math`,
 `handler.go`, then call `sys/tinygo/compile`. Its result contains a base64
 module, which the following pipeline decodes into a file:
 
-```
+```console
 $ juice run sys@acme/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json \
     | jq -r .result.artifact | base64 -d > stamp.wasm
 ```
@@ -81,7 +81,7 @@ $ juice run sys@acme/tinygo/compile "$(jq -Rs '{source: .}' handler.go)" --json 
 Register the decoded module as a WebAssembly action, then enable it and choose
 its audience:
 
-```
+```console
 $ juice action create stamp --title "Stamp a note" --kind wasm --artifact stamp.wasm --price 1 \
     --description "Stamp a note with the current time" \
     --input-schema '{"type":"object","properties":{"note":{"type":"string","description":"text to stamp"}},"required":["note"]}'
@@ -92,7 +92,7 @@ $ juice action update bob@acme/stamp --visibility local
 The action returns the input note together with the timestamp obtained by its
 child call:
 
-```
+```console
 $ juice run bob@acme/stamp '{"note":"invoice 42"}'
 bob@acme/stamp costs 1.00 fUSD. Run it? [y/N] y
   result: {

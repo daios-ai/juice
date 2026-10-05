@@ -13,7 +13,7 @@ network participation. Routine supervision is covered in
 
 ## Starting one
 
-```
+```console
 $ juice kernel serve play --listen-addr :4040
 ```
 
@@ -127,7 +127,7 @@ say what is unready.
 
 **2. Start the kernel.** For Arbitrum One:
 
-```
+```console
 $ juice kernel serve arbitrum-one
 ```
 
@@ -143,7 +143,7 @@ chain.
 **3. Read the kernel's address.** The serving machine's client already knows
 the kernel. Log in as `sys` and inspect its blockchain address:
 
-```
+```console
 $ juice admin kernel show
 Handle:     bank
 Network:    arbitrum-one
@@ -165,7 +165,7 @@ are explained below.
 before fees have accumulated, remain logged in as `sys` and register the external
 wallet address from which you will send USDT0:
 
-```
+```console
 $ juice user blockchain-address <your-wallet-address>
 $ juice user deposit
 ```
@@ -219,7 +219,7 @@ the distinction between funding the payment and paying its blockchain fee.
 For unattended first boot, name the kernel on the command line and provide the
 superuser password through `JUICE_BOOTSTRAP_PASSWORD`:
 
-```
+```console
 $ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve play --kernel-handle acme --listen-addr :4040
 ```
 
@@ -252,7 +252,7 @@ To run another kernel under the same Juice installation, choose another world.
 For example, after creating `workshop.json` as described in
 [Configuring worlds](worlds.html#creating-a-world), start it with:
 
-```
+```console
 $ juice kernel serve workshop --listen-addr :4242 --fed-listen-addrs /ip4/0.0.0.0/tcp/31314
 ```
 
@@ -271,7 +271,7 @@ For a consistent backup, stop the server and copy the complete home directory.
 Copying individual files while the server is running is not a supported backup
 procedure.
 
-Coordinate this upgrade with the other operators on your network. Stop new
+To upgrade, coordinate with the other operators on your network. Stop new
 cross-kernel calls and let all existing calls settle on every kernel before
 stopping the servers, replacing the executables, and restarting them together.
 Startup refuses the migration while a call is still in doubt here, but cannot
@@ -305,7 +305,7 @@ a seed is dialable at a known address with nothing to configure.
 Discovery is separated by network, so kernels find peers on their own network
 and nowhere else. You can inspect the local transport addresses with:
 
-```
+```console
 $ juice admin kernel show
 …
 Listen addresses:
@@ -320,7 +320,7 @@ From another machine, request `GET /health` at the kernel's HTTP address. Its
 On the serving machine, `serve` has already registered `acme`; no `kernel add`
 is needed.
 
-```
+```console
 $ juice kernel health acme
 ok  acme  network play  fdlMi64P…  v0.14.46
 ```
@@ -333,7 +333,7 @@ well as its status. Clients use that identity to check they have reached the exp
 A kernel can export its own counters to Prometheus. Set `metrics_listen_addr`
 in `config.json`, or pass `--metrics-listen-addr`:
 
-```
+```console
 $ juice kernel serve play --metrics-listen-addr 127.0.0.1:9100
 ```
 

@@ -119,7 +119,7 @@ transaction history.
 
 ## Your track record
 
-```
+```console
 $ juice action show bob@acme/echo
   …
 

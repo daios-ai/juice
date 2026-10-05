@@ -189,7 +189,7 @@ An issuer that gives conflicting signed accounts of a trade or its rating is
 marked as telling it two ways, and that trade contributes nothing to the derived
 figures. Inspect these views with:
 
-```
+```console
 $ juice admin peer inspect beta-kernel
 ```
 

@@ -20,7 +20,7 @@ agent is covered in [Running an agent](running-an-agent.html).
 
 Specify the saved login for each invocation with `--as`:
 
-```
+```console
 $ juice --as bot@acme run sys@acme/lookup '{"query":"translate to german"}' --json
 ```
 
@@ -43,7 +43,7 @@ the server's reply structure. Use `--quiet` when only the returned identifiers
 are needed, one per line. These unattended examples also show the price line
 written to stderr; it is separate from the result on stdout:
 
-```
+```console
 $ juice --as bot@acme run sys@acme/time --json
 sys@acme/time costs 0.00 fUSD.
 {
@@ -106,7 +106,7 @@ Convert amounts at the interface boundary. The command line accepts display
 units, while the HTTP API and action arguments and results use integer base
 units. On the shipped networks, one display unit contains 1,000,000 base units:
 
-```
+```console
 $ juice user transfer bob@acme 1.5           # display units
 ```
 ```
@@ -124,7 +124,7 @@ The built-in `sys/llm/decide` action can choose among candidate actions and
 propose their arguments. Calling it purchases the selection service, but does
 not execute the action it selects:
 
-```
+```console
 $ juice --as bot@acme run sys@acme/llm/decide '{
     "messages": [{"role":"user","content":"summarise this contract"}],
     "actions": ["bob@acme/echo","dave@beta-kernel/summarize"]
@@ -146,7 +146,7 @@ can change while a program prepares work, so carry the
 `quote_hash` from the selected search result or action read into the execution
 request:
 
-```
+```console
 $ juice --as bot@acme run bob@acme/echo '{"msg":"hi"}' --quote-hash 4965342976414282…
 ```
 
@@ -159,7 +159,7 @@ If the action is inactive, that earlier precondition fails instead.
 Before issuing a run that may need to be retried, generate and save a key for
 that purchase. Pass it as `--external-key` from the first request:
 
-```
+```console
 $ juice --as bot@acme run bob@acme/echo '{"msg":"hi"}' --external-key echo-2026-09-14-001 --json
 ```
 
@@ -192,7 +192,7 @@ Reuse it with the same terms if a retry is needed; the kernel returns the
 existing withdrawal rather than creating another. If `--id` is omitted, the
 CLI generates a new UUID for that invocation.
 
-```
+```console
 $ juice --as bot@acme user transfer bob@acme 1 --external-key payout-2026-09-14-001 --yes
 $ juice --as bot@acme user withdraw 5 --id 58e1e97f-7a31-4c92-8b6d-9f3048a2c015 --yes
 ```
@@ -207,7 +207,7 @@ the task and input, allowing the same request to recover its stored outcome.
 Transfers and withdrawals require confirmation. Without a terminal or explicit
 confirmation, the client refuses to act:
 
-```
+```console
 $ juice user transfer bob@acme 1
 error: re-run with --yes to confirm (no terminal to ask on)
 ```
@@ -242,7 +242,7 @@ as shown below. Authentication uses an authorization code with PKCE: the
 client generates a verifier, sends its derived challenge when authenticating,
 and presents the verifier when exchanging the code for tokens.
 
-```
+```console
 $ VERIFIER=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')
 $ CH=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
 $ curl -s -X POST localhost:4040/v1/auth/authorize -H 'Content-Type: application/json' \
@@ -255,7 +255,7 @@ $ curl -s -X POST localhost:4040/v1/auth/token -H 'Content-Type: application/jso
 
 Then use the access token as a bearer:
 
-```
+```console
 $ curl -s localhost:4040/v1/run -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d '{"action":"sys@acme/time","args":{}}'
 {"result":{"iso":"2026-09-14T12:07:31Z","unix":1789387651},"tx_id":"800c8279-…", …}
@@ -268,7 +268,7 @@ before the next refresh, since the old one is no longer valid.
 Check `GET /health` before trusting a server, and compare what it reports against
 the key and network you expect:
 
-```
+```console
 $ curl -s localhost:4040/health
 {"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
  "handle":"acme","network":"play","network_fingerprint":"baed18ae…",

@@ -18,7 +18,7 @@ Its handle is unique there, but another kernel may have an unrelated account
 with the same handle. The following command creates `alice` on the kernel that
 your client knows as `acme`:
 
-```
+```console
 $ juice user create alice@acme
 Password:
 Confirm password:
@@ -43,7 +43,7 @@ A **login** is the client's saved session for an account, identified by
 `handle@kernel`. Logging in authenticates you to that account and selects it
 for subsequent commands:
 
-```
+```console
 $ juice auth login alice@acme
 Password:
 alice@acme
@@ -53,7 +53,7 @@ The client stores each login's session tokens separately. It can hold several
 logins at once, including logins for different accounts on the same kernel.
 Use `auth list` to see them and `auth use` to change the selected one:
 
-```
+```console
 $ juice auth list
 LOGIN       IN USE
 alice@acme
@@ -70,7 +70,7 @@ that same saved login share its session, so logging it out also affects them.
 When you want to use a different account for one command, `--as` names an
 existing login without changing the client's selection:
 
-```
+```console
 $ juice --as bob@acme user me
 ```
 
@@ -97,7 +97,7 @@ keeps its logins. A name held by a different kernel is refused.
 
 ## Registering and trusting a kernel
 
-```
+```console
 $ juice kernel add https://kernel.example.org
 acme  network play  https://kernel.example.org  fdlMi64P…  (added)
 $ juice kernel list
@@ -119,7 +119,7 @@ it does not carry a saved login to that address.
 
 ## Password and profile
 
-```
+```console
 $ juice user update --description "I run the nightly summariser"
 $ juice user update --password
 Current password:
@@ -131,7 +131,7 @@ Passwords are at least eight characters; there are no composition rules.
 
 ## Recovering a lost password
 
-```
+```console
 $ juice auth recover alice@acme
 Recovery phrase:
 New password:
@@ -150,7 +150,7 @@ An operator may suspend an account to prevent it from making authenticated
 requests. A command using a suspended account therefore fails even if its
 session credentials are otherwise valid:
 
-```
+```console
 $ juice user me
 error: account suspended
 ```

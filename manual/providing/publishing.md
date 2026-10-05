@@ -16,7 +16,7 @@ The following example registers an HTTP endpoint that echoes a message. Its
 input schema describes the `msg` field, and its price is 0.50 fUSD on
 `play`:
 
-```
+```console
 $ juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
@@ -79,7 +79,7 @@ is paid. A result that violates the output schema causes a failed call.
 A new action is inactive and private. Enable it to permit execution, then choose
 who may call it by setting its visibility:
 
-```
+```console
 $ juice action enable bob@acme/echo
 CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
 enabled  Echo a message  bob@acme/echo  0.50 fUSD  yes     private
@@ -114,7 +114,7 @@ deactivates it, resets current statistics, and revokes delegated grants.
 Reactivation is then an explicit step, and callers must renew any required
 consent:
 
-```
+```console
 $ juice action update bob@acme/echo --price 0.75
 $ juice action enable bob@acme/echo
 ```
@@ -127,7 +127,7 @@ terms are refused before charging. See
 
 ## Retiring an action
 
-```
+```console
 $ juice action disable bob@acme/echo
 $ juice action delete bob@acme/echo
 ```
@@ -144,7 +144,7 @@ The mutation commands accept an action ID for one action, or an
 For example, enabling `bob@acme/greeter` can enable both operations in an
 application:
 
-```
+```console
 $ juice action enable bob@acme/greeter
 CHANGE   TITLE              ACTION                  PRICE      ACTIVE  AUDIENCE
 enabled  Greet someone      bob@acme/greeter/greet  0.50 fUSD  yes     private
@@ -171,7 +171,7 @@ separate application interface.
 When an upstream service uses your provider account, attach its credential
 to the action. The kernel will apply it when sending requests to the endpoint:
 
-```
+```console
 $ juice action create weather --title "City forecast" --kind http --source https://api.example.com/v1/forecast \
     --price 1 --description "Forecast for a city" \
     --input-schema '…' \

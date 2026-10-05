@@ -21,7 +21,7 @@ specified actions permission to use it when you pay for their execution.
 If a required consent is absent, the call is rejected before charging and
 identifies what you need to connect:
 
-```
+```console
 $ juice run bob@acme/mail '{"body":"hi"}'
 bob@acme/mail costs 0.00 fUSD. Run it? [y/N] y
 error: grant required for bob@acme/mail
@@ -31,7 +31,7 @@ error: grant required for bob@acme/mail
 The connection procedure depends on the authentication scheme configured for
 the action. With OAuth, start the consent flow using:
 
-```
+```console
 $ juice user connect bob@acme/mail
 ```
 
@@ -42,7 +42,7 @@ without a browser.
 
 For an action configured to use a personal token, supply the token directly:
 
-```
+```console
 $ juice user connect bob@acme/mail --token ghp_…
 Connected bob@acme/mail.
 ```
@@ -56,7 +56,7 @@ connecting it as well.
 
 ## Seeing and revoking consents
 
-```
+```console
 $ juice user me
   connections: [
     {
@@ -84,7 +84,7 @@ you have authorized by directory. These views contain no credentials; the
 kernel also excludes credentials from call inputs, outputs, logs, and receipts.
 To revoke access for a selection of actions, use:
 
-```
+```console
 $ juice user disconnect bob@acme/mail
   revoked: [
     "bob@acme/mail"
@@ -111,7 +111,7 @@ that price when completing it. An action that delivers value or calls a remote
 kernel can still require the immediate caller's separate value or stake funds.
 Use `task list` and `task show` to inspect the work addressed to you:
 
-```
+```console
 $ juice task list
 TASK          STATUS   CREATED BY        COMPLETES      OWNER       CALLER
 b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  alice@acme  bob@acme
@@ -139,7 +139,7 @@ The `created_by` field identifies the action that created the task, while
 whenever the task changes. Read `partial_args` for the information already
 supplied and `allowed_input` for the schema of the remaining input:
 
-```
+```console
 $ juice task complete b75366d19c2e '{}'
   result: {}
   tx_id: 4a908ead-…
@@ -160,7 +160,7 @@ across kernel restarts.
 To refuse the work instead, decline it. Its reserved price returns to the
 process that set it aside:
 
-```
+```console
 $ juice task cancel b75366d19c2e
 ```
 

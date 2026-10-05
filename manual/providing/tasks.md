@@ -26,7 +26,7 @@ The built-in `sys/message` action creates a task carrying a message to a named
 recipient. Its target is `sys/sink`, so completion acknowledges the work without
 performing a further service:
 
-```
+```console
 $ juice run sys@acme/message '{"to":"bob@acme","message":"approve the order?"}'
 sys@acme/message costs 0.00 fUSD. Run it? [y/N] y
   result: {
@@ -64,7 +64,7 @@ X-Juice-Capability: <the capability it was dispatched with>
 
 The command-line form identifies the trace whose budget funds the task:
 
-```
+```console
 $ juice task create bob@acme/approve --trace <trace-id> --required-caller bob@acme \
     --partial-args '{"order":"42"}'
 ```
@@ -121,7 +121,7 @@ funds. It closes automatically once the root call and its descendants have
 settled and no tasks remain outstanding. Any funds left at closure return to
 the process owner.
 
-```
+```console
 $ juice process list
 PROCESS       STATUS  AVAILABLE  LOCKED     AWAITING SINCE
 e3539f75a421  open    0.00 fUSD  0.00 fUSD
@@ -131,7 +131,7 @@ e3539f75a421  open    0.00 fUSD  0.00 fUSD
 
 The process owner can end work that is no longer wanted:
 
-```
+```console
 $ juice process end e3539f75a421
 Process e3539f75a421 ended.
 ```

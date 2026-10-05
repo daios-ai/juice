@@ -140,7 +140,7 @@ action, with an error naming where it is:
 
 For example:
 
-```
+```console
 $ juice action create pick --title "Pick one" --source https://api.example.com/pick \
     --input-schema '{"type":"object","properties":{"v":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}'
 error: input.properties.v: oneOf is not supported: a field has one type, a choice among strings is an enum, and a field that may be empty is "type": [T, "null"]

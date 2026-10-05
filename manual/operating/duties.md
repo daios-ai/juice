@@ -18,7 +18,7 @@ and use a local connection or TLS when accessing the kernel remotely.
 Begin with `admin kernel show` for an overview of the kernel's identity,
 funds, configured rates, and exposure to remote trade:
 
-```
+```console
 $ juice admin kernel show
 Handle:     acme
 Public key: fdlMi64P…
@@ -54,7 +54,7 @@ The **Fees** and **Tickets** lines report the rates and ticket settings used by 
 On the manual `play` rail, credit an account by recording a deposit and its
 external reference:
 
-```
+```console
 $ juice admin user deposit alice@acme 10 --ref demo-payment-1
 Credit 10.00 fUSD to alice@acme, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
@@ -76,7 +76,7 @@ On a chain network, the kernel detects finalized payments and credits known
 sender addresses automatically. Operator attribution is needed when a received
 payment cannot yet be assigned:
 
-```
+```console
 $ juice admin kernel deposits
 ```
 
@@ -95,7 +95,7 @@ Suspension prevents an account from making authenticated requests while keeping
 its records intact. Separate user and peer commands identify the kind of account
 being moderated:
 
-```
+```console
 $ juice admin user suspend carol@acme
 $ juice admin user unsuspend carol@acme
 $ juice admin peer suspend beta-kernel
@@ -107,7 +107,7 @@ Unsuspending restores access with balances and history preserved. Suspending
 a peer refuses its requests but does not erase its evidence or prevent the
 kernel from recording observations of its reachability.
 
-```
+```console
 $ juice admin user list
 $ juice admin user show carol@acme
 $ juice admin user rename carol@acme carolyn@acme
@@ -119,7 +119,7 @@ for reuse. Programs keeping durable references should therefore store the ID.
 
 ## Peers
 
-```
+```console
 $ juice admin peer list
 PETNAME     NICKNAME  TRADED  LAST SEEN  LAST FAILED  ACTIONS  STATUS  PUBLIC KEY
 k-hqDr8oMX  —         yes     just now   never        0                hqDr8oMX…
@@ -136,7 +136,7 @@ An incoming call may provision an account but does not assign a local name,
 preventing a remote caller from claiming a petname by its own choice. To assign
 one explicitly, use:
 
-```
+```console
 $ juice admin peer rename hqDr8oMX… beta-kernel
 hqDr8oMX… renamed to beta-kernel.
 ```
@@ -149,7 +149,7 @@ The contact columns report observations rather than a current online status.
 have reached the peer. A connection lost after dispatch provides neither kind
 of evidence and advances neither timestamp. Inspect a peer for more detail:
 
-```
+```console
 $ juice admin peer inspect beta-kernel
 Petname:      beta-kernel
 Nickname:     beta
@@ -238,7 +238,7 @@ outgoing rail work waits.
 An incoming token payment whose sender is not registered cannot immediately be
 credited to a user. The kernel holds it and includes it in the deposits view:
 
-```
+```console
 $ juice admin kernel deposits
 Payments received whose sender nobody has registered:
   id: rail:0xccb0975d…:0

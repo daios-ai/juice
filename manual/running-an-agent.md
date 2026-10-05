@@ -40,7 +40,7 @@ as described in [Keeping the agent apart](#keeping-the-agent-apart).
 Create the account yourself, entering the password and saving the recovery
 phrase:
 
-```
+```console
 $ juice user create bot@acme
 Password:
 Confirm password:
@@ -50,13 +50,13 @@ Recovery phrase (write this down; it is shown only once and cannot be recovered)
 
 On any network, you can fund the agent's account by transferring from your own:
 
-```
+```console
 $ juice user transfer bot@acme 100
 ```
 
 Alternatively, on `play`, the operator can credit the account:
 
-```
+```console
 $ juice admin user deposit bot@acme 100 --ref "bot initial funds"
 ```
 
@@ -68,7 +68,7 @@ it, and the agent cannot change where its withdrawals go.
 Log in as the agent. This saves the session the agent will use. It also selects
 that login for your own shell, so switch back afterwards:
 
-```
+```console
 $ juice auth login bot@acme
 Password:
 bot@acme
@@ -78,7 +78,7 @@ alice@acme
 
 Set the login in the agent's environment when starting it:
 
-```
+```console
 $ JUICE_AS=bot@acme agent
 ```
 
@@ -101,7 +101,7 @@ to the agent's account and waits until the agent completes it
 ([Completing work addressed to you](calling/consent-and-tasks.html#completing-work-addressed-to-you)).
 The agent checks for waiting tasks with `task list`:
 
-```
+```console
 $ juice task list
 TASK          STATUS   CREATED BY        COMPLETES      OWNER       CALLER
 b75366d19c2e  waiting  sys@acme/message  sys@acme/sink  alice@acme  bot@acme
@@ -127,7 +127,7 @@ set `PATH` or `JUICE_HOME` if your installation requires them.
 To ask the agent for work, send it a message from your own account. The built-in
 message action creates a task for its recipient:
 
-```
+```console
 $ juice run sys@acme/message '{"to":"bot@acme","message":"find a service that translates to German, and tell me its price"}'
 sys@acme/message costs 0.00 fUSD. Run it? [y/N] y
   result: {
@@ -139,7 +139,7 @@ sys@acme/message costs 0.00 fUSD. Run it? [y/N] y
 At its next check the agent finds the task, reads it, searches, and completes
 it with the answer:
 
-```
+```console
 $ juice task show b75366d19c2e
   partial_args: {
     "message": "find a service that translates to German, and tell me its price"
@@ -157,7 +157,7 @@ The task's target is `sys/sink`, which accepts any input, so the answer travels
 as the completion's arguments. You read it on the transaction, since the process
 that created the task is yours:
 
-```
+```console
 $ juice tx show 4a908ead-7c13-4f21-9b0d-c817f23a5601
   args: {
     "message": "find a service that translates to German, and tell me its price",
@@ -181,7 +181,7 @@ it could spend.
 For unattended operation, give the agent a separate operating system user
 without `sudo` rights. Install Juice and establish its login as that user:
 
-```
+```console
 $ sudo useradd -m bot
 $ sudo -iu bot
 bot$ curl -fsSL https://juiceos.org/install.sh | sh
@@ -204,7 +204,7 @@ access to Juice, log out the saved session using the client that holds it.
 If the agent runs as a separate operating system user, run this command as
 that user:
 
-```
+```console
 $ juice auth logout bot@acme
 ```
 

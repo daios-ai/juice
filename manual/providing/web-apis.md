@@ -48,7 +48,7 @@ in a list. The optional `x-juice-price` extension gives an operation's price in
 base units.
 Import the document under the application name `greeter`:
 
-```
+```console
 $ juice action import greeter https://greeter.example.com/openapi.json
 imported greeter/greet
 imported greeter/index
@@ -62,7 +62,7 @@ different name to create an independent application.
 Imported actions begin inactive and private. Enable them using their shared
 path, then set the visibility required for their intended audience:
 
-```
+```console
 $ juice action enable bob@acme/greeter
 CHANGE   TITLE              ACTION                  PRICE      ACTIVE  AUDIENCE
 enabled  Greet someone      bob@acme/greeter/greet  0.50 fUSD  yes     private
@@ -100,7 +100,7 @@ operation, where it is in the document, and the rule it breaks. A change Juice
 made in storing a schema, such as writing `nullable: true` in its standard
 form, is listed as a note:
 
-```
+```console
 $ juice action import shop https://shop.example.com/openapi.json
 imported shop/addPet
 note addPet (POST /pets): input.properties.tag: nullable folded into type [T, "null"]
@@ -124,7 +124,7 @@ Set `operationId: index` or `x-juice-name: index` on an operation that describes
 the application. This is optional; without it, callers name individual
 operations directly.
 
-```
+```console
 $ juice action show bob@acme/greeter
   id: 31004d30-…
   name: greeter/index
@@ -140,7 +140,7 @@ Re-importing reads the document again and reconciles its operations with the
 installed actions. The kernel remembers the document URL, so the application
 name is sufficient:
 
-```
+```console
 $ juice action import greeter
 unchanged greeter/greet
 unchanged greeter/index
@@ -169,7 +169,7 @@ as does the price of an operation whose document declares none.
 Because an application shares a path, the ordinary action commands can disable
 or retire all of its operations together:
 
-```
+```console
 $ juice action disable bob@acme/greeter
 $ juice action delete bob@acme/greeter
 ```
@@ -182,7 +182,7 @@ individual action.
 If all operations use your account at the upstream provider, supply its
 credential when importing the application:
 
-```
+```console
 $ juice action import weather https://api.example.com/openapi.json \
     --auth '{"scheme":"bearer","secrets":{"token":"…"}}'
 ```

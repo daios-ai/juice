@@ -22,15 +22,16 @@ explains how that changes the setup.
 
 Use this command to install:
 
-```
+```console
 $ curl -fsSL https://juiceos.org/install.sh | sh
 ```
 
-This puts everything under the `~/.juice` directory and adds `~/.juice/bin` containing the  `juice` command to your search path.
+This puts everything under the `~/.juice` directory and adds `~/.juice/bin`,
+which holds the `juice` command, to your search path.
 
-You can put options go after `sh -s --`:
+Options go after `sh -s --`:
 
-```
+```console
 $ curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
 ```
 
@@ -53,7 +54,7 @@ it through. The shipped ones are written there the first time you serve. This
 walkthrough uses `play`, whose money is not real, and accepts HTTP clients on
 port 4040:
 
-```
+```console
 $ juice kernel serve play --listen-addr :4040
 ```
 
@@ -111,7 +112,7 @@ Use `kernel add` for a kernel somebody else runs, as shown in
 Create the buyer's account, `alice`, on the registered kernel. The combined name
 `alice@acme` tells the client where to create the account:
 
-```
+```console
 $ juice user create alice@acme
 Password:
 Confirm password:
@@ -129,7 +130,7 @@ Save Alice's recovery phrase as you did the superuser's. Juice has no email
 recovery, so this phrase is needed if the password is lost. Account creation
 and login are separate operations; authenticate as Alice next:
 
-```
+```console
 $ juice auth login alice@acme
 Password:
 alice@acme
@@ -139,7 +140,7 @@ The client now selects `alice@acme` as the current login. Subsequent commands
 act as Alice on `acme` until you switch to another login. Inspect the account to
 confirm its identity and initial balance:
 
-```
+```console
 $ juice user me
   address: alice@acme
   available: 0.00 fUSD
@@ -154,7 +155,7 @@ You can check execution before adding funds by calling `sys/time`, one of the
 built-in actions. It is free under the default configuration and returns the
 kernel's current time:
 
-```
+```console
 $ juice run sys@acme/time
 sys@acme/time costs 0.00 fUSD. Run it? [y/N] y
   result: {
@@ -180,7 +181,7 @@ in as `sys` to credit Alice with 10 fUSD. On a chain network, funding
 instead requires a token payment, as described in
 [Deposits and withdrawals](money/deposits-and-withdrawals.html).
 
-```
+```console
 $ juice auth login sys@acme
 Password:
 sys@acme
@@ -198,7 +199,7 @@ The reference prevents the same deposit from being credited twice if the command
 is repeated. Both logins are now saved in the client, so you can return to Alice
 without entering her password again:
 
-```
+```console
 $ juice auth use alice@acme
 alice@acme
 ```
@@ -213,7 +214,7 @@ connection.
 
 ### Bob publishes
 
-```
+```console
 $ juice user create bob@acme
 Password:
 Confirm password:
@@ -229,7 +230,7 @@ bob@acme
 As Bob, register the endpoint with a title, a description, a price of
 0.50 fUSD, and an input schema requiring a text field named `msg`:
 
-```
+```console
 $ juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
@@ -251,7 +252,7 @@ Registration creates an inactive, private action. Enable it to allow execution,
 then choose `local` visibility so that Alice and other users of `acme` can call
 it:
 
-```
+```console
 $ juice action enable bob@acme/echo
 CHANGE   TITLE           ACTION         PRICE      ACTIVE  AUDIENCE
 enabled  Echo a message  bob@acme/echo  0.50 fUSD  yes     private
@@ -262,7 +263,7 @@ updated  Echo a message  bob@acme/echo  0.50 fUSD  yes     local
 
 ### Alice finds it and buys it
 
-```
+```console
 $ juice auth use alice@acme
 alice@acme
 $ juice run sys@acme/lookup '{"query":"echo a message"}'
@@ -293,7 +294,7 @@ action's JSON result, `price` uses integer
 base units: `500000` represents `0.50 fUSD`. Use the returned reference to
 send Bob's action a message:
 
-```
+```console
 $ juice run bob@acme/echo '{"msg":"hello"}'
 bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
   result: {
@@ -312,7 +313,7 @@ bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
 After the successful call, Alice's available balance has decreased by the
 advertised 0.50 fUSD:
 
-```
+```console
 $ juice user me
   available: 9.50 fUSD
   …
@@ -320,7 +321,7 @@ $ juice user me
 
 ### What the call cost, and rating it
 
-```
+```console
 $ juice tx show e989c5e1d21a
   id: e989c5e1d21a
   …
@@ -349,7 +350,7 @@ whole price is margin, on which the default fee is 20%.
 Alice can now rate the call because she paid for it. A rating can be submitted
 only once and may include a note:
 
-```
+```console
 $ juice tx rate e989c5e1d21a 1 --note "did what it said"
   id: c84133a1-…
   rated_tx_id: e989c5e1-…
@@ -372,7 +373,7 @@ to this call and does not alter the payment.
 To use an existing kernel, begin by registering the address its operator gives
 you. You can then create an account and log in without running a server:
 
-```
+```console
 $ juice kernel add https://kernel.example.org
 work  network play  https://kernel.example.org  hqDr8oMX…  (added)
 $ juice user create alice@work

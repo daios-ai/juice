@@ -22,7 +22,7 @@ On `play`, the operator records deposits using references from their own books.
 No wallet or blockchain transaction is involved. The deposit command explains
 this arrangement:
 
-```
+```console
 $ juice user deposit
 Money on the play network has no addresses to send to.
 The operator of this kernel records payments here; there is nothing to send from your side.
@@ -87,7 +87,7 @@ The kernel attributes a deposit by its sender address. Register the address you
 will pay from before sending funds, proving control by signing the kernel's
 registration message with that wallet:
 
-```
+```console
 $ juice user blockchain-address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 Sign this message with the wallet holding 0x70997970C51812dc3A010C7d01b50e0d17dc79C8:
 
@@ -121,7 +121,7 @@ the address recorded when it was requested.
 
 ### Step 2: find out where to send
 
-```
+```console
 $ juice user deposit
 Send arbitrum-one to this kernel at:
   0xcaf2a882af8730c6ad92d76361b1952c71c0453f
@@ -169,7 +169,7 @@ The shipped `arbitrum-sepolia` world accepts a payment once it is included in a
 block. The `arbitrum-one` and `polygon` worlds wait until the chain reports it
 as final. Waiting times depend on the chain and the kernel's progress reading it.
 
-```
+```console
 $ juice user me
   available: 250.00 USDT0
   …
@@ -181,7 +181,7 @@ payments and the kernel's view of chain progress.
 
 ## Taking money out
 
-```
+```console
 $ juice user withdraw 50
 Withdraw 50.00 USDT0 on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
   id: 58e1e97f-…
@@ -199,7 +199,7 @@ uses your registered address as its destination. The kernel sends and confirms
 the payment automatically. On `play`, the same operation completes through the
 manual payment records. Use `user withdrawals` to follow the outcome:
 
-```
+```console
 $ juice user withdrawals
   id: 58e1e97f-…
   kind: payout

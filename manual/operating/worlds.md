@@ -62,7 +62,7 @@ amounts, and `description` explains the world when a kernel is created.
 
 Start the first kernel:
 
-```
+```console
 $ juice kernel serve workshop
 ```
 
