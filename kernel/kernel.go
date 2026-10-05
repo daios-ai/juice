@@ -1862,17 +1862,66 @@ func (k *Kernel) ReadCallableAction(ctx context.Context, ref, callerID string) (
 	return a, nil
 }
 
-// ListVisibleActions returns active actions visible network-wide (public) and, when includeLocal is
-// set, also kernel-local ones. Manifests and gossip pass false (public only); an authenticated local
-// listing passes true (§14).
-func (k *Kernel) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error) {
-	return k.store.ListVisibleActions(ctx, includeLocal, limit, offset)
+// CatalogQuery scopes the catalog (D20): every action the caller may see — all of its own, every other
+// live one visible to it (D5), and for a local caller those discovered on peers (§13) — or one
+// owner's share of it. The superuser sees every action in every state.
+type CatalogQuery struct {
+	CallerID   string
+	Local      bool // a local session caller: local actions and discovered ones are visible to it
+	Superuser  bool
+	OwnerID    string // narrows to one account of this kernel
+	PeerKey    string // narrows to one user of a peer, with PeerHandle
+	PeerHandle string
 }
 
-// ListOwnedActions returns all non-deleted actions owned by ownerID, including inactive
-// and private ones. Intended for authenticated owner list views.
-func (k *Kernel) ListOwnedActions(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error) {
-	return k.store.ListActionsByOwner(ctx, ownerID, limit, offset)
+// CatalogEntry is one row of a catalog page: an action, or a discovered one by its discovery key.
+type CatalogEntry struct{ ActionID, DocKey string }
+
+// Catalog is one page of the catalog, each row priced as Lookup prices its hits: an action at its
+// own all-in price, a discovered one at its indicative price with the quote that price pins (§13).
+func (k *Kernel) Catalog(ctx context.Context, q CatalogQuery, limit, offset int) ([]*LookupResult, error) {
+	entries, err := k.store.ListCatalog(ctx, q, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	var docs map[string]*DiscoveryDoc
+	out := make([]*LookupResult, 0, len(entries))
+	for _, e := range entries {
+		if e.ActionID != "" {
+			a, err := k.store.ReadAction(ctx, e.ActionID)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, &LookupResult{Action: a, Price: a.Price})
+			continue
+		}
+		if docs == nil {
+			all, err := k.store.ListDiscoveryDocs(ctx)
+			if err != nil {
+				return nil, err
+			}
+			docs = make(map[string]*DiscoveryDoc, len(all))
+			for _, d := range all {
+				docs[discoveryDocKey(d.KernelPublicKey, d.ActionID)] = d
+			}
+		}
+		d := docs[e.DocKey]
+		if d == nil {
+			continue // swept by a catalogue scan between the two reads
+		}
+		price, ok := k.indicativePrice(d.ServingPrice)
+		if !ok {
+			continue
+		}
+		out = append(out, &LookupResult{Discovered: d, Price: price, QuoteHash: quoteHashOf(quoteTermsOfDoc(d, price))})
+	}
+	return out, nil
+}
+
+// DiscoveredAddress is the address a discovered action is called by (D15): its owner on its kernel,
+// named as this kernel names that kernel.
+func (k *Kernel) DiscoveredAddress(ctx context.Context, d *DiscoveryDoc) string {
+	return Address{Handle: d.Handle, Kernel: k.KernelName(ctx, d.KernelPublicKey), Name: d.Name}.String()
 }
 
 // ListAllActions returns all actions regardless of active state.

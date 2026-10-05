@@ -105,6 +105,15 @@ price, and does not prevent publication.
 
 Visibility and activity can be changed independently. Disabling temporarily
 prevents all calls while retaining the chosen audience for a later reactivation.
+`action list` shows your own actions in every state, so you can see at a glance
+which are enabled and who may call them:
+
+```console
+$ juice action list
+TITLE           ACTION                  PRICE      ACTIVE  AUDIENCE  AUTHORIZE
+Echo a message  bob@acme/echo           0.50 fUSD  yes     local
+Greet someone   bob@acme/greeter/greet  0.50 fUSD  no      private
+```
 
 ## Changing terms
 

@@ -39,7 +39,7 @@ type Spec struct {
 // this package can widen it — adding a capability is an edit here, in the open.
 type Host interface {
 	Lookup(ctx context.Context, req kernel.LookupRequest) ([]*kernel.LookupResult, error)
-	KernelName(ctx context.Context, publicKey string) string
+	DiscoveredAddress(ctx context.Context, d *kernel.DiscoveryDoc) string
 	OwnName(ctx context.Context) string
 	NewNames() *kernel.Names
 	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)

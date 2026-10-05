@@ -1123,19 +1123,7 @@ func reportActions(verb string) output {
 		if err != nil {
 			return err
 		}
-		if err := list(
-			column{"CHANGE", func(json.RawMessage) string { return verb }},
-			column{"TITLE", text("title")},
-			column{"ACTION", text("action")},
-			column{"PRICE", money("price", net)},
-			column{"ACTIVE", func(row json.RawMessage) string {
-				if strField(row, "active") == "true" {
-					return "yes"
-				}
-				return "no"
-			}},
-			column{"AUDIENCE", text("visibility")},
-		)(b); err != nil {
+		if err := list(append([]column{{"CHANGE", func(json.RawMessage) string { return verb }}}, actionColumns(net)...)...)(b); err != nil {
 			return err
 		}
 		warnUnfundedPublic(as)
@@ -1211,56 +1199,61 @@ func setLimitOffset(q url.Values, limit, offset int) {
 	}
 }
 
+// actionColumns is how a person reads a row of actions, in a list and in what a change wrote.
+func actionColumns(net kernel.Network) []column {
+	return []column{{"TITLE", text("title")}, {"ACTION", text("action")}, {"PRICE", money("price", net)},
+		{"ACTIVE", func(row json.RawMessage) string {
+			if strField(row, "active") == "true" {
+				return "yes"
+			}
+			return "no"
+		}},
+		{"AUDIENCE", text("visibility")}}
+}
+
 func actionListCmd() *cobra.Command {
 	var all bool
-	var owner, name string
+	var owner string
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List actions",
-		Args:  cobra.NoArgs,
+		Short: "List your actions, or with --all every action this kernel knows",
+		Long: "List your own actions, in every state. --all lists every action this kernel knows that " +
+			"you may see, those discovered on other kernels included at an indicative price; --owner " +
+			"lists one owner's.",
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ctx := context.Background()
 			net, err := humanUnits(ctx)
 			if err != nil {
 				return err
 			}
+			// The kernel lists the catalog; your own share of it is the catalog narrowed to you.
+			if owner == "" && !all {
+				me, err := readMe(ctx)
+				if err != nil {
+					return err
+				}
+				owner = me.Address
+			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
-			// Default is active-only (like `docker ps`); --all includes inactive/private rows in
-			// the caller's scope (own for a normal user, all owners for the superuser).
-			if all {
-				q.Set("all", "1")
-			}
 			if owner != "" {
 				q.Set("owner", owner)
 			}
-			if name != "" {
-				q.Set("name", name)
-			}
-			// Whether a row is live and whether it needs the caller's own credential are columns
-			// like any other, rather than marks the reader has to have been told about.
-			cols := []column{{"TITLE", text("title")}, {"ACTION", text("action")}, {"PRICE", money("price", net)}}
-			if all {
-				cols = append(cols, column{"ACTIVE", func(row json.RawMessage) string {
-					if strField(row, "active") == "true" {
-						return "yes"
+			// Whether a row needs the caller's own credential is a column like any other, rather than
+			// a mark the reader has to have been told about.
+			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: list(append(actionColumns(net),
+				column{"AUTHORIZE", func(row json.RawMessage) string {
+					if strField(row, "requires_grant") == "true" {
+						return "your own login"
 					}
-					return "no"
-				}})
-			}
-			cols = append(cols, column{"AUTHORIZE", func(row json.RawMessage) string {
-				if strField(row, "requires_grant") == "true" {
-					return "your own login"
-				}
-				return ""
-			}})
-			return cli.emitCtx(ctx, "GET", "/v1/actions?"+q.Encode(), nil, output{human: list(cols...)})
+					return ""
+				}})...)})
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Include inactive and private actions (a superuser sees every owner's)")
-	cmd.Flags().StringVar(&owner, "owner", "", "Only actions owned by this user, handle@kernel")
-	cmd.Flags().StringVar(&name, "name", "", "Only actions with this name")
+	cmd.Flags().BoolVar(&all, "all", false, "Every action this kernel knows that you may see (a superuser sees every owner's)")
+	cmd.Flags().StringVar(&owner, "owner", "", "Only the actions of this user, handle@kernel, that you may see")
 	addPagingFlags(cmd, &limit, &offset)
 	return cmd
 }

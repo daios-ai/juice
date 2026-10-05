@@ -3431,17 +3431,13 @@ func TestServeActionsRefMode(t *testing.T) {
 	if code, out := get("ref="+url.QueryEscape(ownerHandle+"@k/mail@home"), ""); code != http.StatusOK || len(out) != 1 || out[0].ID != atID {
 		t.Errorf("anonymous local ref whose name contains @: got code=%d %+v", code, out)
 	}
-	// Reference mode and the flat filters are different questions and never combine.
-	if code, _ := get("ref="+url.QueryEscape(ownerHandle+"@k/mail")+"&name=mail/index", tok); code != http.StatusUnprocessableEntity {
-		t.Errorf("ref+name: got %d, want 422", code)
+	// Reference mode and the owner filter are different questions and never combine.
+	if code, _ := get("ref="+url.QueryEscape(ownerHandle+"@k/mail")+"&owner="+ownerHandle+"@k", tok); code != http.StatusUnprocessableEntity {
+		t.Errorf("ref+owner: got %d, want 422", code)
 	}
 	// A miss is an empty list, like every other filter on this endpoint.
 	if code, out := get("ref="+url.QueryEscape(ownerHandle+"@k/absent"), tok); code != http.StatusOK || len(out) != 0 {
 		t.Errorf("miss: got code=%d %+v, want an empty list", code, out)
-	}
-	// The flat filters stay exact: ?name= names a row, and never resolves a group.
-	if code, out := get("name=mail&owner="+ownerHandle+"@k", tok); code != http.StatusOK || len(out) != 0 {
-		t.Errorf("name filter must stay exact: got code=%d %+v", code, out)
 	}
 }
 

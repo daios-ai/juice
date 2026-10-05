@@ -49,7 +49,7 @@ Each result has `action` (the reference to run), `title`, `description`, `input_
 ```bash
 juice action show bob@acme/echo --json    # contract, price, quote_hash, requires_grant, evidence
 juice action ratings bob@acme/echo
-juice action list                          # everything callable by you
+juice action list --all                    # every action this kernel knows that you may call
 ```
 
 Judge a candidate by:

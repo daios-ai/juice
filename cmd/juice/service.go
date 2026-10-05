@@ -101,6 +101,7 @@ type actionResp struct {
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
 	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
 	QuoteHash     string    `json:"quote_hash"`            // the terms a caller may pin on a run (§4 precondition 7)
+	Discovered    bool      `json:"discovered,omitempty"`  // learned from a peer's catalogue, not yet resolved: its price is indicative (§13)
 	// Evidence is what this kernel holds about the action's conduct, on the detail read. Present
 	// for every action, local or remote: the subject is whoever runs it (§13, U39).
 	Evidence *kernel.ActionRecord `json:"evidence,omitempty"`
@@ -718,34 +719,13 @@ func deleteActions(k *kernel.Kernel, ctx context.Context, callerID, target strin
 	return enrichActions(k, ctx, as), nil
 }
 
-// listPublicActions returns actions visible to the caller, optionally filtered by owner handle and name.
-// Unauthenticated: active public actions only.
-// Authenticated (no owner filter): active public+local actions union caller's own active actions, deduplicated.
-// Authenticated with owner filter resolving to caller: all their actions regardless of active/visibility.
-// Source and ArtifactHash are stripped from all results.
-func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHandle, name string, includeInactive bool, limit, offset int) ([]actionSummary, error) {
-	// The superuser sees every owner's rows (supervision is scope on the normal endpoint, §14);
-	// everyone else starts from the public+active set and unions their own below. Inactive rows are
-	// dropped at the end unless includeInactive (the `all` param / `--all`) is set — so the default
-	// list is active-only for everyone, like `docker ps`.
-	superuser := callerID != "" && k.IsSuperuser(ctx, callerID)
-	var actions []*kernel.Action
-	var err error
-	if superuser {
-		actions, err = k.ListAllActions(ctx, limit, offset)
-	} else {
-		// Authenticated (session) callers are local users, so they see local actions too; an
-		// unauthenticated listing sees public only (§4/§14).
-		actions, err = k.ListVisibleActions(ctx, callerID != "", limit, offset)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var remoteOwner string // the handle folded into a proxy's stored name, when the owner is on a peer
-	if ownerHandle != "" {
-		// The owner is an address. Here it names a user; on a peer it names the peer's account —
-		// which holds every proxy of that kernel — plus the owner's handle folded into each row.
-		addr, err := kernel.ParseAddress(ownerHandle)
+// listActions is one page of the catalog the caller may see (D20), or of one owner's share of it
+// when owner names one by address. A discovered action reads as its cached copy will (§13), marked
+// discovered and priced indicatively. Lists summarize: no source and no artifact hash on any row.
+func listActions(k *kernel.Kernel, ctx context.Context, callerID, owner string, limit, offset int) ([]actionSummary, error) {
+	q := kernel.CatalogQuery{CallerID: callerID, Local: callerID != "", Superuser: callerID != "" && k.IsSuperuser(ctx, callerID)}
+	if owner != "" {
+		addr, err := kernel.ParseAddress(owner)
 		if err != nil || addr.Name != "" {
 			return nil, kernel.ErrInvalidInput.Wrap("owner must be handle@kernel")
 		}
@@ -753,91 +733,30 @@ func listPublicActions(k *kernel.Kernel, ctx context.Context, callerID, ownerHan
 		if err != nil {
 			return []actionSummary{}, nil
 		}
-		u := kr.Account
-		if kr.Local {
-			if u, err = k.ReadUserByHandle(ctx, addr.Handle); err != nil {
-				return []actionSummary{}, nil
-			}
+		if !kr.Local {
+			q.PeerKey, q.PeerHandle = kr.Key, addr.Handle
+		} else if u, err := k.ReadUserByHandle(ctx, addr.Handle); err != nil {
+			return []actionSummary{}, nil
 		} else {
-			if u == nil {
-				return []actionSummary{}, nil
-			}
-			remoteOwner = addr.Handle
-		}
-		if !superuser && callerID != "" && callerID == u.ID {
-			// §3: an owner may list all their own actions regardless of active/public.
-			actions, err = k.ListOwnedActions(ctx, u.ID, limit, offset)
-			if err != nil {
-				return nil, err
-			}
-			includeInactive = true
-		} else {
-			filtered := actions[:0]
-			for _, a := range actions {
-				if a.OwnerUserID == u.ID {
-					filtered = append(filtered, a)
-				}
-			}
-			actions = filtered
-			if superuser {
-				// Scoping supervision to one owner is an explicit request for that owner's
-				// full picture (§3), so inactive rows show without needing `--all`.
-				includeInactive = true
-			}
-		}
-	} else if !superuser && callerID != "" {
-		owned, err := k.ListOwnedActions(ctx, callerID, limit, offset)
-		if err != nil {
-			return nil, err
-		}
-		seen := make(map[string]bool, len(actions))
-		for _, a := range actions {
-			seen[a.ID] = true
-		}
-		for _, a := range owned {
-			if (a.Active || includeInactive) && !seen[a.ID] {
-				actions = append(actions, a)
-			}
+			q.OwnerID = u.ID
 		}
 	}
-	if !includeInactive {
-		kept := actions[:0]
-		for _, a := range actions {
-			if a.Active {
-				kept = append(kept, a)
-			}
+	hits, err := k.Catalog(ctx, q, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	names := k.NewNames()
+	resps := make([]actionResp, len(hits))
+	for i, h := range hits {
+		if d := h.Discovered; d != nil {
+			resps[i] = actionResp{Action: &kernel.Action{Name: d.Name, Title: d.Title, Kind: kernel.KindRemoteProxy,
+				Active: true, Visibility: kernel.VisibilityLocal, Price: h.Price, Description: d.Description,
+				InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, RemoteActionID: d.ActionID},
+				ActionRef: k.DiscoveredAddress(ctx, d), QuoteHash: h.QuoteHash, Discovered: true}
+			continue
 		}
-		actions = kept
-	}
-	if name != "" || remoteOwner != "" {
-		filtered := actions[:0]
-		for _, a := range actions {
-			n := a.Name
-			if a.Kind == kernel.KindRemoteProxy {
-				var owner string
-				owner, n = kernel.SplitProxyName(a.Name)
-				if remoteOwner != "" && owner != remoteOwner {
-					continue
-				}
-			}
-			if name == "" || n == name {
-				filtered = append(filtered, a)
-			}
-		}
-		actions = filtered
-	}
-	resps := make([]actionResp, len(actions))
-	names := k.NewNames() // shared so listing is O(distinct owners), not O(rows)
-	for i, a := range actions {
-		r := enrichAction(ctx, k, a, names)
-		// Lists summarize (§14): no source of any kind and no artifact hash, whatever a detail read
-		// would show. enrichAction responds from its own copy, so this never touches the row.
-		r.Source = ""
-		r.ArtifactHash = ""
-		resps[i] = r
-	}
-	if resps == nil {
-		resps = []actionResp{}
+		resps[i] = enrichAction(ctx, k, h.Action, names)
+		resps[i].Source, resps[i].ArtifactHash = "", ""
 	}
 	return summaries(resps), nil
 }

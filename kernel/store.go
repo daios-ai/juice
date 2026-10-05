@@ -288,9 +288,9 @@ type Store interface {
 	// DeleteActionAndGrants atomically soft-deletes the action and deletes its delegated grants:
 	// a deleted action can never be called again, so no consent may outlive it (§5, §8).
 	DeleteActionAndGrants(ctx context.Context, id string) error
-	// ListVisibleActions returns active non-deleted actions with a non-suspended owner, network-wide
-	// (visibility=public) and, when includeLocal is set, also kernel-local ones (§4/§14).
-	ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error)
+	// ListCatalog returns one page of the actions a caller may see, discovered ones included, in title
+	// order (D20).
+	ListCatalog(ctx context.Context, q CatalogQuery, limit, offset int) ([]CatalogEntry, error)
 	// ListExportableActionsAfter returns one page of public actions in id order, for a catalogue scan.
 	ListExportableActionsAfter(ctx context.Context, afterActionID string, limit int) ([]*Action, error)
 	// ListActionsByOwner returns all non-deleted actions owned by ownerID, including

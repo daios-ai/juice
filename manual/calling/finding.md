@@ -145,22 +145,29 @@ by each report. Verification confirms a matching record of trade, not quality.
 
 ## Listing
 
+`action list --all` lists every action your kernel knows that you may see: your
+own, the local and public actions hosted here, the remote actions your kernel
+has cached, and those it has discovered on other kernels but not yet used:
+
 ```console
-$ juice action list
-TITLE                 ACTION                      PRICE       AUTHORIZE
-Read my mail          bob@acme/mail               0.00 fUSD   your own login
-Summarize a document  dave@beta-kernel/summarize  2.205 fUSD
-Stamp a note          bob@acme/stamp              1.00 fUSD
-Echo a message        bob@acme/echo               0.50 fUSD
+$ juice action list --all
+TITLE                 ACTION                       PRICE       ACTIVE  AUDIENCE  AUTHORIZE
+Echo a message        bob@acme/echo                0.50 fUSD   yes     local
+Read my mail          bob@acme/mail                0.00 fUSD   yes     local     your own login
+Stamp a note          bob@acme/stamp               1.00 fUSD   yes     local
+Summarize a document  dave@beta-kernel/summarize   2.205 fUSD  yes     local
+Translate to German   carol@beta-kernel/translate  0.315 fUSD  yes     local
   …
 ```
 
-Each row leads with the action's title and gives the reference that runs it.
-The default list shows active actions within your access: your own actions,
-local and public actions hosted here, and cached remote actions. `your own login`
-in the `AUTHORIZE` column means an upstream connection is required. Use `--all`
-to include inactive actions within your permitted scope; it also adds an
-`ACTIVE` column between `PRICE` and `AUTHORIZE`.
+Rows are ordered by title, and each gives the reference that runs it. A remote
+action discovered but not yet used shows an indicative price, which your kernel
+confirms against the provider's signed terms on first use; `--json` marks such a
+row `discovered`. `your own login` in the `AUTHORIZE` column means an upstream
+connection is required. `--owner handle@kernel` narrows the list to one owner's
+actions, and `--limit` and `--offset` page through it. Without `--all`,
+`action list` shows only your own actions, as described in
+[Publishing](../providing/publishing.html).
 
 ## What other buyers thought
 

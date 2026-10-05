@@ -2555,13 +2555,16 @@ func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
 		}
 		return m
 	}
-	anon, err := st.ListVisibleActions(ctx, false, 1000, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	session, err := st.ListVisibleActions(ctx, true, 1000, 0)
-	if err != nil {
-		t.Fatal(err)
+	catalog := func(q kernel.CatalogQuery) map[string]bool {
+		es, err := st.ListCatalog(ctx, q, 1000, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, e := range es {
+			m[e.ActionID] = true
+		}
+		return m
 	}
 	abroad, err := st.ListExportableActionsAfter(ctx, "", 1000)
 	if err != nil {
@@ -2576,7 +2579,7 @@ func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
 			name   string
 			caller *kernel.Account
 			seen   map[string]bool
-		}{{"anonymous", nil, listed(anon)}, {"local user", local, listed(session)}, {"peer", peer, listed(abroad)}} {
+		}{{"anonymous", nil, catalog(kernel.CatalogQuery{})}, {"local user", local, catalog(kernel.CatalogQuery{CallerID: local.ID, Local: true})}, {"peer", peer, listed(abroad)}} {
 			if got, want := c.seen[id], kernel.CanCall(c.caller, a); got != want {
 				t.Errorf("%s: %s/%s active=%v owner-suspended=%v: listed %v, canCall %v",
 					c.name, a.Name, a.Visibility, a.Active, a.OwnerSuspended, got, want)

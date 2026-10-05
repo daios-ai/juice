@@ -1081,8 +1081,8 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 	// listing, so a client never has to know the naming rules (§14). It is authenticated because
 	// resolving a kernel-qualified reference can dial a peer, and this route is otherwise open.
 	if ref := q.Get("ref"); ref != "" {
-		if q.Get("owner") != "" || q.Get("name") != "" {
-			writeErr(w, kernel.ErrInvalidInput.Wrap("ref cannot be combined with owner or name"))
+		if q.Get("owner") != "" {
+			writeErr(w, kernel.ErrInvalidInput.Wrap("ref cannot be combined with owner"))
 			return
 		}
 		// Authentication is required by the dial, not by resolution: a kernel-qualified reference
@@ -1097,8 +1097,7 @@ func (s *server) getActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := listBounds(r)
-	resps, err := listPublicActions(s.kernel, r.Context(), caller,
-		q.Get("owner"), q.Get("name"), listAll(r), limit, offset)
+	resps, err := listActions(s.kernel, r.Context(), caller, q.Get("owner"), limit, offset)
 	writeOr(w, resps, err)
 }
 
@@ -1205,8 +1204,8 @@ func (s *server) deleteActionTarget(w http.ResponseWriter, r *http.Request) {
 	writeOr(w, as, err)
 }
 
-// listAll reads the ?all= switch a list takes to show what it hides by default: inactive actions,
-// finished tasks, closed processes.
+// listAll reads the ?all= switch a list takes to show what it hides by default: finished tasks and
+// closed processes.
 func listAll(r *http.Request) bool {
 	all := r.URL.Query().Get("all")
 	return all == "1" || all == "true"

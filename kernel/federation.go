@@ -267,10 +267,6 @@ func (s *pricedStore) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, re
 	return s.priceOne(s.Store.ReadActionByOwnerRemoteID(ctx, ownerID, remoteActionID))
 }
 
-func (s *pricedStore) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*Action, error) {
-	return s.priceMany(s.Store.ListVisibleActions(ctx, includeLocal, limit, offset))
-}
-
 func (s *pricedStore) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error) {
 	return s.priceMany(s.Store.ListActionsByOwner(ctx, ownerID, limit, offset))
 }

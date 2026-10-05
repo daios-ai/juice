@@ -841,12 +841,82 @@ func TestListActions(t *testing.T) {
 		t.Errorf("ListAllActions: got %d, want 3", len(all))
 	}
 
-	publicActive, err := db.ListVisibleActions(ctx, false, 100, 0)
-	if err != nil {
+}
+
+// The catalog is one ordered union, so its scope decides what a page holds before the page is cut:
+// a caller's own rows in every state, others' live visible ones, the discoveries no live cached copy
+// shows, narrowed to one owner on request, ordered by title, and paged without a row skipped or
+// repeated.
+func TestListCatalog(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	alice, bob := newUser("alice", 0), newUser("bob", 0)
+	_ = db.CreateUser(ctx, alice)
+	_ = db.CreateUser(ctx, bob)
+	peer := newPeer(t, db, "beta", "K", 0, 0, time.Now().UTC())
+	label := map[string]string{}
+	add := func(owner *kernel.Account, name string, active bool, vis kernel.ActionVisibility, remoteID string) {
+		a := newAction(owner.ID, name, 0, active)
+		a.Title, a.Visibility, a.RemoteActionID = name, vis, remoteID
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		label[a.ID] = name
+	}
+	add(alice, "a-pub", true, kernel.VisibilityPublic, "")
+	add(alice, "a-priv", true, kernel.VisibilityPrivate, "")
+	add(alice, "a-off", false, kernel.VisibilityPublic, "")
+	add(bob, "b-local", true, kernel.VisibilityLocal, "")
+	add(bob, "b-priv", true, kernel.VisibilityPrivate, "")
+	add(bob, "b-off", false, kernel.VisibilityPublic, "")
+	add(peer, "dave/sum", true, kernel.VisibilityLocal, "r1")
+	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{
+		{KernelPublicKey: "K", ActionID: "r1", Handle: "dave", Name: "sum", Title: "d-sum", ObservedAt: time.Now()},
+		{KernelPublicKey: "K", ActionID: "r2", Handle: "dave", Name: "tr", Title: "d-tr", ObservedAt: time.Now()},
+		{KernelPublicKey: "K", ActionID: "r3", Handle: "erin", Name: "x", Title: "e-x", ObservedAt: time.Now()},
+	}, "", 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(publicActive) != 1 || publicActive[0].Name != "/active" {
-		t.Errorf("ListPublicActions: unexpected result")
+	list := func(q kernel.CatalogQuery, limit, offset int) []string {
+		t.Helper()
+		got, err := db.ListCatalog(ctx, q, limit, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, e := range got {
+			if e.DocKey != "" {
+				out = append(out, e.DocKey)
+			} else {
+				out = append(out, label[e.ActionID])
+			}
+		}
+		return out
+	}
+	mine := kernel.CatalogQuery{CallerID: alice.ID, Local: true}
+	for _, c := range []struct {
+		name string
+		q    kernel.CatalogQuery
+		want string
+	}{
+		{"own, every state", kernel.CatalogQuery{CallerID: alice.ID, Local: true, OwnerID: alice.ID}, "a-off a-priv a-pub"},
+		{"all, shadowed discovery dropped", mine, "a-off a-priv a-pub b-local K/r2 dave/sum K/r3"},
+		{"anonymous sees live public only", kernel.CatalogQuery{}, "a-pub"},
+		{"superuser sees every row", kernel.CatalogQuery{CallerID: bob.ID, Local: true, Superuser: true},
+			"a-off a-priv a-pub b-local b-off b-priv K/r2 dave/sum K/r3"},
+		{"another owner's visible rows", kernel.CatalogQuery{CallerID: alice.ID, Local: true, OwnerID: bob.ID}, "b-local"},
+		{"one user of a peer", kernel.CatalogQuery{CallerID: alice.ID, Local: true, PeerKey: "K", PeerHandle: "dave"}, "K/r2 dave/sum"},
+	} {
+		if got := strings.Join(list(c.q, 100, 0), " "); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	var paged []string
+	for off := 0; off < 9; off += 3 {
+		paged = append(paged, list(mine, 3, off)...)
+	}
+	if got, want := strings.Join(paged, " "), strings.Join(list(mine, 100, 0), " "); got != want {
+		t.Errorf("pages of 3 = %q, want the whole list %q", got, want)
 	}
 }
 
@@ -862,18 +932,18 @@ func TestListPublicActionsExcludesSuspendedOwner(t *testing.T) {
 	a.Visibility = kernel.VisibilityPublic
 	_ = db.CreateAction(ctx, a)
 
-	before, err := db.ListVisibleActions(ctx, false, 100, 0)
+	before, err := db.ListCatalog(ctx, kernel.CatalogQuery{}, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(before) != 1 || before[0].OwnerSuspended {
-		t.Fatalf("active owner: want 1 action with OwnerSuspended=false, got %d", len(before))
+	if len(before) != 1 {
+		t.Fatalf("active owner: want 1 action listed, got %d", len(before))
 	}
 
 	if err := db.SuspendUser(ctx, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	after, err := db.ListVisibleActions(ctx, false, 100, 0)
+	after, err := db.ListCatalog(ctx, kernel.CatalogQuery{}, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

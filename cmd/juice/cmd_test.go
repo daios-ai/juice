@@ -846,13 +846,13 @@ func TestActionListActive(t *testing.T) {
 	pub := kernel.VisibilityPublic
 	_, _ = env.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub})
 
-	actions, err := env.k.ListVisibleActions(ctx, false, 10, 0)
+	actions, err := env.k.Catalog(ctx, kernel.CatalogQuery{}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	found := false
 	for _, act := range actions {
-		if act.ID == a.ID {
+		if act.Action != nil && act.Action.ID == a.ID {
 			found = true
 		}
 	}
@@ -1726,7 +1726,7 @@ func TestQuietPrintsIdentifiersOnly(t *testing.T) {
 			})
 		})
 		out := captureStdout(t, func() error {
-			_, err := execTestCmd(t, actionListCmd())
+			_, err := execTestCmd(t, actionListCmd(), "--all")
 			return err
 		})
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -2370,7 +2370,7 @@ func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
 		banners = 0
 		oldFlag := *f
 		*f = true
-		_, err := execTestCmd(t, actionListCmd())
+		_, err := execTestCmd(t, actionListCmd(), "--all")
 		*f = oldFlag
 		if err != nil {
 			t.Errorf("a read that prints no money was refused because the banner was: %v", err)
@@ -3053,8 +3053,8 @@ func TestAPersonReadsRecordIDsShort(t *testing.T) {
 	}
 }
 
-// `task list` and `process list` show what is open; --all asks the server for the rest, by the
-// same parameter `action list` uses, and is sent only when typed.
+// `task list` and `process list` show what is open; --all asks the server for the rest, and is sent
+// only when typed.
 func TestListsAskForAllOnlyWhenTold(t *testing.T) {
 	var asked []string
 	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
@@ -3093,13 +3093,44 @@ func TestActionListShowsTitles(t *testing.T) {
 		})
 	})
 	out := captureStdout(t, func() error {
-		_, err := execTestCmd(t, actionListCmd())
+		_, err := execTestCmd(t, actionListCmd(), "--all")
 		return err
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 || !strings.HasPrefix(lines[0], "TITLE") || !strings.HasPrefix(lines[1], "Weather forecast") ||
 		!strings.Contains(lines[1], "bob@k/forecast") {
 		t.Errorf("action list =\n%s\nwant a TITLE column first, then the address", out)
+	}
+}
+
+// `action list` is the caller's own share of the catalog, which the kernel lists whole: by default
+// the client narrows it to the caller's address, --all asks for every action, and --owner for one
+// owner's.
+func TestActionListNarrowsTheCatalog(t *testing.T) {
+	var asked []string
+	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/me" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"address": "me@k"})
+			return
+		}
+		asked = append(asked, r.URL.RawQuery)
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "limit=50&owner=me%40k"},
+		{[]string{"--all"}, "limit=50"},
+		{[]string{"--owner", "bob@k"}, "limit=50&owner=bob%40k"},
+	} {
+		asked = nil
+		if _, err := execTestCmd(t, actionListCmd(), c.args...); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if len(asked) != 1 || asked[0] != c.want {
+			t.Errorf("action list %v asked %v, want %q", c.args, asked, c.want)
+		}
 	}
 }
 

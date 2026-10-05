@@ -148,8 +148,8 @@ flow_admin_supervision() {
         --source "http://127.0.0.1:$bport" --description "alice's action" --price "$(units 0)")" id)
     j "$db" "$ha" action enable "$aid" >/dev/null 2>&1
     j "$db" "$ha" action update "$aid" --visibility public >/dev/null 2>&1
-    # sys `action list` shows alice's action (system-wide scope).
-    assert_contains "admin.action_list_scope" "$aid" "$(jj "$db" "$hs" action list)"
+    # sys `action list --all` shows alice's action (system-wide scope).
+    assert_contains "admin.action_list_scope" "$aid" "$(jj "$db" "$hs" action list --all)"
 
     # sys disables alice's action over TCP (owner-or-superuser); bob cannot.
     j "$db" "$hs" action disable "$aid" >/dev/null 2>&1

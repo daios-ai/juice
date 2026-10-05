@@ -417,8 +417,11 @@ func TestActionAuthFieldsExposed(t *testing.T) {
 	}
 }
 
-func TestListPublicActions_FilterAndStrip(t *testing.T) {
-	_, k, _ := newTestHTTPServerFull(t)
+// The catalog lists summaries: an anonymous caller sees the public rows, an owner narrows them, and a
+// local caller also sees what discovery learned on a peer, read as its cached copy will read, marked
+// discovered and priced indicatively — the import fee added, the quote that price pins carried.
+func TestListActions_ScopeStripAndDiscovered(t *testing.T) {
+	_, k, db := newTestHTTPServerFull(t)
 	ctx := context.Background()
 
 	ownerID, _ := makeUser(t, k, "svc-lpa")
@@ -442,42 +445,48 @@ func TestListPublicActions_FilterAndStrip(t *testing.T) {
 	}
 
 	// List all public — should appear.
-	resps, err := listPublicActions(k, ctx, "", "", "", false, 50, 0)
+	resps, err := listActions(k, ctx, "", "", 50, 0)
 	if err != nil {
-		t.Fatalf("listPublicActions: %v", err)
+		t.Fatalf("listActions: %v", err)
 	}
 	found := false
 	for _, r := range resps {
 		if r.ID == a.ID {
 			found = true
-			if r.Action.Source != "" {
-				t.Error("Source should be stripped in public listing")
-			}
-			if r.Action.ArtifactHash != "" {
-				t.Error("ArtifactHash should be stripped in public listing")
+			if r.Action.Source != "" || r.Action.ArtifactHash != "" {
+				t.Error("a list row must carry neither source nor artifact hash")
 			}
 		}
 	}
 	if !found {
-		t.Error("public action not found in listPublicActions")
+		t.Error("public action not found in listActions")
+	}
+	if byOwner, err := listActions(k, ctx, "", "svc-lpa@k", 50, 0); err != nil || len(byOwner) == 0 {
+		t.Errorf("no results filtering by owner svc-lpa@k: %v", err)
 	}
 
-	// Filter by owner handle.
-	byOwner, err := listPublicActions(k, ctx, "", "svc-lpa@k", "", false, 50, 0)
+	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{{KernelPublicKey: "K", ActionID: "r1",
+		Handle: "dave", Name: "sum", Title: "Summarize", Description: "d", ServingPrice: 100, ObservedAt: time.Now().UTC()}}, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	discovered := func(rows []actionSummary) *actionSummary {
+		for i := range rows {
+			if rows[i].Discovered {
+				return &rows[i]
+			}
+		}
+		return nil
+	}
+	mine, err := listActions(k, ctx, ownerID, "", 50, 0)
 	if err != nil {
-		t.Fatalf("listPublicActions by owner: %v", err)
+		t.Fatal(err)
 	}
-	if len(byOwner) == 0 {
-		t.Error("no results filtering by owner @svc-lpa")
+	if d := discovered(mine); d == nil || d.ActionRef != "dave@K/sum" || d.Title != "Summarize" ||
+		d.Price <= 100 || d.QuoteHash == "" || d.RemoteActionID != "r1" || !d.Active {
+		t.Errorf("discovered row = %+v, want dave@K/sum titled, priced above its serving price, quoted", d)
 	}
-
-	// Filter by name.
-	byName, err := listPublicActions(k, ctx, "", "", "svc-pub", false, 50, 0)
-	if err != nil {
-		t.Fatalf("listPublicActions by name: %v", err)
-	}
-	if len(byName) == 0 {
-		t.Error("no results filtering by name svc-pub")
+	if anon, _ := listActions(k, ctx, "", "", 50, 0); discovered(anon) != nil {
+		t.Error("an anonymous caller must not see discovered actions")
 	}
 }
 
@@ -721,9 +730,9 @@ func TestEnrichTxDropsUUIDs(t *testing.T) {
 	}
 }
 
-// TestListActionsActiveOnlyByDefault: the superuser's default action list is active-only (so a
-// deactivated proxy disappears, like after unfriend); includeInactive brings inactive rows back.
-func TestListActionsActiveOnlyByDefault(t *testing.T) {
+// TestTheSuperuserListsEveryRow: supervision is scope on the normal endpoint (D20), so the
+// superuser's catalog holds another owner's inactive action, and narrowed to that owner still does.
+func TestTheSuperuserListsEveryRow(t *testing.T) {
 	_, k, _ := newTestHTTPServerFull(t)
 	ctx := context.Background()
 	sys, err := k.ReadUserByHandle(ctx, "sys")
@@ -754,13 +763,15 @@ func TestListActionsActiveOnlyByDefault(t *testing.T) {
 		}
 		return false
 	}
-	def, _ := listPublicActions(k, ctx, sys.ID, "", "", false, 50, 0)
-	if has(def) {
-		t.Error("superuser default list must exclude an inactive action")
-	}
-	all, _ := listPublicActions(k, ctx, sys.ID, "", "", true, 50, 0)
+	all, _ := listActions(k, ctx, sys.ID, "", 50, 0)
 	if !has(all) {
-		t.Error("superuser --all list must include the inactive action")
+		t.Error("the superuser's catalog must include another owner's inactive action")
+	}
+	if theirs, _ := listActions(k, ctx, sys.ID, "svc-inact@k", 50, 0); !has(theirs) {
+		t.Error("narrowed to its owner, the superuser's catalog must still include the inactive action")
+	}
+	if anon, _ := listActions(k, ctx, "", "", 50, 0); has(anon) {
+		t.Error("an inactive action is in nobody else's catalog")
 	}
 }
 

@@ -118,7 +118,7 @@ non-interactive confirmation.
 | `juice action enable ACTION\|PATH` | make callable |
 | `juice action disable ACTION\|PATH` | make uncallable, reversibly |
 | `juice action delete ACTION\|PATH` | retire; history survives |
-| `juice action list` | active actions within your access, by title; `--all` includes inactive actions in your scope |
+| `juice action list` | your own actions in every state, by title; `--all` every action this kernel knows that you may see, discovered ones included; `--owner` one owner's |
 | `juice action import NAME [SPEC_URL]` | install an OpenAPI document ([Wrapping a web API](../providing/web-apis.html)) |
 | `juice action ratings ACTION` | the public ratings |
 

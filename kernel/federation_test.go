@@ -3468,13 +3468,13 @@ func TestEveryReadPathReprices(t *testing.T) {
 			t.Errorf("%s price = %d, want %d", name, got.Price, want)
 		}
 	}
-	listed, err := k.ListOwnedActions(ctx, a.OwnerUserID, 50, 0)
+	listed, err := k.Catalog(ctx, kernel.CatalogQuery{CallerID: caller.ID, Local: true, OwnerID: a.OwnerUserID}, 50, 0)
 	if err != nil || len(listed) == 0 {
 		t.Fatalf("listing: %d rows, err %v", len(listed), err)
 	}
 	for _, got := range listed {
-		if got.ID == a.ID && got.Price != want {
-			t.Errorf("ListOwnedActions price = %d, want %d", got.Price, want)
+		if got.Action.ID == a.ID && got.Price != want {
+			t.Errorf("Catalog price = %d, want %d", got.Price, want)
 		}
 	}
 

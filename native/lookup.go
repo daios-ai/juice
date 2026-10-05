@@ -88,7 +88,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		var record *kernel.ActionRecord
 		if d := r.Discovered; d != nil {
 			actionID, title, description, in, out = d.ActionID, d.Title, d.Description, d.InputSchema, d.OutputSchema
-			ref = kernel.Address{Handle: d.Handle, Kernel: k.KernelName(ctx, d.KernelPublicKey), Name: d.Name}.String()
+			ref = k.DiscoveredAddress(ctx, d)
 			observedAt = d.ObservedAt.UTC().Format(time.RFC3339)
 			record = k.DiscoveredRecord(ctx, d)
 		} else {

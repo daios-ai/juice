@@ -772,7 +772,7 @@ func (s *DB) DeleteActionAndGrants(ctx context.Context, id string) error {
 
 // visibleTo is canCall in SQL for every caller but the owner, over actions a joined to their owner
 // u: live (active, not deleted, owner not suspended) and public, or also local when the caller is a
-// local user (D5). What an owner may see of their own is a separate listing.
+// local user (D5).
 func visibleTo(includeLocal bool) string {
 	vis := `a.visibility='public'`
 	if includeLocal {
@@ -781,16 +781,34 @@ func visibleTo(includeLocal bool) string {
 	return `a.active=1 AND a.deleted_at IS NULL AND u.suspended_at IS NULL AND ` + vis
 }
 
-func (s *DB) ListVisibleActions(ctx context.Context, includeLocal bool, limit, offset int) ([]*kernel.Action, error) {
-	// Peers never reach this via a session, so includeLocal is safe to key on session presence upstream.
+// ListCatalog is one page of the catalog (D20), ordered by title so a page is cut only after scope
+// and order are applied: a caller's own actions in every state, every other live one visible to it
+// (visibleTo), and, for a local caller, the actions discovered on peers that no live cached copy
+// already shows, keyed as the FTS mirror keys them. A superuser sees every action. An owner narrows
+// it: a local account, or one user of a peer, whose cached copies fold the handle into their name.
+func (s *DB) ListCatalog(ctx context.Context, q kernel.CatalogQuery, limit, offset int) ([]kernel.CatalogEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
-		 WHERE `+visibleTo(includeLocal)+`
-		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT a.id AS id, '' AS doc, a.title AS title FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
+		 WHERE a.deleted_at IS NULL AND (?1 OR a.owner_user_id=?2 OR (`+visibleTo(q.Local)+`))
+		   AND (?3='' OR a.owner_user_id=?3)
+		   AND (?4='' OR (u.kernel_public_key=?4 AND substr(a.name, 1, length(?5)+1)=?5||'/'))
+		 UNION ALL
+		 SELECT '', d.kernel_public_key||'/'||d.action_id, d.title FROM discovery_docs d
+		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel_public_key=?4 AND d.handle=?5))
+		   AND NOT EXISTS (SELECT 1 FROM actions p JOIN accounts pa ON pa.id=p.owner_user_id
+		     WHERE pa.kernel_public_key=d.kernel_public_key AND p.remote_action_id=d.action_id
+		       AND p.active=1 AND p.deleted_at IS NULL)
+		 ORDER BY title, id, doc LIMIT ?7 OFFSET ?8`,
+		q.Superuser, q.CallerID, q.OwnerID, q.PeerKey, q.PeerHandle, q.Local, limit, offset)
 	if err != nil {
-		return nil, dbErr(err, "list visible actions")
+		return nil, dbErr(err, "list catalog")
 	}
-	return queryList(rows, "list visible actions", scanActionFn)
+	return queryList(rows, "list catalog", func(scan func(...any) error) (kernel.CatalogEntry, error) {
+		var e kernel.CatalogEntry
+		var title string // selected only to order the union by
+		err := scan(&e.ActionID, &e.DocKey, &title)
+		return e, err
+	})
 }
 
 // ListExportableActionsAfter is one page of the catalogue, ordered by action id so a scan can be
