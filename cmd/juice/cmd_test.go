@@ -11,10 +11,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2725,6 +2730,9 @@ func TestDepositNamesTheTokenItTakes(t *testing.T) {
 		if !strings.Contains(got, vault) {
 			t.Errorf("the kernel's address is missing:\n%s", got)
 		}
+		if !strings.Contains(got, "Send USDT on the real network") {
+			t.Errorf("the instruction must name the money and its network, which are two things:\n%s", got)
+		}
 	})
 
 	t.Run("an unregistered sender is held, not credited to whoever sent it", func(t *testing.T) {
@@ -3186,5 +3194,65 @@ func TestActionImportReportsLocationsAndNotes(t *testing.T) {
 	}
 	if len(result.Notices) != 1 || result.Notices[0].Key != "sayHello" || result.Notices[0].Location != "GET /hello" {
 		t.Errorf("notices = %+v", result.Notices)
+	}
+}
+
+// A message that tells a person which command to run is an instruction they will type, so a
+// command it names that does not exist strands them at the step it was meant to unblock (a deposit
+// and a withdrawal once named `juice user address`, which never existed). Every string in the
+// program's own source that names a command under one of the root's verbs must resolve to a real
+// one: a group followed by a word that is none of its verbs is a command nobody can run.
+func TestEveryCommandAMessageNamesExists(t *testing.T) {
+	top := map[string]bool{}
+	for _, c := range rootCmd.Commands() {
+		top[c.Name()] = true
+	}
+	named := regexp.MustCompile(`\bjuice((?: [a-z][a-z-]*)+)`)
+	var files []string
+	for _, dir := range []string{".", "../../kernel", "../../rail", "../../fed", "../../native", "../../store", "../../script", "../../llm", "../../log", "../../netsim"} {
+		found, err := filepath.Glob(dir + "/*.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, found...)
+	}
+	checked := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), f, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			text, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			for _, at := range named.FindAllStringSubmatchIndex(text, -1) {
+				if at[1] < len(text) && text[at[1]] == '\n' {
+					continue // the first line of a message signed with a key names its purpose, not a command
+				}
+				m := []string{text[at[0]:at[1]], text[at[2]:at[3]]}
+				words := strings.Fields(m[1])
+				if !top[words[0]] {
+					continue // "juice reads JUICE_HOME": the product, not a command
+				}
+				checked++
+				c, rest, err := rootCmd.Find(words)
+				if err != nil || (c.HasSubCommands() && len(rest) > 0) {
+					t.Errorf("%s names %q, which is no command", f, "juice"+m[1])
+				}
+			}
+			return true
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no command named anywhere: the scan read nothing")
 	}
 }

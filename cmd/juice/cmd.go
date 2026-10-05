@@ -799,7 +799,13 @@ func userDepositCmd() *cobra.Command {
 					fmt.Println("The operator of this kernel records payments here; there is nothing to send from your side.")
 					return nil
 				}
-				fmt.Printf("Send %s to this kernel at:\n  %s\n\n", h.Network, h.BlockchainAddress)
+				// The money and the network are two things, and a depositor needs both: which currency to
+				// send, and on which chain. The world names the network; its symbol names the money.
+				money := h.Symbol
+				if money == "" {
+					money = "money"
+				}
+				fmt.Printf("Send %s on the %s network to this kernel at:\n  %s\n\n", money, h.Network, h.BlockchainAddress)
 				// The contract, not the symbol, is what says which money this is: one chain carries
 				// several tokens called the same thing, and a payment in the wrong one is never
 				// credited. An older kernel does not publish it, and a blank line under an
@@ -817,7 +823,7 @@ func userDepositCmd() *cobra.Command {
 				}
 				if me.BlockchainAddress == "" {
 					fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
-					fmt.Println("Register the address you will pay from first:  juice user address ADDRESS")
+					fmt.Println("Register the address you will pay from first:  juice user blockchain-address ADDRESS")
 					return nil
 				}
 				fmt.Printf("Pay from your registered address:\n  %s\n\n", me.BlockchainAddress)
@@ -840,7 +846,7 @@ func userWithdrawCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "withdraw AMOUNT",
 		Short: "Withdraw your credits",
-		Long: "Withdraw AMOUNT to the address you registered with `juice user address`; `juice user " +
+		Long: "Withdraw AMOUNT to the address you registered with `juice user blockchain-address`; `juice user " +
 			"withdrawals` lists the ones you have made and where each stands.\n\n" +
 			"A withdrawal fixes its destination when it is made, so registering another address later " +
 			"never redirects one already under way.",

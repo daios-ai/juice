@@ -304,7 +304,7 @@ func (c *Chain) Address() string { return strings.ToLower(c.addr.Hex()) }
 func (c *Chain) Destination(registered string) (string, error) {
 	if registered == "" {
 		return "", kernel.ErrInvalidState.Wrap(
-			"no payment address is registered; register the one you control first:  juice user address ADDRESS")
+			"no payment address is registered; register the one you control first:  juice user blockchain-address ADDRESS")
 	}
 	addr, err := jrail.ParseAddress(registered, "destination")
 	if err != nil {
