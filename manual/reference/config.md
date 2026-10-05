@@ -29,9 +29,9 @@ stored with mode 0600.
 The network itself is not configured here. It is the world named on
 `juice kernel serve`, whose file in `~/.juice/worlds/` carries the money, the
 node a chain world is reached through (`rpc`), and the `seeds` where peers are
-met. The shipped `play`, `arbitrum-one`, and `polygon` files include project
-seeds. For `arbitrum-sepolia`, add the address of a kernel already serving that
-network. The network a kernel was created on is recorded in its database, and
+met. The `play`, `polygon` and `arbitrum-one` files Juice comes with include
+project seeds. For `arbitrum-sepolia`, add the address of a kernel already
+serving that world. The network a kernel was created on is recorded in its database, and
 a boot offering it another is refused.
 See [Configuring worlds](../operating/worlds.html) for the file's contents and
 how to configure a network of your own.
@@ -99,16 +99,16 @@ actions default to zero.
 ### Fuel, on a chain network
 
 The world file supplies the rail's fuel policy. These settings determine when
-it buys fuel, how much it buys, and the limits on the purchase. Fuel is ETH on
-Arbitrum and POL on Polygon. These are world settings, stored outside the
+it buys fuel, how much it buys, and the limits on the purchase. Fuel is POL on
+Polygon and ETH on Arbitrum. These are world settings, stored outside the
 kernel's `config.json`.
 
-| Key | Arbitrum One | Arbitrum Sepolia | Polygon | |
+| Key | `polygon` | `arbitrum-one` | `arbitrum-sepolia` | |
 |---|---|---|---|---|
-| `gas.min` | 0.001 ETH | 0.0002 ETH | 5 POL | buy more below this |
-| `gas.max` | 0.003 ETH | 0.0004 ETH | 15 POL | buy up to this |
-| `gas.feeBound` | 0.0003 ETH | 0.0001 ETH | 4 POL | most it will pay for one purchase |
-| `gas.slippageBps` | 100 | 500 | 100 | tolerance above the quoted price |
+| `gas.min` | 5 POL | 0.001 ETH | 0.0002 ETH | buy more below this |
+| `gas.max` | 15 POL | 0.003 ETH | 0.0004 ETH | buy up to this |
+| `gas.feeBound` | 4 POL | 0.0003 ETH | 0.0001 ETH | most it will pay for one purchase |
+| `gas.slippageBps` | 100 | 100 | 500 | tolerance above the quoted price |
 | `venue` | Uniswap V3 | Uniswap V3 | Uniswap V3 | the exchange used to buy fuel; its contract addresses and fee tier are set in the world file |
 
 See

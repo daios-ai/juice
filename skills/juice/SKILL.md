@@ -34,7 +34,7 @@ A person creates the account and logs in. You are given the login, such as `bot@
 
 ## Money and units
 
-- The CLI takes and shows **display units** (`0.50 fUSD`). JSON results, action arguments, and `--json` output use **integer base units**: on the shipped networks 1 display unit = 1,000,000 base units (`500000` = `0.50`). Read `decimals` and `symbol` from `juice kernel health --json` or `GET /health` rather than assuming six.
+- The CLI takes and shows **display units** (`0.50 fUSD`). JSON results, action arguments, and `--json` output use **integer base units**: in every world Juice comes with, 1 display unit = 1,000,000 base units (`500000` = `0.50`). Read `decimals` and `symbol` from `juice kernel health --json` or `GET /health` rather than assuming six.
 - `juice user me --json` → `available` (spendable) and `locked` (reserved for running calls, waiting tasks, remote stakes).
 - `juice user ledger` lists deposits, withdrawals, transfers, and settlement postings. Its `WHY` column identifies the transaction or payment behind a movement. Settlement postings name the call's transaction; older calls may be recorded only in the transaction history.
 

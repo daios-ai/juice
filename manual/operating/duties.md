@@ -169,7 +169,7 @@ observations.
 
 ## Money on a chain
 
-On `arbitrum-sepolia`, `arbitrum-one`, and `polygon`, the kernel holds tokens
+On `polygon`, and likewise on the two Arbitrum worlds, the kernel holds tokens
 and sends payments on the chain.
 After [initial setup](running-a-kernel.html#setting-up-on-a-chain), supervision
 centres on fuel, blocked payments, unattributed deposits, and the agreement
@@ -180,12 +180,12 @@ between custody and the account books.
 The funding model and initial deposits are explained in
 [Setting up on a chain](running-a-kernel.html#setting-up-on-a-chain).
 Refills spend available `sys` USDT0 through the venue configured in the world
-file. The shipped chain worlds use Uniswap V3.
+file. The chain worlds Juice comes with use Uniswap V3.
 
 The refill policy has a lower threshold, `gas.min`, and a target, `gas.max`.
 When an outgoing payment requires a refill, the rail attempts to buy enough
-fuel to reach the target. On Arbitrum One the shipped values are 0.001 and 0.003 ETH;
-on Polygon, where fuel is POL, they are 5 and 15 POL.
+fuel to reach the target. On `polygon` these are 5 and 15 POL; on
+`arbitrum-one`, where fuel is ETH, they are 0.001 and 0.003 ETH.
 Buying above the threshold reduces the need to refill on every payment.
 
 Fuel is an operator expense. The reservation excludes USDT0 backing other
@@ -211,13 +211,13 @@ the age of the halt. For example:
 
 ```
 ALARM: outgoing payments are halted since 2026-09-15T00:12:42Z: native currency
-too low, top up: holding 0.00, a refill costs 0.001972… — send native currency to
+too low, top up: holding 0.00, a refill costs 0.0581… — send native currency to
 0xcAf2a882aF8730C6ad92D76361b1952C71C0453F
 ```
 
 A **fuel shortage** can prevent even the refill transaction from being sent.
-In that case, send ETH on Arbitrum or POL on Polygon to the address in the
-message. This may be necessary both at initial setup and after the kernel has
+In that case, send the chain's native currency, POL on `polygon`, to the address
+in the message. This may be necessary both at initial setup and after the kernel has
 exhausted its fee balance.
 
 A **fee-bound failure** means the refill would exceed the configured transaction
@@ -258,13 +258,13 @@ user generally cannot prove control of the exchange's sender address.
 A held payment may instead settle a remote obligation. Reconciliation checks
 those obligations before attributing user deposits, and can wait for a peer's
 reveal when the sender has an unresolved ticket. See
-[The network economy](network-economy.html#settling-one-call). ETH received on
-Arbitrum, or POL on Polygon, supplies fuel and does not appear as a user deposit.
+[The network economy](network-economy.html#settling-one-call). POL received at
+the address supplies fuel and does not appear as a user deposit.
 
 ### Holdings and custody
 
 ```
-Holdings:   240.00 USDT0 (gas 0.04994…) as of block 28
+Holdings:   240.00 USDT0 (gas 14.62…) as of block 28
 Operator:   earned=0.00 USDT0 paying-out=0.00 USDT0 unclaimed=40.00 USDT0 held-for-gas=0.00 USDT0
 Solvency:   user-balances=240.00 USDT0 money-in=240.00 USDT0 difference=0.00 USDT0
 Custody:    the money the rail holds matches the books

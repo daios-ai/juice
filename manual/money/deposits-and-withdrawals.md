@@ -6,21 +6,21 @@ nav_order: 2
 
 # Deposits and withdrawals
 
-A deposit credits your account against an external payment; a withdrawal sends
-funds out of that account. Their external form depends on the kernel's network.
-On `play`, they are records of fUSD (fake dollars). On a chain network, they correspond
-to token payments confirmed by the blockchain.
+A **deposit** moves money from outside Juice into your account; a
+**withdrawal** moves it back out. What that money is depends on the kernel's
+world. On `play` it is fUSD, a record kept by the operator, and nothing leaves
+the kernel. On `polygon` it is a dollar stablecoin held on a blockchain, and
+every deposit and withdrawal is a real payment.
 
-This chapter first covers `play`, then follows a chain deposit from address
-registration to the resulting account credit. See
-[What differs between the four networks](index.html#what-differs-between-the-four-networks)
-for an overview of their payment arrangements.
+This chapter covers `play` briefly, then follows real money on `polygon` from
+your bank to your Juice account and back. The other worlds are summarized at
+the end.
 
 ## On `play`
 
-On `play`, the operator records deposits using references from their own books.
-No wallet or blockchain transaction is involved. The deposit command explains
-this arrangement:
+On `play`, the operator records deposits in the kernel's books, citing a
+reference from their own records. No wallet or blockchain is involved, as the
+deposit command explains:
 
 ```console
 $ juice user deposit
@@ -28,64 +28,88 @@ Money on the play network has no addresses to send to.
 The operator of this kernel records payments here; there is nothing to send from your side.
 ```
 
-Ask the operator to credit your account. They use `admin user deposit` with a
-reference identifying the deposit. A withdrawal likewise updates the kernel's
-records without making an external payment. These funds have no real monetary
-value, allowing you to learn and test the system without handling funds on a
-blockchain.
+Ask the operator to credit your account; they do so with `admin user deposit`,
+as described in [Crediting accounts](../operating/duties.html#crediting-accounts).
+A withdrawal on `play` removes fUSD from your balance and sends nothing
+anywhere, since fUSD exists only in the kernel's books.
 
-## On `arbitrum-sepolia`, `arbitrum-one` and `polygon`
+## On `polygon`
 
-On `arbitrum-sepolia`, `arbitrum-one` and `polygon`, deposits and withdrawals use the token specified by the
-network: a test token on Arbitrum Sepolia, or USDT0 on Arbitrum One and on Polygon.
+### The terms
 
-The following examples use a local chain to demonstrate the commands and their
-output. Substitute the addresses returned by your kernel and wallet. The
-waiting periods described in the prose refer to the shipped networks rather
-than the local demonstration chain.
+Real money reaches Juice through several hands. This section introduces them,
+then traces the path the money takes.
 
-### The two assets
+**Polygon** is a public blockchain: a ledger of payments that no single party
+controls. Wallets identify it by its chain ID, 137.
 
-Your wallet needs two currencies: the token you deposit and the currency that
-pays the blockchain's transaction fee. The latter is often called fuel.
+A **wallet** is software that holds the key to a blockchain **address**, a
+string such as `0x7099…79C8` that can receive money and send it. MetaMask and
+Rabby are common wallets. A wallet is not an exchange account: you control the
+address in your wallet, whereas an exchange holds your money in addresses it
+controls.
 
-**USDT0** is the unit used for account balances on `arbitrum-one` and `polygon`. A deposit of
-`250.00 USDT0` credits that amount to the account, and a withdrawal pays USDT0
-back to the registered address. The `arbitrum-sepolia` network uses a test token with no
-real monetary value.
+**USDT0** is the money of the `polygon` world. It is a **token**, a currency
+recorded on a blockchain, and more precisely a **stablecoin**, a token whose
+value is kept at one US dollar, issued by [Tether](https://tether.to). On
+Polygon its contract address is `0xc2132D05D31c914a87C6611C10748AEb04B58e8F`.
+Polygon's USDT was upgraded to USDT0 at that same address, so some wallets and
+services still call it USDT.
 
-**ETH** is the fuel on Arbitrum; **POL** serves the same purpose on Polygon.
-Your wallet spends it on the transaction fee in addition to the tokens you
-send. That fee is not credited to your Juice balance. The kernel pays its own
-blockchain fees when sending withdrawals.
+**POL** is Polygon's own currency. Every Polygon transaction pays a small fee in
+POL, so sending USDT0 also requires a little POL. POL never enters your Juice
+balance.
 
-### What you need before you start
+An **on-ramp** converts money from a bank account or card into tokens delivered
+to your wallet; an **off-ramp** does the reverse. Exchanges serve both
+purposes.
 
-Use a wallet configured for the kernel's chain that can sign a message and
-send the required token. Message signing proves ownership of your address;
-the token transfer supplies the deposit.
+| Term | In short |
+|---|---|
+| Polygon | the blockchain, chain ID 137 |
+| wallet | software controlling your address, such as MetaMask or Rabby |
+| address | where your money on Polygon is held, `0x…` |
+| USDT0 | the dollar stablecoin Juice counts in on `polygon` |
+| POL | Polygon's currency, which pays transaction fees |
+| on-ramp, off-ramp | services converting between bank money and tokens |
 
-| | `arbitrum-sepolia` | `arbitrum-one` | `polygon` |
-|---|---|---|---|
-| Chain | Arbitrum Sepolia | Arbitrum One | Polygon |
-| The money | a test token, worth nothing | USDT0, real dollars | USDT0, real dollars |
-| Where it comes from | Sepolia ETH from a public faucet; the test token has an open `mint` anyone may call | bought or transferred like any other USDT0 | bought or transferred like any other USDT0 |
+Money therefore travels from your bank to Juice and back along this path:
 
-If you need test funds, the operator may be able to supply them. Even on `arbitrum-sepolia`,
-an account credit must be supported by a witnessed payment. The operator can
-send you tokens or arrange and attribute a payment on your behalf.
+```text
+bank or card
+   ↓  on-ramp
+your wallet
+   ↓  USDT0 on Polygon
+your Juice account
+   ↓  withdrawal
+your wallet
+   ↓  off-ramp
+bank
+```
+
+### Getting USDT0 and POL
+
+You can buy USDT0 through an on-ramp or an exchange, or receive it from another
+wallet. Transak, MoonPay and Ramp are examples of on-ramps; availability, fees
+and payment methods depend on your country. Choose Polygon as the network and
+have the tokens delivered to your wallet's address. Buy a small amount of POL
+in the same way, to pay transaction fees.
+
+If you buy through an exchange, withdraw the tokens to your own wallet before
+depositing them in Juice. Juice credits a deposit to the account registered for
+the address that sent it, as the next step explains, and a payment sent directly
+from an exchange comes from the exchange's address.
 
 {: .warning }
-> Check the token's contract address before sending a deposit. A token symbol
-> does not uniquely identify it: one chain carries several tokens calling
-> themselves USDT. `juice user deposit` prints the contract this kernel takes; send that
-> one. Payments in another token are not credited through this deposit procedure.
+> Check the network and the contract address, not only the token's name.
+> Several tokens on Polygon call themselves USDT, and a payment in any of them
+> other than `0xc2132D05D31c914a87C6611C10748AEb04B58e8F` is not credited.
 
-### Step 1: register the address you will pay from
+### Step 1: register your wallet's address
 
-The kernel attributes a deposit by its sender address. Register the address you
-will pay from before sending funds, proving control by signing the kernel's
-registration message with that wallet:
+Juice recognizes your deposits by the address they come from, and sends your
+withdrawals to the same address. You therefore register that address once,
+proving that you control it:
 
 ```console
 $ juice user blockchain-address 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
@@ -97,37 +121,53 @@ user: cfeacc90-…
 address: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 
 Signature:
+```
+
+The four lines beginning `juice address registration` are the message. Sign it
+with your wallet:
+
+1. Open Polygonscan's [Verified Signatures](https://polygonscan.com/verifiedSignatures)
+   page and choose **Sign Message**.
+2. Connect the wallet holding the address you are registering.
+3. Paste the four lines exactly as printed, with their line breaks and nothing
+   added.
+4. Sign, and copy the signature, a long string beginning with `0x`.
+
+Polygonscan also offers to publish the signature; that is not needed. Paste the
+signature at the `Signature:` prompt, and give your password when asked:
+
+```console
+Signature: 0x5d1c…
 Password:
-```
-
-Copy the complete message into your wallet's message-signing function, then
-paste the resulting signature at the prompt. You are then asked for your
-password. The signature shows who holds the address, and the password shows that
-the account's owner chose it: withdrawals go to this address. The response confirms the
-registered address and lists any held deposits attributed to it:
-
-```
   blockchain_address: 0x70997970c51812dc3a010c7d01b50e0d17dc79c8
   attributed: []
 ```
 
-A program supplies `--signature` and `--password` instead of being asked. If you
-work at a command line, `cast wallet sign --private-key … "$MESSAGE"` produces the
-same thing.
+The signature proves that you hold the address, and the password proves that
+the account's owner chose it, since withdrawals will go there. `attributed`
+lists any earlier payments from this address that the kernel was holding and
+now credits to you. If the message changed while being copied, Juice answers
+`signature was not made by that address`; sign it again, copying the four lines
+exactly.
 
-An address can be registered to only one account. Registering a replacement
-changes the destination of future withdrawals; an existing withdrawal retains
-the address recorded when it was requested.
+Foundry users can sign from a terminal with `cast wallet sign --account NAME
+"$MESSAGE"`, which uses a key from Foundry's encrypted keystore. A program
+passes the signature and password with `--signature` and `--password` instead
+of answering the prompts.
 
-### Step 2: find out where to send
+An address can be registered to only one account. Registering a different
+address later changes where future withdrawals go; a withdrawal already
+requested keeps the address it was made with.
+
+### Step 2: find where to send
 
 ```console
 $ juice user deposit
-Send arbitrum-one to this kernel at:
+Send USDT0 on the polygon network to this kernel at:
   0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 
 Send only this token, and nothing else:
-  0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9  (USDT0)
+  0xc2132d05d31c914a87c6611c10748aeb04b58e8f  (USDT0)
 
 Pay from your registered address:
   0x70997970c51812dc3a010c7d01b50e0d17dc79c8
@@ -137,53 +177,46 @@ A payment from any other address, an exchange paying on your behalf included, is
 for the operator to assign by hand: withdraw to your own wallet first, then pay from there.
 ```
 
-You can also run this command before registration. It will report that a sender
-address still needs to be registered.
+The kernel's address is where all its deposits arrive. The token contract
+printed here is the authority on which money the kernel accepts.
 
 ### Step 3: send the USDT0
 
-From your own wallet, on that chain, send USDT0 to the kernel's address. You pay
-the transaction fee in ETH on Arbitrum or POL on Polygon.
+In your wallet, send USDT0 from your registered address to the kernel's address.
+Before confirming, check that the network is Polygon, that the token's contract
+matches the one printed above, and that the recipient is the kernel's address.
+The wallet pays the transaction fee in POL.
 
 {: .warning }
-> Select the token by the contract address `juice user deposit` printed, not by
-> its symbol. ETH or POL sent directly to the kernel supplies its fuel and does
-> not credit your account.
+> POL sent to the kernel's address is not a deposit. The kernel uses it to pay
+> its own transaction fees, and it credits no account.
 
-{: .warning }
-> Send from your registered address. A direct withdrawal from an exchange names
-> the exchange as sender, leaving the payment held for attribution. Withdraw to
-> your own wallet first, then send the deposit from that wallet.
+### Step 4: check the deposit
 
-{: .warning }
-> Check that the wallet is using the kernel's chain. A payment on another chain
-> will not be recognized as a deposit by this kernel.
-
-### Step 4: wait
-
-After sending the token, the kernel detects the payment and waits for the
-network's required confirmation. It then credits the account registered to the
-sender address without a further command from you.
-
-The shipped `arbitrum-sepolia` world accepts a payment once it is included in a
-block. The `arbitrum-one` and `polygon` worlds wait until the chain reports it
-as final. Waiting times depend on the chain and the kernel's progress reading it.
+The kernel credits a payment once Polygon reports it as final, which happens
+shortly after the payment is made, and it looks for new payments once a
+minute. A deposit therefore usually appears within about a minute:
 
 ```console
 $ juice user me
+  …
   available: 250.00 USDT0
   …
 ```
 
-If the expected credit has not appeared, check that the payment used the right
-chain, token, destination, and registered sender. The operator can inspect held
-payments and the kernel's view of chain progress.
+If it does not appear, look up the payment on [Polygonscan](https://polygonscan.com)
+by its **transaction hash**, the identifier your wallet shows for the payment.
+Check that it succeeded, and that it went on Polygon, in the token printed in
+step 2, to the kernel's address, and from your registered address. A payment
+from any other address is held by the kernel rather than lost: give the operator
+its transaction hash, and they can credit it to your account with
+`admin user deposit`.
 
 ## Taking money out
 
 ```console
 $ juice user withdraw 50
-Withdraw 50.00 USDT0 on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
+Withdraw 50.00 USDT0 on polygon to 0x70997970c51812dc3a010c7d01b50e0d17dc79c8, acting as alice@bank? This cannot be undone. [y/N] y
   id: 58e1e97f-…
   kind: payout
   amount: 50.00 USDT0
@@ -194,10 +227,16 @@ Withdraw 50.00 USDT0 on arbitrum-one to 0x70997970c51812dc3a010c7d01b50e0d17dc79
   party: alice@bank
 ```
 
-On a chain network, the withdrawal reserves the amount from your balance and
-uses your registered address as its destination. The kernel sends and confirms
-the payment automatically. On `play`, the same operation completes through the
-manual payment records. Use `user withdrawals` to follow the outcome:
+A withdrawal sends USDT0 from the kernel to your registered address; without a
+registered address it is refused. The amount is reserved from your balance at
+once. The kernel pays the Polygon fee, so you receive exactly the amount and need
+no POL to receive it. `amount` is what the payment carries and `credit` what
+leaves your balance; for a withdrawal the two are equal.
+
+A withdrawal begins as `pending`, becomes `submitted` once the kernel has sent
+the payment, and reaches `confirmed` when Polygon reports it as final. If the
+payment fails, the reserved amount returns to your balance. The `blocked` status
+is described in the next section. Use `user withdrawals` to follow the outcome:
 
 ```console
 $ juice user withdrawals
@@ -208,42 +247,53 @@ $ juice user withdrawals
   …
 ```
 
-A withdrawal begins as `pending`, becomes `submitted` after submission to the
-rail, and reaches `confirmed` when payment is final. A finalized failure returns
-the reservation to your balance. The `blocked` status means the kernel cannot
-currently proceed, as described below.
-
-If you may need to retry after a lost reply, generate and save a UUID before
-requesting the withdrawal and pass it with `--id`. Repeating the request with
-that ID and the same terms returns the existing withdrawal without taking more
-money. Without `--id`, the CLI generates a new UUID each time, so a second
-invocation requests a second withdrawal. See [Retries](../programs.html#retries)
-for an example.
+To turn the USDT0 into money in a bank account, send it from your wallet to an
+off-ramp or exchange that accepts USDT on Polygon; Transak is one example. That
+transfer is an ordinary Polygon payment, so it needs a little POL for its fee.
 
 {: .warning }
 > Withdrawals cannot be undone or recalled. Check the destination in the
 > confirmation line before answering it.
 
-For unattended withdrawals, `--yes` supplies the confirmation in advance.
-This is the same convention used for transfers. Calls to value-bearing
-actions differ: issuing `run` itself authorizes the value named in its input.
+If you may need to retry after a lost reply, generate and save a UUID before
+requesting the withdrawal, and pass it with `--id`. Repeating the request with
+that ID and the same amount returns the existing withdrawal without taking more
+money. Without `--id`, the client generates a new UUID each time, so a second
+invocation requests a second withdrawal. For unattended withdrawals, `--yes`
+supplies the confirmation in advance. See [Retries](../programs.html#retries)
+for an example.
 
 ## When a payment does not go out
 
-A kernel that cannot pay reports it on the withdrawal itself:
+A kernel that cannot pay reports the reason on the withdrawal itself:
 
 ```
   status: blocked
-  reason: native currency too low, top up: holding 0.00, a refill costs 0.002306…
+  reason: native currency too low, top up: holding 0.00, a refill costs 0.0581…
           — send native currency to 0xcAf2a882aF8730C6ad92D76361b1952C71C0453F
 ```
 
-In this Arbitrum example, the kernel lacks enough ETH to pay its transaction fees.
-The withdrawal remains reserved and is retried when the cause clears; you
-should not submit a second withdrawal to replace it. The operator can inspect
-and address the cause using the procedures in
+A chain's **native currency** is the one its fees are paid in, POL on Polygon.
+In this example the kernel has run out of POL for its own fees. The withdrawal
+stays reserved and is retried once the cause clears; do not submit a second
+withdrawal to replace it. Other causes are the cost of buying more POL, or too
+little operator money to buy it with. Deposits, calls, and reads continue while
+outgoing payments wait. The operator's remedies are in
 [Money on a chain](../operating/duties.html#money-on-a-chain).
 
-Other causes include the cost of a fuel purchase or insufficient operator funds
-for it. A halt affects outgoing rail work, while deposits, calls, and reads
-continue.
+## Other worlds
+
+The two Arbitrum worlds follow the same procedure, with Arbitrum in place of
+Polygon, ETH in place of POL, and Arbiscan in place of Polygonscan;
+`juice user deposit` prints the token contract each one accepts.
+
+| World | Money | Fees paid in | How deposits arrive |
+|---|---|---|---|
+| `play` | fUSD, with no value | nothing | recorded by the operator |
+| `polygon` | USDT0 on Polygon | POL | sent from your registered address |
+| `arbitrum-one` | USDT0 on Arbitrum One | ETH | sent from your registered address |
+| `arbitrum-sepolia` | a test token on Arbitrum Sepolia, with no value | test ETH | sent from your registered address |
+
+`arbitrum-sepolia` credits a payment as soon as it is included in a block, rather
+than waiting until it is final. Its test token has an open `mint` function anyone
+may call, and test ETH comes from public faucets.

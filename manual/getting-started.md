@@ -43,16 +43,16 @@ it afresh.
 
 ## Start a kernel
 
-This walkthrough uses `play` and requires no blockchain funding. To operate on
-Arbitrum or Polygon, follow [Setting up on a chain](operating/running-a-kernel.html#setting-up-on-a-chain),
-which explains the kernel's address, the currency used to pay transaction fees,
+This walkthrough uses `play` and requires no blockchain funding. To run a kernel
+with real money on `polygon`, follow [Setting up on a chain](operating/running-a-kernel.html#setting-up-on-a-chain),
+which explains the kernel's address, the currency it pays transaction fees in,
 and the operator's USDT0 balance.
 
-A kernel serves one network, named when it is started. A network is a **world**:
-a file in `~/.juice/worlds/` describing the money it uses and the servers to meet
-it through. The shipped ones are written there the first time you serve. This
-walkthrough uses `play`, whose money is not real, and accepts HTTP clients on
-port 4040:
+A kernel serves one world, named when it is started. Each world is described by
+a file in `~/.juice/worlds/`, giving its money and the servers to meet it
+through; the files for the worlds Juice comes with are written there the first
+time you serve. This walkthrough uses `play`, whose money is not real, and
+accepts HTTP clients on port 4040:
 
 ```console
 $ juice kernel serve play --listen-addr :4040
@@ -393,7 +393,7 @@ before sending funds.
 
 - [Concepts](concepts.html) defines the terms used from here on.
 - [Money](money/) covers balances, deposits and withdrawals in full, including
-  putting real money into an account on `arbitrum-one` or `polygon`.
+  putting real money into an account on `polygon`.
 - [Calling actions](calling/) covers finding, running, paying and rating.
 - [Providing actions](providing/) covers publishing, pricing and composition.
 - [Operating a kernel](operating/) covers running the kernel you started above.

@@ -17,12 +17,12 @@ network participation. Routine supervision is covered in
 $ juice kernel serve play --listen-addr :4040
 ```
 
-The argument names the network to serve. It is a world: a file in
-`~/.juice/worlds/` describing one network — the money it uses and the servers to
-meet it through. The worlds this build ships (`play`, `arbitrum-sepolia`,
-`arbitrum-one`, `polygon`) are written there the first time you serve, to read and to edit,
-and a network juice does not ship is a file you add. One installation runs one
-kernel per world, in `~/.juice/kernels/<world>/`. See
+The argument names the world to serve. A world is a network with a single
+currency, described by a file in `~/.juice/worlds/` that gives the money it uses
+and the servers to meet it through. The files for the worlds Juice comes with
+(`play`, `polygon`, `arbitrum-one`, `arbitrum-sepolia`) are written there the first
+time you serve, to read and to edit, and a world of your own is a file you add.
+One installation runs one kernel per world, in `~/.juice/kernels/<world>/`. See
 [Configuring worlds](worlds.html) to edit a world or create one of your own.
 
 The `--listen-addr` option sets the HTTP listening address. On first start, the
@@ -80,65 +80,61 @@ identifying the kernel, network, and public key.
 
 ## Setting up on a chain
 
-A kernel on `arbitrum-sepolia`, `arbitrum-one` or `polygon` has one address on
-that chain. Both USDT0 deposits and fuel go to this address, but the two
-currencies serve different purposes.
+This section sets up a kernel on `polygon`, the standard world with real money.
+The two Arbitrum worlds are set up the same way, with ETH in place of POL.
 
-USDT0 backs the balances inside the kernel. Each deposit is credited to the
+A kernel on `polygon` has one address on the Polygon blockchain. Two currencies
+arrive at that address, and they serve different purposes.
+
+**USDT0** backs the balances inside the kernel. Each deposit is credited to the
 account that registered the sending address, including `sys` when the operator
 is depositing. The `sys` account has administrative authority, receives kernel
-fees, and holds the operator's own balance. There is no additional kernel USDT0
-balance outside these accounts. All balances must remain backed, including
-funds reserved for work or payments; money held for an outgoing payment or
-awaiting attribution is unavailable for operator spending.
+fees, and holds the operator's own balance. There is no kernel USDT0 balance
+outside these accounts. All balances must remain backed, including funds
+reserved for work or payments; money held for an outgoing payment or awaiting
+attribution is unavailable for the operator to spend.
 
-Fuel pays the blockchain's transaction fees, also called gas. Arbitrum charges
-these fees in ETH; Polygon charges them in POL. The kernel needs that currency
-to send withdrawals and settlement payments. Receiving a deposit does not use
-the kernel's fuel, since the sender pays the fee. Fuel sent to the kernel
-credits no internal account.
+**POL** pays Polygon's transaction fees, also called gas; the currency a chain
+charges its fees in is its **fuel**. The kernel needs POL to send withdrawals and
+settlement payments. Receiving a deposit costs the kernel nothing, since the
+sender pays that fee. POL sent to the kernel credits no account.
 
-The kernel can buy more fuel with available `sys` USDT0. Other accounts'
-backing cannot fund that purchase. The purchase itself is a blockchain
-transaction and also needs fuel, so the operator must supply the first amount
-and replenish it directly if too little remains to make a purchase.
-The setup sequence is:
+When its POL runs low, the kernel buys more with available `sys` USDT0 on an
+exchange named in the world file, its **venue**. This purchase is a **refill**.
+Other accounts' balances cannot fund it. A refill is itself a transaction and
+needs POL, so the operator supplies the first POL and replenishes it directly if
+too little remains to make a purchase. The setup sequence is:
 
-**1. Decide which node to use.** All three shipped chain worlds name a public
-node, so there is nothing to do here. The kernel reads payments and submits
-transactions through it. To use a hosted node or your own instead, edit `rpc` in that world's
-file in `~/.juice/worlds/`, which is where the node belongs and may be changed
-at any time.
+**1. Decide which node to use.** The kernel reads payments and submits
+transactions through a Polygon node. The `polygon` world file names a public one,
+so there is nothing to do here. To use a hosted node or your own instead, edit
+`rpc` in `~/.juice/worlds/polygon.json`; the node may be changed at any time.
 
 On first boot, the kernel checks that it can reach the node, that the chain,
-token and decimals match the world file, and that the configured exchange
-supports fuel purchases. These checks validate the configuration; funding
-follows below. Creating a kernel fixes its network
-for life and publishes the address people pay to, and it records the block from
-which payments are watched for, which cannot be guessed afterwards. So a first
-boot that cannot reach the chain, or finds any of that wrong, creates no kernel:
-no superuser, nothing serving. What it had already written, including its chain
-key, stays where it is, so fixing the cause and starting again continues from
-there rather than beginning afresh.
+token and decimals match the world file, and that the venue supports refills.
+Creating a kernel fixes its world for life, publishes the address people pay to,
+and records the block from which it watches for payments, which cannot be
+guessed afterwards. A first boot that cannot reach the chain, or finds any of
+these wrong, therefore creates no kernel: no superuser, nothing serving. What it
+had already written, including its chain key, stays where it is, so fixing the
+cause and starting again continues from there.
 
-Once the kernel exists, that is behind it. An unreachable node or a broken
-venue only delays money: the kernel serves, and the payment commands wait and
-say what is unready.
+Once the kernel exists, an unreachable node or a broken venue only delays money:
+the kernel serves, and the payment commands wait and say what is not ready.
 
-**2. Start the kernel.** For Arbitrum One:
+**2. Start the kernel.**
 
 ```console
-$ juice kernel serve arbitrum-one
+$ juice kernel serve polygon
 ```
 
-Use `arbitrum-sepolia` for the test network or `polygon` for Polygon. First boot
-generates `rail.key` in the kernel's home. This key controls its account on the
-chain.
+First boot generates `rail.key` in the kernel's home. This key controls the
+kernel's address on the chain.
 
 {: .warning }
 > `rail.key` controls the kernel's money on the chain. It is created once and
-> never regenerated. Back it up with the rest of the home, and lose it and you
-> lose what the kernel holds.
+> never regenerated. Back it up with the rest of the home: lose it and you lose
+> what the kernel holds.
 
 **3. Read the kernel's address.** The serving machine's client already knows
 the kernel. Log in as `sys` and inspect its blockchain address:
@@ -146,23 +142,24 @@ the kernel. Log in as `sys` and inspect its blockchain address:
 ```console
 $ juice admin kernel show
 Handle:     bank
-Network:    arbitrum-one
+Network:    polygon
 Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 Holdings:   0.00 USDT0 (gas 0.00) as of block 13
 …
 ```
 
-`juice user deposit` reports the same destination, together with the accepted
-USDT0 contract and the current account's registered sender address.
+`Holdings` reports the kernel's USDT0 and, as `gas`, its POL. `juice user
+deposit` reports the same `Paid at` address, together with the accepted USDT0
+contract and the current account's registered sender address.
 
-**4. Supply initial fuel.** From an external wallet, send ETH on Arbitrum or
-POL on Polygon to the `Paid at:` address on the kernel's chain. Fuel on another
-chain cannot pay this kernel's transaction fees. The amount must cover outgoing
-transactions and leave enough to submit a refill; the configured thresholds
-are explained below.
+**4. Supply the first POL.** From your own wallet, send POL on Polygon to the
+`Paid at:` address. With the settings in `polygon.json` the kernel refills below 5 POL and
+buys up to 15 POL, so sending 15 POL lets the first payments go out without a
+refill.
 
-**5. Fund the operator's USDT0 balance.** To provide funds for automatic refills
-before fees have accumulated, remain logged in as `sys` and register the external
+**5. Fund the operator's USDT0 balance.** Refills are paid from `sys`'s USDT0,
+so `sys` needs some before fees have accumulated: enough to buy 15 POL at the
+current price covers one refill. Remain logged in as `sys`, and register the
 wallet address from which you will send USDT0:
 
 ```console
@@ -171,44 +168,42 @@ $ juice user deposit
 ```
 
 The first command asks for a signature proving control of your wallet, and for
-your password. Follow the second command's instructions to send the specified
-USDT0 from that wallet to the kernel's address, the same destination used for
-fuel. Once the payment
-is final and processed, it credits `sys`. The full signing and deposit procedure
-is covered in [Deposits and withdrawals](../money/deposits-and-withdrawals.html#step-1-register-the-address-you-will-pay-from).
+the `sys` password. Follow the second command's instructions to send USDT0 from
+that wallet to the kernel's address. Once Polygon reports the payment as final
+and the kernel has seen it, it credits `sys`. The signing and deposit procedure
+is covered step by step in [Deposits and withdrawals](../money/deposits-and-withdrawals.html#step-1-register-your-wallets-address).
 
-**6. Verify funding.** Run `juice user me` to check the available `sys` balance
-and `juice admin kernel show` to inspect finalized USDT0 and fuel holdings,
-accounting checks, and any payment halt. Wait for the kernel to process the
-payments before expecting the figures to reflect them. The solvency difference
-should be zero; custody is compared when the scan and payments allow a settled
-comparison, as explained in [Operator duties](duties.html#the-one-view-to-read-first).
+**6. Verify funding.** Run `juice user me` to check the available `sys` balance,
+and `juice admin kernel show` to inspect the kernel's final USDT0 and POL
+holdings, its accounting checks, and any payment halt. The solvency difference
+should be zero; custody is compared when the payment scan allows it, as
+explained in [Operator duties](duties.html#the-one-view-to-read-first).
 
 ## Funding the kernel
 
-Continued operation requires enough fuel to send payments and, when a refill is
+Continued operation requires enough POL to send payments and, when a refill is
 needed, enough available `sys` USDT0 to buy it. There is no fixed minimum `sys`
-balance or separate solvency requirement for that account. A zero balance is
-valid, but cannot fund a refill. The required USDT0 depends on the purchase quote
-and its allowed slippage, while the transaction fee must fit the configured
-fee limit. Solvency concerns the backing of all internal balances; it does not
-establish that the kernel has enough fuel to transact.
+balance. A zero balance is valid, but cannot fund a refill. The USDT0 a refill
+needs depends on the exchange's price and the allowed slippage, and its
+transaction fee must fit the configured fee limit. Solvency concerns the backing
+of all internal balances; it does not establish that the kernel has enough POL
+to transact.
 
-The shipped Arbitrum One settings trigger a refill below 0.001 ETH and target
-0.003 ETH; Arbitrum Sepolia uses 0.0002 and 0.0004 ETH respectively.
-Polygon triggers below 5 POL and targets 15 POL. These thresholds describe the
-configured refill policy, rather than a guarantee of a transaction's cost.
+The `polygon` world refills below 5 POL and targets 15 POL. The Arbitrum worlds
+use ETH: `arbitrum-one` refills below 0.001 ETH and targets 0.003 ETH, and
+`arbitrum-sepolia` uses 0.0002 and 0.0004 ETH. These thresholds describe the
+refill policy, not the cost of any one transaction.
 
 Fees replenish `sys`, but whether they cover fuel depends on activity and costs.
-The operator can add USDT0 through the deposit procedure above or supply fuel
-directly. Automatic refilling still requires a reachable chain node, a working
-swap venue, and a purchase within the configured limits. See
+The operator can add USDT0 through the deposit procedure above, or send POL
+directly. Automatic refills also require a reachable node, a working venue, and
+a purchase within the configured limits. See
 [How the kernel keeps itself in fuel](duties.html#how-the-kernel-keeps-itself-in-fuel).
 
 {: .warning }
-> Without sufficient fuel, outgoing payments cannot proceed. Deposits and calls
-> can continue, but a blocked withdrawal or settlement payment requires the
-> shortage to be resolved. Buying fuel also requires a transaction fee.
+> Without enough POL, outgoing payments cannot proceed. Deposits and calls
+> continue, but a blocked withdrawal or settlement payment waits until the
+> shortage is resolved. Buying POL also costs a transaction fee.
 
 Ticket settlement has its own funding rules and imposes no minimum operator
 balance. See [Who funds a ticket](network-economy.html#who-funds-a-ticket) for
@@ -289,8 +284,8 @@ the records and keys needed to resolve them.
 
 The world file's `seeds` are addresses of kernels to contact when joining the
 network. Through them, kernels find peers and exchange public catalogues.
-`play`, `arbitrum-one`, and `polygon` include project seeds. On
-`arbitrum-sepolia`, add the address of a kernel already serving that network.
+`play`, `polygon` and `arbitrum-one` include project seeds. On
+`arbitrum-sepolia`, add the address of a kernel already serving that world.
 To use a different seed on any world, edit `seeds` in its world file. Eligible
 public actions then become available to remote callers without another
 registration step.

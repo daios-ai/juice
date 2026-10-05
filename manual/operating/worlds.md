@@ -11,7 +11,7 @@ settle, and where it first meets peers. Its JSON file lives in
 `$JUICE_HOME/worlds/`, or `~/.juice/worlds/` with the default installation root.
 The filename without `.json` is the world's name.
 
-The shipped worlds are installed on the first `kernel serve` and are never
+The worlds Juice comes with are installed on the first `kernel serve` and are never
 overwritten. You can edit their connection settings or add a file for a network
 of your own. Restart the kernel to apply changes. An unknown field causes
 startup to fail.
@@ -80,8 +80,8 @@ approval mechanism.
 
 ## Using a chain
 
-For a world whose payments settle on a chain, start from a shipped `evm` world
-file. Keeping its filename and defining fields keeps you on that network;
+For a world whose payments settle on a chain, start from one of the `evm` world
+files Juice comes with, such as `polygon.json`. Keeping its filename and defining fields keeps you on that network;
 copying it under a new filename creates a separate network, even when it uses
 the same chain and token.
 

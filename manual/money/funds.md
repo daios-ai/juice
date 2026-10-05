@@ -38,11 +38,11 @@ See [Tasks and processes](../providing/tasks.html) for the conditions of closure
 
 ## Amounts
 
-The command line accepts amounts in the network's display unit, such as
+The command line accepts amounts in the world's display unit, such as
 `0.50 fUSD` on `play`. The HTTP API and action JSON use integer base units.
-All four shipped networks use six decimal places, so `500000` base units
-represent 0.50 fUSD on `play`. Equal numeric amounts on different networks do
-not imply equal monetary value.
+Every world Juice comes with counts to six decimal places, so `500000` base
+units represent 0.50 fUSD on `play`. Equal numeric amounts in different worlds
+do not imply equal monetary value.
 
 ## What an action costs
 

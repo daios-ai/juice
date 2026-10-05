@@ -104,7 +104,7 @@ is a decimal string in base units, and can be zero.
 
 Convert amounts at the interface boundary. The command line accepts display
 units, while the HTTP API and action arguments and results use integer base
-units. On the shipped networks, one display unit contains 1,000,000 base units:
+units. In every world Juice comes with, one display unit contains 1,000,000 base units:
 
 ```console
 $ juice user transfer bob@acme 1.5           # display units

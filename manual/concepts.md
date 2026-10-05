@@ -36,14 +36,14 @@ references. It is meaningful only on the assigning kernel. Since the remote
 kernel cannot choose this name, it cannot claim an existing local name merely
 by announcing a matching nickname.
 
-A **world**, also called a **network**, defines the money and external payment
-system a kernel uses. It is a file in `~/.juice/worlds/`, named by that file, and
-a kernel serves the world it is started with. The shipped worlds are `play`,
-which counts in fUSD (fake dollars), with six decimal places and no real monetary
-value; `arbitrum-sepolia`, which uses a test token on Arbitrum Sepolia; and
-`arbitrum-one` and `polygon`, which use USDT0 on Arbitrum One and on Polygon. A world you write yourself is a
-network of its own. The choice is fixed when the kernel is created, and kernels
-federate only within the same network.
+A **world** is a network with a single currency, in which a kernel counts all
+its balances, prices and payments. Kernels trade only with kernels in their own
+world, and a kernel stays for life in the world it was created in. The two
+standard worlds are `play`, which counts in fUSD, fake dollars with no value, and
+`polygon`, which counts in USDT0, a dollar stablecoin on the Polygon blockchain.
+`arbitrum-one` and `arbitrum-sepolia` show the same arrangement on Arbitrum. Each
+world is described by a file in `~/.juice/worlds/`, and a world you write
+yourself is a network of its own.
 
 ## Actions
 
@@ -122,8 +122,8 @@ settlement posting names its transaction, which records the work and its cost.
 
 **Base units** are the integer amounts used by the HTTP API and action JSON.
 **Display units** are the amounts accepted and shown by the command line.
-The shipped networks use six decimal places, so `500000` base units correspond
-to `0.50` fUSD on `play`, or `0.50` tokens on a chain network.
+Every world Juice comes with counts to six decimal places, so `500000` base
+units correspond to `0.50` fUSD on `play`, or `0.50` USDT0 on `polygon`.
 
 A **peer** is another kernel known to yours. A **counterparty** is a peer for
 which your kernel holds an account, allowing it to authorize requests and record
