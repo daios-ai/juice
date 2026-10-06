@@ -15,6 +15,23 @@ causes startup to fail, helping catch misspellings that would otherwise appear
 to configure a value. The file contains the credential-encryption key and is
 stored with mode 0600.
 
+Every setting is described in `~/.juice/schemas/config.schema.json`, which the
+kernel rewrites each time it starts; world files and language-model endpoint
+files have `world.schema.json` and `llm-endpoint.schema.json` beside it. A file
+that names its schema in its first line is completed and checked by your editor
+as you type:
+
+```json
+{
+  "$schema": "../../schemas/config.schema.json",
+```
+
+Files Juice writes already carry that line. To add it to an older
+`config.json`, use the line above; in a world or endpoint file, use
+`"../schemas/world.schema.json"` or `"../schemas/llm-endpoint.schema.json"`.
+The schema helps you write the file; the kernel still checks it when it
+starts.
+
 ## Identity and network
 
 | Key | Default | |

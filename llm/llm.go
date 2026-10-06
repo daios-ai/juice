@@ -55,18 +55,19 @@ func Shipped() fs.FS {
 // its models this installation uses. A model is listed under a short name of the operator's, since
 // its own id may carry characters an action name cannot (gemma4:26b, vendor/model).
 type Endpoint struct {
-	Protocol    string           `json:"protocol"`
-	URL         string           `json:"url"`
-	KeyRequired bool             `json:"key_required"`
-	Models      map[string]Model `json:"models"`
+	Schema      string           `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
+	Protocol    string           `json:"protocol" enum:"openai,anthropic" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
+	URL         string           `json:"url" doc:"The API's base address, e.g. https://api.openai.com/v1."`
+	KeyRequired bool             `json:"key_required" doc:"The provider needs an API key, set in config.json under native.llm.endpoints.<this file's name>.key. Default false."`
+	Models      map[string]Model `json:"models" doc:"The models used here, each under a short name of your own (lowercase, at most 32 characters)."`
 }
 
 // Model is one model of an endpoint: the provider's id for it, what it is for, and its output cap
 // (0 leaves the provider's own, except on Anthropic, which requires one).
 type Model struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	MaxTokens int    `json:"max_tokens"`
+	ID        string `json:"id" doc:"The provider's own name for the model, e.g. gemma4:26b or claude-opus-5-5."`
+	Kind      string `json:"kind" enum:"chat,embed" doc:"chat (backs chat and decide) or embed (backs embeddings; not on anthropic)."`
+	MaxTokens int    `json:"max_tokens" doc:"Most tokens a reply may hold; 0 leaves the provider's own, except anthropic, which uses 4096."`
 }
 
 // nameRe is what an endpoint or model name may be: one short segment of an action name

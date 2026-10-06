@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/world.schema.json",
   "rail": "evm",
   "chainId": 137,
   "rpc": "https://polygon-bor-rpc.publicnode.com",

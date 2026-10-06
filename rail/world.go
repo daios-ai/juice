@@ -62,48 +62,49 @@ type World struct {
 	// command line, the directory the kernel lives in, and the network itself, so the three
 	// cannot disagree.
 	Name     string `json:"-"`
-	Rail     string `json:"rail"`
-	ChainID  uint64 `json:"chainId"`
-	Token    string `json:"token"`
-	Decimals uint8  `json:"decimals"`
+	Schema   string `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
+	Rail     string `json:"rail" enum:"manual,evm" doc:"How money is witnessed: manual (play money the operator records) or evm (a token on an EVM chain)."`
+	ChainID  uint64 `json:"chainId" doc:"The EVM chain's id. Required for evm, absent for manual."`
+	Token    string `json:"token" doc:"The token contract's address. Required for evm, absent for manual."`
+	Decimals uint8  `json:"decimals" doc:"The token's decimals, at most 18. Required for evm."`
 	// Symbol is what an amount on this world is called when it is shown to a person, and Description
 	// is the one line that tells an operator choosing a network what this one means. Both are display
 	// only: neither enters the fingerprint, so renaming a token or rewording a line is not a new network.
-	Symbol      string `json:"symbol"`
-	Description string `json:"description"`
+	Symbol      string `json:"symbol" doc:"What an amount is called when shown to a person (USDT0)."`
+	Description string `json:"description" doc:"One line telling an operator what this network is."`
 
 	// Seeds are the bootstrap addresses of this network's own kernels — the meeting point a new
 	// member dials before it knows anyone. Each world has its own, since a kernel that dialled
 	// another world's seed would be told, every pass, that it serves a network this one is not.
 	// An empty list is a network whose members introduce each other by editing this file.
-	Seeds []string `json:"seeds"`
+	Seeds []string `json:"seeds" doc:"Multiaddrs of this network's own kernels a new member dials first; empty means members introduce each other."`
 
 	// RPC is where this kernel reaches its chain. A chain world must name one; an operator who
 	// wants their own node edits it here, beside the chain it belongs to. There is no field for
 	// where the payment scan starts: that is not the network's to say and not the operator's
 	// either — it is the block the chain reports when a kernel first reaches it, recorded then as
 	// the rail's own cursor.
-	RPC      string   `json:"rpc"`
-	Finality string   `json:"finality"`
-	Venue    venueCfg `json:"venue"`
-	Gas      gasCfg   `json:"gas"`
+	RPC      string   `json:"rpc" doc:"The chain node this kernel reads and writes through. Required for evm."`
+	Finality string   `json:"finality" doc:"Block tag a payment must reach to count: latest, safe or finalized. Empty is finalized."`
+	Venue    venueCfg `json:"venue" doc:"The Uniswap V3 pool the kernel buys gas through."`
+	Gas      gasCfg   `json:"gas" doc:"The gas reserve the kernel keeps and refills."`
 }
 
 type venueCfg struct {
-	Router        string `json:"router"`
-	Quoter        string `json:"quoter"`
-	WrappedNative string `json:"wrappedNative"`
-	FeeTier       uint32 `json:"feeTier"`
-	Router02      bool   `json:"router02"`
+	Router        string `json:"router" doc:"The Uniswap V3 SwapRouter's address."`
+	Quoter        string `json:"quoter" doc:"The Uniswap V3 QuoterV2's address."`
+	WrappedNative string `json:"wrappedNative" doc:"The wrapped native currency the pool trades (WETH, WPOL)."`
+	FeeTier       uint32 `json:"feeTier" doc:"The pool's fee in hundredths of a basis point (500 = 0.05%)."`
+	Router02      bool   `json:"router02" doc:"The router is SwapRouter02, which takes the deadline in multicall. Default false."`
 }
 
 type gasCfg struct {
-	Min         string `json:"min"`
-	Max         string `json:"max"`
-	FeeBound    string `json:"feeBound"`
-	SlippageBps uint32 `json:"slippageBps"`
-	PaymentGas  uint64 `json:"paymentGas"`
-	SwapGas     uint64 `json:"swapGas"`
+	Min         string `json:"min" doc:"Below this native balance, in wei as a decimal string, the kernel buys gas."`
+	Max         string `json:"max" doc:"The native balance a refill buys up to, in wei as a decimal string."`
+	FeeBound    string `json:"feeBound" doc:"Most a refill transaction may cost, in wei as a decimal string; above it the kernel waits."`
+	SlippageBps uint32 `json:"slippageBps" doc:"How much more than the quote a refill may spend, in basis points."`
+	PaymentGas  uint64 `json:"paymentGas" doc:"Gas limit of a payment; 0 uses the rail's default."`
+	SwapGas     uint64 `json:"swapGas" doc:"Gas limit of a refill swap; 0 uses the rail's default."`
 }
 
 // Install writes every shipped file into dir that is not there already, and leaves the rest alone:

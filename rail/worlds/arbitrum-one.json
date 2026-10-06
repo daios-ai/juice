@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/world.schema.json",
   "rail": "evm",
   "chainId": 42161,
   "rpc": "https://arb1.arbitrum.io/rpc",

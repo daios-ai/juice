@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/rail"
 )
 
 func TestRemoteRetryInterval(t *testing.T) {
@@ -569,6 +572,123 @@ func TestLLMNativePrices(t *testing.T) {
 	} {
 		if got := c.PriceOf(name); got != want {
 			t.Errorf("PriceOf(%s) = %d, want %d", name, got, want)
+		}
+	}
+}
+
+// The generator maps each kind it supports, admits null where Go decodes it, carries descriptions,
+// allowed values and non-zero defaults, and skips a field tagged "-".
+func TestJSONSchemaKinds(t *testing.T) {
+	type inner struct {
+		X float64 `json:"x" doc:"d"`
+	}
+	type probe struct {
+		S    string           `json:"s" doc:"a string" enum:"a,b"`
+		N    int64            `json:"n" doc:"d"`
+		B    bool             `json:"b" doc:"d"`
+		P    *int64           `json:"p" doc:"d"`
+		L    []string         `json:"l" doc:"d"`
+		M    map[string]int64 `json:"m" doc:"d"`
+		In   inner            `json:"in" doc:"d"`
+		Skip string           `json:"-"`
+	}
+	got, err := jsonSchema("probe", probe{N: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(got)
+	var s struct {
+		Title                string                     `json:"title"`
+		AdditionalProperties bool                       `json:"additionalProperties"`
+		Properties           map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"s":  `{"description":"a string","enum":["a","b"],"type":"string"}`,
+		"n":  `{"default":7,"description":"d","type":"integer"}`,
+		"b":  `{"description":"d","type":"boolean"}`,
+		"p":  `{"description":"d","type":["integer","null"]}`,
+		"l":  `{"description":"d","items":{"type":"string"},"type":["array","null"]}`,
+		"m":  `{"additionalProperties":{"type":"integer"},"description":"d","type":["object","null"]}`,
+		"in": `{"additionalProperties":false,"description":"d","properties":{"x":{"description":"d","type":"number"}},"type":"object"}`,
+	}
+	if s.Title != "probe" || s.AdditionalProperties || len(s.Properties) != len(want) {
+		t.Fatalf("schema = %s", b)
+	}
+	for key, w := range want {
+		if string(s.Properties[key]) != w {
+			t.Errorf("%s = %s, want %s", key, s.Properties[key], w)
+		}
+	}
+}
+
+// A field the generator cannot describe is an error, never a silent gap: Go would decode an
+// untagged field under its Go name, and a setting without a description would ship unexplained.
+func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
+	for name, v := range map[string]any{
+		"untagged":    struct{ X string }{},
+		"no doc":      struct{ X string `json:"x"` }{},
+		"unsupported": struct{ C chan int `json:"c" doc:"d"` }{},
+		"map key":     struct{ M map[int]string `json:"m" doc:"d"` }{},
+	} {
+		if _, err := jsonSchema("x", v); err == nil {
+			t.Errorf("%s: a schema was generated", name)
+		}
+	}
+}
+
+// Each file an operator writes gets a schema in $JUICE_HOME/schemas/, and Juice's own files are
+// valid under it: the config.json first boot writes, nulls included, and every shipped world and
+// endpoint file. Each names its schema in $schema, which the strict decoders accept and which is
+// no setting, so it has no flag.
+func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("JUICE_HOME", home)
+	if err := writeSchemas(); err != nil {
+		t.Fatal(err)
+	}
+	schema := func(name string) map[string]any {
+		var s map[string]any
+		raw, err := os.ReadFile(filepath.Join(schemasDir(), name+".schema.json"))
+		if err != nil || json.Unmarshal(raw, &s) != nil {
+			t.Fatalf("%s schema unreadable: %v", name, err)
+		}
+		return s
+	}
+	valid := func(what string, s map[string]any, raw []byte) {
+		var doc any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if err := kernel.ValidateInput(s, doc); err != nil {
+			t.Errorf("%s is not valid under its own schema: %v", what, err)
+		}
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := writeConfig(cfgPath, DefaultServerConfig()); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(cfgPath)
+	valid("the first-boot config.json", schema("config"), raw)
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil || cfg.Schema != "../../schemas/config.schema.json" {
+		t.Errorf("config.json with $schema: %q, %v", cfg.Schema, err)
+	}
+	flags := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	bindConfigFlags(flags, &ServerConfig{})
+	if flags.Lookup("$schema") != nil {
+		t.Error("$schema became a flag")
+	}
+
+	for name, files := range map[string]fs.FS{"world": rail.Worlds(), "llm-endpoint": llm.Shipped()} {
+		s := schema(name)
+		entries, _ := fs.ReadDir(files, ".")
+		for _, e := range entries {
+			raw, _ := fs.ReadFile(files, e.Name())
+			valid(name+" "+e.Name(), s, raw)
 		}
 	}
 }

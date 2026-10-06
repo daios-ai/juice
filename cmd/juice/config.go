@@ -17,6 +17,7 @@ import (
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/rail"
 )
 
 // NativeLLMConfig binds the language-model natives (D17). Chat, Decide and Embed each name the model
@@ -24,16 +25,16 @@ import (
 // $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this kernel keeps about
 // an endpoint: its key, and what each of its models costs a caller.
 type NativeLLMConfig struct {
-	Chat      string                       `json:"chat"`
-	Decide    string                       `json:"decide"`
-	Embed     string                       `json:"embed"`
-	Endpoints map[string]LLMEndpointConfig `json:"endpoints,omitempty"`
+	Chat      string                       `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from $JUICE_HOME/llm/; empty leaves it unbound."`
+	Decide    string                       `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
+	Embed     string                       `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
+	Endpoints map[string]LLMEndpointConfig `json:"endpoints,omitempty" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
 }
 
 // LLMEndpointConfig is one endpoint's key and its models' prices.
 type LLMEndpointConfig struct {
-	Key    string           `json:"key,omitempty"`
-	Prices map[string]int64 `json:"prices,omitempty"`
+	Key    string           `json:"key,omitempty" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
+	Prices map[string]int64 `json:"prices,omitempty" doc:"Price of a call, in base units, per model name. A metered endpoint must state every model's, 0 included."`
 }
 
 // price is what a call to the model ref (<endpoint>/<model>) costs; an unbound or unpriced one is 0.
@@ -91,35 +92,35 @@ func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
 
 // NativeLookupConfig holds configuration for the @sys/lookup native action.
 type NativeLookupConfig struct {
-	DefaultLimit int   `json:"default_limit"`
-	Price        int64 `json:"price"`
+	DefaultLimit int   `json:"default_limit" doc:"Results lookup returns when the caller names no limit."`
+	Price        int64 `json:"price" doc:"Price of a lookup call, in base units. Default 0."`
 }
 
 // NativeWebConfig holds configuration for the @sys/web native action. The User-Agent it sends is
 // derived from the binary's own version, not configured: it identifies the software making the
 // request, which is a fact about the build rather than an operator preference.
 type NativeWebConfig struct {
-	Price int64 `json:"price"`
+	Price int64 `json:"price" doc:"Price of a web fetch, in base units. Default 0."`
 }
 
 // NativePriceConfig is the whole configuration of a native whose only setting is its price —
 // most of the stdlib. One type instead of one struct per action; the JSON shape is unchanged (§14).
 type NativePriceConfig struct {
-	Price int64 `json:"price"`
+	Price int64 `json:"price" doc:"Price of a call to this action, in base units. Default 0."`
 }
 
 // NativeConfig holds per-action configuration for all native actions (§14 `native.<action>`).
 // Configuration owns prices and their defaults; each native's contract lives with its handler (§9).
 type NativeConfig struct {
-	LLM      NativeLLMConfig    `json:"llm"`
-	Lookup   NativeLookupConfig `json:"lookup"`
-	Time     NativePriceConfig  `json:"time"`
-	Sink     NativePriceConfig  `json:"sink"`
-	Message  NativePriceConfig  `json:"message"`
-	Random   NativePriceConfig  `json:"random"`
-	Web      NativeWebConfig    `json:"web"`
-	TinyGo   NativePriceConfig  `json:"tinygo"`
-	Transfer NativePriceConfig  `json:"transfer"`
+	LLM      NativeLLMConfig    `json:"llm" doc:"Which language model backs llm/chat, llm/decide and llm/embed, and each provider's key and prices."`
+	Lookup   NativeLookupConfig `json:"lookup" doc:"The lookup action (search over actions)."`
+	Time     NativePriceConfig  `json:"time" doc:"The time action."`
+	Sink     NativePriceConfig  `json:"sink" doc:"The sink action (a no-op task target)."`
+	Message  NativePriceConfig  `json:"message" doc:"The message action (a task a user acknowledges)."`
+	Random   NativePriceConfig  `json:"random" doc:"The random action."`
+	Web      NativeWebConfig    `json:"web" doc:"The web action (a public GET)."`
+	TinyGo   NativePriceConfig  `json:"tinygo" doc:"The tinygo/compile action."`
+	Transfer NativePriceConfig  `json:"transfer" doc:"The transfer action (sending credits to a user)."`
 }
 
 // PriceOf returns the configured price for a native action name (§9 names, §14 config keys). It is
@@ -160,33 +161,34 @@ func (c NativeConfig) PriceOf(name string) int64 {
 // Secrets (JUICE_SECRET_KEY, JUICE_BOOTSTRAP_PASSWORD) are read from environment variables.
 // All other settings come from this struct, populated from the JSON config file.
 type ServerConfig struct {
-	Native                     NativeConfig `json:"native"`
-	ScriptTimeoutMS            int64        `json:"script_timeout_ms"`
-	ScriptMemoryBytes          int64        `json:"script_memory_bytes"`
-	FeeBPS                     int64        `json:"fee_bps"`
-	RemoteBPS                  int64        `json:"remote_bps"`   // serving-side markup on inbound remote calls (§13)
-	ImportBPS                  int64        `json:"import_bps"`   // origin-side import fee on outbound remote calls, retained locally (§13)
-	Lottery                    *int64       `json:"lottery"`      // L: the ticket this kernel writes (P10); 0 = pay every obligation exactly
-	LotteryMax                 *int64       `json:"lottery_max"`  // the largest ticket this kernel accepts from a buyer (P10)
-	CreditLimit                *int64       `json:"credit_limit"` // E_max: most unpaid delivered service carried at once (P10)
-	TokenTTL                   string       `json:"token_ttl"`
-	AuthIssuer                 string       `json:"auth_issuer"`
-	AuthAudience               string       `json:"auth_audience"`
-	LogLevel                   string       `json:"log_level"`
-	LogFile                    string       `json:"log_file"`
-	LogFormat                  string       `json:"log_format"`
-	AllowLocalSources          bool         `json:"allow_local_sources"`
-	ListenAddr                 string       `json:"listen_addr"`                   // address the client API binds, host:port; host omitted ⇒ every interface, port 0 ⇒ OS-assigned
-	HTTPCallbackURL            string       `json:"http_callback_url"`             // base URL advertised to dispatched kind=http endpoints for capability callbacks (§9); "" ⇒ derive from listen address
-	KernelHandle               string       `json:"kernel_handle"`                 // handle this kernel presents in gossip (§13)
-	FedListenAddrs             []string     `json:"fed_listen_addrs"`              // multiaddrs the peer transport binds; empty = OS-assigned ports; a world's seed pins one so members find it at the same address after a restart (§13)
-	CredentialsKey             string       `json:"credentials_key,omitempty"`     // base64url AES-256 key; generated on first boot
-	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds"` // seconds between retry passes for pending remote calls (§13); <=0 → default
-	PeerRetentionDays          int64        `json:"peer_retention_days"`           // days a peer may stay idle at zero balance before purge (§13); <=0 → disabled
-	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds"`    // seconds between known-network discovery passes (§13); <=0 → default
-	MaxInboundPeers            int64        `json:"max_inbound_peers"`             // inbound connections accepted at once, a relay slot being one (D12); <=0 → default
-	RelaySlots                 int64        `json:"relay_slots"`                   // kernels behind NAT this host relays for at once (D12); <=0 → default
-	MetricsListenAddr          string       `json:"metrics_listen_addr"`           // where /metrics answers, host:port; "" ⇒ no metrics are served (D20)
+	Schema                     string       `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
+	Native                     NativeConfig `json:"native" doc:"Prices and settings of the built-in sys actions."`
+	ScriptTimeoutMS            int64        `json:"script_timeout_ms" doc:"How long one WebAssembly or HTTP action may run, in milliseconds."`
+	ScriptMemoryBytes          int64        `json:"script_memory_bytes" doc:"Memory one WebAssembly action may use, in bytes."`
+	FeeBPS                     int64        `json:"fee_bps" doc:"The operator's fee on each call's margin, in basis points (2000 = 20%)."`
+	RemoteBPS                  int64        `json:"remote_bps" doc:"Markup this kernel adds when serving another kernel's caller, in basis points."`
+	ImportBPS                  int64        `json:"import_bps" doc:"Fee this kernel keeps when its caller buys from another kernel, in basis points."`
+	Lottery                    *int64       `json:"lottery" doc:"Face value of the ticket this kernel writes to settle a small cross-kernel debt, in base units; 0 pays every debt exactly. Unset: the shipped economy's."`
+	LotteryMax                 *int64       `json:"lottery_max" doc:"Largest ticket this kernel accepts from a buyer, in base units. Unset: the shipped economy's."`
+	CreditLimit                *int64       `json:"credit_limit" doc:"Most work this kernel delivers to other kernels before being paid, in base units. Unset: the shipped economy's."`
+	TokenTTL                   string       `json:"token_ttl" doc:"How long a login's access token lasts, as a Go duration (15m)."`
+	AuthIssuer                 string       `json:"auth_issuer" doc:"Issuer named in access tokens; empty is the kernel's own."`
+	AuthAudience               string       `json:"auth_audience" doc:"Audience named in access tokens; empty is the kernel's own."`
+	LogLevel                   string       `json:"log_level" doc:"debug, info, warn or error."`
+	LogFile                    string       `json:"log_file" doc:"A file the log is also written to; empty writes to the terminal only."`
+	LogFormat                  string       `json:"log_format" doc:"text or json."`
+	AllowLocalSources          bool         `json:"allow_local_sources" doc:"Let actions reach private-network addresses. Loopback is always allowed. Default false."`
+	ListenAddr                 string       `json:"listen_addr" doc:"Address the client API listens on, host:port; no host listens on every interface, port 0 picks one."`
+	HTTPCallbackURL            string       `json:"http_callback_url" doc:"Base URL HTTP actions call back on to compose; empty derives it from listen_addr."`
+	KernelHandle               string       `json:"kernel_handle" doc:"This kernel's name on the network, the part after @ in every address here."`
+	FedListenAddrs             []string     `json:"fed_listen_addrs" doc:"Addresses other kernels reach this one on, as multiaddrs; empty uses port 31313."`
+	CredentialsKey             string       `json:"credentials_key,omitempty" doc:"Key sealing every stored upstream credential, made at first boot. Keep it with your backups. No command-line flag."`
+	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds" doc:"How often calls waiting on another kernel are retried, in seconds; 0 or less uses the default."`
+	PeerRetentionDays          int64        `json:"peer_retention_days" doc:"Days an idle peer's cached data is kept; 0 or less keeps it forever."`
+	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds" doc:"How often other kernels are discovered and their catalogues read, in seconds; 0 or less uses the default."`
+	MaxInboundPeers            int64        `json:"max_inbound_peers" doc:"Connections from other kernels accepted at once; 0 or less uses the default."`
+	RelaySlots                 int64        `json:"relay_slots" doc:"Kernels behind NAT this one relays for at once; 0 or less uses the default."`
+	MetricsListenAddr          string       `json:"metrics_listen_addr" doc:"Address /metrics is served on, host:port; empty serves none."`
 }
 
 // remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a
@@ -391,7 +393,8 @@ func configFields(c *ServerConfig, visit func(name string, field reflect.Value))
 		t := v.Type()
 		for i := 0; i < t.NumField(); i++ {
 			key, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-			if key == "" || key == "-" {
+			// $schema names the file's schema for editors; it is not a setting, so it has no flag.
+			if key == "" || key == "-" || key == "$schema" {
 				continue
 			}
 			name := strings.ReplaceAll(key, "_", "-")
@@ -409,6 +412,7 @@ func configFields(c *ServerConfig, visit func(name string, field reflect.Value))
 }
 
 func writeConfig(path string, cfg ServerConfig) error {
+	cfg.Schema = "../../schemas/config.schema.json" // kernels/<world>/config.json → schemas/
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -529,6 +533,9 @@ func kernelHome() string { return filepath.Join(juiceHome(), "kernels", worldNam
 // ones here; an operator adds or edits others (D23).
 func worldsDir() string { return filepath.Join(juiceHome(), "worlds") }
 
+// schemasDir is where this installation keeps the JSON Schemas of the files an operator writes.
+func schemasDir() string { return filepath.Join(juiceHome(), "schemas") }
+
 // llmDir is where this installation keeps its language-model endpoint files, installed and owned
 // as worlds are (D17).
 func llmDir() string { return filepath.Join(juiceHome(), "llm") }
@@ -556,4 +563,128 @@ func kernelsHere() []string {
 		}
 	}
 	return names
+}
+
+// ---- Schemas ----
+
+// writeSchemas writes into schemasDir the JSON Schema of each file an operator writes — a kernel's
+// config.json, a world file, a language-model endpoint file — so an editor completes, explains and
+// checks their keys as they are typed. They are rewritten on every serve, since a schema describes
+// the binary that wrote it; each is written beside its name and renamed into place, so an editor
+// never reads half of one.
+func writeSchemas() error {
+	if err := os.MkdirAll(schemasDir(), 0o700); err != nil {
+		return err
+	}
+	for name, file := range map[string]struct {
+		title string
+		v     any
+	}{
+		"config":       {"A Juice kernel's config.json", DefaultServerConfig()},
+		"world":        {"A Juice world file", rail.World{}},
+		"llm-endpoint": {"A Juice language-model endpoint file", llm.Endpoint{}},
+	} {
+		schema, err := jsonSchema(file.title, file.v)
+		if err != nil {
+			return fmt.Errorf("%s schema: %w", name, err)
+		}
+		b, err := json.MarshalIndent(schema, "", "  ")
+		if err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(schemasDir(), name+".*")
+		if err != nil {
+			return err
+		}
+		_, werr := tmp.Write(append(b, '\n'))
+		if cerr := tmp.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr == nil {
+			werr = os.Rename(tmp.Name(), filepath.Join(schemasDir(), name+".schema.json"))
+		}
+		if werr != nil {
+			os.Remove(tmp.Name())
+			return werr
+		}
+	}
+	return nil
+}
+
+// jsonSchema describes v's type as a JSON Schema. It is editor help, not validation: the decoders'
+// own validators keep every rule across fields. A property's description is its field's doc tag,
+// its allowed values the enum tag, and a non-zero field of v its default (a zero default — false,
+// 0 — is said in the description). A pointer, map or slice also admits null, which Go decodes into
+// each. A field with no json or doc tag, or a kind outside these, is an error rather than a silent
+// gap, so a setting added without a description cannot ship.
+func jsonSchema(title string, v any) (map[string]any, error) {
+	schema, err := schemaOf(reflect.ValueOf(v))
+	if err != nil {
+		return nil, err
+	}
+	schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+	schema["title"] = title
+	return schema, nil
+}
+
+func schemaOf(v reflect.Value) (map[string]any, error) {
+	t := v.Type()
+	switch t.Kind() {
+	case reflect.String:
+		return map[string]any{"type": "string"}, nil
+	case reflect.Bool:
+		return map[string]any{"type": "boolean"}, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer"}, nil
+	case reflect.Float32, reflect.Float64:
+		return map[string]any{"type": "number"}, nil
+	case reflect.Pointer, reflect.Slice, reflect.Map:
+		elem, err := schemaOf(reflect.Zero(t.Elem()))
+		if err != nil {
+			return nil, err
+		}
+		schema := elem
+		switch t.Kind() {
+		case reflect.Slice:
+			schema = map[string]any{"type": "array", "items": elem}
+		case reflect.Map:
+			if t.Key().Kind() != reflect.String {
+				return nil, fmt.Errorf("%s: a map key must be a string", t)
+			}
+			schema = map[string]any{"type": "object", "additionalProperties": elem}
+		}
+		schema["type"] = []any{schema["type"], "null"}
+		return schema, nil
+	case reflect.Struct:
+		props := map[string]any{}
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			key, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if key == "-" {
+				continue
+			}
+			doc := f.Tag.Get("doc")
+			if key == "" || doc == "" {
+				return nil, fmt.Errorf("%s.%s needs both a json and a doc tag", t.Name(), f.Name)
+			}
+			prop, err := schemaOf(v.Field(i))
+			if err != nil {
+				return nil, err
+			}
+			prop["description"] = doc
+			if enum := f.Tag.Get("enum"); enum != "" {
+				prop["enum"] = strings.Split(enum, ",")
+			}
+			if fv := v.Field(i); f.Type.Kind() != reflect.Struct && !fv.IsZero() {
+				prop["default"] = fv.Interface()
+			}
+			props[key] = prop
+		}
+		return map[string]any{"type": "object", "properties": props, "additionalProperties": false}, nil
+	}
+	return nil, fmt.Errorf("%s: no JSON Schema for this kind", t)
 }

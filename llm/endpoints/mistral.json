@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/llm-endpoint.schema.json",
   "protocol": "openai",
   "url": "https://api.mistral.ai/v1",
   "key_required": true,

@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/llm-endpoint.schema.json",
   "protocol": "openai",
   "url": "https://api.deepseek.com",
   "key_required": true,

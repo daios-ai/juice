@@ -98,6 +98,10 @@ func runServer(name string) error {
 	if err := rail.Install(llmDir(), llm.Shipped()); err != nil {
 		return fmt.Errorf("llm endpoints: %w", err)
 	}
+	// Their schemas, and config.json's, describe this binary, so they are rewritten every serve.
+	if err := writeSchemas(); err != nil {
+		return fmt.Errorf("schemas: %w", err)
+	}
 	world, err := rail.Load(worldsDir(), name)
 	if err != nil {
 		return err

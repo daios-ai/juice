@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/llm-endpoint.schema.json",
   "protocol": "openai",
   "url": "https://generativelanguage.googleapis.com/v1beta/openai",
   "key_required": true,
