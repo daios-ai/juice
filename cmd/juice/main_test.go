@@ -445,7 +445,7 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", Decide: "down/c", Embed: "up/e"}, logger)
+	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", JSON: "up/c", Decide: "down/c", Embed: "up/e"}, logger)
 	if err != nil {
 		t.Fatalf("openLLM: %v", err)
 	}
@@ -455,7 +455,8 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"down/e", "up/e"}) {
 		t.Errorf("embedding models = %v", got)
 	}
-	if models.Chat != models.Chats["up/c"] || models.Decide != models.Chats["down/c"] || models.Embedder != models.Embedders["up/e"] {
+	if models.Chat != models.Chats["up/c"] || models.JSON != models.Chats["up/c"] || models.Decide != models.Chats["down/c"] ||
+		models.Embedder != models.Embedders["up/e"] {
 		t.Error("the canonical natives are not bound to the configured models")
 	}
 	if identity != "up/e|"+up.URL+"|e1" || !reachable {
@@ -466,7 +467,7 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		t.Error("an embedder whose endpoint does not answer was reported reachable")
 	}
 	models, identity, _, err = openLLM(NativeLLMConfig{}, logger)
-	if err != nil || models.Chat != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
+	if err != nil || models.Chat != nil || models.JSON != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
 		t.Errorf("an unbound configuration bound something: %+v %q %v", models, identity, err)
 	}
 	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "cloud/c"}, logger); err == nil {

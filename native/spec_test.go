@@ -47,7 +47,7 @@ func TestAllShipsCompleteContracts(t *testing.T) {
 	}
 	// The stdlib §9 names; a native removed from the platform must also leave this list.
 	for _, want := range []string{
-		"lookup", "llm/chat", "llm/embed", "llm/decide",
+		"lookup", "llm/chat", "llm/json", "llm/embed", "llm/decide",
 		"time", "sink", "message", "random", "transfer", "web", "tinygo/compile",
 	} {
 		if !seen[want] {
@@ -74,12 +74,13 @@ func TestAllGeneratesEachModelsNatives(t *testing.T) {
 		titles[s.Title] = true
 		names = append(names, s.Name)
 	}
-	want := []string{"llm/a/chat/chat", "llm/a/chat/decide", "llm/b/chat/chat", "llm/b/chat/decide", "llm/a/vec/embed"}
+	want := []string{"llm/a/chat/chat", "llm/a/chat/json", "llm/a/chat/decide",
+		"llm/b/chat/chat", "llm/b/chat/json", "llm/b/chat/decide", "llm/a/vec/embed"}
 	if got := names[len(names)-len(want):]; !slices.Equal(got, want) {
 		t.Errorf("generated natives = %v, want %v", got, want)
 	}
-	for _, want := range []string{"Chat with a language model", "Choose an action with a language model", "Embed text",
-		"Chat with a/chat", "Choose an action with a/chat", "Embed text with a/vec"} {
+	for _, want := range []string{"Chat with a language model", "Get JSON from a language model", "Choose an action with a language model",
+		"Embed text", "Chat with a/chat", "Get JSON from a/chat", "Choose an action with a/chat", "Embed text with a/vec"} {
 		if !titles[want] {
 			t.Errorf("no native titled %q", want)
 		}

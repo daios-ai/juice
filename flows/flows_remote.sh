@@ -133,8 +133,9 @@ flow_chat() {
 # --- Language-model endpoints (D17) ---
 # The operator's own endpoint files decide what exists: a model on an endpoint that answers is its
 # own natives and backs llm/chat; one on an endpoint that is down keeps its natives; one on a metered
-# endpoint without its key generates none. llm/chat answers in the Chat Completions shape, and a
-# json_schema response_format is held to its schema.
+# endpoint without its key generates none. llm/chat answers text in the Chat Completions shape and
+# llm/json the value its schema admits — one action per output kind, so llm/chat refuses a request
+# for structured output.
 flow_llm_endpoints() {
     echo "=== FLOW llm_endpoints ==="
     local dir db hs port down llm; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
@@ -155,18 +156,20 @@ flow_llm_endpoints() {
     assert_eq "llm.embed_generated"      yes "$(has_action "$acts" llm/ollama/nomic/embed)"
     assert_eq "llm.down_endpoint_kept"   yes "$(has_action "$acts" llm/down/m/chat)"
     assert_eq "llm.keyless_metered_none" no  "$(has_action "$acts" llm/cloud/m/chat)"
-    assert_eq "llm.json_folded_into_chat" no "$(has_action "$acts" llm/json)"
+    assert_eq "llm.json_registered"      yes "$(has_action "$acts" llm/json)"
+    assert_eq "llm.json_generated"       yes "$(has_action "$acts" llm/ollama/gemma/json)"
     assert_eq "llm.down_logged" yes "$(grep -q '"msg":"llm.endpoint_unreachable".*"endpoint":"down"' "$(server_log "$db")" && echo yes || echo no)"
 
     local content; content=$(jj "$db" "$hs" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hi"}]}' |
         python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["choices"][0]["message"]["content"])' 2>/dev/null)
     assert_eq "llm.chat_standard_shape" '{"x": 1}' "$content"
-    local fits='{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"n","schema":{"type":"object","properties":{"x":{"type":"integer","description":"x"}},"required":["x"]}}}}'
-    content=$(jj "$db" "$hs" run sys@k/llm/chat "$fits" |
-        python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["choices"][0]["message"]["content"])' 2>/dev/null)
-    assert_eq "llm.structured_output_validated" '{"x":1}' "$content"
-    local refuses='{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"n","schema":{"type":"object","properties":{"y":{"type":"string","description":"y"}},"required":["y"]}}}}'
-    assert_fails "llm.structured_output_refused" "execution\|schema" -- j "$db" "$hs" run sys@k/llm/chat "$refuses"
+    local fits='{"messages":[{"role":"user","content":"hi"}],"schema":{"type":"object","properties":{"x":{"type":"integer","description":"x"}},"required":["x"]}}'
+    local value; value=$(jj "$db" "$hs" run sys@k/llm/json "$fits" |
+        python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["value"]["x"])' 2>/dev/null)
+    assert_eq "llm.json_value_validated" 1 "$value"
+    local refuses='{"messages":[{"role":"user","content":"hi"}],"schema":{"type":"object","properties":{"y":{"type":"string","description":"y"}},"required":["y"]}}'
+    assert_fails "llm.json_reply_refused" "execution\|schema" -- j "$db" "$hs" run sys@k/llm/json "$refuses"
+    assert_fails "llm.chat_is_text_only" 'undeclared key "response_format"' -- j "$db" "$hs" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema"}}'
     assert_fails "llm.down_endpoint_call_fails" "execution\|failed" -- j "$db" "$hs" run sys@k/llm/down/m/chat '{"messages":[{"role":"user","content":"hi"}]}'
 }
 

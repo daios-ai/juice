@@ -76,7 +76,7 @@ func TestDiscoveryInterval(t *testing.T) {
 func TestDefaultServerConfig(t *testing.T) {
 	cfg := DefaultServerConfig()
 	// A fresh kernel's language-model natives are bound to the shipped local endpoint (D17).
-	if cfg.Native.LLM.Chat != "ollama/gemma" || cfg.Native.LLM.Decide != "ollama/gemma" || cfg.Native.LLM.Embed != "ollama/nomic" {
+	if l := cfg.Native.LLM; l.Chat != "ollama/gemma" || l.JSON != "ollama/gemma" || l.Decide != "ollama/gemma" || l.Embed != "ollama/nomic" {
 		t.Errorf("default llm bindings = %+v", cfg.Native.LLM)
 	}
 	if cfg.ScriptTimeoutMS <= 0 {
@@ -536,6 +536,7 @@ func TestLLMConfigCheck(t *testing.T) {
 		{"unknown endpoint", "native.llm.decide", func(c *NativeLLMConfig) { c.Decide = "nowhere/chat" }},
 		{"chat bound to an embed model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/vec" }},
 		{"embed bound to a chat model", "native.llm.embed", func(c *NativeLLMConfig) { c.Embed = "local/chat" }},
+		{"json bound to an embed model", "native.llm.json", func(c *NativeLLMConfig) { c.JSON = "local/vec" }},
 		{"bound endpoint lacks its key", "native.llm.endpoints.cloud.key", func(c *NativeLLMConfig) {
 			c.Endpoints = map[string]LLMEndpointConfig{"cloud": {Prices: map[string]int64{"big": 1, "small": 1}}}
 		}},
@@ -564,11 +565,11 @@ func TestLLMConfigCheck(t *testing.T) {
 // A language-model native costs what the model behind it does: the canonical natives their bound
 // model's price, a generated model's natives its own, and an unbound native nothing.
 func TestLLMNativePrices(t *testing.T) {
-	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", Decide: "cloud/small", Endpoints: map[string]LLMEndpointConfig{
+	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", JSON: "cloud/small", Decide: "cloud/small", Endpoints: map[string]LLMEndpointConfig{
 		"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 3}}}}}
 	for name, want := range map[string]int64{
-		"llm/chat": 20, "llm/decide": 3, "llm/embed": 0,
-		"llm/cloud/big/chat": 20, "llm/cloud/big/decide": 20, "llm/cloud/small/chat": 3, "llm/local/vec/embed": 0,
+		"llm/chat": 20, "llm/json": 3, "llm/decide": 3, "llm/embed": 0,
+		"llm/cloud/big/chat": 20, "llm/cloud/big/json": 20, "llm/cloud/big/decide": 20, "llm/cloud/small/chat": 3, "llm/local/vec/embed": 0,
 	} {
 		if got := c.PriceOf(name); got != want {
 			t.Errorf("PriceOf(%s) = %d, want %d", name, got, want)
@@ -628,10 +629,16 @@ func TestJSONSchemaKinds(t *testing.T) {
 // untagged field under its Go name, and a setting without a description would ship unexplained.
 func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
 	for name, v := range map[string]any{
-		"untagged":    struct{ X string }{},
-		"no doc":      struct{ X string `json:"x"` }{},
-		"unsupported": struct{ C chan int `json:"c" doc:"d"` }{},
-		"map key":     struct{ M map[int]string `json:"m" doc:"d"` }{},
+		"untagged": struct{ X string }{},
+		"no doc": struct {
+			X string `json:"x"`
+		}{},
+		"unsupported": struct {
+			C chan int `json:"c" doc:"d"`
+		}{},
+		"map key": struct {
+			M map[int]string `json:"m" doc:"d"`
+		}{},
 	} {
 		if _, err := jsonSchema("x", v); err == nil {
 			t.Errorf("%s: a schema was generated", name)

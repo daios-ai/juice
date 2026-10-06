@@ -6,28 +6,20 @@ package native
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/daios-ai/juice/kernel"
 )
 
 // Chat declares a chat native (§9): llm/chat, which configuration binds to a model, or the native
-// of one generated model (D17). Either is the Chat Completions subset, structured output included:
-// a json_schema response_format is answered as content validated against the schema.
-func Chat(model string, m ChatModel) Spec {
+// of one generated model (D17). Either is the Chat Completions subset and answers with text; JSON
+// a schema describes is llm/json's, since an action has one output kind (D4).
+func Chat(model string, m kernel.Chatter) Spec {
 	return Spec{
 		Name:        llmName(model, "chat"),
 		Title:       "Chat with " + llmTitle(model),
-		Description: "Chat completion by " + llmBy(model) + ", in the Chat Completions shape; a json_schema response_format is answered as JSON content the schema admits, validated locally",
+		Description: "Chat completion by " + llmBy(model) + ", in the Chat Completions shape; the reply is text",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(messageSchema(), "Conversation history; a system prompt is a message with role system"),
-			"response_format": objd("Asks for structured output: the reply's content is JSON the schema admits", map[string]any{
-				"type": map[string]any{"type": "string", "enum": []any{"json_schema"}, "description": "The kind of structured output; json_schema"},
-				"json_schema": objd("The schema the reply must satisfy", map[string]any{
-					"name":   str("A name for the schema"),
-					"schema": object("JSON Schema the reply must satisfy"),
-				}, "schema"),
-			}, "type", "json_schema"),
 		}, "messages"),
 		OutputSchema: obj(map[string]any{
 			"choices": arrayOf(obj(map[string]any{
@@ -46,7 +38,7 @@ func Chat(model string, m ChatModel) Spec {
 	}
 }
 
-func executeChat(ctx context.Context, args map[string]any, m ChatModel) (map[string]any, error) {
+func executeChat(ctx context.Context, args map[string]any, m kernel.Chatter) (map[string]any, error) {
 	if m == nil {
 		return nil, kernel.ErrInvalidState.Wrap("no chat model is bound")
 	}
@@ -54,42 +46,17 @@ func executeChat(ctx context.Context, args map[string]any, m ChatModel) (map[str
 	if err != nil {
 		return nil, err
 	}
-	var content string
-	if rf, ok := args["response_format"].(map[string]any); ok {
-		js, _ := rf["json_schema"].(map[string]any)
-		raw, _ := js["schema"].(map[string]any)
-		// The schema is read in the canonical form, so the model is asked for, and the reply held
-		// to, exactly what any action's schema means (D4).
-		schema, _, err := kernel.NormalizeSchema("response_format.json_schema.schema", raw)
-		if err != nil {
-			return nil, err
-		}
-		value, err := m.ChatJSON(ctx, messages, schema)
-		if err != nil {
-			return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
-		}
-		if err := kernel.ValidateInput(schema, value); err != nil {
-			return nil, kernel.ErrExecutionFailed.Wrapf("model output failed schema validation: %v", err)
-		}
-		b, err := json.Marshal(value)
-		if err != nil {
-			return nil, kernel.ErrInternal.Wrapf("encode reply: %v", err)
-		}
-		content = string(b)
-	} else {
-		reply, err := m.Chat(ctx, messages)
-		if err != nil {
-			return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
-		}
-		content = reply.Content
+	reply, err := m.Chat(ctx, messages)
+	if err != nil {
+		return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
 	}
 	return map[string]any{"choices": []any{map[string]any{
 		"index":   0,
-		"message": map[string]any{"role": "assistant", "content": content},
+		"message": map[string]any{"role": "assistant", "content": reply.Content},
 	}}}, nil
 }
 
-// chatMessages extracts the {role, content} turns llm/chat takes.
+// chatMessages extracts the {role, content} turns llm/chat and llm/json take.
 func chatMessages(args map[string]any) ([]kernel.ChatMessage, error) {
 	msgList, ok := args["messages"].([]any)
 	if !ok {

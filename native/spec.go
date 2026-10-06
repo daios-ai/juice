@@ -62,7 +62,7 @@ type Deps struct {
 	CompileSDK string
 }
 
-// ChatModel is everything the chat and decide natives ask of a model.
+// ChatModel is everything the chat, json and decide natives ask of a chat model.
 type ChatModel interface {
 	kernel.Chatter
 	kernel.JSONChatter
@@ -70,13 +70,13 @@ type ChatModel interface {
 }
 
 // LLM is the language models the natives reach (D17): every generated model by <endpoint>/<model>,
-// each its own natives, and the models configuration binds llm/chat, llm/decide and llm/embed to —
-// nil where a native is unbound.
+// each its own natives, and the models configuration binds llm/chat, llm/json, llm/decide and
+// llm/embed to — nil where a native is unbound.
 type LLM struct {
-	Chats        map[string]ChatModel
-	Embedders    map[string]kernel.Embedder
-	Chat, Decide ChatModel
-	Embedder     kernel.Embedder
+	Chats              map[string]ChatModel
+	Embedders          map[string]kernel.Embedder
+	Chat, JSON, Decide ChatModel
+	Embedder           kernel.Embedder
 }
 
 // All returns every native the platform ships, in registration order: the fixed stdlib, then each
@@ -84,12 +84,12 @@ type LLM struct {
 func All(d Deps) []Spec {
 	specs := []Spec{
 		Lookup(),
-		Chat("", d.LLM.Chat), Embed("", d.LLM.Embedder), Decide("", d.LLM.Decide),
+		Chat("", d.LLM.Chat), JSON("", d.LLM.JSON), Embed("", d.LLM.Embedder), Decide("", d.LLM.Decide),
 		Time(), Sink(), Message(), Random(), Transfer(),
 		Web(d.Web), TinyGo(d.Compile, d.CompileSDK),
 	}
 	for _, m := range slices.Sorted(maps.Keys(d.LLM.Chats)) {
-		specs = append(specs, Chat(m, d.LLM.Chats[m]), Decide(m, d.LLM.Chats[m]))
+		specs = append(specs, Chat(m, d.LLM.Chats[m]), JSON(m, d.LLM.Chats[m]), Decide(m, d.LLM.Chats[m]))
 	}
 	for _, m := range slices.Sorted(maps.Keys(d.LLM.Embedders)) {
 		specs = append(specs, Embed(m, d.LLM.Embedders[m]))
@@ -164,7 +164,7 @@ func arrayOf(items map[string]any, desc string) map[string]any {
 	return map[string]any{"type": "array", "description": desc, "items": items}
 }
 
-// messageSchema is the {role, content} turn llm/chat takes. A fresh map per call: a
+// messageSchema is the {role, content} turn llm/chat and llm/json take. A fresh map per call: a
 // Spec is handed to the kernel, which may retain it, so schemas must not share state.
 func messageSchema() map[string]any {
 	return obj(map[string]any{

@@ -35,12 +35,6 @@ func (s *stubModel) ChatDecide(context.Context, []kernel.DecideMessage, []kernel
 
 var hi = []any{map[string]any{"role": "system", "content": "be brief"}, map[string]any{"role": "user", "content": "hi"}}
 
-// structured asks for a reply the schema {name: string, required} admits.
-func structured() map[string]any {
-	return map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "person", "schema": map[string]any{
-		"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}, "required": []any{"name"}}}}
-}
-
 func firstMessage(t *testing.T, result map[string]any) map[string]any {
 	t.Helper()
 	choices, ok := result["choices"].([]any)
@@ -91,44 +85,16 @@ func TestExecuteChat_Reply(t *testing.T) {
 	}
 }
 
-// A json_schema response_format is asked for in canonical form and answered as content the schema
-// admits; a reply it refuses, or a schema outside the subset, is no answer.
-func TestExecuteChat_StructuredOutput(t *testing.T) {
-	m := &stubModel{value: map[string]any{"name": "Ada"}}
-	result, err := executeChat(context.Background(), map[string]any{"messages": hi, "response_format": structured()}, m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msg := firstMessage(t, result); msg["content"] != `{"name":"Ada"}` {
-		t.Errorf("content = %v", msg["content"])
-	}
-	if m.schema["additionalProperties"] != false {
-		t.Errorf("the model was not asked for the canonical schema: %v", m.schema)
-	}
-
-	m.value = map[string]any{"wrong": 1}
-	if _, err := executeChat(context.Background(), map[string]any{"messages": hi, "response_format": structured()}, m); !errors.Is(err, kernel.ErrExecutionFailed) {
-		t.Errorf("a reply the schema refuses: got %v, want ErrExecutionFailed", err)
-	}
-	rf := structured()
-	rf["json_schema"].(map[string]any)["schema"] = map[string]any{"anyOf": []any{}}
-	if _, err := executeChat(context.Background(), map[string]any{"messages": hi, "response_format": rf}, m); !errors.Is(err, kernel.ErrSchemaViolation) {
-		t.Errorf("a schema outside the subset: got %v, want ErrSchemaViolation", err)
-	}
-}
-
-// The response_format the input schema declares admits the standard shape and nothing else.
-func TestChatInputSchemaAdmitsTheStandardShape(t *testing.T) {
+// llm/chat answers with text and nothing else: a request for structured output is refused by its
+// own contract, before the handler, since that output kind is llm/json's (D4).
+func TestChatInputSchemaIsTextOnly(t *testing.T) {
 	in := Chat("", nil).InputSchema
-	if err := kernel.ValidateInput(in, map[string]any{"messages": hi, "response_format": structured()}); err != nil {
-		t.Errorf("the standard shape was refused: %v", err)
+	if err := kernel.ValidateInput(in, map[string]any{"messages": hi}); err != nil {
+		t.Errorf("a plain chat was refused: %v", err)
 	}
-	other := structured()
-	other["type"] = "json_object"
-	if err := kernel.ValidateInput(in, map[string]any{"messages": hi, "response_format": other}); err == nil {
-		t.Error("a response_format other than json_schema was admitted")
-	}
-	if err := kernel.ValidateInput(in, map[string]any{"messages": hi, "system": "x"}); err == nil {
-		t.Error("the non-standard system field was admitted")
+	for _, extra := range []string{"response_format", "system"} {
+		if err := kernel.ValidateInput(in, map[string]any{"messages": hi, extra: map[string]any{}}); err == nil {
+			t.Errorf("%s was admitted", extra)
+		}
 	}
 }

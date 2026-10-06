@@ -225,10 +225,11 @@ Native actions registered at bootstrap, owned by `sys`, `local` — callable by 
 | Action | Price | Purpose |
 |--------|-------|---------|
 | `lookup` | 0 | Rank active actions by query |
-| `llm/chat` | model's | Chat with a language model the operator chose, in the Chat Completions shape; a `json_schema` `response_format` is answered as content validated against the schema |
+| `llm/chat` | model's | Chat with a language model the operator chose, in the Chat Completions shape; the reply is text |
+| `llm/json` | model's | The object a caller's schema describes, from a language model the operator chose, checked against the schema |
 | `llm/embed` | model's | Text embedding, in the Embeddings shape |
 | `llm/decide` | model's | Action selection; returns chosen action and args without executing |
-| `llm/<endpoint>/<model>/chat`, `/decide`, `/embed` | model's | The same, for one model of one endpoint file, generated per model by kind (D17) |
+| `llm/<endpoint>/<model>/chat`, `/json`, `/decide`, `/embed` | model's | The same, for one model of one endpoint file, generated per model by kind (D17) |
 | `time` | 0 | Current time |
 | `sink` | 0 | Universal no-op task target |
 | `message` | 0 | Message a user by creating a task they acknowledge |

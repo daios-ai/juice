@@ -308,7 +308,7 @@ language model configured (a local Ollama by default; any provider through
 `~/.juice/llm/` and `native.llm` in config), `sys/llm/decide` picks one
 action from typed candidates and proposes valid arguments **without executing
 anything**, so planning and spending stay separate decisions. The rest of the stdlib
-(`sys/time`, `sys/random`, `sys/web`, `sys/llm/chat`, `sys/llm/embed`,
+(`sys/time`, `sys/random`, `sys/web`, `sys/llm/chat`, `sys/llm/json`, `sys/llm/embed`,
 `sys/transfer`, `sys/sink`) works like any other action: `juice run
 sys/time`.
 

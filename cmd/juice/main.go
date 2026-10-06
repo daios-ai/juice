@@ -469,7 +469,8 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 
 // openLLM reads the endpoint files, refuses a configuration that cannot mean what it says, and
 // builds a client for every model of every endpoint holding its required key: each model is its
-// own natives, and the ones the configuration binds back llm/chat, llm/decide and llm/embed (D17).
+// own natives, and the ones the configuration binds back llm/chat, llm/json, llm/decide and
+// llm/embed (D17).
 // Each endpoint with models is probed once and the outcome logged. The probe is a diagnostic — an
 // endpoint that is down keeps its natives and their ids, and its calls fail until it is back — and
 // decides only whether this boot embeds what lacks a vector. It returns the models, and the bound
@@ -510,7 +511,8 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 	}
 	// Map lookups of an interface type, so an unbound native holds a nil interface, never a nil
 	// pointer that would read as configured.
-	models.Chat, models.Decide, models.Embedder = models.Chats[cfg.Chat], models.Chats[cfg.Decide], models.Embedders[cfg.Embed]
+	models.Chat, models.JSON, models.Decide = models.Chats[cfg.Chat], models.Chats[cfg.JSON], models.Chats[cfg.Decide]
+	models.Embedder = models.Embedders[cfg.Embed]
 	if cfg.Embed == "" {
 		return models, "", false, nil
 	}

@@ -339,7 +339,7 @@ Native actions are a platform standard library shipped alongside the kernel and 
 HTTP or WASM actions. They are registered at bootstrap and interact with the platform only
 through the same injected dependencies and the same `Call()` / `CreateTask()` entry points
 available to every action. The stdlib includes semantic catalog `lookup`; the LLM surface
-`llm/chat` (structured output included), `llm/embed`, and `llm/decide` (which selects an action and proposes
+`llm/chat`, `llm/json` (structured output, checked against the caller's schema), `llm/embed`, and `llm/decide` (which selects an action and proposes
 arguments without executing); `make` (synthesizes and registers a WASM action from a
 natural-language description); the WASM build action `tinygo/compile`; and utilities `time`,
 `random`, `sink`, and `message`. Their prices and settings are configurable, but they are

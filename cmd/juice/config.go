@@ -20,12 +20,13 @@ import (
 	"github.com/daios-ai/juice/rail"
 )
 
-// NativeLLMConfig binds the language-model natives (D17). Chat, Decide and Embed each name the model
-// llm/chat, llm/decide and llm/embed call, as <endpoint>/<model> — an endpoint being a file of
-// $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this kernel keeps about
-// an endpoint: its key, and what each of its models costs a caller.
+// NativeLLMConfig binds the language-model natives (D17). Chat, JSON, Decide and Embed each name the
+// model llm/chat, llm/json, llm/decide and llm/embed call, as <endpoint>/<model> — an endpoint
+// being a file of $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this
+// kernel keeps about an endpoint: its key, and what each of its models costs a caller.
 type NativeLLMConfig struct {
 	Chat      string                       `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from $JUICE_HOME/llm/; empty leaves it unbound."`
+	JSON      string                       `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
 	Decide    string                       `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
 	Embed     string                       `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
 	Endpoints map[string]LLMEndpointConfig `json:"endpoints,omitempty" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
@@ -50,7 +51,8 @@ func (c NativeLLMConfig) price(ref string) int64 {
 // caller would spend the operator's bill without bound.
 func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
 	for _, b := range []struct{ key, ref, kind string }{
-		{"chat", c.Chat, llm.KindChat}, {"decide", c.Decide, llm.KindChat}, {"embed", c.Embed, llm.KindEmbed},
+		{"chat", c.Chat, llm.KindChat}, {"json", c.JSON, llm.KindChat}, {"decide", c.Decide, llm.KindChat},
+		{"embed", c.Embed, llm.KindEmbed},
 	} {
 		if b.ref == "" {
 			continue
@@ -112,7 +114,7 @@ type NativePriceConfig struct {
 // NativeConfig holds per-action configuration for all native actions (§14 `native.<action>`).
 // Configuration owns prices and their defaults; each native's contract lives with its handler (§9).
 type NativeConfig struct {
-	LLM      NativeLLMConfig    `json:"llm" doc:"Which language model backs llm/chat, llm/decide and llm/embed, and each provider's key and prices."`
+	LLM      NativeLLMConfig    `json:"llm" doc:"Which language model backs llm/chat, llm/json, llm/decide and llm/embed, and each provider's key and prices."`
 	Lookup   NativeLookupConfig `json:"lookup" doc:"The lookup action (search over actions)."`
 	Time     NativePriceConfig  `json:"time" doc:"The time action."`
 	Sink     NativePriceConfig  `json:"sink" doc:"The sink action (a no-op task target)."`
@@ -131,6 +133,8 @@ func (c NativeConfig) PriceOf(name string) int64 {
 		return c.Lookup.Price
 	case "llm/chat":
 		return c.LLM.price(c.LLM.Chat)
+	case "llm/json":
+		return c.LLM.price(c.LLM.JSON)
 	case "llm/decide":
 		return c.LLM.price(c.LLM.Decide)
 	case "llm/embed":
@@ -227,7 +231,7 @@ func (c ServerConfig) peerRetention() time.Duration {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Native: NativeConfig{
-			LLM:    NativeLLMConfig{Chat: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic"},
+			LLM:    NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic"},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},

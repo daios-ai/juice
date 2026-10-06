@@ -124,14 +124,15 @@ your own:
 }
 ```
 
-`native.llm` says which model `sys/llm/chat`, `sys/llm/decide` and
-`sys/llm/embed` use, as `<file>/<model>` — by default `ollama/gemma`,
-`ollama/gemma` and `ollama/nomic`, a local Ollama — and holds each provider's
-key and each model's price:
+`native.llm` says which model `sys/llm/chat`, `sys/llm/json`, `sys/llm/decide`
+and `sys/llm/embed` use, as `<file>/<model>` — by default `ollama/gemma` for the
+first three and `ollama/nomic` for embeddings, a local Ollama — and holds each
+provider's key and each model's price:
 
 ```json
 "llm": {
   "chat": "anthropic/opus",
+  "json": "anthropic/opus",
   "decide": "anthropic/opus",
   "embed": "ollama/nomic",
   "endpoints": {

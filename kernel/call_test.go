@@ -1496,15 +1496,7 @@ func (f *fakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.Ch
 	return f.reply, nil
 }
 
-func (f *fakeChatter) ChatJSON(context.Context, []kernel.ChatMessage, map[string]any) (any, error) {
-	return nil, kernel.ErrExecutionFailed.Wrap("not asked")
-}
-
-func (f *fakeChatter) ChatDecide(context.Context, []kernel.DecideMessage, []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
-	return nil, nil, kernel.ErrExecutionFailed.Wrap("not asked")
-}
-
-func newTestKernelWithChatter(st kernel.Store, c native.ChatModel) *kernel.Kernel {
+func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel {
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st})
 	native.Register(k, []native.Spec{native.Chat("", c)})
 	return k
