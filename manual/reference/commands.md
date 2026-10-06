@@ -64,7 +64,7 @@ For `kernel serve`, each setting of the kernel's `config.json` except
 `credentials_key` is also an option,
 written as the key with underscores replaced by dashes and a nested key as a path:
 `--listen-addr :4141` selects the address clients reach, `--fed-listen-addrs` the
-addresses peers dial, `--native.llm.url` the language-model endpoint. An option
+addresses peers dial, `--native.llm.chat` the model `sys/llm/chat` uses. An option
 applies to that run and is not written to the file, except on a first boot, which
 writes what you pass as the new kernel's configuration
 ([Configuration](config.html)).

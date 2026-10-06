@@ -5,6 +5,8 @@ package native
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"slices"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -54,23 +56,62 @@ type Host interface {
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a
 // misconfiguration the handler reports at call time (ErrInvalidState), never a missing action.
 type Deps struct {
-	Chatter    kernel.Chatter
-	Embedder   kernel.Embedder
-	JSON       kernel.JSONChatter
-	Decide     kernel.DecideChatter
+	LLM        LLM
 	Web        WebDeps
 	Compile    CompileDeps
 	CompileSDK string
 }
 
-// All returns every native the platform ships, in registration order.
+// ChatModel is everything the chat and decide natives ask of a model.
+type ChatModel interface {
+	kernel.Chatter
+	kernel.JSONChatter
+	kernel.DecideChatter
+}
+
+// LLM is the language models the natives reach (D17): every generated model by <endpoint>/<model>,
+// each its own natives, and the models configuration binds llm/chat, llm/decide and llm/embed to —
+// nil where a native is unbound.
+type LLM struct {
+	Chats        map[string]ChatModel
+	Embedders    map[string]kernel.Embedder
+	Chat, Decide ChatModel
+	Embedder     kernel.Embedder
+}
+
+// All returns every native the platform ships, in registration order: the fixed stdlib, then each
+// generated model's natives in name order.
 func All(d Deps) []Spec {
-	return []Spec{
+	specs := []Spec{
 		Lookup(),
-		Chat(d.Chatter), Embed(d.Embedder), JSON(d.JSON), Decide(d.Decide),
+		Chat("", d.LLM.Chat), Embed("", d.LLM.Embedder), Decide("", d.LLM.Decide),
 		Time(), Sink(), Message(), Random(), Transfer(),
 		Web(d.Web), TinyGo(d.Compile, d.CompileSDK),
 	}
+	for _, m := range slices.Sorted(maps.Keys(d.LLM.Chats)) {
+		specs = append(specs, Chat(m, d.LLM.Chats[m]), Decide(m, d.LLM.Chats[m]))
+	}
+	for _, m := range slices.Sorted(maps.Keys(d.LLM.Embedders)) {
+		specs = append(specs, Embed(m, d.LLM.Embedders[m]))
+	}
+	return specs
+}
+
+// llmName is a language-model native's name: llm/<verb> for the one configuration binds, or
+// llm/<endpoint>/<model>/<verb> for one generated model (D17).
+func llmName(model, verb string) string {
+	if model == "" {
+		return "llm/" + verb
+	}
+	return "llm/" + model + "/" + verb
+}
+
+// llmWho names, for a person, the model a language-model native reaches.
+func llmWho(model string) string {
+	if model == "" {
+		return "the configured model"
+	}
+	return model
 }
 
 // Register wires each Spec's handler (and value extractor, if any) onto k. It is the sole
@@ -115,7 +156,7 @@ func arrayOf(items map[string]any, desc string) map[string]any {
 	return map[string]any{"type": "array", "description": desc, "items": items}
 }
 
-// messageSchema is the {role, content} turn both plain LLM natives take. A fresh map per call: a
+// messageSchema is the {role, content} turn llm/chat takes. A fresh map per call: a
 // Spec is handed to the kernel, which may retain it, so schemas must not share state.
 func messageSchema() map[string]any {
 	return obj(map[string]any{

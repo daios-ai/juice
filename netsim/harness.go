@@ -367,7 +367,7 @@ func writeKernelConfig(path string, o bootOpts) error {
 // operator edits to join a network. Rewritten on every boot, so a restart rejoins the same way.
 func (n *Net) installWorld(dir, boot string) (string, error) {
 	worlds := filepath.Join(dir, "worlds")
-	if err := rail.Install(worlds); err != nil {
+	if err := rail.Install(worlds, rail.Worlds()); err != nil {
 		return "", err
 	}
 	name, doc := n.Rail.World()

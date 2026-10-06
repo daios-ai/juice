@@ -30,7 +30,7 @@ const (
 func installed(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := rail.Install(dir); err != nil {
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	return dir
@@ -91,7 +91,7 @@ func TestConcurrentInstallsConverge(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := rail.Install(dir); err != nil {
+			if err := rail.Install(dir, rail.Worlds()); err != nil {
 				errs <- err
 			}
 		}()
@@ -138,7 +138,7 @@ func TestInstallWritesOnceAndKeepsEdits(t *testing.T) {
 	}
 	doc["rpc"] = "https://my-own-node.example/rpc"
 	writeDoc(t, edited, doc)
-	if err := rail.Install(dir); err != nil {
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	w, err := rail.Load(dir, "arbitrum-sepolia")

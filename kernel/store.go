@@ -586,6 +586,8 @@ type Store interface {
 	// ListEmbeddings returns stored embedding vectors keyed by action ID, filtered to active,
 	// non-deleted actions; visibility is enforced by the caller-scoped canCall post-filter in Lookup.
 	ListEmbeddings(ctx context.Context) (map[string][]float32, error)
+	// ClearEmbeddings forgets every stored vector, actions' and discovery docs' alike.
+	ClearEmbeddings(ctx context.Context) error
 	// UpsertLookupText replaces an action's lexical-index text (§9 hybrid lookup).
 	UpsertLookupText(ctx context.Context, actionID, text string) error
 	// SearchActionsLexical returns up to limit active action IDs matching query, BM25-ranked best-first.

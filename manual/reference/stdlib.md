@@ -32,17 +32,25 @@ See [Finding an action](../calling/finding.html).
 
 ## Language model
 
-These actions require the corresponding model capability configured through
-`native.llm`. An unavailable capability is reported as `ErrInvalidState`
-without charging for the request.
+These actions call the model `native.llm` names for each of them (see
+[Configuration](config.html)). One that names no model is reported as
+`ErrInvalidState` without charging for the request. Each costs what its model
+costs.
 
-**`sys/llm/chat`** — `{messages, system?}` → `{message}`
+**`sys/llm/chat`** — `{messages, response_format?}` →
+`{choices: [{index, message: {role, content}}]}`, the shape of the OpenAI
+Chat Completions API. A system prompt is a message with role `system`. With
+`response_format` `{type: "json_schema", json_schema: {name, schema}}` the
+reply's content is JSON that the schema admits, checked before it is
+returned. The schema follows the rules of [Action schemas](schemas.html), so
+its top level is an object.
 
-**`sys/llm/embed`** — `{text}` → `{embedding}`
+**`sys/llm/embed`** — `{input}` → `{data: [{index, embedding}]}`, the shape of
+the OpenAI Embeddings API, for one string.
 
-**`sys/llm/json`** — `{messages, system?, output_schema}` → `{value}`, validated
-locally against the schema. The schema follows the rules of
-[Action schemas](schemas.html), so its top level is an object.
+Every model the configuration can reach also has these actions of its own,
+`sys/llm/<endpoint>/<model>/chat` and `/decide` for a chat model and `/embed`
+for an embedding model, so you can call a particular model directly.
 
 **`sys/llm/decide`** — `{messages, actions}` → `{action, args, message?}`
 

@@ -106,7 +106,7 @@ that file's name. Writing one of your own gives an economy of its own: its money
 own, and nothing signed on it verifies anywhere else.
 
 Every setting of `config.json` is an option here — the key with underscores written as
-dashes, a nested key as a path (`--native.llm.url`) — and an option applies to that run
+dashes, a nested key as a path (`--native.llm.chat`) — and an option applies to that run
 only, except on a first boot, which writes what you give it as the new kernel's
 configuration. Writing the file yourself first does the same thing.
 
@@ -304,11 +304,12 @@ machinery. Suspended work survives restarts.
 
 Lookup searches descriptions lexically and semantically and returns ranked candidates
 with schemas and all-in prices — including actions discovered on other kernels. With a
-local LLM configured (Ollama; `native.llm` in config), `sys/llm/decide` picks one
+language model configured (a local Ollama by default; any provider through
+`~/.juice/llm/` and `native.llm` in config), `sys/llm/decide` picks one
 action from typed candidates and proposes valid arguments **without executing
 anything**, so planning and spending stay separate decisions. The rest of the stdlib
 (`sys/time`, `sys/random`, `sys/web`, `sys/llm/chat`, `sys/llm/embed`,
-`sys/llm/json`, `sys/transfer`, `sys/sink`) works like any other action: `juice run
+`sys/transfer`, `sys/sink`) works like any other action: `juice run
 sys/time`.
 
 ## Federation
@@ -394,7 +395,7 @@ kernel/      Core objects and operational semantics
 store/       SQLite persistence (migrations, WAL)
 fed/         Federation transport (libp2p)
 script/      WebAssembly execution (wazero)
-llm/         Language/embedding adapter (Ollama)
+llm/         Language-model endpoints and their two protocol adaptors
 native/      The sys stdlib actions
 log/         Structured logging
 ```

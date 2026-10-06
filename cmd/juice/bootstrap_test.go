@@ -31,7 +31,7 @@ func TestServeRequiresAWorld(t *testing.T) {
 func testWorld(t *testing.T) rail.World {
 	t.Helper()
 	dir := t.TempDir()
-	if err := rail.Install(dir); err != nil {
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
 		t.Fatal(err)
 	}
 	w, err := rail.Load(dir, "play")
@@ -110,7 +110,7 @@ func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
 func TestCheckNetworkReadsTheRecord(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	if err := rail.Install(dir); err != nil {
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
 		t.Fatal(err)
 	}
 	play, err := rail.Load(dir, "play")

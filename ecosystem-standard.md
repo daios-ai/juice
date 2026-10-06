@@ -28,6 +28,7 @@ keeps clusters apart from users. Only the terms are ours.
 $JUICE_HOME/
   bin/                   the family's executables, where the installer puts them
   worlds/<world>.json    one network's definition: its money, and the servers to meet it through
+  llm/<endpoint>.json    one language-model provider: its protocol, address and models
   kernels/<world>/       one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected

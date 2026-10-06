@@ -540,3 +540,79 @@ func TestLookupLocalActionPrice(t *testing.T) {
 		t.Errorf("local hit price = %d, want 42 (action.price)", res[0].Price)
 	}
 }
+
+// countingEmbedder embeds like fakeEmbedder and counts every call; once budget calls have succeeded
+// it fails (a negative budget never fails).
+type countingEmbedder struct {
+	calls, budget int
+}
+
+func (c *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	c.calls++
+	if c.budget >= 0 && c.calls > c.budget {
+		return nil, kernel.ErrInternal.Wrap("embedder down")
+	}
+	return (&fakeEmbedder{}).Embed(ctx, text)
+}
+
+// SyncEmbeddings keeps vectors in the space of the bound model (D17): a change of model clears them
+// all and is recorded at once; a reachable embedder fills what is missing, stopping at the first
+// failure; and the next boot resumes from what is still missing rather than from what changed.
+func TestSyncEmbeddings(t *testing.T) {
+	st := newTestStore(t)
+	emb := &countingEmbedder{budget: -1}
+	k := newTestKernelWithEmbedder(st, emb)
+	ctx := context.Background()
+	owner := setupUser(t, st, "alice", 0)
+	for i, active := range []bool{true, true, true, false} {
+		a := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/a" + string(rune('0'+i)),
+			Kind: kernel.KindHTTP, Active: active, Visibility: kernel.VisibilityPublic, Description: "d",
+			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vectors := func() int {
+		have, err := st.ListEmbeddings(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(have)
+	}
+
+	if err := k.SyncEmbeddings(ctx, "m1", true); err != nil {
+		t.Fatal(err)
+	}
+	if vectors() != 3 || emb.calls != 3 {
+		t.Fatalf("first boot: %d vectors from %d calls, want 3 active actions embedded", vectors(), emb.calls)
+	}
+	if model, _ := st.GetConfig(ctx, "embed_model"); model != "m1" {
+		t.Errorf("recorded model %q", model)
+	}
+	if err := k.SyncEmbeddings(ctx, "m1", true); err != nil || emb.calls != 3 {
+		t.Errorf("an unchanged model with nothing missing re-embedded: %d calls, %v", emb.calls, err)
+	}
+
+	if err := k.SyncEmbeddings(ctx, "m2", false); err != nil {
+		t.Fatal(err)
+	}
+	if vectors() != 0 {
+		t.Errorf("a change of model kept %d vectors from the old one", vectors())
+	}
+
+	emb.calls, emb.budget = 0, 1
+	if err := k.SyncEmbeddings(ctx, "m2", true); err != nil {
+		t.Fatal(err)
+	}
+	if vectors() != 1 || emb.calls != 2 {
+		t.Errorf("a failing embedder: %d vectors from %d calls; want the one before the failure and no call after it", vectors(), emb.calls)
+	}
+	emb.calls, emb.budget = 0, -1
+	if err := k.SyncEmbeddings(ctx, "m2", true); err != nil || vectors() != 3 || emb.calls != 2 {
+		t.Errorf("the next boot resumed with %d calls to %d vectors, %v; want the 2 missing", emb.calls, vectors(), err)
+	}
+
+	if err := k.SyncEmbeddings(ctx, "", true); err != nil || vectors() != 3 {
+		t.Errorf("no bound model must change nothing: %d vectors, %v", vectors(), err)
+	}
+}

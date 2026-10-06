@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daios-ai/juice/kernel"
 )
@@ -621,5 +624,90 @@ func TestCapabilityHeaderStrippedOnCrossHostRedirect(t *testing.T) {
 	}
 	if endHeaders.Get(capabilityHeader) != "" {
 		t.Errorf("capability leaked across host-changing redirect: %q", endHeaders.Get(capabilityHeader))
+	}
+}
+
+// A redirect within the first origin is followed as sent. One to another origin is followed only as
+// a body-less GET or HEAD, carrying no header but Content-Type, Accept and User-Agent, so no
+// credential — whatever header carries it, or a Referer holding a query-string key — and no body
+// reaches a host it was not given to (G5).
+func TestRedirectAcrossOrigins(t *testing.T) {
+	type hit struct {
+		header http.Header
+		body   string
+	}
+	var elsewhereHits []hit
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		elsewhereHits = append(elsewhereHits, hit{r.Header.Clone(), string(b)})
+		w.Write([]byte(`{}`))
+	}))
+	defer elsewhere.Close()
+	var homeEnd http.Header
+	home := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/end":
+			homeEnd = r.Header.Clone()
+			w.Write([]byte(`{}`))
+		case "/same":
+			http.Redirect(w, r, "/end", http.StatusFound)
+		case "/away307":
+			http.Redirect(w, r, elsewhere.URL+"/x", http.StatusTemporaryRedirect)
+		default: // another port of the same host is another origin
+			http.Redirect(w, r, elsewhere.URL+"/x", http.StatusFound)
+		}
+	}))
+	defer home.Close()
+	send := func(method, path, body string) error {
+		req, _ := http.NewRequest(method, home.URL+path+"?key=secret", strings.NewReader(body))
+		if body == "" {
+			req, _ = http.NewRequest(method, home.URL+path+"?key=secret", nil)
+		}
+		req.Header.Set("X-Api-Key", "k")
+		req.Header.Set("Authorization", "Bearer t")
+		req.Header.Set(capabilityHeader, "cap")
+		req.Header.Set("Accept", "application/json")
+		resp, err := newHTTPClient(5*time.Second, true).Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+
+	if err := send(http.MethodPost, "/same", "args"); err != nil || homeEnd.Get("X-Api-Key") != "k" || homeEnd.Get(capabilityHeader) != "cap" {
+		t.Errorf("a same-origin redirect lost what it carried: %v %v", err, homeEnd)
+	}
+
+	if err := send(http.MethodGet, "/away", ""); err != nil || len(elsewhereHits) != 1 {
+		t.Fatalf("a body-less GET to another origin was not followed: %v", err)
+	}
+	h := elsewhereHits[0].header
+	for _, name := range []string{"X-Api-Key", "Authorization", capabilityHeader, "Referer"} {
+		if h.Get(name) != "" {
+			t.Errorf("%s reached another origin: %q", name, h.Get(name))
+		}
+	}
+	if h.Get("Accept") != "application/json" {
+		t.Error("a harmless header was dropped")
+	}
+
+	// A 302 turns a POST into a body-less GET, which may go; a 307 would resend the body, which may not.
+	if err := send(http.MethodPost, "/away", "args"); err != nil || elsewhereHits[1].body != "" || elsewhereHits[1].header.Get("X-Api-Key") != "" {
+		t.Errorf("a 302 after a POST: %v, %+v", err, elsewhereHits[1])
+	}
+	if err := send(http.MethodPost, "/away307", "args"); err == nil || len(elsewhereHits) != 2 {
+		t.Errorf("a 307 resent the body to another origin: %v, %d hits", err, len(elsewhereHits))
+	}
+}
+
+// An origin is scheme, host and port: a downgrade to http or another port is another origin, and a
+// default port written out is the same one.
+func TestOrigin(t *testing.T) {
+	o := func(s string) string { u, _ := url.Parse(s); return origin(u) }
+	if o("https://A.example/x") != o("https://a.example:443/y") {
+		t.Error("an explicit default port changed the origin")
+	}
+	if o("https://a.example") == o("http://a.example") || o("http://a.example:80") == o("http://a.example:8080") {
+		t.Error("a scheme or port change kept the origin")
 	}
 }

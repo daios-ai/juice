@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+
+	"github.com/daios-ai/juice/llm"
 )
 
 func TestRemoteRetryInterval(t *testing.T) {
@@ -70,8 +72,9 @@ func TestDiscoveryInterval(t *testing.T) {
 
 func TestDefaultServerConfig(t *testing.T) {
 	cfg := DefaultServerConfig()
-	if cfg.Native.LLM.URL == "" {
-		t.Error("Native.LLM.URL should have a default")
+	// A fresh kernel's language-model natives are bound to the shipped local endpoint (D17).
+	if cfg.Native.LLM.Chat != "ollama/gemma" || cfg.Native.LLM.Decide != "ollama/gemma" || cfg.Native.LLM.Embed != "ollama/nomic" {
+		t.Errorf("default llm bindings = %+v", cfg.Native.LLM)
 	}
 	if cfg.ScriptTimeoutMS <= 0 {
 		t.Error("ScriptTimeoutMS should be positive")
@@ -106,18 +109,18 @@ func TestLoadConfig_AbsentIsNotCreated(t *testing.T) {
 
 func TestLoadConfig_ReadsExistingOntoDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"url":"http://custom:11434"}}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"native":{"llm":{"chat":"anthropic/opus"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Native.LLM.URL != "http://custom:11434" {
-		t.Errorf("Native.LLM.URL = %q", cfg.Native.LLM.URL)
+	if cfg.Native.LLM.Chat != "anthropic/opus" {
+		t.Errorf("Native.LLM.Chat = %q", cfg.Native.LLM.Chat)
 	}
-	if cfg.Native.LLM.ChatModel != DefaultServerConfig().Native.LLM.ChatModel {
-		t.Errorf("an unstated field must keep its default, got %q", cfg.Native.LLM.ChatModel)
+	if cfg.Native.LLM.Embed != DefaultServerConfig().Native.LLM.Embed {
+		t.Errorf("an unstated field must keep its default, got %q", cfg.Native.LLM.Embed)
 	}
 }
 
@@ -164,14 +167,14 @@ func TestApplyEnvOverrides(t *testing.T) {
 	t.Run("absent env leaves file value", func(t *testing.T) {
 		cfg := DefaultServerConfig()
 		cfg.LogLevel = "warn"
-		cfg.Native.LLM.URL = "http://from-file:11434"
+		cfg.Native.LLM.Chat = "from/file"
 		cfg.FeeBPS = 1234
 		applyEnvOverrides(&cfg)
 		if cfg.LogLevel != "warn" {
 			t.Errorf("LogLevel should not be overridden, got %q", cfg.LogLevel)
 		}
-		if cfg.Native.LLM.URL != "http://from-file:11434" {
-			t.Errorf("Native.LLM.URL should not be overridden, got %q", cfg.Native.LLM.URL)
+		if cfg.Native.LLM.Chat != "from/file" {
+			t.Errorf("Native.LLM.Chat should not be overridden, got %q", cfg.Native.LLM.Chat)
 		}
 		if cfg.FeeBPS != 1234 {
 			t.Errorf("FeeBPS should not be overridden, got %d", cfg.FeeBPS)
@@ -410,8 +413,8 @@ func TestKernelsHereNamesOnlyRealKernels(t *testing.T) {
 
 // Every setting of the configuration file is settable on the command line, because the flags are
 // derived from the struct: a setting added later gets its flag without anyone remembering to add
-// one. The exception is the credentials key, which would otherwise stand in the process table for
-// every user of the machine to read.
+// one. The exceptions are the credentials key and the language-model endpoints' keys, which would
+// otherwise stand in the process table for every user of the machine to read.
 func TestEveryConfigKeyHasAFlag(t *testing.T) {
 	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
 	holder := DefaultServerConfig()
@@ -419,9 +422,9 @@ func TestEveryConfigKeyHasAFlag(t *testing.T) {
 
 	var missing []string
 	configFields(&holder, func(name string, _ reflect.Value) {
-		if name == "credentials-key" {
+		if name == "credentials-key" || name == "native.llm.endpoints" {
 			if fs.Lookup(name) != nil {
-				t.Error("the credentials key is settable on the command line, where the machine can read it")
+				t.Errorf("%s is settable on the command line, where the machine can read it", name)
 			}
 			return
 		}
@@ -433,7 +436,7 @@ func TestEveryConfigKeyHasAFlag(t *testing.T) {
 		t.Fatalf("settings with no flag: %s", strings.Join(missing, ", "))
 	}
 	// A spot check that the spelling is the key's, so the operator reads one vocabulary.
-	for _, name := range []string{"listen-addr", "fed-listen-addrs", "fee-bps", "native.llm.url", "native.lookup.default-limit", "max-inbound-peers", "relay-slots"} {
+	for _, name := range []string{"listen-addr", "fed-listen-addrs", "fee-bps", "native.llm.chat", "native.lookup.default-limit", "max-inbound-peers", "relay-slots"} {
 		if fs.Lookup(name) == nil {
 			t.Errorf("no flag named %s", name)
 		}
@@ -447,7 +450,7 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	file.FeeBPS = 1234
 	file.KernelHandle = "acme"
 	file.AllowLocalSources = true
-	file.Native.LLM.URL = "http://file:11434"
+	file.Native.LLM.Chat = "file/chat"
 	file.Native.Lookup.DefaultLimit = 7
 	file.FedListenAddrs = []string{"/ip4/0.0.0.0/tcp/1"}
 	lot := int64(11)
@@ -459,7 +462,7 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	serveFlags = fs
 	t.Cleanup(func() { serveFlags = nil })
 	if err := fs.Parse([]string{"--listen-addr", ":4141", "--fee-bps", "500",
-		"--allow-local-sources=false", "--native.llm.url", "http://flag:11434",
+		"--allow-local-sources=false", "--native.llm.chat", "flag/chat",
 		"--native.lookup.default-limit", "3", "--fed-listen-addrs", "/ip4/0.0.0.0/tcp/2",
 		"--lottery", "22"}); err != nil {
 		t.Fatalf("parse: %v", err)
@@ -470,7 +473,7 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	if got.ListenAddr != ":4141" || got.FeeBPS != 500 || got.AllowLocalSources {
 		t.Fatalf("plain settings not overridden: %+v", got)
 	}
-	if got.Native.LLM.URL != "http://flag:11434" || got.Native.Lookup.DefaultLimit != 3 {
+	if got.Native.LLM.Chat != "flag/chat" || got.Native.Lookup.DefaultLimit != 3 {
 		t.Fatalf("nested settings not overridden: %+v", got.Native)
 	}
 	if len(got.FedListenAddrs) != 1 || got.FedListenAddrs[0] != "/ip4/0.0.0.0/tcp/2" {
@@ -498,5 +501,74 @@ func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
 	applyConfigFlags(&cfg)
 	if cfg.FeeBPS != 4321 {
 		t.Fatalf("configuration changed with no flags parsed: %d", cfg.FeeBPS)
+	}
+}
+
+// llmEndpoints is a pair of endpoint files as Load reads them: one local and free, one metered.
+func llmEndpoints() map[string]llm.Endpoint {
+	return map[string]llm.Endpoint{
+		"local": {Protocol: llm.ProtocolOpenAI, URL: "http://localhost:1/v1", Models: map[string]llm.Model{
+			"chat": {ID: "c", Kind: llm.KindChat}, "vec": {ID: "v", Kind: llm.KindEmbed}}},
+		"cloud": {Protocol: llm.ProtocolAnthropic, URL: "https://x/v1", KeyRequired: true, Models: map[string]llm.Model{
+			"big": {ID: "b", Kind: llm.KindChat}, "small": {ID: "s", Kind: llm.KindChat}}},
+	}
+}
+
+// A configuration that cannot mean what it says is refused before anything is served, naming the
+// key to correct (D17); one that can is accepted, a metered endpoint stating every model's price.
+func TestLLMConfigCheck(t *testing.T) {
+	ok := NativeLLMConfig{Chat: "cloud/big", Decide: "local/chat", Embed: "local/vec", Endpoints: map[string]LLMEndpointConfig{
+		"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 0}}}}
+	if err := ok.check(llmEndpoints()); err != nil {
+		t.Fatalf("a sound configuration was refused: %v", err)
+	}
+	if err := (NativeLLMConfig{}).check(llmEndpoints()); err != nil {
+		t.Fatalf("an unbound configuration was refused: %v", err)
+	}
+	for _, tc := range []struct {
+		name, want string
+		edit       func(*NativeLLMConfig)
+	}{
+		{"unknown model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/none" }},
+		{"unknown endpoint", "native.llm.decide", func(c *NativeLLMConfig) { c.Decide = "nowhere/chat" }},
+		{"chat bound to an embed model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/vec" }},
+		{"embed bound to a chat model", "native.llm.embed", func(c *NativeLLMConfig) { c.Embed = "local/chat" }},
+		{"bound endpoint lacks its key", "native.llm.endpoints.cloud.key", func(c *NativeLLMConfig) {
+			c.Endpoints = map[string]LLMEndpointConfig{"cloud": {Prices: map[string]int64{"big": 1, "small": 1}}}
+		}},
+		{"settings for no endpoint", "native.llm.endpoints.ghost", func(c *NativeLLMConfig) {
+			c.Endpoints["ghost"] = LLMEndpointConfig{}
+		}},
+		{"price for no model", "native.llm.endpoints.cloud.prices.huge", func(c *NativeLLMConfig) {
+			c.Endpoints["cloud"].Prices["huge"] = 1
+		}},
+		{"negative price", "must not be negative", func(c *NativeLLMConfig) { c.Endpoints["cloud"].Prices["big"] = -1 }},
+		{"metered model without a price", "native.llm.endpoints.cloud.prices.small", func(c *NativeLLMConfig) {
+			delete(c.Endpoints["cloud"].Prices, "small")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ok
+			c.Endpoints = map[string]LLMEndpointConfig{"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 0}}}
+			tc.edit(&c)
+			if err := c.check(llmEndpoints()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want a refusal naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A language-model native costs what the model behind it does: the canonical natives their bound
+// model's price, a generated model's natives its own, and an unbound native nothing.
+func TestLLMNativePrices(t *testing.T) {
+	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", Decide: "cloud/small", Endpoints: map[string]LLMEndpointConfig{
+		"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 3}}}}}
+	for name, want := range map[string]int64{
+		"llm/chat": 20, "llm/decide": 3, "llm/embed": 0,
+		"llm/cloud/big/chat": 20, "llm/cloud/big/decide": 20, "llm/cloud/small/chat": 3, "llm/local/vec/embed": 0,
+	} {
+		if got := c.PriceOf(name); got != want {
+			t.Errorf("PriceOf(%s) = %d, want %d", name, got, want)
+		}
 	}
 }

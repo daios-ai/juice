@@ -46,7 +46,7 @@ its own addresses, for example `["/ip4/0.0.0.0/tcp/31314", "/ip4/0.0.0.0/udp/313
 
 Each kernel configuration key is also an option of `juice kernel serve`, written as the
 key with underscores replaced by dashes, and a nested key as a path:
-`--listen-addr :4141`, `--fee-bps 500`, `--native.llm.url http://localhost:11434`.
+`--listen-addr :4141`, `--fee-bps 500`, `--native.llm.chat ollama/gemma`.
 An option given on the command line applies to that run only and is not written
 to the file. On a first boot, where there is no file yet, what you pass is
 written as the new kernel's configuration. The one key with no option is
@@ -90,8 +90,43 @@ and funding duties.
 | `credentials_key` | generated at first boot | the key sealing upstream credentials. A value that is not a 32-byte key refuses the boot |
 | `native.<name>` | see below | per-action price and settings for the standard library |
 
-The `native.llm` settings select the language-model endpoint and model names;
-the default endpoint is Ollama at `http://localhost:11434`.
+The language models a kernel can use are described by files in `~/.juice/llm/`,
+one per provider, which Juice writes on first use and never overwrites. Each
+names how the provider is spoken to (`openai` or `anthropic`), its address,
+whether it needs a key, and the models you use there under short names of
+your own:
+
+```json
+{
+  "protocol": "anthropic",
+  "url": "https://api.anthropic.com/v1",
+  "key_required": true,
+  "models": {
+    "opus": {"id": "claude-opus-5-5", "kind": "chat", "max_tokens": 4096}
+  }
+}
+```
+
+`native.llm` says which model `sys/llm/chat`, `sys/llm/decide` and
+`sys/llm/embed` use, as `<file>/<model>` — by default `ollama/gemma`,
+`ollama/gemma` and `ollama/nomic`, a local Ollama — and holds each provider's
+key and each model's price:
+
+```json
+"llm": {
+  "chat": "anthropic/opus",
+  "decide": "anthropic/opus",
+  "embed": "ollama/nomic",
+  "endpoints": {
+    "anthropic": {"key": "sk-ant-…", "prices": {"opus": 20000}}
+  }
+}
+```
+
+A provider that needs a key is used only once its key is here, and then every
+one of its models must have a price, 0 included, since each call costs you
+money. The keys have no command-line flag. A provider that is down when the
+kernel starts is noted in the log, and calls to it fail until it is back.
 `native.lookup.default_limit` defaults to `10`. The compilation action defaults
 to a price of `5` base units through `native.tinygo.price`; other built-in
 actions default to zero.

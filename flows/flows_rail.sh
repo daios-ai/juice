@@ -174,6 +174,8 @@ flow_rail_world_mismatch() {
     assert_contains "rail_world_mismatch.says_why" "bound to network" "$(cat "$log")"
     # It refuses before the rail: a chain world whose node is unreachable is never dialled.
     assert_not_contains "rail_world_mismatch.dialled_nothing" "dial" "$(cat "$log")"
+    # Nor is any language-model endpoint probed: every probe is logged, reached or not (D17).
+    assert_not_contains "rail_world_mismatch.probed_no_model" "llm.endpoint" "$(cat "$log")"
 
     # Its own network still starts.
     mv "$root/kernels/arbitrum-sepolia" "$root/kernels/play"

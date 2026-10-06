@@ -1,0 +1,8 @@
+{
+  "protocol": "openai",
+  "url": "http://localhost:11434/v1",
+  "models": {
+    "gemma": {"id": "gemma4:26b", "kind": "chat"},
+    "nomic": {"id": "nomic-embed-text", "kind": "embed"}
+  }
+}

@@ -130,6 +130,46 @@ flow_chat() {
     assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- j "$db" "$ha" run sys@k/llm/chat '{}'
 }
 
+# --- Language-model endpoints (D17) ---
+# The operator's own endpoint files decide what exists: a model on an endpoint that answers is its
+# own natives and backs llm/chat; one on an endpoint that is down keeps its natives; one on a metered
+# endpoint without its key generates none. llm/chat answers in the Chat Completions shape, and a
+# json_schema response_format is held to its schema.
+flow_llm_endpoints() {
+    echo "=== FLOW llm_endpoints ==="
+    local dir db hs port down llm; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
+    port=$(backend_port); down=$(backend_port)
+    start_llm_backend "$port"
+    # An existing file is never overwritten by the shipped one, so ollama.json is the operator's.
+    llm="$(khome "$db")/llm"; mkdir -p "$llm"
+    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":{"gemma":{"id":"g","kind":"chat"},"nomic":{"id":"n","kind":"embed"}}}' "$port" >"$llm/ollama.json"
+    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":{"m":{"id":"x","kind":"chat"}}}' "$down" >"$llm/down.json"
+    printf '{"protocol":"anthropic","url":"http://127.0.0.1:%s/v1","key_required":true,"models":{"m":{"id":"x","kind":"chat"}}}' "$port" >"$llm/cloud.json"
+    start_server "$db" "$hs" || { fail "llm.boot" "server did not start"; return; }
+    know "$db" "$hs"
+    j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
+
+    local acts; acts=$(jj "$db" "$hs" action list)
+    assert_eq "llm.model_generated"      yes "$(has_action "$acts" llm/ollama/gemma/chat)"
+    assert_eq "llm.decide_generated"     yes "$(has_action "$acts" llm/ollama/gemma/decide)"
+    assert_eq "llm.embed_generated"      yes "$(has_action "$acts" llm/ollama/nomic/embed)"
+    assert_eq "llm.down_endpoint_kept"   yes "$(has_action "$acts" llm/down/m/chat)"
+    assert_eq "llm.keyless_metered_none" no  "$(has_action "$acts" llm/cloud/m/chat)"
+    assert_eq "llm.json_folded_into_chat" no "$(has_action "$acts" llm/json)"
+    assert_eq "llm.down_logged" yes "$(grep -q '"msg":"llm.endpoint_unreachable".*"endpoint":"down"' "$(server_log "$db")" && echo yes || echo no)"
+
+    local content; content=$(jj "$db" "$hs" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hi"}]}' |
+        python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["choices"][0]["message"]["content"])' 2>/dev/null)
+    assert_eq "llm.chat_standard_shape" '{"x": 1}' "$content"
+    local fits='{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"n","schema":{"type":"object","properties":{"x":{"type":"integer","description":"x"}},"required":["x"]}}}}'
+    content=$(jj "$db" "$hs" run sys@k/llm/chat "$fits" |
+        python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["choices"][0]["message"]["content"])' 2>/dev/null)
+    assert_eq "llm.structured_output_validated" '{"x":1}' "$content"
+    local refuses='{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"n","schema":{"type":"object","properties":{"y":{"type":"string","description":"y"}},"required":["y"]}}}}'
+    assert_fails "llm.structured_output_refused" "execution\|schema" -- j "$db" "$hs" run sys@k/llm/chat "$refuses"
+    assert_fails "llm.down_endpoint_call_fails" "execution\|failed" -- j "$db" "$hs" run sys@k/llm/down/m/chat '{"messages":[{"role":"user","content":"hi"}]}'
+}
+
 # --- OpenAPI ---
 # _greet_spec port file [desc]  — one-operation OpenAPI spec owned by alice.
 _greet_spec() {

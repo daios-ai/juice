@@ -178,15 +178,48 @@ func newHTTPClient(timeout time.Duration, allowLocal bool) *http.Client {
 		Timeout:   timeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Never carry the composition capability across a host-changing redirect (§9):
-			// Go strips Authorization automatically but not our custom headers.
-			if len(via) > 0 && req.URL.Hostname() != via[len(via)-1].URL.Hostname() {
-				req.Header.Del(capabilityHeader)
-				req.Header.Del(callbackHeader)
+			if err := validateRedirectHost(req.URL.Hostname(), allowLocal); err != nil {
+				return err
 			}
-			return validateRedirectHost(req.URL.Hostname(), allowLocal)
+			return crossOrigin(req, via[0])
 		},
 	}
+}
+
+// redirectSafeHeaders are the only headers a request keeps when a redirect takes it to another
+// origin: what describes the request and the client, never what authenticates it.
+var redirectSafeHeaders = map[string]bool{"Content-Type": true, "Accept": true, "User-Agent": true}
+
+// crossOrigin decides a redirect against the origin first asked (G5, D8). Within it — same scheme,
+// host and port — the redirect is followed as sent. To another origin it is followed only as a GET
+// or HEAD with no body, and with no header but redirectSafeHeaders: a credential may travel in any
+// header (an auth scheme's own, a delegated token's, the composition capability, a Referer carrying
+// a query-string key), and a 307 or 308 would resend the body — a caller's arguments, an OAuth
+// client secret — to a host it was never given to. Go copies the first request's headers onto every
+// hop before asking, so a hop back to the first origin carries them again, as it may.
+func crossOrigin(req, first *http.Request) error {
+	if origin(req.URL) == origin(first.URL) {
+		return nil
+	}
+	if (req.Method != http.MethodGet && req.Method != http.MethodHead) || req.GetBody != nil {
+		return fmt.Errorf("a redirect to another origin would resend the request body")
+	}
+	for name := range req.Header {
+		if !redirectSafeHeaders[name] {
+			req.Header.Del(name)
+		}
+	}
+	return nil
+}
+
+// origin is a URL's scheme, host and port, the port made explicit so https://a and https://a:443
+// are one origin.
+func origin(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	return u.Scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }
 
 // doHTTP executes one HTTP request and returns (body, statusCode, error).

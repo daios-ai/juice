@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,14 +16,77 @@ import (
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/llm"
 )
 
-// NativeLLMConfig holds configuration for the @sys/llm/* native actions.
+// NativeLLMConfig binds the language-model natives (D17). Chat, Decide and Embed each name the model
+// llm/chat, llm/decide and llm/embed call, as <endpoint>/<model> — an endpoint being a file of
+// $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this kernel keeps about
+// an endpoint: its key, and what each of its models costs a caller.
 type NativeLLMConfig struct {
-	URL        string `json:"url"`
-	ChatModel  string `json:"chat_model"`
-	EmbedModel string `json:"embed_model"`
-	Price      int64  `json:"price"`
+	Chat      string                       `json:"chat"`
+	Decide    string                       `json:"decide"`
+	Embed     string                       `json:"embed"`
+	Endpoints map[string]LLMEndpointConfig `json:"endpoints,omitempty"`
+}
+
+// LLMEndpointConfig is one endpoint's key and its models' prices.
+type LLMEndpointConfig struct {
+	Key    string           `json:"key,omitempty"`
+	Prices map[string]int64 `json:"prices,omitempty"`
+}
+
+// price is what a call to the model ref (<endpoint>/<model>) costs; an unbound or unpriced one is 0.
+func (c NativeLLMConfig) price(ref string) int64 {
+	endpoint, model, _ := strings.Cut(ref, "/")
+	return c.Endpoints[endpoint].Prices[model]
+}
+
+// check refuses, naming the key, a configuration that cannot mean what it says (D17): a binding to
+// a model no endpoint file holds, to one of the wrong kind, or to one whose endpoint lacks its key;
+// settings for an endpoint or model that does not exist; a negative price; and a metered model —
+// one of an endpoint holding its required key — whose price is stated nowhere, since at price 0 any
+// caller would spend the operator's bill without bound.
+func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
+	for _, b := range []struct{ key, ref, kind string }{
+		{"chat", c.Chat, llm.KindChat}, {"decide", c.Decide, llm.KindChat}, {"embed", c.Embed, llm.KindEmbed},
+	} {
+		if b.ref == "" {
+			continue
+		}
+		endpoint, name, _ := strings.Cut(b.ref, "/")
+		model, ok := eps[endpoint].Models[name]
+		switch {
+		case !ok:
+			return fmt.Errorf("native.llm.%s names %q, which no endpoint file in %s holds", b.key, b.ref, llmDir())
+		case model.Kind != b.kind:
+			return fmt.Errorf("native.llm.%s names %q, a %s model; it takes a %s model", b.key, b.ref, model.Kind, b.kind)
+		case eps[endpoint].KeyRequired && c.Endpoints[endpoint].Key == "":
+			return fmt.Errorf("native.llm.%s names %q, whose endpoint needs native.llm.endpoints.%s.key", b.key, b.ref, endpoint)
+		}
+	}
+	for endpoint, ec := range c.Endpoints {
+		ep, ok := eps[endpoint]
+		if !ok {
+			return fmt.Errorf("native.llm.endpoints.%s names no endpoint file in %s", endpoint, llmDir())
+		}
+		for name, price := range ec.Prices {
+			if _, ok := ep.Models[name]; !ok {
+				return fmt.Errorf("native.llm.endpoints.%s.prices.%s names no model of that endpoint", endpoint, name)
+			}
+			if price < 0 {
+				return fmt.Errorf("native.llm.endpoints.%s.prices.%s must not be negative", endpoint, name)
+			}
+		}
+		if ep.KeyRequired && ec.Key != "" {
+			for name := range ep.Models {
+				if _, ok := ec.Prices[name]; !ok {
+					return fmt.Errorf("native.llm.endpoints.%s.prices.%s is required: the endpoint is metered, so each of its models states its price, 0 included", endpoint, name)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // NativeLookupConfig holds configuration for the @sys/lookup native action.
@@ -64,8 +128,12 @@ func (c NativeConfig) PriceOf(name string) int64 {
 	switch name {
 	case "lookup":
 		return c.Lookup.Price
-	case "llm/chat", "llm/embed", "llm/json", "llm/decide":
-		return c.LLM.Price
+	case "llm/chat":
+		return c.LLM.price(c.LLM.Chat)
+	case "llm/decide":
+		return c.LLM.price(c.LLM.Decide)
+	case "llm/embed":
+		return c.LLM.price(c.LLM.Embed)
 	case "time":
 		return c.Time.Price
 	case "sink":
@@ -80,6 +148,10 @@ func (c NativeConfig) PriceOf(name string) int64 {
 		return c.Web.Price
 	case "tinygo/compile":
 		return c.TinyGo.Price
+	}
+	// A generated model's natives, llm/<endpoint>/<model>/<verb>, cost what the model does.
+	if rest, ok := strings.CutPrefix(name, "llm/"); ok {
+		return c.LLM.price(path.Dir(rest))
 	}
 	return 0
 }
@@ -153,7 +225,7 @@ func (c ServerConfig) peerRetention() time.Duration {
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Native: NativeConfig{
-			LLM:    NativeLLMConfig{URL: "http://localhost:11434", ChatModel: "gemma4:26b", EmbedModel: "nomic-embed-text", Price: 0},
+			LLM:    NativeLLMConfig{Chat: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic"},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
@@ -233,7 +305,7 @@ func isTruthyEnv(v string) bool {
 // ---- Command-line overrides ----
 
 // Every setting of config.json is also a flag of `kernel serve`, spelled as its key with `_`
-// written `-` and a nested key as a path (`--native.llm.url`), and a flag typed on the command line
+// written `-` and a nested key as a path (`--native.llm.chat`), and a flag typed on the command line
 // wins over the file for that run. This is the arrangement bitcoin, redis and the docker daemon
 // use; the alternative is a file and nothing else (IPFS, nginx). What juice had was neither: one
 // port was a flag with no key and the other a key with no flag (§14).
@@ -249,11 +321,10 @@ var (
 // defaults, because `into` starts as the shipped configuration.
 func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
 	configFields(into, func(name string, f reflect.Value) {
-		// The credentials key is the one setting with no flag: a process's command line is
-		// readable by every user of the machine, and the key seals every stored credential.
-		// It is read from the file, or from JUICE_CREDENTIALS_KEY for a run that must not
-		// write it down.
-		if name == "credentials-key" {
+		// The credentials key and the language-model endpoints' keys have no flag: a process's
+		// command line is readable by every user of the machine. The credentials key is read from
+		// the file, or from JUICE_CREDENTIALS_KEY for a run that must not write it down.
+		if name == "credentials-key" || name == "native.llm.endpoints" {
 			return
 		}
 		usage := "sets " + strings.ReplaceAll(name, "-", "_") + " for this run"
@@ -457,6 +528,10 @@ func kernelHome() string { return filepath.Join(juiceHome(), "kernels", worldNam
 // since a world is a network's definition and not one kernel's property. Install writes the shipped
 // ones here; an operator adds or edits others (D23).
 func worldsDir() string { return filepath.Join(juiceHome(), "worlds") }
+
+// llmDir is where this installation keeps its language-model endpoint files, installed and owned
+// as worlds are (D17).
+func llmDir() string { return filepath.Join(juiceHome(), "llm") }
 
 // exists reports whether a path is there, which for a kernel's database is the whole of "has this
 // kernel been created".

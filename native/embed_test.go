@@ -19,41 +19,36 @@ func (s *stubEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return s.vec, s.err
 }
 
-func TestExecuteEmbed_NilEmbedder(t *testing.T) {
-	_, err := executeEmbed(context.Background(), map[string]any{"text": "hello"}, nil)
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState with nil embedder, got %v", err)
+func TestExecuteEmbed_Unbound(t *testing.T) {
+	if _, err := executeEmbed(context.Background(), map[string]any{"input": "hello"}, nil); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("an unbound embed native must answer ErrInvalidState, got %v", err)
 	}
 }
 
-func TestExecuteEmbed_EmptyText(t *testing.T) {
-	_, err := executeEmbed(context.Background(), map[string]any{"text": ""}, &stubEmbedder{})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for empty text, got %v", err)
+func TestExecuteEmbed_EmptyInput(t *testing.T) {
+	for _, args := range []map[string]any{{}, {"input": ""}} {
+		if _, err := executeEmbed(context.Background(), args, &stubEmbedder{}); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("%v: got %v, want ErrInvalidInput", args, err)
+		}
 	}
 }
 
-func TestExecuteEmbed_MissingText(t *testing.T) {
-	_, err := executeEmbed(context.Background(), map[string]any{}, &stubEmbedder{})
-	if !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("expected ErrInvalidInput for missing text, got %v", err)
-	}
-}
-
-func TestExecuteEmbed_Success(t *testing.T) {
-	e := &stubEmbedder{vec: []float32{0.1, 0.2, 0.3}}
-	result, err := executeEmbed(context.Background(), map[string]any{"text": "hello"}, e)
+// An embedding answers in the Embeddings shape.
+func TestExecuteEmbed_Reply(t *testing.T) {
+	result, err := executeEmbed(context.Background(), map[string]any{"input": "hello"}, &stubEmbedder{vec: []float32{0.1, 0.2, 0.3}})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-	emb, ok := result["embedding"].([]any)
-	if !ok {
-		t.Fatalf("expected []any embedding, got %T", result["embedding"])
+	data, ok := result["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("data = %v", result["data"])
 	}
-	if len(emb) != 3 {
-		t.Errorf("expected 3 elements, got %d", len(emb))
+	d := data[0].(map[string]any)
+	emb := d["embedding"].([]any)
+	if d["index"] != 0 || len(emb) != 3 || emb[0].(float64) != float64(float32(0.1)) {
+		t.Errorf("data[0] = %v", d)
 	}
-	if emb[0].(float64) != float64(float32(0.1)) {
-		t.Errorf("unexpected first element: %v", emb[0])
+	if _, err := executeEmbed(context.Background(), map[string]any{"input": "x"}, &stubEmbedder{err: errors.New("down")}); !errors.Is(err, kernel.ErrExecutionFailed) {
+		t.Errorf("a failed model call: got %v, want ErrExecutionFailed", err)
 	}
 }

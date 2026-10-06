@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -373,16 +375,6 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 		MemoryBytes: cfg.ScriptMemory,
 	})
 
-	embedder := kernel.Embedder(&llm.OllamaEmbedder{
-		URL:   globalCfg.Native.LLM.URL,
-		Model: globalCfg.Native.LLM.EmbedModel,
-	})
-	ollamaChatter := &llm.OllamaChatter{
-		URL:   globalCfg.Native.LLM.URL,
-		Model: globalCfg.Native.LLM.ChatModel,
-	}
-	chatter := kernel.Chatter(ollamaChatter)
-
 	// The world this kernel serves fixes its network, whose fingerprint binds every signature it
 	// makes and the namespace it discovers on (D23). A database made on another network is refused
 	// here, before the rail is opened, so a kernel served from the wrong world dials nothing.
@@ -391,6 +383,12 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 		return nil, nil, nil, nil, nil, nil, err
 	}
 	cfg.Network = world.Network()
+	// Only now are the model endpoints probed: a kernel offered another network has dialled nothing.
+	models, embedModel, embedReachable, err := openLLM(globalCfg.Native.LLM, logger)
+	if err != nil {
+		db.Close()
+		return nil, nil, nil, nil, nil, nil, err
+	}
 	// Every money rule comes from one place, the operator's own configuration (P10).
 	econ, err := globalCfg.Economy()
 	if err != nil {
@@ -402,7 +400,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 		Store:    db,
 		Scripts:  exec,
 		HTTP:     httpExec, // one cohesive HTTP concern: dispatch + ordinary fetching
-		Embedder: embedder,
+		Embedder: models.Embedder,
 		Config:   cfg,
 		Economy:  econ,
 		Logger:   logger,
@@ -438,10 +436,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	// not just bootstrap.
 	webUA := "juice-kernel/" + version + " (+https://github.com/daios-ai/juice)"
 	nativeDeps := native.Deps{
-		Chatter:  chatter,
-		Embedder: embedder,
-		JSON:     ollamaChatter,
-		Decide:   ollamaChatter,
+		LLM: models,
 		Web: native.WebDeps{Fetch: func(ctx context.Context, url string) (int, []byte, string, string, error) {
 			return httpExec.fetchWeb(ctx, url, webUA)
 		}},
@@ -450,6 +445,10 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	}
 	specs := native.All(nativeDeps)
 	native.Register(k, specs)
+	if err := k.SyncEmbeddings(context.Background(), embedModel, embedReachable); err != nil {
+		db.Close()
+		return nil, nil, nil, nil, nil, nil, fmt.Errorf("embeddings: %w", err)
+	}
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
 	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
@@ -466,6 +465,58 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	}
 
 	return k, db, logger, httpExec, fedAdapter, specs, nil
+}
+
+// openLLM reads the endpoint files, refuses a configuration that cannot mean what it says, and
+// builds a client for every model of every endpoint holding its required key: each model is its
+// own natives, and the ones the configuration binds back llm/chat, llm/decide and llm/embed (D17).
+// Each endpoint with models is probed once and the outcome logged. The probe is a diagnostic — an
+// endpoint that is down keeps its natives and their ids, and its calls fail until it is back — and
+// decides only whether this boot embeds what lacks a vector. It returns the models, and the bound
+// embedding model's identity and whether its endpoint answered.
+func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool, error) {
+	eps, err := llm.Load(llmDir())
+	if err != nil {
+		return native.LLM{}, "", false, err
+	}
+	if err := cfg.check(eps); err != nil {
+		return native.LLM{}, "", false, err
+	}
+	models := native.LLM{Chats: map[string]native.ChatModel{}, Embedders: map[string]kernel.Embedder{}}
+	reachable := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(eps)) {
+		ep, key := eps[name], cfg.Endpoints[name].Key
+		if len(ep.Models) == 0 {
+			continue
+		}
+		if ep.KeyRequired && key == "" {
+			logger.Info("llm.endpoint_skipped", "endpoint", name, "reason", "no key in native.llm.endpoints."+name+".key")
+			continue
+		}
+		for m, model := range ep.Models {
+			c := &llm.Client{Endpoint: ep, Model: model, Key: key}
+			if model.Kind == llm.KindEmbed {
+				models.Embedders[name+"/"+m] = c
+			} else {
+				models.Chats[name+"/"+m] = c
+			}
+		}
+		if err := llm.Probe(context.Background(), ep, key); err != nil {
+			logger.Warn("llm.endpoint_unreachable", "endpoint", name, "error", err.Error())
+			continue
+		}
+		reachable[name] = true
+		logger.Info("llm.endpoint_reachable", "endpoint", name)
+	}
+	// Map lookups of an interface type, so an unbound native holds a nil interface, never a nil
+	// pointer that would read as configured.
+	models.Chat, models.Decide, models.Embedder = models.Chats[cfg.Chat], models.Chats[cfg.Decide], models.Embedders[cfg.Embed]
+	if cfg.Embed == "" {
+		return models, "", false, nil
+	}
+	endpoint, m, _ := strings.Cut(cfg.Embed, "/")
+	identity := cfg.Embed + "|" + eps[endpoint].URL + "|" + eps[endpoint].Models[m].ID
+	return models, identity, reachable[endpoint], nil
 }
 
 // promptPassword reads a password from the terminal without echo. It is a

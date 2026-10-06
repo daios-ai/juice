@@ -1,0 +1,6 @@
+{
+  "protocol": "openai",
+  "url": "https://api.openai.com/v1",
+  "key_required": true,
+  "models": {}
+}

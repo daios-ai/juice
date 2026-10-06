@@ -79,7 +79,7 @@ run_flows \
     flow_task_success flow_task_failure flow_task_restart flow_locked_funds_recovery \
     flow_rating \
     flow_pkce_auth flow_refresh_rotation flow_successful_receipt flow_failed_receipt \
-    flow_lookup flow_chat flow_openapi_import_execute flow_openapi_changed_reimport \
+    flow_lookup flow_chat flow_llm_endpoints flow_openapi_import_execute flow_openapi_changed_reimport \
     flow_openapi_disable_tree flow_openapi_application flow_openapi_import_report \
     flow_federation_import_execute flow_federation_changed_reimport flow_fed_rename \
     flow_fed_verify_receipt flow_fed_all_receipt_checks flow_fed_suspend_blocks \

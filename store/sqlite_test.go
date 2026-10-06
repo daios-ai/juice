@@ -2862,6 +2862,38 @@ func TestCommitFailedCallReleasesIdempotencyLockAtomically(t *testing.T) {
 	}
 }
 
+// A change of embedding model forgets every vector, actions' and discovered actions' alike, since a
+// vector is comparable only with others from the model that made it.
+func TestClearEmbeddings(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("owner-clear", 0)
+	_ = db.CreateUser(ctx, owner)
+	a := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "/a", Kind: kernel.KindHTTP, Active: true,
+		Visibility: kernel.VisibilityPublic, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := db.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertEmbedding(ctx, a.ID, []float32{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	doc := &kernel.DiscoveryDoc{Handle: "prov", ActionID: "r1", Name: "x", Title: "T", Description: "d",
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
+		Embedding: []float32{1, 0}, ObservedAt: time.Now().UTC()}
+	if err := db.ApplyCatalogPage(ctx, "peer-key", []*kernel.DiscoveryDoc{doc}, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ClearEmbeddings(ctx); err != nil {
+		t.Fatalf("ClearEmbeddings: %v", err)
+	}
+	if got, _ := db.ListEmbeddings(ctx); len(got) != 0 {
+		t.Errorf("action vectors survived: %v", got)
+	}
+	if _, ok := db.DiscoveryEmbedding(ctx, "peer-key", "r1", "T d"); ok {
+		t.Error("a discovered action's vector survived")
+	}
+}
+
 func TestUpsertAndListEmbeddings(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

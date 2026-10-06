@@ -37,6 +37,15 @@ import (
 //go:embed worlds
 var shipped embed.FS
 
+// Worlds holds the world files this build ships, for Install.
+func Worlds() fs.FS {
+	sub, err := fs.Sub(shipped, "worlds")
+	if err != nil {
+		panic(err) // the directory is embedded above; its absence is a build error
+	}
+	return sub
+}
+
 // The adaptors a world may name. The field decides which one witnesses this network's money, so a
 // world says what it settles on rather than leaving it to be inferred from which fields it happens
 // to carry — and a future adaptor is a new value here, not a new guess.
@@ -97,16 +106,17 @@ type gasCfg struct {
 	SwapGas     uint64 `json:"swapGas"`
 }
 
-// Install writes every shipped world into dir that is not there already, and leaves the rest alone:
-// a file an operator has edited is the world they serve, and an upgrade must not undo it. Each is
-// written under a temporary name, flushed, and linked into place, so a crash cannot leave a
-// half-written file under a name that would then never be rewritten; a link refused because the
-// file now exists is another `serve` having won the race, which is success.
-func Install(dir string) error {
+// Install writes every shipped file into dir that is not there already, and leaves the rest alone:
+// a file an operator has edited is the one they run, and an upgrade must not undo it. Worlds and
+// language-model endpoints (D17) are installed alike. Each is written under a temporary name,
+// flushed, and linked into place, so a crash cannot leave a half-written file under a name that
+// would then never be rewritten; a link refused because the file now exists is another `serve`
+// having won the race, which is success.
+func Install(dir string, files fs.FS) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	entries, err := fs.ReadDir(shipped, "worlds")
+	entries, err := fs.ReadDir(files, ".")
 	if err != nil {
 		return err
 	}
@@ -115,7 +125,7 @@ func Install(dir string) error {
 		if _, err := os.Stat(path); err == nil {
 			continue
 		}
-		body, err := fs.ReadFile(shipped, "worlds/"+e.Name())
+		body, err := fs.ReadFile(files, e.Name())
 		if err != nil {
 			return err
 		}

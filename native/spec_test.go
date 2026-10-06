@@ -3,6 +3,7 @@
 package native
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
@@ -46,12 +47,39 @@ func TestAllShipsCompleteContracts(t *testing.T) {
 	}
 	// The stdlib §9 names; a native removed from the platform must also leave this list.
 	for _, want := range []string{
-		"lookup", "llm/chat", "llm/embed", "llm/json", "llm/decide",
+		"lookup", "llm/chat", "llm/embed", "llm/decide",
 		"time", "sink", "message", "random", "transfer", "web", "tinygo/compile",
 	} {
 		if !seen[want] {
 			t.Errorf("stdlib native %q is not shipped", want)
 		}
+	}
+}
+
+// Each generated model is its own natives by kind, beside the canonical ones and in name order, each
+// with a distinct title naming it (D17).
+func TestAllGeneratesEachModelsNatives(t *testing.T) {
+	m := &stubModel{}
+	specs := All(Deps{LLM: LLM{
+		Chats:     map[string]ChatModel{"b/chat": m, "a/chat": m},
+		Embedders: map[string]kernel.Embedder{"a/vec": &stubEmbedder{}},
+		Chat:      m,
+	}})
+	var names []string
+	titles := map[string]bool{}
+	for _, s := range specs {
+		if titles[s.Title] {
+			t.Errorf("title %q is shared", s.Title)
+		}
+		titles[s.Title] = true
+		names = append(names, s.Name)
+	}
+	want := []string{"llm/a/chat/chat", "llm/a/chat/decide", "llm/b/chat/chat", "llm/b/chat/decide", "llm/a/vec/embed"}
+	if got := names[len(names)-len(want):]; !slices.Equal(got, want) {
+		t.Errorf("generated natives = %v, want %v", got, want)
+	}
+	if !titles["Chat with a/chat"] || !titles["Chat with the configured model"] {
+		t.Errorf("titles = %v", titles)
 	}
 }
 

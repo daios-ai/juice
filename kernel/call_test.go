@@ -1496,9 +1496,17 @@ func (f *fakeChatter) Chat(_ context.Context, _ []kernel.ChatMessage) (kernel.Ch
 	return f.reply, nil
 }
 
-func newTestKernelWithChatter(st kernel.Store, c kernel.Chatter) *kernel.Kernel {
+func (f *fakeChatter) ChatJSON(context.Context, []kernel.ChatMessage, map[string]any) (any, error) {
+	return nil, kernel.ErrExecutionFailed.Wrap("not asked")
+}
+
+func (f *fakeChatter) ChatDecide(context.Context, []kernel.DecideMessage, []kernel.ToolDefinition) (*kernel.ToolCall, *kernel.ChatMessage, error) {
+	return nil, nil, kernel.ErrExecutionFailed.Wrap("not asked")
+}
+
+func newTestKernelWithChatter(st kernel.Store, c native.ChatModel) *kernel.Kernel {
 	k := newKernel(testConfig(), kernel.Dependencies{Store: st})
-	native.Register(k, []native.Spec{native.Chat(c)})
+	native.Register(k, []native.Spec{native.Chat("", c)})
 	return k
 }
 
@@ -1538,10 +1546,11 @@ func TestCallLLMChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call llm/chat: %v", err)
 	}
-	msg, ok := reply.Result["message"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected message in result, got %v", reply.Result)
+	choices, _ := reply.Result["choices"].([]any)
+	if len(choices) != 1 {
+		t.Fatalf("expected one choice in result, got %v", reply.Result)
 	}
+	msg := choices[0].(map[string]any)["message"].(map[string]any)
 	if msg["content"] != "hello there" {
 		t.Errorf("content: got %q, want %q", msg["content"], "hello there")
 	}
@@ -1551,7 +1560,7 @@ func TestCallLLMChatNoChatter(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
 	k := newTestKernel(st)
-	native.Register(k, []native.Spec{native.Chat(nil)})
+	native.Register(k, []native.Spec{native.Chat("", nil)})
 
 	owner := setupUser(t, st, "sys", 1000)
 	chatAction := &kernel.Action{

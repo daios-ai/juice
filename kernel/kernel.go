@@ -3299,18 +3299,75 @@ func schemaText(b *strings.Builder, schema map[string]any) {
 	}
 }
 
-// storeEmbedding embeds an action's title and description and persists the vector. Best-effort: logs on failure, never returns an error.
-func (k *Kernel) storeEmbedding(ctx context.Context, actionID, text string) {
+// storeEmbedding embeds an action's title and description and persists the vector. A failure is
+// logged and returned; indexing ignores it, since lookup degrades to its lexical leg without one.
+func (k *Kernel) storeEmbedding(ctx context.Context, actionID, text string) error {
 	if k.llm == nil || strings.TrimSpace(text) == "" {
-		return
+		return nil
 	}
 	vec, err := k.llm.Embed(ctx, text)
 	if err != nil {
 		k.log.With(ctx).Warn("lookup.embed_failed", "action_id", actionID, "error", err.Error())
-		return
+		return err
 	}
 	if err := k.store.UpsertEmbedding(ctx, actionID, vec); err != nil {
 		k.log.With(ctx).Warn("lookup.embed_store_failed", "action_id", actionID, "error", err.Error())
+		return err
+	}
+	return nil
+}
+
+// configKeyEmbedModel records which embedding model made the stored vectors.
+const configKeyEmbedModel = "embed_model"
+
+// SyncEmbeddings keeps the stored vectors in the space of the embedding model the kernel uses
+// (D17). model identifies that model; "" (none bound) changes nothing, the vectors waiting unused.
+// A change of model clears every vector — discovered actions' refill on the next catalogue scan —
+// and is recorded at once, so it is never cleared twice. Then, if the model's endpoint answered at
+// boot (reachable), each active action lacking a vector is embedded, stopping at the first failure:
+// what one boot cannot finish, the next resumes, since it is driven by what is missing rather than
+// by what changed.
+func (k *Kernel) SyncEmbeddings(ctx context.Context, model string, reachable bool) error {
+	if model == "" || k.llm == nil {
+		return nil
+	}
+	prev, err := k.store.GetConfig(ctx, configKeyEmbedModel)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if prev != model {
+		if err := k.store.ClearEmbeddings(ctx); err != nil {
+			return err
+		}
+		if err := k.store.SetConfig(ctx, configKeyEmbedModel, model); err != nil {
+			return err
+		}
+		k.log.With(ctx).Info("lookup.embeddings_cleared", "model", model)
+	}
+	if !reachable {
+		return nil
+	}
+	have, err := k.store.ListEmbeddings(ctx)
+	if err != nil {
+		return err
+	}
+	const page = 200
+	for offset := 0; ; offset += page {
+		actions, err := k.store.ListAllActions(ctx, page, offset)
+		if err != nil {
+			return err
+		}
+		for _, a := range actions {
+			if !a.Active || have[a.ID] != nil {
+				continue
+			}
+			if k.storeEmbedding(ctx, a.ID, a.Title+" "+a.Description) != nil {
+				return nil // logged; the next boot resumes
+			}
+		}
+		if len(actions) < page {
+			return nil
+		}
 	}
 }
 

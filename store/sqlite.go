@@ -3061,6 +3061,18 @@ func (s *DB) UpsertEmbedding(ctx context.Context, actionID string, vec []float32
 	return dbErr(err, "upsert embedding")
 }
 
+// ClearEmbeddings forgets every stored vector, actions' and discovered actions' alike: a vector is
+// comparable only with others from the model that made it, so a change of model starts afresh.
+func (s *DB) ClearEmbeddings(ctx context.Context) error {
+	return s.withTx(ctx, "clear embeddings", func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE actions SET embed_vec=NULL WHERE embed_vec IS NOT NULL`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE discovery_docs SET embed_vec=NULL WHERE embed_vec IS NOT NULL`)
+		return err
+	})
+}
+
 func (s *DB) ListEmbeddings(ctx context.Context) (map[string][]float32, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, embed_vec FROM actions

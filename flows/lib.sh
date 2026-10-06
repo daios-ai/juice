@@ -620,6 +620,32 @@ PYEOF
     sleep 0.3
 }
 
+# start_llm_backend port — an OpenAI-compatible model server: it lists models, answers every chat
+# with the JSON document {"x": 1} as content, and embeds every input as one fixed vector.
+start_llm_backend() {
+    local port="$1"
+    python3 - "$port" <<'PYEOF' &
+import sys, json, http.server
+port = int(sys.argv[1])
+class H(http.server.BaseHTTPRequestHandler):
+    def reply(self, body):
+        b = json.dumps(body).encode()
+        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        self.reply({"data": []})
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        if self.path.endswith('/embeddings'):
+            self.reply({"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+        else:
+            self.reply({"choices": [{"index": 0, "message": {"role": "assistant", "content": "{\"x\": 1}"}}]})
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    track_pid $!
+    _await_http "$port" GET
+}
 # start_header_echo_backend port header  — POST backend that reflects one request header as
 # {"seen": <value>}, so a flow can prove an auth credential actually reached the upstream.
 start_header_echo_backend() {

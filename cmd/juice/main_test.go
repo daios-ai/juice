@@ -5,13 +5,18 @@ package main
 import (
 	"bytes"
 	"errors"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 	"github.com/spf13/cobra"
 )
 
@@ -406,5 +411,65 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	}
 	if _, err := loadRefreshToken(); err == nil {
 		t.Error("expected error after removeRefreshToken")
+	}
+}
+
+// openLLM generates a model's natives from configuration alone — an endpoint lacking its required
+// key generates none, one that is down keeps its natives — binds the canonical natives to what the
+// configuration names, and reports the bound embedder's identity and whether its endpoint answered.
+func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("JUICE_HOME", home)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer up.Close()
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close() // a closed port: the endpoint does not answer
+	dir := filepath.Join(home, "llm")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"up":    `{"protocol":"openai","url":"` + up.URL + `","models":{"c":{"id":"c1","kind":"chat"},"e":{"id":"e1","kind":"embed"}}}`,
+		"down":  `{"protocol":"openai","url":"` + down.URL + `","models":{"c":{"id":"c2","kind":"chat"},"e":{"id":"e2","kind":"embed"}}}`,
+		"cloud": `{"protocol":"anthropic","url":"https://x","key_required":true,"models":{"c":{"id":"c3","kind":"chat"}}}`,
+		"empty": `{"protocol":"openai","url":"https://y","key_required":true,"models":{}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logger, err := log.New(log.Config{Level: "error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", Decide: "down/c", Embed: "up/e"}, logger)
+	if err != nil {
+		t.Fatalf("openLLM: %v", err)
+	}
+	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"down/c", "up/c"}) {
+		t.Errorf("chat models = %v; want the reachable and the down endpoint's, not the keyless one's", got)
+	}
+	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"down/e", "up/e"}) {
+		t.Errorf("embedding models = %v", got)
+	}
+	if models.Chat != models.Chats["up/c"] || models.Decide != models.Chats["down/c"] || models.Embedder != models.Embedders["up/e"] {
+		t.Error("the canonical natives are not bound to the configured models")
+	}
+	if identity != "up/e|"+up.URL+"|e1" || !reachable {
+		t.Errorf("embedder identity %q reachable %v", identity, reachable)
+	}
+
+	if _, _, reachable, _ = openLLM(NativeLLMConfig{Embed: "down/e"}, logger); reachable {
+		t.Error("an embedder whose endpoint does not answer was reported reachable")
+	}
+	models, identity, _, err = openLLM(NativeLLMConfig{}, logger)
+	if err != nil || models.Chat != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
+		t.Errorf("an unbound configuration bound something: %+v %q %v", models, identity, err)
+	}
+	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "cloud/c"}, logger); err == nil {
+		t.Error("a binding to an endpoint lacking its key was accepted")
 	}
 }

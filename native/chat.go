@@ -6,71 +6,96 @@ package native
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/daios-ai/juice/kernel"
 )
 
-// Chat declares @sys/llm/chat (§9).
-func Chat(chatter kernel.Chatter) Spec {
+// Chat declares a chat native (§9): llm/chat, which configuration binds to a model, or the native
+// of one generated model (D17). Either is the Chat Completions subset, structured output included:
+// a json_schema response_format is answered as content validated against the schema.
+func Chat(model string, m ChatModel) Spec {
 	return Spec{
-		Name:        "llm/chat",
-		Title:       "Chat with the model",
-		Description: "Chat completion via the configured language model",
+		Name:        llmName(model, "chat"),
+		Title:       "Chat with " + llmWho(model),
+		Description: "Chat completion via " + llmWho(model) + ", in the Chat Completions shape; a json_schema response_format is answered as JSON content the schema admits, validated locally",
 		InputSchema: obj(map[string]any{
-			"messages": arrayOf(messageSchema(), "Conversation history"),
-			"system":   str("Optional system prompt"),
+			"messages": arrayOf(messageSchema(), "Conversation history; a system prompt is a message with role system"),
+			"response_format": objd("Asks for structured output: the reply's content is JSON the schema admits", map[string]any{
+				"type": map[string]any{"type": "string", "enum": []any{"json_schema"}, "description": "The kind of structured output; json_schema"},
+				"json_schema": objd("The schema the reply must satisfy", map[string]any{
+					"name":   str("A name for the schema"),
+					"schema": object("JSON Schema the reply must satisfy"),
+				}, "schema"),
+			}, "type", "json_schema"),
 		}, "messages"),
 		OutputSchema: obj(map[string]any{
-			"message": objd("Generated reply message", map[string]any{
-				"role":    str("Role of the message sender (assistant)"),
-				"content": str("Text content of the reply"),
-			}),
+			"choices": arrayOf(obj(map[string]any{
+				"index": integer("Position of this choice"),
+				"message": objd("The reply", map[string]any{
+					"role":    str("Role of the message sender (assistant)"),
+					"content": str("Text content of the reply"),
+				}),
+			}), "The model's reply, as one choice"),
 		}),
 		Handler: func(Host) kernel.NativeFunc {
 			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
-				return executeChat(ctx, args, chatter)
+				return executeChat(ctx, args, m)
 			}
 		},
 	}
 }
 
-func executeChat(ctx context.Context, args map[string]any, chatter kernel.Chatter) (map[string]any, error) {
-	if chatter == nil {
-		return nil, kernel.ErrInvalidState.Wrap("chat service not configured")
+func executeChat(ctx context.Context, args map[string]any, m ChatModel) (map[string]any, error) {
+	if m == nil {
+		return nil, kernel.ErrInvalidState.Wrap("no chat model is bound")
 	}
-
-	messages, err := chatMessages(args, "chat")
+	messages, err := chatMessages(args)
 	if err != nil {
 		return nil, err
 	}
-
-	reply, err := chatter.Chat(ctx, messages)
-	if err != nil {
-		return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
+	var content string
+	if rf, ok := args["response_format"].(map[string]any); ok {
+		js, _ := rf["json_schema"].(map[string]any)
+		raw, _ := js["schema"].(map[string]any)
+		// The schema is read in the canonical form, so the model is asked for, and the reply held
+		// to, exactly what any action's schema means (D4).
+		schema, _, err := kernel.NormalizeSchema("response_format.json_schema.schema", raw)
+		if err != nil {
+			return nil, err
+		}
+		value, err := m.ChatJSON(ctx, messages, schema)
+		if err != nil {
+			return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
+		}
+		if err := kernel.ValidateInput(schema, value); err != nil {
+			return nil, kernel.ErrExecutionFailed.Wrapf("model output failed schema validation: %v", err)
+		}
+		b, err := json.Marshal(value)
+		if err != nil {
+			return nil, kernel.ErrInternal.Wrapf("encode reply: %v", err)
+		}
+		content = string(b)
+	} else {
+		reply, err := m.Chat(ctx, messages)
+		if err != nil {
+			return nil, kernel.ErrExecutionFailed.Wrapf("chat failed: %v", err)
+		}
+		content = reply.Content
 	}
-	return map[string]any{
-		"message": map[string]any{
-			"role":    reply.Role,
-			"content": reply.Content,
-		},
-	}, nil
+	return map[string]any{"choices": []any{map[string]any{
+		"index":   0,
+		"message": map[string]any{"role": "assistant", "content": content},
+	}}}, nil
 }
 
-// chatMessages extracts the {role, content} list both plain LLM natives take, prepending the
-// optional system message. One parser, so llm/chat and llm/json cannot diverge on what they accept.
-func chatMessages(args map[string]any, who string) ([]kernel.ChatMessage, error) {
-	rawMsgs, ok := args["messages"]
+// chatMessages extracts the {role, content} turns llm/chat takes.
+func chatMessages(args map[string]any) ([]kernel.ChatMessage, error) {
+	msgList, ok := args["messages"].([]any)
 	if !ok {
-		return nil, kernel.ErrInvalidInput.Wrapf("%s requires messages argument", who)
+		return nil, kernel.ErrInvalidInput.Wrap("chat requires a messages array")
 	}
-	msgList, ok := rawMsgs.([]any)
-	if !ok {
-		return nil, kernel.ErrInvalidInput.Wrap("messages must be an array")
-	}
-	var messages []kernel.ChatMessage
-	if sys, ok := args["system"].(string); ok && sys != "" {
-		messages = append(messages, kernel.ChatMessage{Role: "system", Content: sys})
-	}
+	messages := make([]kernel.ChatMessage, 0, len(msgList))
 	for _, item := range msgList {
 		m, ok := item.(map[string]any)
 		if !ok {

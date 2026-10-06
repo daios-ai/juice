@@ -310,7 +310,7 @@ func TestServeHealth(t *testing.T) {
 // money this kernel takes, and a depositor acts on it.
 func TestServeHealthCarriesTheWorldsToken(t *testing.T) {
 	dir := t.TempDir()
-	if err := rail.Install(dir); err != nil {
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
 		t.Fatal(err)
 	}
 	world, err := rail.Load(dir, "arbitrum-sepolia")

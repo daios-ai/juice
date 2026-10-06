@@ -8,13 +8,14 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// Decide declares @sys/llm/decide (§9): the model selects one candidate action and proposes args;
-// it never executes the call.
-func Decide(chatter kernel.DecideChatter) Spec {
+// Decide declares a decide native (§9): llm/decide, which configuration binds to a model, or the
+// native of one generated model (D17). The model selects one candidate action and proposes args; it
+// never executes the call.
+func Decide(model string, chatter kernel.DecideChatter) Spec {
 	return Spec{
-		Name:        "llm/decide",
-		Title:       "Choose an action",
-		Description: "LLM-driven action selection; returns chosen action and args without executing",
+		Name:        llmName(model, "decide"),
+		Title:       "Choose an action with " + llmWho(model),
+		Description: "Action selection via " + llmWho(model) + "; returns chosen action and args without executing",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(obj(map[string]any{
 				"role":    str("Message role: system, user, assistant, or tool"),
@@ -50,7 +51,7 @@ func executeDecide(
 	callerID string,
 ) (map[string]any, error) {
 	if chatter == nil {
-		return nil, kernel.ErrInvalidState.Wrap("decide chat service not configured")
+		return nil, kernel.ErrInvalidState.Wrap("no chat model is bound")
 	}
 
 	rawMsgs, ok := args["messages"]
