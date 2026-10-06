@@ -17,8 +17,8 @@ import (
 func Chat(model string, m ChatModel) Spec {
 	return Spec{
 		Name:        llmName(model, "chat"),
-		Title:       "Chat with " + llmWho(model),
-		Description: "Chat completion via " + llmWho(model) + ", in the Chat Completions shape; a json_schema response_format is answered as JSON content the schema admits, validated locally",
+		Title:       "Chat with " + llmTitle(model),
+		Description: "Chat completion by " + llmBy(model) + ", in the Chat Completions shape; a json_schema response_format is answered as JSON content the schema admits, validated locally",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(messageSchema(), "Conversation history; a system prompt is a message with role system"),
 			"response_format": objd("Asks for structured output: the reply's content is JSON the schema admits", map[string]any{

@@ -14,8 +14,8 @@ import (
 func Decide(model string, chatter kernel.DecideChatter) Spec {
 	return Spec{
 		Name:        llmName(model, "decide"),
-		Title:       "Choose an action with " + llmWho(model),
-		Description: "Action selection via " + llmWho(model) + "; returns chosen action and args without executing",
+		Title:       "Choose an action with " + llmTitle(model),
+		Description: "Action selection by " + llmBy(model) + "; returns chosen action and args without executing",
 		InputSchema: obj(map[string]any{
 			"messages": arrayOf(obj(map[string]any{
 				"role":    str("Message role: system, user, assistant, or tool"),

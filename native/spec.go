@@ -106,10 +106,18 @@ func llmName(model, verb string) string {
 	return "llm/" + model + "/" + verb
 }
 
-// llmWho names, for a person, the model a language-model native reaches.
-func llmWho(model string) string {
+// llmTitle and llmBy name, for a person, the model a language-model native reaches: in a title,
+// "a language model" or the generated model itself; in a description, who chose it.
+func llmTitle(model string) string {
 	if model == "" {
-		return "the configured model"
+		return "a language model"
+	}
+	return model
+}
+
+func llmBy(model string) string {
+	if model == "" {
+		return "the language model this kernel's operator chose"
 	}
 	return model
 }

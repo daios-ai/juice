@@ -12,10 +12,14 @@ import (
 // native of one generated model (D17). Either is the Embeddings subset; input is one string, since
 // the standard's string-or-array is a oneOf the schema subset refuses (D4).
 func Embed(model string, embedder kernel.Embedder) Spec {
+	title := "Embed text"
+	if model != "" {
+		title += " with " + model
+	}
 	return Spec{
 		Name:        llmName(model, "embed"),
-		Title:       "Embed text with " + llmWho(model),
-		Description: "Text embedding via " + llmWho(model) + ", in the Embeddings shape",
+		Title:       title,
+		Description: "Text embedding by " + llmBy(model) + ", in the Embeddings shape",
 		InputSchema: obj(map[string]any{"input": str("Text to embed")}, "input"),
 		OutputSchema: obj(map[string]any{
 			"data": arrayOf(obj(map[string]any{

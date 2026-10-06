@@ -78,8 +78,11 @@ func TestAllGeneratesEachModelsNatives(t *testing.T) {
 	if got := names[len(names)-len(want):]; !slices.Equal(got, want) {
 		t.Errorf("generated natives = %v, want %v", got, want)
 	}
-	if !titles["Chat with a/chat"] || !titles["Chat with the configured model"] {
-		t.Errorf("titles = %v", titles)
+	for _, want := range []string{"Chat with a language model", "Choose an action with a language model", "Embed text",
+		"Chat with a/chat", "Choose an action with a/chat", "Embed text with a/vec"} {
+		if !titles[want] {
+			t.Errorf("no native titled %q", want)
+		}
 	}
 }
 
