@@ -10,6 +10,8 @@ flow_bootstrap() {
     local dir db hs; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
 
     start_server "$db" "$hs" || { fail "bootstrap.first_boot" "server did not start"; return; }
+    # The running server's process id is in serve.lock, for whatever supervises it to signal.
+    assert_eq "bootstrap.pid_in_lock" "${SERVER_PID[$db]}" "$(cat "$(dirname "$db")/serve.lock")"
     ok "bootstrap.first_boot"
     know "$db" "$hs"
     j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1

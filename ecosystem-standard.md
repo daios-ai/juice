@@ -67,7 +67,10 @@ identity, which is its key and does not exist until that boot.
 
 Each kernel is started with its own `--listen-addr` and carries its own `fed_listen_addrs` in its own
 `config.json`. Nothing allocates ports for them; a collision is a bind failure at startup, for the
-client port and the peer transport alike. One server per kernel, enforced by the lock in its home.
+client port and the peer transport alike. One server per kernel, enforced by the lock in its home:
+`serve.lock`, which the server holds under an exclusive `flock` and writes its process id into. A
+program that stops a kernel reads the id from there; the lock, not the number, says whether a
+kernel holds the home, since a reader that can take the lock has found no kernel.
 
 A kernel is created by its first boot, and only on the operator's word: a `config.json` written in
 advance, or an answer given at a terminal after they are told which kernels are here. It then asks

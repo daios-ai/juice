@@ -247,7 +247,7 @@ Each kernel has a home directory containing the state needed to run it:
 ~/.juice/kernels/play/
   juice.db        accounts, actions, ledger, and the signing key
   config.json     configuration, written once at first boot
-  serve.lock      held by the running server
+  serve.lock      held by the running server, and holding its process id
   cache/          regenerable; safe to delete
 ```
 

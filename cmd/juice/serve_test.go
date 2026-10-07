@@ -19,8 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -4111,5 +4113,38 @@ func TestServeEveryIDPositionTakesAPrefix(t *testing.T) {
 		if got := listed(c.path, c.tok, c.id); got != c.want {
 			t.Errorf("GET %s lists %s: %v, want %v", c.path, c.id, got, c.want)
 		}
+	}
+}
+
+// A serving kernel writes its process id into serve.lock and holds the lock for as long as it
+// serves, so a supervisor signals the kernel that holds the home: a second holder is refused while
+// the first serves, and the lock is free once it stops.
+func TestHoldHomeWritesThePID(t *testing.T) {
+	testHome(t)
+	release, err := holdHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release) // a failed assertion below must not leave the home held for later tests
+	path := filepath.Join(kernelHome(), "serve.lock")
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != strconv.Itoa(os.Getpid())+"\n" {
+		t.Fatalf("serve.lock holds %q, %v; want this process's id", got, err)
+	}
+	if _, err := holdHome(); err == nil {
+		t.Fatal("a second server took the same home")
+	}
+	// The reader's rule: the lock, not the number, says whether a kernel holds the home.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+		t.Fatal("a reader took the lock while the kernel holds it")
+	}
+	release()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("the lock is still held after release: %v", err)
 	}
 }

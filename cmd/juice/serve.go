@@ -167,6 +167,10 @@ func listWorlds(dir string) ([]map[string]any, error) {
 // holdHome takes the one lock a kernel's home has, for as long as this process serves it. One
 // server per home is not a convenience: two would race the same signing key on the rail, where the
 // chain admits one transaction per nonce, and would double-drive every background worker (D23).
+// It then writes its process id into the lock file, as PostgreSQL's postmaster.pid is, so whatever
+// supervises this kernel can signal it. The lock is what makes the number readable: a reader that
+// can take it knows no kernel holds the home and the number is stale, one that cannot knows a kernel
+// holds it and the number is that kernel's — a moment's answer, as with any PID file.
 func holdHome() (func(), error) {
 	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
 		return nil, err
@@ -179,6 +183,13 @@ func holdHome() (func(), error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("another server is already running for %s", kernelHome())
+	}
+	if err = f.Truncate(0); err == nil {
+		_, err = fmt.Fprintf(f, "%d\n", os.Getpid())
+	}
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	return func() { syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
 }
