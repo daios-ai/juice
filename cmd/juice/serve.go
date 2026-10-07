@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +63,105 @@ func kernelServeCmd() *cobra.Command {
 	serveOverride = DefaultServerConfig()
 	bindConfigFlags(cmd.Flags(), &serveOverride)
 	return cmd
+}
+
+// kernelWorldsCmd lists the worlds `kernel serve` would read: the files in the installation's worlds
+// directory, and the worlds this build ships that are not written there yet, which a serve writes
+// before reading one. It reads and writes nothing, so a program choosing a world for a kernel that
+// does not exist yet has its list before any kernel has served. Each world is read as serve reads
+// it, so an operator's edit shows, and a file serve would refuse — by its name, or by what it says —
+// is listed with the error serve would give and nothing else.
+func kernelWorldsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "worlds",
+		Short: "List the worlds this installation can serve",
+		Long: "List the worlds `kernel serve` accepts: the files in ~/.juice/worlds/ and the worlds " +
+			"this build ships, which are written there the first time you serve. Each row gives the " +
+			"world's money and description; a file that cannot be served shows the error serve would give.",
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			rows, err := listWorlds(worldsDir())
+			if err != nil {
+				return err
+			}
+			body, err := json.Marshal(rows)
+			if err != nil {
+				return err
+			}
+			return emit(body, output{id: "world", human: list(
+				column{"WORLD", text("world")},
+				column{"MONEY", text("symbol")},
+				column{"RAIL", text("rail")},
+				column{"DESCRIPTION", func(row json.RawMessage) string {
+					if e := strField(row, "error"); e != "" {
+						return e
+					}
+					return strField(row, "description")
+				}},
+				column{"FILE", text("file")},
+			)})
+		},
+	}
+}
+
+// listWorlds builds the rows of `kernel worlds` from dir: every `.json` file there and every shipped
+// world not among them, in name order. An absent directory is an installation nothing has served
+// yet and lists the shipped worlds alone; one that exists and cannot be read is an error, never a
+// listing on which the operator's files are missing.
+func listWorlds(dir string) ([]map[string]any, error) {
+	onDisk := map[string]bool{}
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, e := range entries {
+		// Whatever bears the name is what serve would open, a directory included, so it is listed and
+		// read as serve would read it rather than passed over for the shipped copy.
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok {
+			onDisk[name] = true
+		}
+	}
+	shipped, err := fs.ReadDir(rail.Worlds(), ".")
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, e := range shipped {
+		names[strings.TrimSuffix(e.Name(), ".json")] = true
+	}
+	for name := range onDisk {
+		names[name] = true
+	}
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	rows := make([]map[string]any, 0, len(sorted))
+	for _, name := range sorted {
+		row := map[string]any{"world": name, "file": ""}
+		var w rail.World
+		var err error
+		if onDisk[name] {
+			// Serve's own path: the name held to its rule, then the file read and parsed by Load.
+			row["file"] = filepath.Join(dir, name+".json")
+			if err = validateLocalName("world", name); err == nil {
+				w, err = rail.Load(dir, name)
+			}
+		} else {
+			var raw []byte
+			if raw, err = fs.ReadFile(rail.Worlds(), name+".json"); err == nil {
+				w, err = rail.Parse(name, raw)
+			}
+		}
+		if err != nil {
+			row["error"] = err.Error()
+		} else {
+			row["rail"], row["symbol"], row["description"] = w.Rail, w.Symbol, w.Description
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
 }
 
 // holdHome takes the one lock a kernel's home has, for as long as this process serves it. One

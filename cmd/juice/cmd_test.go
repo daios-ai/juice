@@ -2796,7 +2796,8 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 	clientSide := map[string]bool{
 		"juice kernel": true, "juice kernel add": true, "juice kernel list": true,
 		"juice kernel health": true, "juice kernel forget": true, "juice kernel serve": true,
-		"juice auth": true, "juice auth login": true, "juice auth use": true,
+		"juice kernel worlds": true,
+		"juice auth":          true, "juice auth login": true, "juice auth use": true,
 		"juice auth list": true, "juice auth logout": true, "juice auth recover": true,
 		"juice user create": true,
 	}

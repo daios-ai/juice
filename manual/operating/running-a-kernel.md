@@ -22,6 +22,7 @@ currency, described by a file in `~/.juice/worlds/` that gives the money it uses
 and the servers to meet it through. The files for the worlds Juice comes with
 (`play`, `polygon`, `arbitrum-one`, `arbitrum-sepolia`) are written there the first
 time you serve, to read and to edit, and a world of your own is a file you add.
+`juice kernel worlds` lists them, with their money and description, before anything has served.
 One installation runs one kernel per world, in `~/.juice/kernels/<world>/`. See
 [Configuring worlds](worlds.html) to edit a world or create one of your own.
 

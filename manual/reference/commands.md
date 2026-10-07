@@ -55,6 +55,7 @@ key for a new purchase ([Retries](../programs.html#retries)).
 | Command | |
 |---|---|
 | `juice kernel serve WORLD` | serve the network WORLD, whose kernel is `$JUICE_HOME/kernels/WORLD/` ([Running a kernel](../operating/running-a-kernel.html)) |
+| `juice kernel worlds` | the worlds this installation can serve, with their money and description |
 | `juice kernel add URL` | register a kernel this client can reach ([Identity](../calling/identity.html#registering-and-trusting-a-kernel)) |
 | `juice kernel list` | the kernels known, marking the one in use |
 | `juice kernel health [NAME]` | check a kernel is up, and which kernel it is |

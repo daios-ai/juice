@@ -28,7 +28,7 @@ import (
 // knows about kernels it talks to — the same thing from either side, so one noun holds both.
 func init() {
 	kernelCmd := group("kernel", "Run a kernel, or manage the ones this client knows")
-	kernelCmd.AddCommand(kernelServeCmd(), kernelAddCmd(), kernelListCmd(),
+	kernelCmd.AddCommand(kernelServeCmd(), kernelWorldsCmd(), kernelAddCmd(), kernelListCmd(),
 		kernelHealthCmd(), kernelForgetCmd())
 	rootCmd.AddCommand(kernelCmd)
 }

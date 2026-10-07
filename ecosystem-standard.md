@@ -57,6 +57,8 @@ that file: the name may hold letters, digits, dot, dash and underscore, up to 64
 not begin with a dot. The worlds this installation's binary ships are written into `worlds/` the
 first time it serves and never overwritten, so an operator's edit — their own node, their own
 meeting point — outlives an upgrade, and a network this build does not ship is a file they add.
+`juice kernel worlds` lists them, the shipped ones included before anything has served, so a
+program can offer the choice before the first boot.
 
 One installation runs one kernel per world, so the world is the whole of what `serve` is told. The
 kernel's own nickname (D15) — what it calls itself on the network, since every kernel on one shares
@@ -120,6 +122,7 @@ Commands:
 | Command | Effect |
 |---|---|
 | `juice kernel add URL` | register the kernel answering there, under the name it calls itself; selects nothing. The same key on the same network at a new address is that kernel having moved: the address is updated and its logins are kept; any other answer is refused |
+| `juice kernel worlds` | the worlds this installation can serve: its world files and the shipped ones not yet written, with money and description; writes nothing |
 | `juice kernel list` | the kernels known, marking the one in use |
 | `juice kernel forget NAME` | drop the record and those logins' credentials |
 | `juice auth login USER@KERNEL` | authenticate there, and act as that login |

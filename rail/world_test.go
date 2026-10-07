@@ -4,6 +4,7 @@ package rail_test
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,40 @@ func TestLabelsDoNotMoveTheFingerprint(t *testing.T) {
 }
 
 // The shipped worlds must be distinct networks, or an artifact of one would verify on another.
+// TestParseReadsAWorldFromItsBytes: Parse is Load once the file is in hand, so a shipped world
+// read from the binary and the same world read from disk are one document, and a bad document is
+// refused the same way.
+func TestParseReadsAWorldFromItsBytes(t *testing.T) {
+	dir := installed(t)
+	entries, err := fs.ReadDir(rail.Worlds(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		raw, err := fs.ReadFile(rail.Worlds(), e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := rail.Parse(name, raw)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		loaded, err := rail.Load(dir, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Name != name || parsed.Network() != loaded.Network() || parsed.Description != loaded.Description {
+			t.Errorf("%s: parsed %+v, loaded %+v", name, parsed, loaded)
+		}
+	}
+	for _, bad := range []string{`{"rail":"manual","chainId":1}`, `{"rail":"manual","nope":1}`, `{"rail":"manual"} {}`} {
+		if _, err := rail.Parse("x", []byte(bad)); err == nil {
+			t.Errorf("parsed %s", bad)
+		}
+	}
+}
+
 func TestShippedWorldsAreDistinct(t *testing.T) {
 	dir := installed(t)
 	seen := map[string]string{}

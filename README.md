@@ -133,6 +133,7 @@ registered once, by address, under the name it calls itself — say `work`:
 ./juice kernel add https://their.example        # register somebody else's, as "work"
 ./juice user create alice@work                  # create an account on it
 ./juice auth login alice@work                   # log in, and act as alice@work
+./juice kernel worlds                           # the worlds this installation can serve
 ./juice kernel list                             # the kernels known, and which is in use
 ./juice auth list                               # the logins held, and which is in use
 ./juice auth use bot@work                       # switch to another login already held

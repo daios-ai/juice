@@ -166,6 +166,12 @@ func Load(dir, name string) (World, error) {
 	if err != nil {
 		return World{}, err
 	}
+	return Parse(name, raw)
+}
+
+// Parse reads one world document under its name: what Load does once it has the file, and what a
+// listing does for a shipped world that is not on disk yet, so both read a world by one rule.
+func Parse(name string, raw []byte) (World, error) {
 	// Strict, as config.json is: a key this build does not know is a setting the operator meant to
 	// have an effect and that would silently have none, so the refusal names it.
 	var w World

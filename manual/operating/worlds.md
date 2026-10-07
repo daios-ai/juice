@@ -14,7 +14,9 @@ The filename without `.json` is the world's name.
 The worlds Juice comes with are installed on the first `kernel serve` and are never
 overwritten. You can edit their connection settings or add a file for a network
 of your own. Restart the kernel to apply changes. An unknown field causes
-startup to fail.
+startup to fail. `juice kernel worlds` lists every world here, the shipped ones
+included before anything has served, with its money and description; a file
+the kernel would refuse is listed with the reason.
 
 ## Changing connection settings
 

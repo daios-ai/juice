@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -722,5 +723,126 @@ func TestFirstBootRefusalWritesNothing(t *testing.T) {
 	}
 	if entries, rerr := os.ReadDir(kernelHome()); !os.IsNotExist(rerr) {
 		t.Errorf("the refused boot wrote its home: %v %v", entries, rerr)
+	}
+}
+
+// TestKernelWorldsListsWhatServeReads: `kernel worlds` is the list of what `kernel serve` would
+// read, before any kernel has served — the shipped worlds from the binary until they are written,
+// the files here once they are, an operator's edit and addition included — and it writes nothing. A
+// file serve would refuse, by its name or by what it says, is listed with serve's error and nothing
+// else, so a program choosing a world can tell it apart; a worlds directory that cannot be read is
+// an error, never a listing with the operator's files missing.
+func TestKernelWorldsListsWhatServeReads(t *testing.T) {
+	root := testHome(t)
+	dir := filepath.Join(root, "worlds")
+
+	rows := func() []map[string]any {
+		t.Helper()
+		got, err := listWorlds(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	byName := func(rs []map[string]any, name string) map[string]any {
+		for _, r := range rs {
+			if r["world"] == name {
+				return r
+			}
+		}
+		t.Fatalf("no row for %s in %v", name, rs)
+		return nil
+	}
+
+	// Nothing has served: the four shipped worlds, read from the binary, no file named.
+	fresh := rows()
+	if len(fresh) != 4 {
+		t.Fatalf("fresh installation lists %d worlds: %v", len(fresh), fresh)
+	}
+	for _, r := range fresh {
+		if r["file"] != "" || r["error"] != nil || r["description"] == "" || r["symbol"] == "" {
+			t.Errorf("a shipped world not yet written must list from the binary with no file: %v", r)
+		}
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Error("listing the worlds wrote the worlds directory")
+	}
+
+	// Served once: the files are here, and what they say is what is listed — an edit and an addition.
+	if err := rail.Install(dir, rail.Worlds()); err != nil {
+		t.Fatal(err)
+	}
+	edited := []byte(`{"rail":"manual","decimals":6,"symbol":"fUSD","description":"my own words","seeds":[]}`)
+	if err := os.WriteFile(filepath.Join(dir, "play.json"), edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mine.json"), edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte(`{"rail":"manual","nope":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a+b.json"), edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory bearing a world's name is what serve would open and fail on, so it is listed with
+	// that failure rather than passed over for the shipped copy.
+	if err := os.Remove(filepath.Join(dir, "polygon.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "polygon.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	served := rows()
+	if len(served) != 7 {
+		t.Fatalf("listed %d worlds: %v", len(served), served)
+	}
+	if r := byName(served, "play"); r["description"] != "my own words" || r["file"] != filepath.Join(dir, "play.json") {
+		t.Errorf("an edited shipped world must be listed as the file says: %v", r)
+	}
+	if r := byName(served, "mine"); r["description"] != "my own words" || r["error"] != nil {
+		t.Errorf("an operator's own world must be listed: %v", r)
+	}
+	for _, name := range []string{"broken", "a+b", "polygon"} {
+		r := byName(served, name)
+		if r["error"] == nil || r["description"] != nil || r["symbol"] != nil || r["rail"] != nil {
+			t.Errorf("a file serve would refuse must carry serve's error and nothing else: %v", r)
+		}
+	}
+	if r := byName(served, "a+b"); !strings.Contains(r["error"].(string), "letters, digits") {
+		t.Errorf("a name serve refuses must be refused as a name: %v", r["error"])
+	}
+
+	// The command's three outputs: the list, the rows as built, the names alone.
+	out := captureStdout(t, func() error { _, err := execTestCmd(t, kernelWorldsCmd()); return err })
+	for _, want := range []string{"WORLD", "my own words", "unknown field", "mine", "is a directory"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the list omits %q:\n%s", want, out)
+		}
+	}
+	oldJSON, oldQuiet := flagJSON, flagQuiet
+	t.Cleanup(func() { flagJSON, flagQuiet = oldJSON, oldQuiet })
+	flagJSON = true
+	out = captureStdout(t, func() error { _, err := execTestCmd(t, kernelWorldsCmd()); return err })
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil || len(parsed) != 7 {
+		t.Errorf("--json is the rows as built: %v %s", err, out)
+	}
+	flagJSON, flagQuiet = false, true
+	out = captureStdout(t, func() error { _, err := execTestCmd(t, kernelWorldsCmd()); return err })
+	if out != "a+b\narbitrum-one\narbitrum-sepolia\nbroken\nmine\nplay\npolygon\n" {
+		t.Errorf("--quiet is the names, one per line: %q", out)
+	}
+	flagQuiet = false
+
+	// A directory that is here and cannot be read is an error, not a listing of shipped worlds alone.
+	if os.Getuid() != 0 {
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) })
+		if _, err := listWorlds(dir); err == nil {
+			t.Error("an unreadable worlds directory listed as though it were absent")
+		}
 	}
 }
