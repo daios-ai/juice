@@ -75,11 +75,10 @@ for what the kernel cannot revise — the name it goes by on the network — and
 naming the key and the file that would have answered. The superuser's password is
 `JUICE_BOOTSTRAP_PASSWORD` or asked; a program that performs the boot generates the recovery phrase
 itself and passes its public key as `JUICE_BOOTSTRAP_RECOVERY_KEY`, so the kernel shows no phrase,
-and without one the kernel generates the phrase and prints it once. The kernel is the only writer of
-`config.json` — that first boot, and later its superuser through `admin kernel config` — and a boot
-writes nothing until the answers are in hand, so one that is declined or unanswered leaves nothing
-behind. The network is recorded once the rail has verified it, and from then on a boot offering that
-kernel another world is refused before anything is opened.
+and without one the kernel generates the phrase and prints it once. That first boot is the only writer of
+`config.json`, and it writes nothing until the answers are in hand, so a boot that is declined or
+unanswered leaves nothing behind. The network is recorded once the rail has verified it, and from
+then on a boot offering that kernel another world is refused before anything is opened.
 
 Removing a kernel is not a lifecycle verb. Its directory holds a ledger, a signing key, a rail
 key and possibly unsettled obligations, so it is archived or destroyed deliberately by the operator,

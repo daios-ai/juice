@@ -470,11 +470,7 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 	if err != nil || models.Chat != nil || models.JSON != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
 		t.Errorf("an unbound configuration bound something: %+v %q %v", models, identity, err)
 	}
-	// A binding to an endpoint lacking its key is the file's error, refused by validate before
-	// anything is opened; openLLM binds what it can.
-	cfg := DefaultServerConfig()
-	cfg.Native.LLM = NativeLLMConfig{Chat: "cloud/c"}
-	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "cloud") {
-		t.Errorf("a binding to an endpoint lacking its key was accepted: %v", err)
+	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "cloud/c"}, logger); err == nil {
+		t.Error("a binding to an endpoint lacking its key was accepted")
 	}
 }

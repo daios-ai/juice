@@ -189,47 +189,6 @@ try: datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')); print('ok')
 except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 }
 
-# The kernel's configuration is read and changed through its API by its superuser, and the kernel
-# writes the file (D20): a read withholds the secrets and names them, a change is held to a start's
-# rules and refused whole, and an accepted one keeps the credentials key and applies at the next start.
-flow_kernel_config() {
-    echo "=== FLOW kernel_config ==="
-    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
-    make_admin "$db" "$hs" || { fail "config.boot" "server did not start"; return; }
-    make_user "$db" "$hs" "$ha" alice
-    local file="$(dirname "$db")/config.json"
-    filef() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v.get(k) if isinstance(v,dict) else None
-print("" if v is None else v)' "$file" "$1"; }
-
-    local cfg; cfg=$(jj "$db" "$hs" admin kernel config)
-    assert_jdot "config.lists_the_file" "$cfg" config.fee_bps 0
-    assert_eq "config.secret_withheld" "" "$(dotfield "$cfg" config.credentials_key)"
-    assert_contains "config.secret_named" credentials_key "$(dotfield "$cfg" secrets)"
-    assert_eq "config.nothing_pending" False "$(dotfield "$cfg" pending_restart)"
-    assert_contains "config.human_lists" "fee_bps = 0" "$(j "$db" "$hs" admin kernel config)"
-    assert_fails "config.not_superuser" "superuser" -- j "$db" "$ha" admin kernel config
-    assert_fails "config.unknown_key_refused" "not a setting" -- j "$db" "$hs" admin kernel config bogus 1
-    assert_fails "config.bad_value_refused" "fee_bps" -- j "$db" "$hs" admin kernel config fee_bps 20000
-    assert_fails "config.credentials_key_kept" "credentials_key" -- j "$db" "$hs" admin kernel config --patch '{"credentials_key":null}'
-    assert_fails "config.key_not_on_command_line" "@FILE" -- j "$db" "$hs" admin kernel config --patch '{"native":{"llm":{"endpoints":{"ollama":{"key":"typed"}}}}}'
-    assert_eq "config.key_from_stdin" "ollama" "$(echo '{"native":{"llm":{"endpoints":{"ollama":{"key":"piped"}}}}}' | jj "$db" "$hs" admin kernel config --patch @- | python3 -c 'import json,sys; print(json.load(sys.stdin)["secrets"][1].split(".")[3])')"
-    assert_eq "config.refused_writes_nothing" 0 "$(filef fee_bps)"
-
-    local key; key=$(filef credentials_key)
-    cfg=$(jj "$db" "$hs" admin kernel config native.time.price 7)
-    assert_eq "config.change_pending" True "$(dotfield "$cfg" pending_restart)"
-    assert_eq "config.file_changed" 7 "$(filef native.time.price)"
-    assert_eq "config.key_survives" "$key" "$(filef credentials_key)"
-    assert_contains "config.human_says_restart" "restart" "$(j "$db" "$hs" admin kernel config)"
-
-    # The change applies when the kernel next starts, on the file as it is.
-    stop_server "$db"
-    KEEP_CONFIG=1 start_server "$db" "$hs" || { fail "config.restart" "server did not restart"; return; }
-    assert_jnum "config.applies_at_start" "$(jj "$db" "$hs" action show sys@k/time)" price 7
-    assert_eq "config.nothing_pending_after_start" False "$(dotfield "$(jj "$db" "$hs" admin kernel config)" pending_restart)"
-}
-
 # The operator's metrics (D20): off unless an address is configured; when on, a scrape of that
 # address names the build and counts a call the moment it settles, under fixed labels alone.
 flow_metrics() {

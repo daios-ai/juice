@@ -96,7 +96,7 @@ func ErrorFromCode(code string) *KernelError {
 		ErrUnauthenticated, ErrUnauthorized, ErrNotFound, ErrInvalidInput,
 		ErrInvalidState, ErrInsufficientFunds, ErrExecutionFailed,
 		ErrSchemaViolation, ErrTimeout, ErrInternal, ErrGrantRequired,
-		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged, ErrRailStopped, ErrPreconditionFailed,
+		ErrPeerUnreachable, ErrPeerUnfunded, ErrTermsChanged, ErrRailStopped,
 	} {
 		if sentinel.Code == code {
 			return sentinel
@@ -161,9 +161,6 @@ var (
 	// insufficient funds: nothing is wrong with the caller, and the condition clears on its own
 	// once the operator's balance or the endpoint recovers (D23).
 	ErrRailStopped = &KernelError{Code: "rail_stopped", HTTP: 503}
-	// ErrPreconditionFailed: a conditional request whose If-Match no longer holds (RFC 9110): what
-	// the client read has changed, and it reads again before it writes.
-	ErrPreconditionFailed = &KernelError{Code: "precondition_failed", HTTP: 412}
 )
 
 // GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and

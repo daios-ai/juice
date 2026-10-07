@@ -139,13 +139,3 @@ func errorsIs(err, target error) bool {
 	tk, ok2 := target.(*KernelError)
 	return ok && ok2 && ke.Code == tk.Code
 }
-
-// Every code that crosses the wire comes back as its own sentinel, 412 included, or the client
-// would report a 500 it never received.
-func TestErrorFromCodeKnowsEveryCode(t *testing.T) {
-	for _, e := range []*KernelError{ErrPreconditionFailed, ErrRailStopped, ErrTermsChanged} {
-		if got := ErrorFromCode(e.Code); got != e {
-			t.Errorf("%s came back as %v", e.Code, got)
-		}
-	}
-}

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -88,14 +87,6 @@ var globalCfg ServerConfig
 
 // resolvedConfigPath is the config file path resolved during initConfig.
 var resolvedConfigPath string
-
-// configOverridden names the settings this run's environment and command line replace, and
-// configBootETag is the file's entity tag when this kernel started; between them a client of
-// `admin kernel config` learns which saved settings this run is not serving under.
-var (
-	configOverridden = []string{}
-	configBootETag   string
-)
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Print the server's JSON reply instead of human-readable text")
@@ -234,20 +225,14 @@ func initConfig() error {
 	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
 		return kernel.ErrInvalidState.Wrapf("create %s: %v", kernelHome(), err)
 	}
-	raw, err := os.ReadFile(resolvedConfigPath)
+	cfg, err := LoadConfig(resolvedConfigPath)
 	if err != nil {
 		return kernel.ErrInvalidInput.Wrapf("config: %v", err)
 	}
-	cfg, err := parseConfig(raw)
-	if err != nil {
-		return kernel.ErrInvalidInput.Wrapf("config: %s: %v", resolvedConfigPath, err)
-	}
+	applyEnvOverrides(&cfg)
 	// Last word to the command line, over both the file and the environment (§14).
-	configOverridden = applyOverrides(&cfg)
-	if err := cfg.validate(); err != nil {
-		return kernel.ErrInvalidInput.Wrapf("config: %v", err)
-	}
-	globalCfg, configBootETag = cfg, etagOf(raw)
+	applyConfigFlags(&cfg)
+	globalCfg = cfg
 	return nil
 }
 
@@ -482,10 +467,10 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	return k, db, logger, httpExec, fedAdapter, specs, nil
 }
 
-// openLLM reads the endpoint files and builds a client for every model of every endpoint holding
-// its required key: each model is its own natives, and the ones the configuration binds back
-// llm/chat, llm/json, llm/decide and llm/embed (D17). The configuration was held to the endpoint
-// files by validate before anything was opened.
+// openLLM reads the endpoint files, refuses a configuration that cannot mean what it says, and
+// builds a client for every model of every endpoint holding its required key: each model is its
+// own natives, and the ones the configuration binds back llm/chat, llm/json, llm/decide and
+// llm/embed (D17).
 // Each endpoint with models is probed once and the outcome logged. The probe is a diagnostic — an
 // endpoint that is down keeps its natives and their ids, and its calls fail until it is back — and
 // decides only whether this boot embeds what lacks a vector. It returns the models, and the bound
@@ -493,6 +478,9 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool, error) {
 	eps, err := llm.Load(llmDir())
 	if err != nil {
+		return native.LLM{}, "", false, err
+	}
+	if err := cfg.check(eps); err != nil {
 		return native.LLM{}, "", false, err
 	}
 	models := native.LLM{Chats: map[string]native.ChatModel{}, Embedders: map[string]kernel.Embedder{}}
@@ -571,9 +559,6 @@ func loadJSONArg(s string) (json.RawMessage, error) {
 	data := []byte(s)
 	if strings.HasPrefix(s, "@") {
 		b, err := os.ReadFile(s[1:])
-		if s == "@-" { // curl's spelling of "from stdin", for a value that must not be typed in a command line
-			b, err = io.ReadAll(os.Stdin)
-		}
 		if err != nil {
 			return nil, fmt.Errorf("read file %s: %w", s[1:], err)
 		}

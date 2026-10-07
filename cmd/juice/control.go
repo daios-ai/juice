@@ -4,16 +4,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
@@ -365,147 +359,6 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// ---- configuration ----
-//
-// A kernel's configuration is read and changed through its API by its superuser, as PostgreSQL's
-// SHOW and ALTER SYSTEM do it: the kernel holds a change to the rules a start applies and writes
-// the file itself, so no client edits a file it does not own, and a remote kernel is configured
-// exactly as a local one (D20). What is read and written is the saved file, which the next start
-// reads; this run may be serving under overrides that differ from it, and says which.
-
-// configMu serialises the API's writers of config.json. An editor holds no lock, so a hand edit
-// landing between a handler's read and its rename goes unseen: editing the file by hand while the
-// kernel serves is best effort, and the manual says so.
-var configMu sync.Mutex
-
-// etagOf is a saved file's strong entity tag: a hash of its bytes, quoted as RFC 9110 spells it.
-func etagOf(raw []byte) string {
-	sum := sha256.Sum256(raw)
-	return `"` + hex.EncodeToString(sum[:]) + `"`
-}
-
-// ifMatch says whether an If-Match header admits the file whose tag is etag, as RFC 9110 §13.1.1
-// reads it: absent admits, `*` admits, and a list of tags admits when one of them is the file's.
-func ifMatch(header, etag string) bool {
-	if header == "" || strings.TrimSpace(header) == "*" {
-		return true
-	}
-	for _, tag := range strings.Split(header, ",") {
-		if strings.TrimSpace(tag) == etag {
-			return true
-		}
-	}
-	return false
-}
-
-// ctlConfig answers the saved configuration: the file with every secret withheld and named, the
-// settings this run overrides, and whether the file has changed since this kernel started.
-func (s *server) ctlConfig(w http.ResponseWriter, r *http.Request) {
-	raw, err := os.ReadFile(resolvedConfigPath)
-	if err != nil {
-		writeErr(w, kernel.ErrInternal.Wrapf("read %s: %v", resolvedConfigPath, err))
-		return
-	}
-	writeConfigView(w, raw)
-}
-
-func writeConfigView(w http.ResponseWriter, raw []byte) {
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		writeErr(w, kernel.ErrInternal.Wrapf("%s does not parse: %v", resolvedConfigPath, err))
-		return
-	}
-	etag := etagOf(raw)
-	w.Header().Set("ETag", etag)
-	writeJSON(w, http.StatusOK, map[string]any{"config": doc, "secrets": redact(doc),
-		"overridden": configOverridden, "pending_restart": etag != configBootETag})
-}
-
-// ctlPatchConfig changes the saved configuration by a JSON merge patch (RFC 7396): a member sets
-// the setting it names, null restores its default, and what the patch does not name — secrets, an
-// operator's hand edits — stays. An If-Match, when given, must be the file's current tag, so a
-// client that resends what it read cannot overwrite what changed meanwhile. The result is held to
-// a start's rules before anything is written, twice: alone, since a start without this run's
-// overrides reads it so, and under them, which is what the next start on the same command line
-// runs. The credentials key cannot change by patch, whether named, nulled or replaced around: it
-// seals every stored credential, so losing it loses them all.
-func (s *server) ctlPatchConfig(w http.ResponseWriter, r *http.Request) {
-	var patch map[string]any
-	if !decodeBody(w, r, &patch) {
-		return
-	}
-	if patch == nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap("a merge patch is a JSON object"))
-		return
-	}
-	configMu.Lock()
-	defer configMu.Unlock()
-	raw, err := os.ReadFile(resolvedConfigPath)
-	if err != nil {
-		writeErr(w, kernel.ErrInternal.Wrapf("read %s: %v", resolvedConfigPath, err))
-		return
-	}
-	if !ifMatch(r.Header.Get("If-Match"), etagOf(raw)) {
-		writeErr(w, kernel.ErrPreconditionFailed.Wrap("the configuration changed since it was read; read it again"))
-		return
-	}
-	var doc map[string]any
-	before, err := parseConfig(raw)
-	if err == nil {
-		err = json.Unmarshal(raw, &doc)
-	}
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidState.Wrapf("%s does not parse and must be repaired by hand: %v", resolvedConfigPath, err))
-		return
-	}
-	mergePatch(doc, patch)
-	merged, _ := json.Marshal(doc)
-	cfg, err := parseConfig(merged)
-	switch {
-	case err != nil:
-	case cfg.CredentialsKey != before.CredentialsKey:
-		err = errors.New("credentials_key cannot be changed: it seals every stored credential")
-	default:
-		if err = cfg.validate(); err == nil {
-			run := cfg
-			applyOverrides(&run)
-			if err = run.validate(); err != nil {
-				err = fmt.Errorf("under this run's command line and environment: %w", err)
-			}
-		}
-	}
-	if err != nil {
-		writeErr(w, kernel.ErrInvalidInput.Wrap(err.Error()))
-		return
-	}
-	if err := writeConfig(resolvedConfigPath, cfg); err != nil {
-		writeErr(w, kernel.ErrInternal.Wrapf("write %s: %v", resolvedConfigPath, err))
-		return
-	}
-	s.ctlConfig(w, r)
-}
-
-// mergePatch applies patch to target as RFC 7396 defines it for an object patch: a null member
-// removes the key, an object member merges into the object there (replacing whatever else was
-// there), and any other value replaces what was there.
-func mergePatch(target, patch map[string]any) {
-	for k, v := range patch {
-		switch pv := v.(type) {
-		case nil:
-			delete(target, k)
-		case map[string]any:
-			sub, ok := target[k].(map[string]any)
-			if !ok {
-				sub = map[string]any{}
-				target[k] = sub
-			}
-			mergePatch(sub, pv)
-		default:
-			target[k] = v
-		}
-	}
 }
 
 // writeOr writes v as JSON on success, or the error otherwise.

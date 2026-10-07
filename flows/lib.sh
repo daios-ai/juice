@@ -202,9 +202,7 @@ start_server() {
     local a cfg=() boot=""
     for a in "$@"; do case "$a" in seed=*) boot=${a#*=} ;; *) cfg+=("$a") ;; esac; done
     mkdir -p "$(dirname "$db")"
-    # KEEP_CONFIG=1 restarts the kernel on the file it has, which is how a change made through
-    # `admin kernel config` takes effect.
-    [ -n "${KEEP_CONFIG:-}" ] || write_config "$db" ${cfg[@]+"${cfg[@]}"}
+    write_config "$db" ${cfg[@]+"${cfg[@]}"}
     # The name the kernel calls itself is the kernel segment of every address on it (D15): what a
     # login is written with and what `kname` answers for this db.
     KHANDLE["$db"]=$KERNEL_NAME
