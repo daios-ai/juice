@@ -31,10 +31,11 @@ const (
 )
 
 // firstBootConfig gathers the configuration of a kernel that does not exist yet. It asks and
-// nothing more: the caller writes, under the home's lock, which is the only write of config.json
-// there is — every later boot reads it and leaves it alone, so a runtime-only override
-// (JUICE_CREDENTIALS_KEY) never reaches the disk. What the operator pre-seeded stands; the rest is
-// asked, because these are the facts a kernel cannot revise.
+// nothing more: the caller writes, under the home's lock, which is the only write of config.json a
+// boot makes — every later boot reads it and leaves it alone, and `admin kernel config` writes the
+// file and never an override, so a runtime-only one (JUICE_CREDENTIALS_KEY) never reaches the
+// disk. What the operator pre-seeded stands; the rest is asked, because these are the facts a
+// kernel cannot revise.
 func firstBootConfig(w rail.World, home string) (ServerConfig, error) {
 	path := filepath.Join(home, "config.json")
 	cfg, err := LoadConfig(path)

@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,7 +36,7 @@ type NativeLLMConfig struct {
 
 // LLMEndpointConfig is one endpoint's key and its models' prices.
 type LLMEndpointConfig struct {
-	Key    string           `json:"key,omitempty" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
+	Key    string           `json:"key,omitempty" secret:"true" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
 	Prices map[string]int64 `json:"prices,omitempty" doc:"Price of a call, in base units, per model name. A metered endpoint must state every model's, 0 included."`
 }
 
@@ -187,7 +189,7 @@ type ServerConfig struct {
 	HTTPCallbackURL            string       `json:"http_callback_url" doc:"Base URL HTTP actions call back on to compose; empty derives it from listen_addr."`
 	KernelHandle               string       `json:"kernel_handle" doc:"This kernel's name on the network, the part after @ in every address here."`
 	FedListenAddrs             []string     `json:"fed_listen_addrs" doc:"Addresses other kernels reach this one on, as multiaddrs; empty uses port 31313."`
-	CredentialsKey             string       `json:"credentials_key,omitempty" doc:"Key sealing every stored upstream credential, made at first boot. Keep it with your backups. No command-line flag."`
+	CredentialsKey             string       `json:"credentials_key,omitempty" secret:"true" doc:"Key sealing every stored upstream credential, made at first boot. Keep it with your backups. No command-line flag."`
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds" doc:"How often calls waiting on another kernel are retried, in seconds; 0 or less uses the default."`
 	PeerRetentionDays          int64        `json:"peer_retention_days" doc:"Days an idle peer's cached data is kept; 0 or less keeps it forever."`
 	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds" doc:"How often other kernels are discovered and their catalogues read, in seconds; 0 or less uses the default."`
@@ -260,24 +262,68 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
-// LoadConfig reads the JSON config file at path onto the defaults. Missing fields keep their
-// default; an absent file returns os.ErrNotExist, which is a first boot and nothing else, since
-// first boot is this file's only writer. An unknown field is refused rather than ignored: a
-// misspelled key reads exactly like one never written, and the setting the operator meant to
-// change silently keeps its default.
+// LoadConfig reads the JSON config file at path onto the defaults. An absent file returns
+// os.ErrNotExist, which is a first boot and nothing else, since the kernel is this file's only writer.
 func LoadConfig(path string) (ServerConfig, error) {
-	cfg := DefaultServerConfig()
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, err
+		return DefaultServerConfig(), err
 	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
+	cfg, err := parseConfig(raw)
+	if err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// parseConfig lays raw, a config.json's bytes, over the defaults. Missing fields keep their
+// default. An unknown field is refused rather than ignored: a misspelled key reads exactly like one
+// never written, and the setting the operator meant to change silently keeps its default. One
+// object and nothing after it, so what parses is what a reader of the whole file sees: `null`
+// decodes into a struct as nothing at all, and would serve defaults as silently. It is the one
+// reader, whether the bytes come from the file or from a change about to be written to it.
+func parseConfig(raw []byte) (ServerConfig, error) {
+	cfg := DefaultServerConfig()
+	if raw = bytes.TrimSpace(raw); len(raw) == 0 || raw[0] != '{' {
+		return cfg, fmt.Errorf("not a JSON object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return cfg, err
+	}
+	if dec.More() {
+		return cfg, fmt.Errorf("more than one document")
+	}
+	return cfg, nil
+}
+
+// validate refuses a configuration that cannot serve, under the one rule a start and a change
+// through the API are both held to: a token lifetime that does not parse, money rules out of range
+// (P10), and language-model bindings the endpoint files cannot honour (D17). What only a start can
+// try — opening the log file, binding the ports — stays with the start, as `nginx -t` leaves it.
+func (c ServerConfig) validate() error {
+	if _, err := c.KernelConfig(""); err != nil {
+		return err
+	}
+	if _, err := c.Economy(); err != nil {
+		return err
+	}
+	eps, err := llm.Load(llmDir())
+	if err != nil {
+		return err
+	}
+	return c.Native.LLM.check(eps)
+}
+
+// applyOverrides lays this run's environment and then its command line over cfg, in that order
+// (§14), and names the settings they replaced as the file spells them: a reader of the file is told
+// which of its settings this run is not serving under.
+func applyOverrides(cfg *ServerConfig) []string {
+	names := append([]string{}, applyEnvOverrides(cfg)...)
+	names = append(names, applyConfigFlags(cfg)...)
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 // applyEnvOverrides applies the spec-documented runtime overrides (§14). Everything
@@ -286,17 +332,22 @@ func LoadConfig(path string) (ServerConfig, error) {
 // runtime-only override of the §8 AES credentials key that never overwrites the config
 // file; JUICE_ALLOW_LOCAL_SOURCES is the dev-only override of the §7 SSRF escape hatch
 // (truthy "1"/"true" enables it, mirroring the allow_local_sources config key). Missing
-// env vars are silently skipped.
-func applyEnvOverrides(cfg *ServerConfig) {
+// env vars are silently skipped. It names the settings it replaced.
+func applyEnvOverrides(cfg *ServerConfig) []string {
+	var names []string
 	if v := os.Getenv("JUICE_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
+		names = append(names, "log_level")
 	}
 	if v := os.Getenv("JUICE_CREDENTIALS_KEY"); v != "" {
 		cfg.CredentialsKey = v
+		names = append(names, "credentials_key")
 	}
 	if v := os.Getenv("JUICE_ALLOW_LOCAL_SOURCES"); v != "" {
 		cfg.AllowLocalSources = isTruthyEnv(v)
+		names = append(names, "allow_local_sources")
 	}
+	return names
 }
 
 // isTruthyEnv reads a boolean-ish env value: "1", "true", "yes", "on" (case-insensitive) are true.
@@ -328,10 +379,7 @@ var (
 // defaults, because `into` starts as the shipped configuration.
 func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
 	configFields(into, func(name string, f reflect.Value) {
-		// The credentials key and the language-model endpoints' keys have no flag: a process's
-		// command line is readable by every user of the machine. The credentials key is read from
-		// the file, or from JUICE_CREDENTIALS_KEY for a run that must not write it down.
-		if name == "credentials-key" || name == "native.llm.endpoints" {
+		if !onCommandLine(name) {
 			return
 		}
 		usage := "sets " + strings.ReplaceAll(name, "-", "_") + " for this run"
@@ -357,21 +405,46 @@ func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
 	})
 }
 
+// onCommandLine says whether a setting may be given on a command line, which every user of the
+// machine can read: all but the credentials key and the language-model endpoints' keys. The
+// credentials key is read from the file, or from JUICE_CREDENTIALS_KEY for a run that must not
+// write it down; an endpoint's key reaches the file only through `admin kernel config --patch`.
+func onCommandLine(name string) bool {
+	return name != "credentials-key" && name != "native.llm.endpoints"
+}
+
+// configKeys names every setting a command line may give, as the file spells them: the one list
+// behind `kernel serve`'s flags and `admin kernel config KEY`.
+func configKeys() map[string]bool {
+	keys := map[string]bool{}
+	cfg := DefaultServerConfig()
+	configFields(&cfg, func(name string, _ reflect.Value) {
+		if onCommandLine(name) {
+			keys[strings.ReplaceAll(name, "-", "_")] = true
+		}
+	})
+	return keys
+}
+
 // applyConfigFlags copies the settings named on the command line onto cfg, and only those: a flag
 // nobody typed leaves the file's value, and the file's silence, alone. It is not written back —
 // the file is what the kernel is, the command line what this run of it is — except on a first
-// boot, which has no file yet and writes the effective configuration as the kernel's own.
-func applyConfigFlags(cfg *ServerConfig) {
+// boot, which has no file yet and writes the effective configuration as the kernel's own. It names
+// the settings it replaced, as the file spells them.
+func applyConfigFlags(cfg *ServerConfig) []string {
 	if serveFlags == nil {
-		return
+		return nil
 	}
+	var names []string
 	dst := map[string]reflect.Value{}
 	configFields(cfg, func(name string, f reflect.Value) { dst[name] = f })
 	configFields(&serveOverride, func(name string, f reflect.Value) {
 		if target, ok := dst[name]; ok && serveFlags.Changed(name) {
 			target.Set(f)
+			names = append(names, strings.ReplaceAll(name, "-", "_"))
 		}
 	})
+	return names
 }
 
 // configFlagsGiven reports whether this command line carried any setting of the kernel's own. It
@@ -416,14 +489,71 @@ func configFields(c *ServerConfig, visit func(name string, field reflect.Value))
 	walk(reflect.ValueOf(c).Elem(), "")
 }
 
+// writeConfig is config.json's one writer: the first boot's, and `admin kernel config`'s.
 func writeConfig(path string, cfg ServerConfig) error {
 	cfg.Schema = "../../schemas/config.schema.json" // kernels/<world>/config.json → schemas/
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	// 0600: this file holds credentials_key, which seals every stored upstream credential.
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	return replaceFile(path, append(b, '\n'))
+}
+
+// replaceFile writes b beside path and renames it into place, so a reader never sees half a file
+// and a write that fails leaves the old one whole. The file is 0600, as every file here is:
+// config.json holds credentials_key, which seals every stored upstream credential.
+func replaceFile(path string, b []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	_, werr := tmp.Write(b)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
+	}
+	if werr != nil {
+		os.Remove(tmp.Name())
+	}
+	return werr
+}
+
+// redact removes every secret from doc, a config.json as a JSON object, and names what it removed as
+// the file spells it. A secret is a field the configuration's own type tags secret:"true", so a
+// setting is withheld by declaring it, never by a list kept beside it; an endpoint's is named under
+// the endpoint, since the file holds one per endpoint (D17).
+func redact(doc map[string]any) []string {
+	names := []string{}
+	var walk func(t reflect.Type, obj map[string]any, prefix string)
+	walk = func(t reflect.Type, obj map[string]any, prefix string) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			key, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			v, ok := obj[key]
+			if !ok || v == nil || v == "" {
+				continue
+			}
+			sub, _ := v.(map[string]any)
+			switch {
+			case f.Tag.Get("secret") == "true":
+				delete(obj, key)
+				names = append(names, prefix+key)
+			case f.Type.Kind() == reflect.Struct && sub != nil:
+				walk(f.Type, sub, prefix+key+".")
+			case f.Type.Kind() == reflect.Map && f.Type.Elem().Kind() == reflect.Struct:
+				for name, entry := range sub {
+					if e, ok := entry.(map[string]any); ok {
+						walk(f.Type.Elem(), e, prefix+key+"."+name+".")
+					}
+				}
+			}
+		}
+	}
+	walk(reflect.TypeOf(ServerConfig{}), doc, "")
+	slices.Sort(names)
+	return names
 }
 
 // KernelConfig translates the JSON (wire) configuration into the kernel's runtime Config and
@@ -597,20 +727,8 @@ func writeSchemas() error {
 		if err != nil {
 			return err
 		}
-		tmp, err := os.CreateTemp(schemasDir(), name+".*")
-		if err != nil {
+		if err := replaceFile(filepath.Join(schemasDir(), name+".schema.json"), append(b, '\n')); err != nil {
 			return err
-		}
-		_, werr := tmp.Write(append(b, '\n'))
-		if cerr := tmp.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr == nil {
-			werr = os.Rename(tmp.Name(), filepath.Join(schemasDir(), name+".schema.json"))
-		}
-		if werr != nil {
-			os.Remove(tmp.Name())
-			return werr
 		}
 	}
 	return nil

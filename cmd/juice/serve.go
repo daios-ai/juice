@@ -941,6 +941,8 @@ func registerRoutes(r chi.Router, srv *server, passwordLimit func(http.Handler) 
 		r.Get("/v1/admin/peers/{target}/inspect", srv.ctlInspectPeer)
 		r.Get("/v1/admin/kernel", srv.ctlIdentity)
 		r.Get("/v1/admin/kernel/deposits", srv.ctlListDeposits)
+		r.Get("/v1/admin/kernel/config", srv.ctlConfig)
+		r.Patch("/v1/admin/kernel/config", srv.ctlPatchConfig)
 	})
 }
 

@@ -215,6 +215,9 @@ func (c *client) do(ctx context.Context, method, path string, body, out any, ret
 		return tokErr
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
+	if method == "PATCH" {
+		headers["Content-Type"] = "application/merge-patch+json" // RFC 7396, the one patch the kernel takes
+	}
 	if tokErr == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}

@@ -11,11 +11,217 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
 )
+
+// configFixture gives the test server a saved configuration as initConfig leaves one: a home with
+// the shipped endpoint files, a config.json holding both kinds of secret, and this run's record of
+// it. It returns the file's path.
+func configFixture(t *testing.T) string {
+	t.Helper()
+	home := llmHome(t)
+	cfg := DefaultServerConfig()
+	cfg.CredentialsKey = "sealed"
+	cfg.Native.LLM.Endpoints = map[string]LLMEndpointConfig{"ollama": {Key: "s3cret"}}
+	path := filepath.Join(home, "config.json")
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	oldPath, oldTag, oldOver := resolvedConfigPath, configBootETag, configOverridden
+	resolvedConfigPath, configBootETag, configOverridden = path, etagOf(raw), []string{}
+	t.Cleanup(func() { resolvedConfigPath, configBootETag, configOverridden = oldPath, oldTag, oldOver })
+	return path
+}
+
+// configView is the reply of GET and PATCH /v1/admin/kernel/config.
+type configView struct {
+	Config         map[string]any `json:"config"`
+	Secrets        []string       `json:"secrets"`
+	Overridden     []string       `json:"overridden"`
+	PendingRestart bool           `json:"pending_restart"`
+}
+
+// configDo sends one request to /v1/admin/kernel/config as a client would, with the If-Match it
+// holds, and returns the reply, its status and its ETag.
+func configDo(t *testing.T, tok, method, body, ifMatch string) ([]byte, int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, flagServer+"/v1/admin/kernel/config", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return out, resp.StatusCode, resp.Header.Get("ETag")
+}
+
+// The superuser reads and changes the saved configuration through the API, and the kernel is the
+// file's writer (D20): a read withholds every secret and names it, says what this run overrides and
+// whether the file has changed since the start; a change is a merge patch held to a start's rules —
+// alone and under this run's overrides — before anything is written, so a refused one leaves the
+// file byte-identical, and an accepted one keeps every secret and the credentials key.
+func TestKernelConfigOverTheAPI(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	tok := bootSuperuser(t, env)
+	path := configFixture(t)
+	file := func() []byte {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	field := func(keys ...string) any {
+		var v any
+		_ = json.Unmarshal(file(), &v)
+		for _, k := range keys {
+			v = v.(map[string]any)[k]
+		}
+		return v
+	}
+	read := func() (configView, string) {
+		t.Helper()
+		body, status, etag := configDo(t, tok, "GET", "", "")
+		if status != http.StatusOK {
+			t.Fatalf("GET: %d %s", status, body)
+		}
+		var v configView
+		_ = json.Unmarshal(body, &v)
+		return v, etag
+	}
+
+	v, etag := read()
+	secrets := []string{"credentials_key", "native.llm.endpoints.ollama.key"}
+	if v.Config["fee_bps"] != float64(2000) || v.Config["credentials_key"] != nil || !slices.Equal(v.Secrets, secrets) ||
+		v.Overridden == nil || len(v.Overridden) != 0 || v.PendingRestart {
+		t.Fatalf("view: %+v", v)
+	}
+	if ep := v.Config["native"].(map[string]any)["llm"].(map[string]any)["endpoints"].(map[string]any)["ollama"].(map[string]any); ep["key"] != nil {
+		t.Fatalf("an endpoint's key was returned: %v", ep)
+	}
+	if len(etag) != 66 || etag[0] != '"' || etag[65] != '"' {
+		t.Fatalf("ETag %q is not a strong, quoted tag", etag)
+	}
+
+	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "regular@k", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	regTok, err := loginTokenFor(env.k, ctx, "regular", "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"GET", "PATCH"} {
+		if _, status, _ := configDo(t, regTok, method, `{"fee_bps":1}`, ""); status != http.StatusForbidden {
+			t.Errorf("%s by a user: %d; want 403", method, status)
+		}
+	}
+
+	before := file()
+	for _, tc := range []struct {
+		name, patch, ifMatch string
+		status               int
+	}{
+		{"unknown key", `{"bogus":1}`, "", http.StatusUnprocessableEntity},
+		{"bad value", `{"fee_bps":20000}`, "", http.StatusUnprocessableEntity},
+		{"wrong type", `{"native":5}`, "", http.StatusUnprocessableEntity},
+		{"not an object", `[1]`, "", http.StatusUnprocessableEntity},
+		{"null", `null`, "", http.StatusUnprocessableEntity},
+		{"names the credentials key", `{"credentials_key":"other"}`, "", http.StatusUnprocessableEntity},
+		{"nulls the credentials key", `{"credentials_key":null}`, "", http.StatusUnprocessableEntity},
+		{"stale If-Match", `{"fee_bps":1}`, `"0000"`, http.StatusPreconditionFailed},
+		{"stale If-Match list", `{"fee_bps":1}`, `"0000", "1111"`, http.StatusPreconditionFailed},
+	} {
+		body, status, _ := configDo(t, tok, "PATCH", tc.patch, tc.ifMatch)
+		if status != tc.status {
+			t.Errorf("%s: %d %s; want %d", tc.name, status, body, tc.status)
+		}
+		if status == http.StatusPreconditionFailed && !strings.Contains(string(body), "precondition_failed") {
+			t.Errorf("%s: %s; want the precondition_failed code", tc.name, body)
+		}
+		if !bytes.Equal(file(), before) {
+			t.Fatalf("%s: a refused patch changed the file", tc.name)
+		}
+	}
+	// Valid alone but not under this run's flags, and the reverse: both refused.
+	undo := bindServeFlags(t, "--lottery", "4000000")
+	if body, status, _ := configDo(t, tok, "PATCH", `{"lottery_max":3000000}`, ""); status != http.StatusUnprocessableEntity ||
+		!strings.Contains(string(body), "this run") {
+		t.Errorf("a file valid alone but not under --lottery: %d %s", status, body)
+	}
+	undo()
+	undo = bindServeFlags(t, "--lottery", "0")
+	if _, status, _ := configDo(t, tok, "PATCH", `{"lottery_max":500000}`, ""); status != http.StatusUnprocessableEntity {
+		t.Errorf("a file invalid alone was saved because --lottery masks it: %d", status)
+	}
+	undo()
+	if !bytes.Equal(file(), before) {
+		t.Fatal("a refused patch changed the file")
+	}
+
+	// A change under a correct If-Match: the file holds it, both secrets survive, a runtime-only
+	// credentials key never reaches the disk, and the view says a restart is waiting.
+	t.Setenv("JUICE_CREDENTIALS_KEY", "runtime-only")
+	body, status, etag2 := configDo(t, tok, "PATCH", `{"native":{"time":{"price":7}},"lottery":123}`, etag)
+	if status != http.StatusOK {
+		t.Fatalf("PATCH: %d %s", status, body)
+	}
+	var after configView
+	_ = json.Unmarshal(body, &after)
+	if !after.PendingRestart || !slices.Equal(after.Secrets, secrets) || etag2 == etag {
+		t.Fatalf("after a change: %+v, ETag %q", after, etag2)
+	}
+	if field("native", "time", "price") != float64(7) || field("lottery") != float64(123) ||
+		field("credentials_key") != "sealed" || field("native", "llm", "endpoints", "ollama", "key") != "s3cret" {
+		t.Fatalf("file after the change: %s", file())
+	}
+	// null restores the default, and a stale tag is stale.
+	if _, status, _ := configDo(t, tok, "PATCH", `{"lottery":null}`, etag); status != http.StatusPreconditionFailed {
+		t.Errorf("the tag of the previous file still matched: %d", status)
+	}
+	if _, status, _ := configDo(t, tok, "PATCH", `{"lottery":null}`, etag2); status != http.StatusOK || field("lottery") != nil {
+		t.Errorf("null did not restore the default: %d, lottery %v", status, field("lottery"))
+	}
+	// If-Match as RFC 9110 reads it: a list holding the file's tag, and `*`, each admit.
+	_, etag3 := read()
+	for _, m := range []string{`"0000", ` + etag3, "*"} {
+		if _, status, _ := configDo(t, tok, "PATCH", `{"fee_bps":2000}`, m); status != http.StatusOK {
+			t.Errorf("If-Match %q: %d; want 200", m, status)
+		}
+	}
+	if v, _ := read(); !v.PendingRestart {
+		t.Error("a changed file does not say a restart is waiting")
+	}
+	// A file that is two documents, or no object, is refused whole, by a start and by a patch
+	// alike, never read in part or as nothing.
+	for name, bad := range map[string][]byte{"two documents": append(file(), []byte("{}")...), "null": []byte("null\n"), "empty": nil} {
+		if err := os.WriteFile(path, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseConfig(bad); err == nil {
+			t.Errorf("%s parsed", name)
+		}
+		if body, status, _ := configDo(t, tok, "PATCH", `{"fee_bps":1}`, ""); status != http.StatusConflict {
+			t.Errorf("a patch over %s: %d %s; want 409", name, status, body)
+		}
+	}
+}
 
 // bootSuperuser first-boots @sys on env.k, marks it the configured superuser, and returns a
 // @sys bearer token. The superuser verbs are ordinary TCP routes now (gated by

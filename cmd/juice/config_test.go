@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -504,6 +505,125 @@ func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
 	applyConfigFlags(&cfg)
 	if cfg.FeeBPS != 4321 {
 		t.Fatalf("configuration changed with no flags parsed: %d", cfg.FeeBPS)
+	}
+}
+
+// llmHome gives a test the installation the shipped endpoint files make, which validate reads the
+// language-model bindings against.
+func llmHome(t *testing.T) string {
+	t.Helper()
+	home := testHome(t)
+	if err := rail.Install(llmDir(), llm.Shipped()); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+// One rule holds the file at a start and at a change through the API: the token lifetime, the
+// money rules and the language-model bindings each refuse by name, and the shipped configuration
+// passes.
+func TestValidateIsTheStartsRule(t *testing.T) {
+	llmHome(t)
+	if err := DefaultServerConfig().validate(); err != nil {
+		t.Fatalf("the shipped configuration does not validate: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(*ServerConfig)
+	}{
+		{"token_ttl", func(c *ServerConfig) { c.TokenTTL = "soon" }},
+		{"fee_bps", func(c *ServerConfig) { c.FeeBPS = 10001 }},
+		{"lottery", func(c *ServerConfig) { v := int64(-1); c.Lottery = &v }},
+		{"native.llm.chat", func(c *ServerConfig) { c.Native.LLM.Chat = "nowhere/x" }},
+		{"native.llm.endpoints.nowhere", func(c *ServerConfig) {
+			c.Native.LLM.Endpoints = map[string]LLMEndpointConfig{"nowhere": {}}
+		}},
+	} {
+		cfg := DefaultServerConfig()
+		tc.set(&cfg)
+		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("%s: validate() = %v; want a refusal naming it", tc.name, err)
+		}
+	}
+}
+
+// What this run overrides is named as the file spells it, once each and in order, and an empty
+// list when nothing is; the command line has the last word over the environment.
+func TestApplyOverridesNamesWhatItReplaced(t *testing.T) {
+	cfg := DefaultServerConfig()
+	if got := applyOverrides(&cfg); got == nil || len(got) != 0 {
+		t.Fatalf("nothing overridden: %#v; want an empty list", got)
+	}
+	t.Setenv("JUICE_LOG_LEVEL", "debug")
+	t.Cleanup(bindServeFlags(t, "--fee-bps", "1", "--log-level", "warn", "--native.lookup.default-limit", "3"))
+	got := applyOverrides(&cfg)
+	if want := []string{"fee_bps", "log_level", "native.lookup.default_limit"}; !slices.Equal(got, want) {
+		t.Fatalf("overridden = %v; want %v", got, want)
+	}
+	if cfg.LogLevel != "warn" || cfg.FeeBPS != 1 || cfg.Native.Lookup.DefaultLimit != 3 {
+		t.Fatalf("the command line did not have the last word: %+v", cfg)
+	}
+}
+
+// The settings a command line may name are one list, read by `kernel serve`'s flags and by
+// `admin kernel config KEY`: every field of the file but the secrets, spelled as the file does.
+func TestConfigKeysAreTheFlaggedSettings(t *testing.T) {
+	keys := configKeys()
+	for _, k := range []string{"listen_addr", "fee_bps", "native.time.price", "native.lookup.default_limit", "fed_listen_addrs", "lottery"} {
+		if !keys[k] {
+			t.Errorf("%s is not a key", k)
+		}
+	}
+	for _, k := range []string{"credentials_key", "native.llm.endpoints", "$schema", "listen-addr", "native"} {
+		if keys[k] {
+			t.Errorf("%s is a key", k)
+		}
+	}
+}
+
+// A secret is withheld by its tag and named where it sits, an endpoint's under its endpoint
+// whatever the endpoint is named; what is not a secret stays, and an empty one is not set.
+func TestRedactWithholdsEverySecret(t *testing.T) {
+	var doc map[string]any
+	raw := `{"credentials_key":"k","fee_bps":1,"native":{"llm":{"chat":"a/b","endpoints":{
+		"a.b":{"key":"s1","prices":{"m":1}},"c":{"key":"","prices":{}},"d":{"prices":{"m":2}}}}}}`
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	got := redact(doc)
+	if want := []string{"credentials_key", "native.llm.endpoints.a.b.key"}; !slices.Equal(got, want) {
+		t.Fatalf("secrets = %v; want %v", got, want)
+	}
+	back, _ := json.Marshal(doc)
+	if s := string(back); strings.Contains(s, "s1") || strings.Contains(s, `"k"`) ||
+		!strings.Contains(s, `"prices":{"m":1}`) || !strings.Contains(s, `"fee_bps":1`) || !strings.Contains(s, `"chat":"a/b"`) {
+		t.Fatalf("redacted file: %s", s)
+	}
+	if got := redact(map[string]any{}); got == nil || len(got) != 0 {
+		t.Fatalf("no secrets: %#v; want an empty list", got)
+	}
+}
+
+// The file is replaced whole, never written in place: nothing is left beside it, its mode is the
+// one every file here has, and it reads back.
+func TestWriteConfigReplacesTheFileWhole(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	cfg := DefaultServerConfig()
+	cfg.FeeBPS = 7
+	for i := 0; i < 2; i++ {
+		if err := writeConfig(path, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("directory holds %d entries; want the file alone", len(entries))
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v; want 0600", st.Mode().Perm())
+	}
+	if got, err := LoadConfig(path); err != nil || got.FeeBPS != 7 {
+		t.Fatalf("read back: %+v, %v", got, err)
 	}
 }
 

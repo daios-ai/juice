@@ -177,6 +177,7 @@ takes `--visibility`. `create` requires `--title`. The schemas follow
 | `juice admin peer inspect PEER` | identity, catalogue, evidence, reachability, version |
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
+| `juice admin kernel config [KEY VALUE]` | show or change the saved configuration ([Configuration](config.html#changing-settings)) |
 
 Peer targets use a public key or petname. User targets use a `handle@kernel`
 address or an account ID. The separate commands avoid ambiguity when a handle

@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +51,7 @@ func init() {
 	peerCmd := group("peer", "Kernels this one trades with")
 	peerCmd.AddCommand(append(rosterCmds("peer"), peerListCmd(), peerInspectCmd())...)
 	kernelCmd := group("kernel", "This kernel itself")
-	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd())
+	kernelCmd.AddCommand(identityCmd(), adminDepositsCmd(), configCmd())
 	adminCmd.AddCommand(userCmd, peerCmd, kernelCmd)
 	rootCmd.AddCommand(adminCmd)
 }
@@ -354,6 +356,121 @@ func adminDepositsCmd() *cobra.Command {
 			}})
 		},
 	}
+}
+
+// configCmd reads and changes this kernel's configuration through its API, the way `git config`
+// reads and writes one file: bare, it lists every saved setting; KEY VALUE sets one, naming it as
+// the file does; --patch applies a JSON merge patch whole, which is how an endpoint's key and
+// prices are set. A key must never be typed on a command line (§14), so a patch naming a secret is
+// taken from a file or stdin alone. What it reads and writes is the saved file: a change applies
+// when the kernel next starts.
+func configCmd() *cobra.Command {
+	var patch string
+	cmd := &cobra.Command{
+		Use:   "config [KEY VALUE]",
+		Short: "Show or change this kernel's configuration",
+		Long: `Show or change this kernel's saved configuration, config.json in its home.
+
+Bare, it lists every setting as the file holds it. KEY VALUE sets one: KEY as the file spells it (native.time.price), VALUE as JSON where it reads as JSON (7, true, ["a"]) and as text otherwise, null restoring the default. --patch applies a JSON merge patch (RFC 7396), given as JSON, @FILE or @- for stdin: a member sets a setting, null restores its default, and what the patch does not name stays. It is how an endpoint's key and its models' prices are set; a patch naming a key is taken from @FILE or @- only, since a key must not appear on a command line: --patch @anthropic.json, the file holding {"native":{"llm":{"endpoints":{"anthropic":{"key":"…"}}}}}.
+
+The file is checked as a start would check it, and refused whole on any error. A change applies when the kernel next starts; the listing says when one is waiting. credentials_key cannot be changed.`,
+		Args: cobra.MaximumNArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			var body any
+			switch {
+			case patch != "" && len(args) > 0:
+				return kernel.ErrInvalidInput.Wrap("give KEY VALUE or --patch, not both")
+			case patch != "":
+				raw, err := loadJSONArg(patch)
+				if err != nil {
+					return kernel.ErrInvalidInput.Wrapf("--patch: %v", err)
+				}
+				var doc map[string]any
+				if !strings.HasPrefix(patch, "@") && json.Unmarshal(raw, &doc) == nil && len(redact(doc)) > 0 {
+					return kernel.ErrInvalidInput.Wrap("a patch naming a key is read from @FILE or @- only; a command line is readable by every user of the machine")
+				}
+				body = raw
+			case len(args) == 1:
+				return kernel.ErrInvalidInput.Wrap("KEY needs a VALUE; null restores the default")
+			case len(args) == 2:
+				p, err := onePatch(args[0], args[1])
+				if err != nil {
+					return err
+				}
+				body = p
+			}
+			method := "GET"
+			if body != nil {
+				method = "PATCH"
+			}
+			return cli.emit(method, "/v1/admin/kernel/config", body, output{human: printConfig})
+		},
+	}
+	cmd.Flags().StringVar(&patch, "patch", "", "A JSON merge patch to apply: JSON, @FILE, or @- for stdin")
+	return cmd
+}
+
+// onePatch is the merge patch that sets one setting: KEY as the file spells it, VALUE as JSON where
+// it reads as JSON and as text otherwise (the rule of `gh api -F`). KEY must be a setting that has
+// a flag — the file's own fields, never a name inside a map, where an endpoint or model name may
+// itself hold a dot (D17) and a dotted path would be ambiguous.
+func onePatch(key, value string) (map[string]any, error) {
+	if !configKeys()[key] {
+		return nil, kernel.ErrInvalidInput.Wrapf("%s is not a setting of config.json that can be named here; `juice kernel serve --help` lists them, and --patch sets the rest", key)
+	}
+	var v any = value
+	if json.Valid([]byte(value)) {
+		v = json.RawMessage(value)
+	}
+	path := strings.Split(key, ".")
+	patch := map[string]any{path[len(path)-1]: v}
+	for i := len(path) - 2; i >= 0; i-- {
+		patch = map[string]any{path[i]: patch}
+	}
+	return patch, nil
+}
+
+// printConfig writes the saved configuration as `key = value`, one setting per line in key order,
+// values as JSON so a line reads back as the KEY VALUE that sets it; a secret as (set), a setting
+// this run overrides marked, and a changed file announced, since nothing here runs until the
+// kernel restarts.
+func printConfig(b []byte) error {
+	var v struct {
+		Config         map[string]any `json:"config"`
+		Secrets        []string       `json:"secrets"`
+		Overridden     []string       `json:"overridden"`
+		PendingRestart bool           `json:"pending_restart"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	lines := map[string]string{}
+	var flatten func(prefix string, obj map[string]any)
+	flatten = func(prefix string, obj map[string]any) {
+		for k, val := range obj {
+			if sub, ok := val.(map[string]any); ok { // an emptied object, an endpoint whose key was withheld, prints nothing
+				flatten(prefix+k+".", sub)
+				continue
+			}
+			j, _ := json.Marshal(val)
+			lines[prefix+k] = string(j)
+		}
+	}
+	flatten("", v.Config)
+	for _, s := range v.Secrets {
+		lines[s] = "(set)"
+	}
+	for _, k := range slices.Sorted(maps.Keys(lines)) {
+		note := ""
+		if slices.Contains(v.Overridden, k) {
+			note = "   # overridden for this run"
+		}
+		fmt.Printf("%s = %s%s\n", k, lines[k], note)
+	}
+	if v.PendingRestart {
+		fmt.Println("Changed since this kernel started: restart it to apply.")
+	}
+	return nil
 }
 
 func peerInspectCmd() *cobra.Command {

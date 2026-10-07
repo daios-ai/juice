@@ -7,8 +7,10 @@ nav_order: 4
 # Configuration
 
 Each kernel reads `config.json` from `$JUICE_HOME/kernels/<world>/`. First boot
-creates this file; later starts read it without rewriting it. Apply a
-configuration change by editing the file and restarting the kernel.
+creates this file; later starts read it without rewriting it. Change it with
+`juice admin kernel config` ([below](#changing-settings)) and restart the
+kernel. Editing the file by hand while the kernel runs also works; a change
+made both ways at once may be lost.
 
 Known settings take their documented defaults when absent. An unrecognized key
 causes startup to fail, helping catch misspellings that would otherwise appear
@@ -31,6 +33,30 @@ Files Juice writes already carry that line. To add it to an older
 `"../schemas/world.schema.json"` or `"../schemas/llm-endpoint.schema.json"`.
 The schema helps you write the file; the kernel still checks it when it
 starts.
+
+## Changing settings
+
+`juice admin kernel config` lists the saved file: each secret as `(set)`, each
+setting this run overrides on its command line marked, and a note when the file
+has changed since the kernel started. `juice admin kernel config KEY VALUE` sets
+one setting, `KEY` as the file spells it and `VALUE` as JSON where it reads as
+JSON (`7`, `true`, `["a"]`), as text otherwise, `null` restoring the default.
+`--patch` applies a JSON merge patch whole, from JSON, `@FILE` or `@-` for
+stdin; it is how an endpoint's key and prices are set. A patch naming a key is
+taken from a file or stdin only, since a key must never be typed on a command
+line:
+
+```sh
+$ juice admin kernel config native.time.price 7
+$ cat anthropic.json
+{"native": {"llm": {"endpoints": {"anthropic": {"key": "sk-ant-…", "prices": {"opus": 20000}}}}}}
+$ juice admin kernel config --patch @anthropic.json
+```
+
+The kernel checks the result as a start would, alone and under this run's
+command line, and refuses it whole on any error; `credentials_key` cannot be
+changed. A change applies when the kernel next starts. It works against a
+remote kernel exactly as against a local one.
 
 ## Identity and network
 
