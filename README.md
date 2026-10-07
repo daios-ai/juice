@@ -101,6 +101,10 @@ give, so `serve` creates it without asking:
 JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve play --kernel-handle acme
 ```
 
+The recovery phrase is then printed once on stderr. A program that boots the kernel for
+someone generates the phrase itself and passes only its public key, as
+`JUICE_BOOTSTRAP_RECOVERY_KEY`, and the kernel prints no phrase.
+
 To join a network juice does not ship, put its file in `~/.juice/worlds/` and serve it by
 that file's name. Writing one of your own gives an economy of its own: its money is its
 own, and nothing signed on it verifies anywhere else.
@@ -378,7 +382,7 @@ The ones you are most likely to touch:
 
 Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
 `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
+`JUICE_BOOTSTRAP_RECOVERY_KEY`, `JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
 
 ## HTTP API
 

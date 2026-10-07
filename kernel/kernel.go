@@ -1056,13 +1056,8 @@ func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Accoun
 	}
 	req.Handle = handle
 	logger.Info("user.create.start", "handle", req.Handle)
-	if err := validatePassword(req.Password); err != nil {
+	if err := ValidateCredentials(req.Password, req.RecoveryPublicKey); err != nil {
 		return nil, err
-	}
-	if req.RecoveryPublicKey != "" {
-		if _, err := decodeRemotePublicKey(req.RecoveryPublicKey); err != nil {
-			return nil, ErrInvalidInput.Wrap("invalid recovery public key")
-		}
 	}
 
 	hash, err := HashPassword(req.Password)
@@ -1956,16 +1951,10 @@ func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 // FirstBoot atomically creates the @sys superuser account, generates an Ed25519 signing
 // keypair, and stores all three config entries in a single SQLite transaction.
 // Safe to call on a database that was already initialized — user INSERT is skipped.
-// recoveryPublicKey is @sys's own recovery key (§12), enrolled from the operator's seed phrase;
-// optional (empty leaves @sys unrecoverable, as before).
+// recoveryPublicKey is @sys's own recovery key (D9), the public half of a phrase its client holds.
 func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey string) error {
-	if err := validatePassword(password); err != nil {
+	if err := ValidateCredentials(password, recoveryPublicKey); err != nil {
 		return err
-	}
-	if recoveryPublicKey != "" {
-		if _, err := decodeRemotePublicKey(recoveryPublicKey); err != nil {
-			return ErrInvalidInput.Wrap("invalid recovery public key")
-		}
 	}
 	hash, err := HashPassword(password)
 	if err != nil {

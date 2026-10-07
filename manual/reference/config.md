@@ -185,6 +185,7 @@ configure Juice.
 |---|---|
 | `JUICE_HOME` | the installation root. Default `~/.juice`, absolute |
 | `JUICE_BOOTSTRAP_PASSWORD` | the `sys` password at first boot, for a machine with no terminal |
+| `JUICE_BOOTSTRAP_RECOVERY_KEY` | the public key of a recovery phrase you generated, enrolled for `sys` at first boot; the kernel then prints no phrase |
 | `JUICE_SECRET_KEY` | the session-signing secret, runtime only; never written to disk |
 | `JUICE_CREDENTIALS_KEY` | the credential-sealing key, runtime only |
 | `JUICE_LOG_LEVEL` | log level |

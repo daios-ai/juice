@@ -97,6 +97,38 @@ func TestPasswordMinLength(t *testing.T) {
 	}
 }
 
+// TestValidateCredentials: one rule for the credentials every account is created with, which
+// CreateUser and FirstBoot both apply.
+func TestValidateCredentials(t *testing.T) {
+	kernel.SetMinPasswordLenForTesting(8)
+	defer kernel.SetMinPasswordLenForTesting(1)
+	key := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	cases := []struct {
+		password, key string
+		ok            bool
+	}{
+		{"short12", "", false},
+		{"pass1234", "not base64!", false},
+		{"pass1234", base64.RawURLEncoding.EncodeToString(make([]byte, 31)), false},
+		{"pass1234", "", true},
+		{"pass1234", key, true},
+	}
+	ctx := context.Background()
+	for n, c := range cases {
+		err := kernel.ValidateCredentials(c.password, c.key)
+		if c.ok != (err == nil) || (err != nil && !errors.Is(err, kernel.ErrInvalidInput)) {
+			t.Errorf("case %d: %v", n, err)
+		}
+		_, cerr := newTestKernel(newTestStore(t)).CreateUser(ctx, kernel.CreateUserRequest{
+			Handle: "u@k", Password: c.password, RecoveryPublicKey: c.key,
+		})
+		ferr := newTestKernel(newTestStore(t)).FirstBoot(ctx, c.password, c.key)
+		if (cerr == nil) != c.ok || (ferr == nil) != c.ok {
+			t.Errorf("case %d: CreateUser %v, FirstBoot %v disagree with the rule", n, cerr, ferr)
+		}
+	}
+}
+
 // userID resolves a handle to its user ID via the store.
 func userID(t *testing.T, st kernel.Store, handle string) string {
 	t.Helper()

@@ -39,6 +39,21 @@ func validatePassword(password string) error {
 	return nil
 }
 
+// ValidateCredentials is the one rule for the credentials an account is created with: a password
+// at the floor, and a recovery public key, when given, that is a base64url Ed25519 key (D9). Every
+// path that creates an account applies it, and a client may apply it before it writes anything.
+func ValidateCredentials(password, recoveryPublicKey string) error {
+	if err := validatePassword(password); err != nil {
+		return err
+	}
+	if recoveryPublicKey != "" {
+		if _, err := decodeRemotePublicKey(recoveryPublicKey); err != nil {
+			return ErrInvalidInput.Wrap("invalid recovery public key")
+		}
+	}
+	return nil
+}
+
 // HashPassword returns a bcrypt hash of the plain-text password.
 func HashPassword(plain string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(plain), bcryptCost)

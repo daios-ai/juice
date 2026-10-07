@@ -162,7 +162,8 @@ func (c NativeConfig) PriceOf(name string) int64 {
 }
 
 // ServerConfig holds all non-secret runtime configuration.
-// Secrets (JUICE_SECRET_KEY, JUICE_BOOTSTRAP_PASSWORD) are read from environment variables.
+// Secrets (JUICE_SECRET_KEY) and the superuser's first-boot credentials (JUICE_BOOTSTRAP_PASSWORD,
+// JUICE_BOOTSTRAP_RECOVERY_KEY) are read from environment variables.
 // All other settings come from this struct, populated from the JSON config file.
 type ServerConfig struct {
 	Schema                     string       `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`

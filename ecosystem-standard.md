@@ -70,7 +70,10 @@ client port and the peer transport alike. One server per kernel, enforced by the
 A kernel is created by its first boot, and only on the operator's word: a `config.json` written in
 advance, or an answer given at a terminal after they are told which kernels are here. It then asks
 for what the kernel cannot revise — the name it goes by on the network — and refuses off a terminal,
-naming the key and the file that would have answered. That first boot is the only writer of
+naming the key and the file that would have answered. The superuser's password is
+`JUICE_BOOTSTRAP_PASSWORD` or asked; a program that performs the boot generates the recovery phrase
+itself and passes its public key as `JUICE_BOOTSTRAP_RECOVERY_KEY`, so the kernel shows no phrase,
+and without one the kernel generates the phrase and prints it once. That first boot is the only writer of
 `config.json`, and it writes nothing until the answers are in hand, so a boot that is declined or
 unanswered leaves nothing behind. The network is recorded once the rail has verified it, and from
 then on a boot offering that kernel another world is refused before anything is opened.

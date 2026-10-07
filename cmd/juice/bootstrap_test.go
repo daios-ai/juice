@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -562,17 +564,22 @@ func TestEnsureSysNativeReconcilesPrice(t *testing.T) {
 // A command line says everything a file says, so it is equally the operator's instruction to make
 // this kernel: a headless install can create one without writing a file first. What it does not say
 // is still refused — the name this kernel goes by is nobody else's to give.
-func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
-	bind := func(args ...string) func() {
-		fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
-		serveOverride = DefaultServerConfig()
-		bindConfigFlags(fs, &serveOverride)
-		if err := fs.Parse(args); err != nil {
-			t.Fatalf("parse %v: %v", args, err)
-		}
-		serveFlags = fs
-		return func() { serveFlags = nil }
+// bindServeFlags parses args as `kernel serve`'s settings, as the command line would, and returns
+// the undo.
+func bindServeFlags(t *testing.T, args ...string) func() {
+	t.Helper()
+	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
+	serveOverride = DefaultServerConfig()
+	bindConfigFlags(fs, &serveOverride)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
 	}
+	serveFlags = fs
+	return func() { serveFlags = nil }
+}
+
+func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
+	bind := func(args ...string) func() { return bindServeFlags(t, args...) }
 
 	w := testWorld(t)
 	home := t.TempDir()
@@ -595,5 +602,125 @@ func TestFirstBootTakesTheCommandLineAsConsent(t *testing.T) {
 	done()
 	if err == nil || !strings.Contains(err.Error(), "--kernel-handle") {
 		t.Fatalf("a first boot with no name given must be refused, naming the option: %v", err)
+	}
+}
+
+// headless makes this test run as a boot with nobody at a terminal.
+func headless(t *testing.T) {
+	t.Helper()
+	old := interactiveTTY
+	interactiveTTY = func() bool { return false }
+	t.Cleanup(func() { interactiveTTY = old })
+}
+
+// testRecoveryKey is the public half of a fresh recovery phrase, as a client enrolling one sends it.
+func testRecoveryKey(t *testing.T) string {
+	t.Helper()
+	_, pub, err := generateRecovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
+}
+
+// TestFirstBootCredentials: off a terminal each of the superuser's credentials has one source, its
+// variable, and is held to the rule every account is created under; a refusal names the variable.
+func TestFirstBootCredentials(t *testing.T) {
+	headless(t)
+	kernel.SetMinPasswordLenForTesting(8)
+	t.Cleanup(func() { kernel.SetMinPasswordLenForTesting(1) })
+	key := testRecoveryKey(t)
+
+	cases := []struct {
+		name, password, key, refusal string
+	}{
+		{"no password", "", "", envBootstrapPassword},
+		{"short password", "short12", "", envBootstrapPassword},
+		{"malformed key", "pass1234", "not-a-key", envBootstrapRecoveryKey},
+		{"wrong-length key", "pass1234", "AAAA", envBootstrapRecoveryKey},
+		{"password alone", "pass1234", "", ""},
+		{"password and key", "pass1234", key, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(envBootstrapPassword, c.password)
+			t.Setenv(envBootstrapRecoveryKey, c.key)
+			got, err := firstBootCredentials()
+			if c.refusal != "" {
+				if err == nil || !strings.Contains(err.Error(), c.refusal) {
+					t.Fatalf("want a refusal naming %s, got %v", c.refusal, err)
+				}
+				return
+			}
+			if err != nil || got.password != c.password || got.recoveryKey != c.key {
+				t.Fatalf("got %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+// TestFirstBootRecoveryKey: a recovery key the boot is given is the superuser's, and no phrase is
+// made or shown; without one the kernel generates the phrase, shows it, and enrolls its public half,
+// so the superuser is always recoverable.
+func TestFirstBootRecoveryKey(t *testing.T) {
+	ctx := context.Background()
+
+	key := testRecoveryKey(t)
+	k := newTestKernel(t)
+	out := captureStderr(t, func() {
+		if err := firstBoot(ctx, k, bootCredentials{password: "secret", recoveryKey: key}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if sys, err := k.ReadUserByHandle(ctx, superuserHandle); err != nil || sys.RecoveryPublicKey != key {
+		t.Fatalf("the given key was not enrolled: %+v %v", sys, err)
+	}
+	if strings.Contains(out, "recovery phrase") {
+		t.Errorf("a phrase was shown although the boot was given its key: %q", out)
+	}
+
+	k = newTestKernel(t)
+	out = captureStderr(t, func() {
+		if err := firstBoot(ctx, k, bootCredentials{password: "secret"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	sys, err := k.ReadUserByHandle(ctx, superuserHandle)
+	if err != nil || sys.RecoveryPublicKey == "" {
+		t.Fatalf("a superuser was created with no recovery key: %+v %v", sys, err)
+	}
+	lines := strings.Split(out, "\n")
+	var phrase string
+	for n, l := range lines {
+		if strings.Contains(l, "sys recovery phrase") && n+1 < len(lines) {
+			phrase = strings.TrimSpace(lines[n+1])
+		}
+	}
+	priv, err := deriveRecoveryKey(phrase)
+	if err != nil {
+		t.Fatalf("no phrase shown (%q): %v", out, err)
+	}
+	if got := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)); got != sys.RecoveryPublicKey {
+		t.Error("the phrase shown is not the one enrolled")
+	}
+}
+
+// TestFirstBootRefusalWritesNothing: a credential refused at a first boot is refused before the
+// home is written, as a missing name is, so the boot can be run again as if it never happened.
+func TestFirstBootRefusalWritesNothing(t *testing.T) {
+	headless(t)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	t.Setenv(envBootstrapPassword, "secret")
+	t.Setenv(envBootstrapRecoveryKey, "not-a-key")
+	old := worldName
+	t.Cleanup(func() { worldName = old })
+	t.Cleanup(bindServeFlags(t, "--kernel-handle", "acme"))
+
+	err := runServer("play")
+	if err == nil || !strings.Contains(err.Error(), envBootstrapRecoveryKey) {
+		t.Fatalf("want a refusal naming %s, got %v", envBootstrapRecoveryKey, err)
+	}
+	if entries, rerr := os.ReadDir(kernelHome()); !os.IsNotExist(rerr) {
+		t.Errorf("the refused boot wrote its home: %v %v", entries, rerr)
 	}
 }

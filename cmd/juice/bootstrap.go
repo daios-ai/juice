@@ -137,16 +137,67 @@ func checkNetwork(ctx context.Context, db *store.DB, w rail.World) error {
 	return nil
 }
 
-// bootstrap runs the idempotent startup tasks, and on a first boot (no superuser configured) asks
-// for the credentials that create one.
+// bootCredentials are the superuser's: its password, and the public half of a recovery phrase its
+// client holds — empty when the kernel, being its own client, is to generate the phrase (D9).
+type bootCredentials struct{ password, recoveryKey string }
+
+const (
+	envBootstrapPassword    = "JUICE_BOOTSTRAP_PASSWORD"
+	envBootstrapRecoveryKey = "JUICE_BOOTSTRAP_RECOVERY_KEY"
+)
+
+// firstBootCredentials gathers the superuser's credentials and checks them by the rule every
+// account is created under, writing nothing, so a boot refused here leaves nothing behind. Each
+// has one source off a terminal, its variable, and a refusal names that variable; at a terminal
+// the password is asked. A recovery key is never asked: without one the phrase is generated at
+// creation, where it can be shown.
+func firstBootCredentials() (bootCredentials, error) {
+	c := bootCredentials{password: os.Getenv(envBootstrapPassword), recoveryKey: os.Getenv(envBootstrapRecoveryKey)}
+	source := envBootstrapPassword
+	if c.password == "" {
+		if !interactiveTTY() {
+			return c, fmt.Errorf("no %s, and no terminal to ask for the superuser password", envBootstrapPassword)
+		}
+		p, err := promptNewPassword("Superuser password: ")
+		if err != nil {
+			return c, fmt.Errorf("reading password: %w", err)
+		}
+		c.password, source = p, "superuser password"
+	}
+	if err := kernel.ValidateCredentials(c.password, ""); err != nil {
+		return c, fmt.Errorf("%s: %w", source, err)
+	}
+	if err := kernel.ValidateCredentials(c.password, c.recoveryKey); err != nil {
+		return c, fmt.Errorf("%s: %w", envBootstrapRecoveryKey, err)
+	}
+	return c, nil
+}
+
+// firstBoot creates the superuser. A recovery key it was given is enrolled as it stands and no
+// phrase exists here; without one the kernel is the client and runs the ceremony a client runs —
+// generate the phrase, show it, enroll the public half — on the terminal when there is one.
+func firstBoot(ctx context.Context, k *kernel.Kernel, c bootCredentials) error {
+	commit := func(recoveryPub string) error { return k.FirstBoot(ctx, c.password, recoveryPub) }
+	var err error
+	if c.recoveryKey != "" {
+		err = commit(c.recoveryKey)
+	} else {
+		err = enrollRecovery("sys recovery phrase", commit)
+	}
+	if err != nil {
+		return fmt.Errorf("first boot: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
+	return nil
+}
+
+// bootstrap runs the idempotent startup tasks of a kernel whose superuser exists.
 func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, net kernel.Network) error {
 	ctx := context.Background()
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
 	if err != nil || handle == "" {
-		if handle, err = firstBoot(ctx, k); err != nil {
-			return err
-		}
+		return fmt.Errorf("superuser_handle missing from config; the first boot did not complete")
 	}
 
 	// Verify both signing keys are present, valid, and consistent.
@@ -204,33 +255,6 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 	}
 
 	return nil
-}
-
-func firstBoot(ctx context.Context, k *kernel.Kernel) (string, error) {
-	password := os.Getenv("JUICE_BOOTSTRAP_PASSWORD")
-	if password == "" {
-		p, err := promptNewPassword("Superuser password: ")
-		if err != nil {
-			return "", fmt.Errorf("reading password: %w", err)
-		}
-		password = p
-	}
-	if password == "" {
-		return "", fmt.Errorf("password cannot be empty")
-	}
-
-	// Enroll sys's own recovery phrase (§12): generated client-side, only the public key is
-	// stored, so the operator can reset the superuser password if it is lost. The ceremony shows
-	// and acknowledges the phrase before committing, so no logging follows until the operator
-	// has it (interactive), and a boot that fails after display announces the phrase is dead.
-	if err := enrollRecovery("sys recovery phrase", func(recoveryPub string) error {
-		return k.FirstBoot(ctx, password, recoveryPub)
-	}); err != nil {
-		return "", fmt.Errorf("first boot: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
-	return superuserHandle, nil
 }
 
 // ensureSysNative idempotently registers, activates, and grants local call access to a @sys native

@@ -112,10 +112,16 @@ func runServer(name string) error {
 	dbFile := filepath.Join(kernelHome(), "juice.db")
 	fresh := !exists(dbFile)
 	var cfg ServerConfig
+	var creds *bootCredentials
 	if fresh {
 		if cfg, err = firstBootConfig(world, kernelHome()); err != nil {
 			return err
 		}
+		c, err := firstBootCredentials()
+		if err != nil {
+			return err
+		}
+		creds = &c
 	}
 	release, err := holdHome()
 	if err != nil {
@@ -161,6 +167,20 @@ func runServer(name string) error {
 		return err
 	}
 
+	// A first boot that stopped after its database was made is run again here, with the same
+	// credentials rule as a fresh one.
+	if made == "" {
+		if creds == nil {
+			c, err := firstBootCredentials()
+			if err != nil {
+				return err
+			}
+			creds = &c
+		}
+		if err := firstBoot(context.Background(), k, *creds); err != nil {
+			return err
+		}
+	}
 	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}

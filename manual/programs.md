@@ -227,6 +227,7 @@ value named in its arguments.
 | password prompt on `user blockchain-address` | `--password` (with `--signature`) |
 | recovery prompt on `auth recover` | `--phrase` and `--password` |
 | first-boot questions | a `config.json` written in advance, plus `JUICE_BOOTSTRAP_PASSWORD` |
+| the `sys` recovery phrase shown at first boot | `JUICE_BOOTSTRAP_RECOVERY_KEY`, the public key of a phrase you generate |
 | confirmation on a money command | `--yes` |
 | the selected login | `--as` or `JUICE_AS` |
 

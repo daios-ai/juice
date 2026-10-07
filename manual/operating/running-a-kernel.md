@@ -223,8 +223,20 @@ them to `config.json` beforehand does the same, and the two can be mixed. On a
 first boot the effective settings are written to that file as the new kernel's
 configuration; on every later boot an option applies to that run alone.
 
+The kernel prints the `sys` recovery phrase once on stderr. A program that
+boots the kernel for someone generates the phrase itself and passes only its
+public key, the same value `POST /v1/users` takes as `recovery_public_key`:
+
+```console
+$ JUICE_BOOTSTRAP_PASSWORD=… JUICE_BOOTSTRAP_RECOVERY_KEY=… juice kernel serve play --kernel-handle acme
+```
+
+The kernel then enrolls that key and prints no phrase.
+
 If required configuration is missing and no terminal is available, startup
-fails with a message identifying the missing setting.
+fails with a message identifying the missing setting. A missing or short
+password, or a malformed recovery key, fails the same way, naming its
+variable, before anything is written.
 
 ## The kernel's home
 
