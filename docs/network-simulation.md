@@ -100,7 +100,7 @@ they are the ones that can catch the kernel being wrong rather than merely incon
 | money entering equals money held | independent | Σ deposits == Σ (available + locked) over every account on every kernel. A cross-kernel call sums to zero across the two kernels — the charge returns to the caller, whose own stake carries the draw — and a ticket payment moves tokens from one vault to the other |
 | every call charged its advertised terms | independent | local: the price. Cross-kernel: `q` from the published rates. Local failure keeps nothing. **Remote failure may legitimately charge** — the peer may have done paid work before failing — so it must equal the receipt's own draw plus premium, with no import fee |
 | every obligation was settled by a payment that was not short | independent | a draw pays what is owed or the whole face value, never less |
-| no obligation outstanding, in either direction | consistency | an obligation is one row on the serving side, so both directions are read; and no peer row holds money at all |
+| no obligation outstanding, in either direction | consistency | an obligation is one row on the serving side, so both directions are read |
 | no funds left parked | consistency | read from `process list` (`awaiting_receipt`), not transaction rows: a call still waiting has no settled row |
 | the evidence a peer serves carries no identifying field | independent | checked on the raw response, and a missing projection fails the run |
 | latency, throughput, recovery | measurement | not a verdict |

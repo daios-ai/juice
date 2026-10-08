@@ -90,13 +90,13 @@ func (e *TransferEffect) stage(t *Trace) {
 // refused: its account holds nothing to fund a value (D14), and a peer completing a parked task is the
 // one path by which it could otherwise reach an effect-bearing action, since completion re-checks
 // liveness but not visibility (§4 binding rule).
-func (k *Kernel) prepareTransferEffect(ctx context.Context, caller *Account, a *Action, args map[string]any) (*TransferEffect, error) {
+func (k *Kernel) prepareTransferEffect(ctx context.Context, caller Principal, a *Action, args map[string]any) (*TransferEffect, error) {
 	fn := k.actionValue(a)
 	if fn == nil {
 		return nil, nil
 	}
-	if caller.IsPeer() {
-		return nil, ErrInvalidInput.Wrap("a peer's account holds nothing to transfer")
+	if !caller.Local() {
+		return nil, ErrInvalidInput.Wrap("a peer holds nothing here to transfer")
 	}
 	amount, ref, err := fn(args)
 	if err != nil {
@@ -115,7 +115,7 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, caller *Account, a *
 	if benef.SuspendedAt != nil {
 		return nil, ErrInvalidInput.Wrap("transfer beneficiary is suspended")
 	}
-	if benef.ID == caller.ID {
+	if benef.ID == caller.UserID {
 		return nil, ErrInvalidInput.Wrap("cannot transfer to yourself")
 	}
 	return &TransferEffect{Amount: amount, Dest: benef.ID}, nil
@@ -129,11 +129,7 @@ func (k *Kernel) prepareRemoteTransfer(ctx context.Context, amount int64, ref st
 	if err != nil {
 		return nil, err
 	}
-	peer, err := k.store.ReadUser(ctx, p.AccountID)
-	if err != nil || peer == nil || peer.KernelPublicKey == "" {
-		return nil, errUserNotFound(ref)
-	}
-	return &TransferEffect{Amount: amount, Dest: p.RemoteID, Peer: peer.KernelPublicKey}, nil
+	return &TransferEffect{Amount: amount, Dest: p.UserID, Peer: p.Kernel}, nil
 }
 
 // dispatchPayload is the persisted remote-proxy dispatch record, stored on Trace.DispatchJSON
@@ -263,8 +259,12 @@ func (s *pricedStore) ReadActionByOwnerName(ctx context.Context, ownerID, name s
 	return s.priceOne(s.Store.ReadActionByOwnerName(ctx, ownerID, name))
 }
 
-func (s *pricedStore) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*Action, error) {
-	return s.priceOne(s.Store.ReadActionByOwnerRemoteID(ctx, ownerID, remoteActionID))
+func (s *pricedStore) ReadProxyByName(ctx context.Context, peerKey, handle, name string) (*Action, error) {
+	return s.priceOne(s.Store.ReadProxyByName(ctx, peerKey, handle, name))
+}
+
+func (s *pricedStore) ReadProxyByRemoteID(ctx context.Context, peerKey, remoteActionID string) (*Action, error) {
+	return s.priceOne(s.Store.ReadProxyByRemoteID(ctx, peerKey, remoteActionID))
 }
 
 func (s *pricedStore) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*Action, error) {
@@ -280,7 +280,7 @@ func marshalDispatch(args map[string]any, taskID string, mp, gross int64, contra
 	b, _ := json.Marshal(dispatchPayload{
 		Args: args, TaskID: taskID, RemotePrice: mp, Gross: gross, ContractHash: contractHash,
 		RemoteBPS: remoteBPS, ImportBPS: importBPS, Secret: secret, Lottery: lottery,
-		CallerUserID: caller.RemoteID, CallerHandle: caller.Handle,
+		CallerUserID: caller.UserID, CallerHandle: caller.Handle,
 	})
 	s := string(b)
 	return &s
@@ -323,11 +323,7 @@ func (k *Kernel) servedRequest(ctx context.Context, t *Trace) (idempotencyKey, c
 	if err != nil {
 		return "", "", ErrInternal.Wrapf("the request this call answers cannot be read: %v", err)
 	}
-	buyer, err := k.store.ReadUser(ctx, rec.CounterpartyUserID)
-	if err != nil || buyer == nil || buyer.KernelPublicKey == "" {
-		return "", "", ErrInternal.Wrap("the kernel this call answers cannot be read")
-	}
-	return rec.IdempotencyKey, buyer.KernelPublicKey, nil
+	return rec.IdempotencyKey, rec.Counterparty, nil
 }
 
 // ServingReserve is what a foreign call's admission counted against the credit limit. Whether a
@@ -722,7 +718,8 @@ func (k *Kernel) pendingMeta(err *KernelError, processID string, since time.Time
 // If the receipt is absent or has an invalid signature, the trace stays open for retry (ErrTimeout).
 // Otherwise it commits the obligation, the draw that decides what is paid for it, and the payment
 // itself, in one transaction (P7, P10).
-func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, target *Account, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
+func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, action *Action, ktx *Transaction, trace *Trace, callerWalletID, callerWalletKind string, req callRequest, mp int64, fr FederationResult, latency float64) (*CallReply, error) {
+	peer := action.OwnerKernel // the kernel the proxy belongs to, which the call was dispatched to
 	// The values we dispatched under ride on the trace, so both the direct and the retry settle paths
 	// read them from one source (§13). The funding boundary froze them, so a fee change — or a
 	// lottery change — between dispatch and settlement cannot move this call's arithmetic.
@@ -736,7 +733,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if trace.IdempotencyKey != nil {
 		expectedKey = *trace.IdempotencyKey
 	}
-	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, target.KernelPublicKey, action.RemoteActionID, expectedArgsHash, expectedKey, k.ourKeyB64())
+	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, peer, action.RemoteActionID, expectedArgsHash, expectedKey, k.ourKeyB64())
 	if err != nil {
 		// The call is parked, not lost: no receipt has settled it, so the allocation stays locked and
 		// the process open until one arrives (§13). Hand back the durable
@@ -784,7 +781,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.Fee = importFee
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
-	ktx.RemoteSignerKey = target.KernelPublicKey // stored with the receipt it verified (G7)
+	ktx.RemoteSignerKey = peer // stored with the receipt it verified (G7)
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	// A rejection is the peer's refusal to execute, at any price: an executed failure that consumed
@@ -808,7 +805,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 				// The remote refuses us credit: its limit is reached, or we owe it for a call it has
 				// not been paid for. Operator-actionable, so a client never renders it as the
 				// caller's own insufficient_funds.
-				failErr = PeerUnfundedError(k.KernelName(ctx, target.KernelPublicKey))
+				failErr = PeerUnfundedError(k.KernelName(ctx, peer))
 			case r.RefreshProxy:
 				// The peer's contract moved under our cached copy. NOT a terms change in the buyer's
 				// sense: the contract hash also covers the artifact, kind, and owner id (§6 P6), so a
@@ -820,7 +817,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			default:
 				// The peer will not serve us — suspended caller, or an action it refuses. Distinct
 				// from unreachable (retry) and unfunded (top up): a human must resolve it.
-				failErr = PeerRefusedError(k.KernelName(ctx, target.KernelPublicKey))
+				failErr = PeerRefusedError(k.KernelName(ctx, peer))
 			}
 		}
 		// The peer authored r.Reason; never adopt it into a record we sign (§6). Its verbatim text
@@ -840,7 +837,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// nonce, and the obligation — so neither can pick the outcome and neither has to trust the
 	// other's report of it. A losing ticket pays nothing; a winning one pays the face value; an
 	// obligation at or above the face value is paid exactly.
-	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerBlockchainAddress(ctx, target.ID))
+	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerBlockchainAddress(ctx, peer))
 
 	// Detach settlement from execution-scoped cancellation so the remote settlement
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
@@ -969,10 +966,6 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	if err != nil || action == nil {
 		return ErrNotFound.Wrap("action not found for retry")
 	}
-	target, err := k.store.ReadUser(ctx, trace.ActionOwnerID)
-	if err != nil {
-		return ErrNotFound.Wrap("target not found for retry")
-	}
 	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
 	if err != nil {
 		return ErrNotFound.Wrap("process not found for retry")
@@ -1011,13 +1004,13 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 	// it. Never-dispatched fail-fast lives solely in Call (§6). The contract hash is the one the
 	// dispatch froze, not the row's current one: the proxy may have been re-resolved while this
 	// call was in doubt, and a retry must present the terms the buyer authorised (§8).
-	fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, OutboundCall{
+	fr, _ := fe.ExecuteFederation(ctx, action.OwnerKernel, OutboundCall{
 		ActionID: action.RemoteActionID, ExpectedContractHash: dispatch.ContractHash, IdempotencyKey: *trace.IdempotencyKey,
 		Commitment: commitmentOf(dispatch.Secret), Lottery: dispatch.Lottery,
 		CallerUserID: dispatch.CallerUserID, CallerHandle: dispatch.CallerHandle,
 	}, dispatch.Args)
 	if fr.ReceiptJSON != "" {
-		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, 0)
+		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, mp, fr, 0)
 		if !errors.Is(err, ErrTimeout) {
 			return err // settled, or a real settlement error
 		}
@@ -1108,7 +1101,7 @@ func (k *Kernel) sendTask(ctx context.Context, callerID string, e *TaskEntry, ki
 	if k.fedClient == nil {
 		return nil, ErrInvalidState.Wrap("federation transport not running")
 	}
-	if callerID != e.RequiredCaller.AccountID {
+	if !e.RequiredCaller.IsUser(callerID) {
 		return nil, ErrUnauthorized.Wrap("only the task's required caller may complete or decline it")
 	}
 	// A suspended holder delivers nothing, so its reply could not be recorded after the work ran.
@@ -1215,7 +1208,7 @@ func (k *Kernel) announceTask(ctx context.Context, o *OutgoingNotice) error {
 
 // holderSuspended reports whether this kernel has suspended a task's holder, which delivers nothing (U37).
 func (k *Kernel) holderSuspended(ctx context.Context, key string) bool {
-	peer, err := k.store.ReadAccountByKernelKey(ctx, key)
+	peer, err := k.store.ReadKernel(ctx, key)
 	return err == nil && peer != nil && peer.SuspendedAt != nil
 }
 
@@ -1240,12 +1233,12 @@ func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *Sign
 
 // ---- Peer operations ----
 
-// The three kernel lifecycle operations (§13). They are deliberately separate: observation must not
-// name or fund a kernel, naming must not open a billing relationship, and an inbound call or a
-// deposit must not let a stranger seed a local name. Each path calls only what it is entitled to.
+// The kernel lifecycle operations (D15). They are deliberately separate: observation must not name a
+// kernel, and an inbound call must not let a stranger seed a local name. Each path calls only what it
+// is entitled to.
 
 // ObserveKernel records what a verified gossip pull said about a kernel: its self-asserted nickname
-// and about. It binds no petname, opens no account, and never advances the evidence cursor or the
+// and about. It binds no petname, and never advances the evidence cursor or the
 // peer-sync cache — those have their own narrow paths, run only after their own work commits.
 func (k *Kernel) ObserveKernel(ctx context.Context, publicKey, nickname, about string) error {
 	return k.observeKernel(ctx, publicKey, nickname, about, "", "")
@@ -1292,53 +1285,78 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, desired string, exa
 	return bound, nil
 }
 
-// EnsureKernelAccount opens the billing relationship with a kernel: a minimal kernel row if none
-// exists (never clearing learned metadata) plus a zero-balance account. It binds no petname — an
-// inbound call or a deposit is not our act of naming. Idempotent, including under the race where two
-// inbound calls provision the same key concurrently.
-func (k *Kernel) EnsureKernelAccount(ctx context.Context, publicKey string) (*Account, error) {
+// knowKernel makes a kernel known on this kernel's own contact with it — an inbound call it signed,
+// a resolve that verified it: a minimal kernel row if none exists, never clearing what was learned.
+// It binds no petname — an inbound call is not our act of naming (D15) — and refuses a malformed key
+// and this kernel's own, which is no peer of itself.
+func (k *Kernel) knowKernel(ctx context.Context, publicKey string) error {
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
-		return nil, err
+		return err
 	}
 	if publicKey == k.SelfKey(ctx) {
-		return nil, ErrInvalidInput.Wrap("a kernel holds no account with itself")
+		return ErrInvalidInput.Wrap("that is this kernel, not a peer")
 	}
-	if existing, err := k.store.ReadAccountByKernelKey(ctx, publicKey); err == nil && existing != nil {
-		return existing, nil
-	}
-	if err := k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC()); err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	// A credentialless account: no handle and no password, authenticating only by federation
-	// signature. The kernel it settles for is named by its petname, never by an account handle.
-	u := &Account{ID: uuid.New().String(), KernelPublicKey: publicKey, CreatedAt: now, UpdatedAt: now}
-	if err := k.store.CreateUser(ctx, u); err != nil {
-		// Two provisioning paths can race (an inbound call and the CLI both write this DB); the
-		// loser trips idx_accounts_kernel. Treat that as idempotent success and return the winner.
-		if winner, rerr := k.store.ReadAccountByKernelKey(ctx, publicKey); rerr == nil && winner != nil {
-			return winner, nil
-		}
-		return nil, err
-	}
-	k.log.With(ctx).Info("kernel.account.created", "public_key", publicKey)
-	return u, nil
+	return k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC())
 }
 
-// SuspendKernel freezes a remote kernel (§13), provisioning its account if it has none so a
-// not-yet-transacting kernel can be blocked before its first inbound call — atomically, so no call
-// can execute against a briefly-active account. Superuser-only, like every moderation act.
+// KnowKernel is knowKernel for the federation transport, which meets a kernel by its signed request.
+func (k *Kernel) KnowKernel(ctx context.Context, publicKey string) error {
+	return k.knowKernel(ctx, publicKey)
+}
+
+// requireActiveKernel admits a peer that is not suspended, the federation twin of requireActiveUser:
+// a suspended peer is refused at every door it comes through (U37).
+func (k *Kernel) requireActiveKernel(ctx context.Context, publicKey string) error {
+	rk, err := k.store.ReadKernel(ctx, publicKey)
+	if err != nil || rk == nil {
+		return ErrUnauthenticated.Wrap("unknown peer")
+	}
+	if rk.SuspendedAt != nil {
+		return ErrUnauthenticated.Wrap("this kernel has suspended the peer")
+	}
+	return nil
+}
+
+// requireCaller validates a call's immediate caller before anything reads what kind of party it is:
+// a user here who exists and is not suspended, returned with its account; or a peer kernel that is
+// known and not suspended, which holds no account here.
+func (k *Kernel) requireCaller(ctx context.Context, p Principal) (*Account, error) {
+	if p.Local() {
+		if p.UserID == "" {
+			return nil, ErrUnauthenticated.Wrap("subject is required")
+		}
+		return k.requireActiveUser(ctx, p.UserID)
+	}
+	return nil, k.requireActiveKernel(ctx, p.Kernel)
+}
+
+// SuspendKernel blocks a remote kernel (U37): its row is made if none exists and flagged in one
+// statement, so a kernel can be blocked before its first call and no call meets it unblocked.
+// Superuser-only, like every moderation act.
 func (k *Kernel) SuspendKernel(ctx context.Context, operatorID, publicKey string) error {
+	return k.setKernelSuspended(ctx, operatorID, publicKey, true)
+}
+
+// UnsuspendKernel lifts a peer's suspension; it requires a kernel this one knows.
+func (k *Kernel) UnsuspendKernel(ctx context.Context, operatorID, publicKey string) error {
+	return k.setKernelSuspended(ctx, operatorID, publicKey, false)
+}
+
+func (k *Kernel) setKernelSuspended(ctx context.Context, operatorID, publicKey string, suspend bool) error {
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return err
 	}
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return err
 	}
-	if err := k.store.SuspendKernelAccount(ctx, publicKey, uuid.New().String(), time.Now().UTC()); err != nil {
+	if publicKey == k.SelfKey(ctx) {
+		return ErrInvalidInput.Wrap("that is this kernel, not a peer")
+	}
+	if err := k.store.SetKernelSuspended(ctx, publicKey, suspend, time.Now().UTC()); err != nil {
 		return err
 	}
-	k.log.With(ctx).Info("kernel.suspended", "public_key", publicKey)
+	event := map[bool]string{true: "kernel.suspended", false: "kernel.unsuspended"}[suspend]
+	k.log.With(ctx).Info(event, "public_key", publicKey)
 	return nil
 }
 
@@ -1404,22 +1422,6 @@ func (k *Kernel) KernelName(ctx context.Context, publicKey string) string {
 // discovery-only alike, from one store query. selfKey is excluded.
 func (k *Kernel) ListKernels(ctx context.Context, includeSuspended bool, limit, offset int) ([]*RemoteKernelView, error) {
 	return k.store.ListKernels(ctx, k.SelfKey(ctx), includeSuspended, limit, offset)
-}
-
-// PeerKeys returns the public keys of all counterparties (kernels holding a live account here) —
-// the pull set for the discovery loop's peer sync (§13 peer sync).
-func (k *Kernel) PeerKeys(ctx context.Context) []string {
-	kernels, err := k.ListKernels(ctx, false, 0, 0)
-	if err != nil {
-		return nil
-	}
-	keys := make([]string, 0, len(kernels))
-	for _, p := range kernels {
-		if p.HasAccount {
-			keys = append(keys, p.PublicKey)
-		}
-	}
-	return keys
 }
 
 // DiscoveryCandidates orders everyone a discovery pass could read, most useful first, and folds in
@@ -1711,7 +1713,7 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, su
 // surface can ask about a different action than another (§13).
 func (k *Kernel) actionSubject(ctx context.Context, a *Action) (subjectKernel, subjectAction string) {
 	if a.Kind == KindRemoteProxy {
-		return k.ownerKernelKey(ctx, a), a.RemoteActionID
+		return a.OwnerKernel, a.RemoteActionID
 	}
 	return k.ourKeyB64(), a.ID
 }
@@ -1770,9 +1772,9 @@ func (k *Kernel) subjectRecord(ctx context.Context, subjectKernel, subjectAction
 	return rec
 }
 
-// PurgeIdlePeers reaps peers idle past PeerRetention at zero balance (§13 Retention): it deletes
-// each such peer's proxy actions, stats, discovery docs, evidence, and discovered_kernels rows and
-// forgets the peer identity, keeping the transaction ledger intact. In the same pass it also evicts
+// PurgeIdlePeers reaps peers idle past PeerRetention with nothing unresolved (D16 Retention): it
+// deletes each such peer's proxy actions, stats, tasks, discovery docs and evidence and forgets its
+// naming state, keeping its key, its proven address and the transaction ledger intact. In the same pass it also evicts
 // directory-only discovered kernels stale past the same horizon (never-peer cache rows that would
 // otherwise accumulate unbounded, §13). Internal maintenance (like RetryPendingRemoteDispatches, no
 // superuser gate) — driven by the serve sweep and once at startup. PeerRetention <= 0 disables it.
@@ -1783,22 +1785,22 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	}
 	logger := k.log.With(ctx)
 	cutoff := time.Now().UTC().Add(-k.cfg.PeerRetention)
-	ids, err := k.store.ListPurgeablePeers(ctx, cutoff)
+	keys, err := k.store.ListPurgeablePeers(ctx, cutoff)
 	if err != nil {
 		logger.Error("peer.purge.list_failed", "error", err)
 		return 0, err
 	}
 	purged := 0
-	for _, id := range ids {
-		if err := k.store.PurgePeerCascade(ctx, id); err != nil {
-			logger.Error("peer.purge.failed", "user_id", id, "error", err)
+	for _, key := range keys {
+		if err := k.store.PurgePeer(ctx, key); err != nil {
+			logger.Error("peer.purge.failed", "public_key", key, "error", err)
 			continue
 		}
 		purged++
-		logger.Info("peer.purged", "user_id", id)
+		logger.Info("peer.purged", "public_key", key)
 	}
 	// Evict directory-only discovered kernels stale past the same horizon, so the discovery cache
-	// stays bounded on a busy network (peer-backed kernels are handled by the loop above).
+	// stays bounded on a busy network (counterparties are handled by the loop above).
 	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.SelfKey(ctx)); derr != nil {
 		logger.Error("discovery.purge.failed", "error", derr)
 	} else if evicted > 0 {
@@ -2102,7 +2104,7 @@ func (k *Kernel) RecordKernelContact(ctx context.Context, publicKey string, ok b
 // records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
 // settled failure is legible rather than always reading "denied". refreshProxy marks a cache fault
 // (contract-hash mismatch, non-executable action) so the origin invalidates its cached proxy (§13).
-func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, counterpartyKey, actionParam string, rawArgs []byte, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
+func (k *Kernel) CreateSignedRejectionReceipt(callerUserID, counterpartyKey, actionParam string, rawArgs []byte, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -2117,8 +2119,8 @@ func (k *Kernel) CreateSignedRejectionReceipt(counterpartyID, counterpartyKey, a
 		// A rejection names no transaction, because it has none. That is what tells it apart from
 		// an executed failure, and it is a fact of the receipt rather than a marker the seller
 		// must remember to write correctly (P5).
-		ActionID:       actionParam, // the refused action's id, matching the caller's remote_action_id
-		CallerUserID:   counterpartyID,
+		ActionID:       actionParam,  // the refused action's id, matching the caller's remote_action_id
+		CallerUserID:   callerUserID, // the buyer's user as it signed it (P4), empty for the kernel itself
 		ArgsHash:       argsHash,
 		IdempotencyKey: idempotencyKey,
 		Counterparty:   counterpartyKey,
@@ -2377,8 +2379,8 @@ func remoteManifestHash(m ActionManifest) string {
 // ImportPeerAction imports one signed manifest without a superuser gate (its authority is the
 // verified manifest signature) and activates it as a local proxy — the §13 subscription-free
 // resolve path used by lazy cross-kernel calls. Returns the resulting proxy action.
-func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m ActionManifest) (*Action, error) {
-	res, err := k.importRemoteActionCore(ctx, remoteUserID, m)
+func (k *Kernel) ImportPeerAction(ctx context.Context, peerKey string, m ActionManifest) (*Action, error) {
+	res, err := k.importRemoteActionCore(ctx, peerKey, m)
 	if err != nil {
 		return nil, err
 	}
@@ -2411,18 +2413,14 @@ func (k *Kernel) ImportPeerAction(ctx context.Context, remoteUserID string, m Ac
 	return a, nil
 }
 
-func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string, m ActionManifest) (*ImportResult, error) {
-	remoteUser, err := k.store.ReadUser(ctx, remoteUserID)
-	if err != nil {
+func (k *Kernel) importRemoteActionCore(ctx context.Context, peerKey string, m ActionManifest) (*ImportResult, error) {
+	if err := k.knowKernel(ctx, peerKey); err != nil {
 		return nil, err
-	}
-	if remoteUser.KernelPublicKey == "" {
-		return nil, ErrInvalidInput.Wrap("user is not a remote kernel")
 	}
 	if m.ActionID == "" {
 		return nil, ErrInvalidInput.Wrap("manifest missing action_id")
 	}
-	if err := k.cfg.Network.VerifyManifestSignature(remoteUser.KernelPublicKey, &m); err != nil {
+	if err := k.cfg.Network.VerifyManifestSignature(peerKey, &m); err != nil {
 		return nil, err
 	}
 	switch {
@@ -2430,9 +2428,12 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		return nil, ErrInvalidInput.Wrap("manifest missing name")
 	case m.OwnerHandle == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing owner_handle")
+	case m.OwnerID == "":
+		// The owner's id on the peer is half of the proxy's owner principal (D13).
+		return nil, ErrInvalidInput.Wrap("manifest missing owner_id")
 	case strings.ContainsAny(m.OwnerHandle, "@/"):
-		// owner_handle is concatenated into the proxy name/source below; a sigil or slash would
-		// corrupt the reference, so a bare handle is required (§3, §14) — not silently rewritten.
+		// owner_handle is what a reference names beneath the peer; a sigil or slash could never be
+		// typed as one, so a bare handle is required (§3, §14) — not silently rewritten.
 		return nil, ErrInvalidInput.Wrap("manifest owner_handle must be a bare handle")
 	case m.Title == "":
 		return nil, ErrInvalidInput.Wrap("manifest missing title")
@@ -2459,20 +2460,13 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 	if m.Price < 0 {
 		return nil, ErrInvalidInput.Wrap("price must be non-negative")
 	}
-	// Source holds the remote action as owner/name, the same fold the row name carries.
-	// The peer is identified by remoteUser.KernelPublicKey; the federation transport resolves that
-	// key to a live path and supplies this kernel's own key as the signed counterparty (§13).
-	source := JoinProxyName(m.OwnerHandle, m.Name)
-
 	existingByKey := map[string]*Action{}
-	if existing, err := k.store.ReadActionByOwnerRemoteID(ctx, remoteUserID, m.ActionID); err == nil {
+	if existing, err := k.store.ReadProxyByRemoteID(ctx, peerKey, m.ActionID); err == nil {
 		existingByKey[m.ActionID] = existing
 	}
 
 	contentHash := remoteManifestHash(m)
-	// Stored folded (SplitProxyName), so same-named actions from different owners on the peer
-	// don't collide under the one account that holds them.
-	name := JoinProxyName(NormalizeHandle(m.OwnerHandle), m.Name)
+	name, handle := m.Name, NormalizeHandle(m.OwnerHandle)
 	// Proxy price is the two-step markup (§13): sr = mp + ceil(mp·remote_bps/10000) is the
 	// serving-kernel markup (a signed manifest field) and the cross-kernel obligation ceiling;
 	// q = sr + ceil(sr·import_bps/10000) adds the origin's locally-retained import fee, so the local
@@ -2492,14 +2486,14 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 		name: name,
 		apply: func(a *Action) {
 			a.Name = name
-			a.Source = source
+			a.OwnerHandle = handle
 			a.Price = proxyPrice
 			a.Title = m.Title
 			a.Description = m.Description
 			a.InputSchema = m.InputSchema
 			a.OutputSchema = m.OutputSchema
 			a.ArtifactHash = contentHash
-			a.RemoteOwnerID = m.OwnerID
+			a.OwnerUserID = m.OwnerID
 			a.RemoteBPS = &rbps
 			a.BasePrice = &basePrice
 		},
@@ -2508,7 +2502,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, remoteUserID string
 			now := time.Now().UTC()
 			return &Action{
 				ID:             uuid.New().String(),
-				OwnerUserID:    remoteUserID,
+				OwnerKernel:    peerKey,
 				Kind:           KindRemoteProxy,
 				Active:         false,
 				Visibility:     VisibilityPrivate, // promoted to local on successful resolve (§8, below)
@@ -2556,7 +2550,7 @@ func (k *Kernel) exportable(a *Action) error {
 	if !a.Active || a.Visibility != VisibilityPublic {
 		return ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
-	// Delegated-OAuth actions are never advertised: a remote peer's proxy user cannot complete a
+	// Delegated-OAuth actions are never advertised: a peer kernel cannot complete a
 	// browser consent, so importing one could only ever produce grant-required failures (§8/§13).
 	if k.isDelegatedAuth(a) {
 		return ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")

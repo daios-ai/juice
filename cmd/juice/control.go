@@ -77,17 +77,13 @@ func (s *server) rosterView(ctx context.Context, acct *kernel.Account, key strin
 	if key == "" {
 		return accountView1(ctx, s.kernel.NewNames(), acct)
 	}
-	// A kernel target renders one flat record: its naming state, plus what it owes us when it has
-	// traded here. A peer account holds no balance of its own (P10), so none is shown.
+	// A kernel target renders one flat record, its row: naming state, contact, suspension. A peer
+	// holds no money here (D14), so none is shown.
 	rk, _ := s.kernel.ReadKernel(ctx, key)
 	out := map[string]any{"public_key": key}
 	if rk != nil {
 		out["petname"], out["nickname"], out["about"], out["blockchain_address"] = rk.Petname, rk.Nickname, rk.About, rk.BlockchainAddress
-		out["last_seen"] = rk.LastSeen
-	}
-	if acct != nil {
-		// No internal id: a peer is named by its key and its petname (D20).
-		out["suspended_at"], out["created_at"] = acct.SuspendedAt, acct.CreatedAt
+		out["last_seen"], out["suspended_at"], out["first_seen"] = rk.LastSeen, rk.SuspendedAt, rk.FirstSeen
 	}
 	return out
 }
@@ -115,14 +111,13 @@ func (s *server) ctlSetSuspended(noun string, suspend bool) http.HandlerFunc {
 			writeErr(w, err)
 			return
 		}
-		ident := chi.URLParam(r, "target")
 		switch {
-		case suspend && key != "":
-			// Suspending a kernel provisions its account and freezes it atomically, so a
-			// not-yet-transacting kernel can be blocked before its first inbound call (§13).
+		case key != "" && suspend:
+			// Suspending makes the kernel's row if it has none, in the same statement, so a
+			// kernel can be blocked before its first inbound call (D15).
 			err = s.kernel.SuspendKernel(r.Context(), callerFrom(r), key)
-		case acct == nil:
-			err = kernel.ErrNotFound.Wrapf("%s has no account here", ident)
+		case key != "":
+			err = s.kernel.UnsuspendKernel(r.Context(), callerFrom(r), key)
 		case suspend:
 			err = s.kernel.SuspendUser(r.Context(), callerFrom(r), acct.ID)
 		default:
@@ -257,10 +252,9 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	if ev, eerr := s.kernel.SubjectEvidence(ctx, peerKey, ""); eerr == nil {
 		resp["evidence"] = ev
 	}
-	// Local account state when this peer has traded here (§14 inspect): whether it is suspended,
-	// independent of whether it is currently reachable. No balance: a peer row holds no money (P10).
-	if pu, _ := s.kernel.ReadAccountByKernelKey(ctx, peerKey); pu != nil {
-		resp["account"] = map[string]any{"suspended": pu.SuspendedAt != nil}
+	// Whether this kernel has suspended the peer, independent of whether it is reachable now.
+	if rk, _ := s.kernel.ReadKernel(ctx, peerKey); rk != nil {
+		resp["suspended"] = rk.SuspendedAt != nil
 	}
 
 	// Live view when the peer answers: a fresh gossip pull (identity + own signed manifests).

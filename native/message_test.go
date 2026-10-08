@@ -106,8 +106,8 @@ func TestExecuteMessage_CreatesTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadTask: %v", err)
 	}
-	if task.RequiredCaller.AccountID != recipient.ID {
-		t.Errorf("expected the task addressed to %s, got %s", recipient.ID, task.RequiredCaller.AccountID)
+	if task.RequiredCaller.UserID != recipient.ID {
+		t.Errorf("expected the task addressed to %s, got %s", recipient.ID, task.RequiredCaller.UserID)
 	}
 	var pa map[string]any
 	if err := json.Unmarshal(task.PartialArgs, &pa); err != nil {

@@ -272,21 +272,11 @@ func (k *Kernel) Deposit(ctx context.Context, operatorID, targetUserID string, a
 	if err != nil {
 		return nil, err
 	}
-	target, err := k.store.ReadUser(ctx, targetUserID)
-	if err != nil {
+	// Only a user is ever credited: a peer holds no account here, and what it owes closes when it
+	// pays — the payment observed on a chain, or its own signed reveal where the world has no
+	// addresses (P10, D23).
+	if _, err := k.store.ReadUser(ctx, targetUserID); err != nil {
 		return nil, err
-	}
-	// Only a live user is ever credited. A peer account is identity, never a wallet (D14), and what
-	// a peer owes closes when it pays: the payment observed on a chain, or the buyer's own signed
-	// reveal where the world has no addresses (P10, D23). The next line would refuse a peer anyway,
-	// since a peer holds no handle — this one exists to say why, and to keep the refusal here at the
-	// money boundary rather than resting on whatever resolved the name.
-	if target.IsPeer() {
-		return nil, ErrInvalidInput.Wrapf("%s is a peer: a peer holds no money here, and what it owes closes when it pays",
-			k.KernelName(ctx, target.KernelPublicKey))
-	}
-	if !target.IsLiveUser() {
-		return nil, ErrNotFound.Wrapf("account %s is not a live user here", targetUserID)
 	}
 
 	fact, err := rail.Witness(ctx, ref, amount)
@@ -799,14 +789,10 @@ func (k *Kernel) reconcileDeposits(ctx context.Context) {
 	}
 }
 
-// peerBlockchainAddress is where a peer account's kernel proved it is paid from — the sender a payment
-// of theirs must carry. Empty when unknown, which matches nothing.
-func (k *Kernel) peerBlockchainAddress(ctx context.Context, accountID string) string {
-	peer, err := k.store.ReadUser(ctx, accountID)
-	if err != nil || peer == nil || peer.KernelPublicKey == "" {
-		return ""
-	}
-	kern, err := k.store.ReadKernel(ctx, peer.KernelPublicKey)
+// peerBlockchainAddress is where a peer proved it is paid from — the sender a payment of theirs must
+// carry. Empty when unknown, which matches nothing.
+func (k *Kernel) peerBlockchainAddress(ctx context.Context, peerKey string) string {
+	kern, err := k.store.ReadKernel(ctx, peerKey)
 	if err != nil || kern == nil || kern.BlockchainAddress == "" {
 		return ""
 	}

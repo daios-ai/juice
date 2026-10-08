@@ -267,6 +267,13 @@ func setupProcess(t *testing.T, st kernel.Store, ownerID string, funds int64) *k
 // mirroring what BeginRun does in production. The caller must have action.Price available.
 func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel.Action) (*kernel.Process, *kernel.Trace) {
 	t.Helper()
+	return beginTestRunWith(t, st, callerID, action, nil)
+}
+
+// beginTestRunWith is beginTestRun with the trace adjusted before it is funded, as beginRun writes
+// the inbound record a federated call answers onto its trace.
+func beginTestRunWith(t *testing.T, st kernel.Store, callerID string, action *kernel.Action, adjust func(*kernel.Trace)) (*kernel.Process, *kernel.Trace) {
+	t.Helper()
 	ctx := context.Background()
 	p := &kernel.Process{
 		ID:          uuid.New().String(),
@@ -278,6 +285,7 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 		ID:            uuid.New().String(),
 		ProcessID:     p.ID,
 		ActionOwnerID: action.OwnerUserID,
+		TargetKernel:  action.OwnerKernel,
 		ActionID:      action.ID,
 		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
@@ -298,6 +306,9 @@ func beginTestRun(t *testing.T, st kernel.Store, callerID string, action *kernel
 			rbps = *action.RemoteBPS
 		}
 		tr.DispatchJSON = kernel.DispatchRecordForTest(mp, action.Price, rbps, econ.ImportBPS, econ.Lottery, "")
+	}
+	if adjust != nil {
+		adjust(tr)
 	}
 	if err := st.BeginRun(ctx, p, tr, callerID, action.Price, 0, 0); err != nil {
 		t.Fatalf("beginTestRun: %v", err)
@@ -890,7 +901,7 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
+	_, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2674,10 +2685,11 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	k := newTestKernelWithScripts(st, &fakeScriptExec{result: `{}`})
 	ctx := context.Background()
 
-	target := setupUser(t, st, "target-fed-bal", 0)
-	caller := setupUser(t, st, "caller-fed-bal", 50) // balance < action price
+	// A foreign call is funded by the seller (D14): a seller short of the price declines it and
+	// nothing is locked or opened.
+	seller := setupUser(t, st, "target-fed-bal", 50)
 	a := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: target.ID, Name: "fed-bal-act",
+		ID: uuid.New().String(), OwnerUserID: seller.ID, Name: "fed-bal-act",
 		Kind: kernel.KindWasm, Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -2686,24 +2698,28 @@ func TestRunFederatedDoesNotCreateProcessOnInsufficientBalance(t *testing.T) {
 	if err := st.CreateAction(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-
-	_, err := k.RunFederated(ctx, caller.ID, a, map[string]any{}, "", kernel.BuyerTerms{})
-	if !errors.Is(err, kernel.ErrInsufficientFunds) {
-		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
+	peer := testKernelKey(7)
+	if err := k.KnowKernel(ctx, peer); err != nil {
+		t.Fatal(err)
 	}
 
-	got, _ := st.ReadUser(ctx, caller.ID)
-	if got.Locked != 0 {
-		t.Errorf("user.Locked=%d after insufficient balance, want 0 (no process created)", got.Locked)
+	_, err := k.RunFederated(ctx, peer, a, map[string]any{}, "", kernel.BuyerTerms{})
+	if !errors.Is(err, kernel.ErrPeerUnfunded) {
+		t.Fatalf("expected ErrPeerUnfunded, got %v", err)
 	}
-	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: caller.ID, All: true, Limit: 10, Offset: 0})
+
+	got, _ := st.ReadUser(ctx, seller.ID)
+	if got.Locked != 0 || got.Available != 50 {
+		t.Errorf("seller available=%d locked=%d after a declined call, want 50/0", got.Available, got.Locked)
+	}
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: seller.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no processes after insufficient balance, got %d", len(procs))
 	}
 }
 
 // TestRunFederatedLocalActionDenied: an inbound peer call to a local-visibility action is denied
-// (§4/§13), the twin of the public-only manifest rule — a peer authenticates as a key account, so
+// (§4/§13), the twin of the public-only manifest rule — a peer caller is not local, so
 // canCall's local branch rejects it. The denial is a precondition failure (no process/transaction),
 // which the federation handler turns into a signed zero-charge rejection receipt.
 func TestRunFederatedLocalActionDenied(t *testing.T) {
@@ -2712,16 +2728,9 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	ctx := context.Background()
 
 	target := setupUser(t, st, "target-local-fed", 0)
-	// A peer proxy user: a set kernel_public_key makes it a key account (a peer), funded so the denial is
-	// on visibility, not balance.
-	if err := st.UpsertKernel(ctx, "cGVlci1sb2NhbC1mZWQ", "peer-local-fed", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	peer := &kernel.Account{
-		ID: uuid.New().String(), KernelPublicKey: "cGVlci1sb2NhbC1mZWQ", Available: 1000,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateUser(ctx, peer); err != nil {
+	// A peer kernel this one knows; the seller is funded so the denial is on visibility, not balance.
+	const peer = "cGVlci1sb2NhbC1mZWQ"
+	if err := st.UpsertKernel(ctx, peer, "peer-local-fed", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2734,11 +2743,16 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, "", kernel.BuyerTerms{})
+	_, err := k.RunFederated(ctx, peer, a, map[string]any{}, "", kernel.BuyerTerms{})
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("peer calling a local action: want ErrUnauthorized, got %v", err)
 	}
-	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: peer.ID, All: true, Limit: 10, Offset: 0})
+	// Nor as a user of its own whose id equals the owner's: a party is its kernel and its id (D15).
+	_, err = k.RunFederated(ctx, peer, a, map[string]any{}, "", kernel.BuyerTerms{CallerUserID: target.ID, CallerHandle: "x"})
+	if !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Fatalf("a peer's user sharing the owner's id calling a local action: want ErrUnauthorized, got %v", err)
+	}
+	procs, _ := st.ListProcesses(ctx, kernel.ProcessFilter{OwnerUserID: target.ID, All: true, Limit: 10, Offset: 0})
 	if len(procs) != 0 {
 		t.Errorf("expected no process for a denied inbound local call, got %d", len(procs))
 	}
@@ -2754,14 +2768,8 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 	ctx := context.Background()
 
 	provider := setupUser(t, st, "rate-fed-provider", 0)
-	if err := st.UpsertKernel(ctx, "cmF0ZS1mZWQtcGVlcg", "rate-fed-peer", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	peer := &kernel.Account{
-		ID: uuid.New().String(), KernelPublicKey: "cmF0ZS1mZWQtcGVlcg",
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := st.CreateUser(ctx, peer); err != nil {
+	const peer = "cmF0ZS1mZWQtcGVlcg"
+	if err := st.UpsertKernel(ctx, peer, "rate-fed-peer", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2777,13 +2785,13 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 
 	// Exactly as the federation handler admits a call: the inbound record exists before it runs.
 	rec := &kernel.IdempotencyRecord{
-		ID: uuid.New().String(), IdempotencyKey: "rate-fed-key", CounterpartyUserID: peer.ID,
+		ID: uuid.New().String(), IdempotencyKey: "rate-fed-key", Counterparty: peer,
 		CreatedAt: time.Now().UTC(),
 	}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, peer, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -2797,13 +2805,10 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("provider rating its own served call: want ErrUnauthorized, got %v", err)
 	}
-	// Retention purges the peer: its account row loses the kernel key but stays as ledger anchor
-	// (§13). The gate must not reopen for a transaction that has outlived its peer.
-	if err := st.PurgePeerCascade(ctx, peer.ID); err != nil {
-		t.Fatalf("PurgePeerCascade: %v", err)
-	}
-	if anon, _ := st.ReadUser(ctx, peer.ID); anon == nil || anon.IsPeer() {
-		t.Fatalf("purge did not anonymize the peer account; the test would prove nothing")
+	// Retention purges the peer (D16). The gate must not reopen for a transaction that has outlived
+	// its peer.
+	if err := st.PurgePeer(ctx, peer); err != nil {
+		t.Fatalf("PurgePeer: %v", err)
 	}
 	if _, err := k.RateTransaction(ctx, provider.ID, reply.TxID, 1.0, nil); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Fatalf("provider rating a served call after the peer was purged: want ErrUnauthorized, got %v", err)
@@ -2829,12 +2834,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", "", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
-		acct := &kernel.Account{ID: uuid.New().String(), KernelPublicKey: key, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-		if err := st.CreateUser(ctx, acct); err != nil {
-			t.Fatal(err)
-		}
 	}
-	peer, _ := st.ReadAccountByKernelKey(ctx, peerKey)
 	a := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "prt-act", Kind: kernel.KindWasm,
 		Active: true, Visibility: kernel.VisibilityPublic, Source: "wat",
@@ -2845,12 +2845,12 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The peer's call, served here: its receipt is what a remote rating must name.
-	rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key", CounterpartyUserID: peer.ID,
+	rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key", Counterparty: peerKey,
 		CreatedAt: time.Now().UTC()}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := k.RunFederated(ctx, peer.ID, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, peerKey, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -2933,12 +2933,12 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	if err := st.CreateAction(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
-	rec2 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-2", CounterpartyUserID: peer.ID,
+	rec2 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-2", Counterparty: peerKey,
 		CreatedAt: time.Now().UTC()}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec2); err != nil {
 		t.Fatal(err)
 	}
-	reply2, err := k.RunFederated(ctx, peer.ID, fresh, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
+	reply2, err := k.RunFederated(ctx, peerKey, fresh, map[string]any{}, rec2.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -2964,12 +2964,12 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	if err := st.CreateAction(ctx, third); err != nil {
 		t.Fatal(err)
 	}
-	rec3 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-3", CounterpartyUserID: peer.ID,
+	rec3 := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "prt-key-3", Counterparty: peerKey,
 		CreatedAt: time.Now().UTC()}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec3); err != nil {
 		t.Fatal(err)
 	}
-	reply3, err := k.RunFederated(ctx, peer.ID, third, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
+	reply3, err := k.RunFederated(ctx, peerKey, third, map[string]any{}, rec3.ID, kernel.BuyerTerms{})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
@@ -3577,7 +3577,7 @@ func TestAttachBearerGrant(t *testing.T) {
 }
 
 // TestManifestExcludesBearerAction: a delegated_bearer action is never served as a manifest — a
-// remote peer's proxy user can never hold a per-caller token (§8/§13).
+// peer kernel can never hold a per-caller token (§8/§13).
 func TestManifestExcludesBearerAction(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -4071,20 +4071,20 @@ func TestEveryCommittedCallIsObservedOnceByScope(t *testing.T) {
 		m := &recordingMetrics{}
 		k.SetMetrics(m)
 		owner := setupUser(t, st, "local-owner", 0)
-		peer, err := k.EnsureKernelAccount(ctx, testKernelKey(62))
+		peer, err := knownPeer(k, ctx, testKernelKey(62))
 		if err != nil {
 			t.Fatal(err)
 		}
 		action := setupLocalAction(t, st, owner.ID, "local-act", 0)
 		rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "metrics-key",
-			CounterpartyUserID: peer.ID, CreatedAt: time.Now().UTC()}
+			Counterparty: peer, CreatedAt: time.Now().UTC()}
 		if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 			t.Fatal(err)
 		}
-		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: peer.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
+		p := &kernel.Process{ID: uuid.New().String(), OwnerUserID: owner.ID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
 		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: action.ID,
-			CallerUserID: peer.ID, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC()}
-		if err := st.BeginRun(ctx, p, tr, peer.ID, 0, 0, 0); err != nil {
+			CallerKernel: peer, IdempotencyRecordID: &rec.ID, CreatedAt: time.Now().UTC()}
+		if err := st.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 		if err := k.Recover(ctx); err != nil {

@@ -1705,11 +1705,14 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
 	ctx := context.Background()
 
-	owner := setupUser(t, st, "rpme-owner", 0)
 	caller := setupUser(t, st, "rpme-caller", 100)
+	if err := st.UpsertKernel(ctx, testKernelKey(70), "rpme-peer", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	base := int64(50)
 	remoteAct := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID,
-		Name: "rpme-action", Kind: kernel.KindRemoteProxy,
+		ID: uuid.New().String(), OwnerKernel: testKernelKey(70), OwnerUserID: "rpme-owner",
+		OwnerHandle: "rpme-owner", Name: "rpme-action", Kind: kernel.KindRemoteProxy, BasePrice: &base,
 		Active: true, Visibility: kernel.VisibilityPublic, Price: 50,
 		Source:    "https://remote.example.com/v1/federation/call?action=@rpme-owner/rpme-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
@@ -1776,9 +1779,12 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	caller := setupUser(t, st, "fed-caller", 1000) // proxy/counterparty user
+	const peer = "ZmVkLWNhbGxlcg" // the buying kernel
+	if err := st.UpsertKernel(ctx, peer, "fed-caller", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	provider := setupUser(t, st, "provider", 0)
-	owner := setupUser(t, st, "owner", 0)
+	owner := setupUser(t, st, "owner", 1000) // a foreign call runs on the seller's own money (D14)
 
 	inner := &kernel.Action{
 		ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "inner",
@@ -1800,7 +1806,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	exec := &subcallThenFailExec{targetUser: "provider", targetAction: "inner"}
 	k := newTestKernelWithScripts(st, exec)
 
-	reply, err := k.RunFederated(ctx, caller.ID, mustResolve(t, k, ctx, owner.ID, "outer"), map[string]any{}, "", kernel.BuyerTerms{})
+	reply, err := k.RunFederated(ctx, peer, mustResolve(t, k, ctx, owner.ID, "outer"), map[string]any{}, "", kernel.BuyerTerms{})
 	if err == nil {
 		t.Fatal("expected outer call to fail")
 	}
@@ -1990,7 +1996,7 @@ func TestHostTaskCompleteIsTraceConfined(t *testing.T) {
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
 	exec := &taskCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	task, err := k.CreateTask(ctx, victimTrace.ID, target.ID, nil, kernel.Principal{AccountID: mallory.ID})
+	task, err := k.CreateTask(ctx, victimTrace.ID, target.ID, nil, kernel.User(mallory.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2534,7 +2540,7 @@ func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := setupUser(t, st, "vis-local", 0)
-	peer := &kernel.Account{ID: "vis-peer", KernelPublicKey: "cGVlcg"}
+	peer := kernel.Principal{Kernel: "cGVlcg"}
 
 	var ids []string
 	for _, o := range []*kernel.Account{owner, banned} {
@@ -2578,9 +2584,9 @@ func TestVisibilityListingsAgreeWithCanCall(t *testing.T) {
 		}
 		for _, c := range []struct {
 			name   string
-			caller *kernel.Account
+			caller kernel.Principal
 			seen   map[string]bool
-		}{{"anonymous", nil, catalog(kernel.CatalogQuery{})}, {"local user", local, catalog(kernel.CatalogQuery{CallerID: local.ID, Local: true})}, {"peer", peer, listed(abroad)}} {
+		}{{"anonymous", kernel.Principal{}, catalog(kernel.CatalogQuery{})}, {"local user", kernel.User(local.ID), catalog(kernel.CatalogQuery{CallerID: local.ID, Local: true})}, {"peer", peer, listed(abroad)}} {
 			if got, want := c.seen[id], kernel.CanCall(c.caller, a); got != want {
 				t.Errorf("%s: %s/%s active=%v owner-suspended=%v: listed %v, canCall %v",
 					c.name, a.Name, a.Visibility, a.Active, a.OwnerSuspended, got, want)

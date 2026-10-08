@@ -344,13 +344,13 @@ func servedOutcome(k *kernel.Kernel, ctx context.Context, counterparty, key stri
 // may be running: the commit that writes the receipt deletes it, and every replay afterwards is
 // answered by the receipt instead. Insert-or-report is one statement, so two arrivals of one
 // request race in the store and exactly one proceeds.
-func takeExecutionLock(k *kernel.Kernel, ctx context.Context, key, counterpartyID, argsJSON string) (rec *kernel.IdempotencyRecord, inFlight bool, err error) {
+func takeExecutionLock(k *kernel.Kernel, ctx context.Context, key, counterparty, argsJSON string) (rec *kernel.IdempotencyRecord, inFlight bool, err error) {
 	rec = &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     key,
-		CounterpartyUserID: counterpartyID,
-		ArgsJSON:           argsJSON,
-		CreatedAt:          time.Now().UTC(),
+		ID:             uuid.New().String(),
+		IdempotencyKey: key,
+		Counterparty:   counterparty,
+		ArgsJSON:       argsJSON,
+		CreatedAt:      time.Now().UTC(),
 	}
 	held, err := k.InsertPendingIdempotencyRecord(ctx, rec)
 	if err != nil {
@@ -362,68 +362,55 @@ func takeExecutionLock(k *kernel.Kernel, ctx context.Context, key, counterpartyI
 	return rec, false, nil
 }
 
-// taskRequester authenticates a request to a task's holder, completing or declining alike: its timestamp, then its
-// signature, which verify checks against this kernel's own key as the recipient; then the peer's
-// account. A peer with no account comes back nil — what that means is the caller's to decide. A
-// store failure is an error, never an absent peer: that conclusion would leave funds stranded.
-func taskRequester(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr string, verify func(self string) error) (string, *kernel.Account, error) {
+// taskRequester authenticates a request to a task's holder, completing or declining alike: its
+// timestamp, then its signature, which verify checks against this kernel's own key as the recipient.
+func taskRequester(k *kernel.Kernel, ctx context.Context, tsStr string, verify func(self string) error) (string, error) {
 	if err := checkFederationTimestamp(tsStr); err != nil {
-		return "", nil, err
+		return "", err
 	}
 	self := k.SelfKey(ctx)
 	if self == "" {
-		return "", nil, kernel.ErrInvalidState.Wrap("signing key not configured")
+		return "", kernel.ErrInvalidState.Wrap("signing key not configured")
 	}
-	if err := verify(self); err != nil {
-		return "", nil, err
-	}
-	peer, err := k.ReadAccountByKernelKey(ctx, cpPubKey)
-	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
-		return "", nil, err
-	}
-	if peer == nil || peer.KernelPublicKey == "" {
-		return self, nil, nil
-	}
-	return self, peer, nil
+	return self, verify(self)
 }
 
-// taskScope admits a peer's completion or decline only in the task's own scope (P8): a task
-// addressed to one principal on the peer is answered by that principal, whose home kernel signed
-// its id into the request; a task addressed to the peer kernel itself by that kernel — its bare
-// signature, or a user it says is its operator. Neither scope reaches the other, and a read that
-// fails refuses rather than skips. A stranger holds no task here: CreateTask resolves the required
-// caller to an existing account, so an unknown key is the required caller of nothing.
-func taskScope(k *kernel.Kernel, ctx context.Context, peer *kernel.Account, taskID, forUserID string, userSuperuser bool) error {
-	if peer == nil {
-		return kernel.ErrUnauthorized.Wrap("unknown peer")
-	}
-	remoteID, err := k.TaskRemoteRequiredCaller(ctx, taskID)
+// taskScope admits a peer's completion or decline only in the task's own scope (P8), and returns
+// the principal it is addressed to: a task addressed to one user on the peer is answered by that
+// user, whose home kernel signed its id into the request; a task addressed to the peer kernel itself
+// by that kernel — its bare signature, or a user it says is its operator. Neither scope reaches the
+// other, a task addressed anywhere else is no business of this peer's, and a read that fails
+// refuses rather than skips.
+func taskScope(k *kernel.Kernel, ctx context.Context, cpPubKey, taskID, forUserID string, userSuperuser bool) (kernel.Principal, error) {
+	rc, err := k.TaskRequiredCaller(ctx, taskID)
 	if err != nil {
-		return err
+		return kernel.Principal{}, err
 	}
 	switch {
-	case forUserID == "" && remoteID != nil:
-		return kernel.ErrUnauthorized.Wrap("this task is addressed to a user of your kernel; answer it as that user")
-	case forUserID != "" && remoteID != nil && forUserID != *remoteID:
-		return kernel.ErrUnauthorized.Wrap("the signed user is not the task's required caller")
-	case forUserID != "" && remoteID == nil && !userSuperuser:
-		return kernel.ErrUnauthorized.Wrap("this task is addressed to your kernel; only its operator answers it")
+	case rc.Kernel != cpPubKey:
+		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("only the task's required caller may complete or decline it")
+	case forUserID == "" && rc.UserID != "":
+		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("this task is addressed to a user of your kernel; answer it as that user")
+	case forUserID != "" && rc.UserID != "" && forUserID != rc.UserID:
+		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("the signed user is not the task's required caller")
+	case forUserID != "" && rc.UserID == "" && !userSuperuser:
+		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("this task is addressed to your kernel; only its operator answers it")
 	}
-	return nil
+	return rc, nil
 }
 
 // handleFederationTaskCancel declines a waiting task on behalf of the requesting peer (P8).
 func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, taskID, sigStr, forUserID string, userSuperuser bool) (int, map[string]any, error) {
-	_, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
+	if _, err := taskRequester(k, ctx, tsStr, func(self string) error {
 		return k.Network().VerifyTaskSignature("cancel", taskID, cpPubKey, self, "", tsStr, "", forUserID, userSuperuser, sigStr)
-	})
+	}); err != nil {
+		return 0, nil, err
+	}
+	scope, err := taskScope(k, ctx, cpPubKey, taskID, forUserID, userSuperuser)
 	if err != nil {
 		return 0, nil, err
 	}
-	if err := taskScope(k, ctx, peer, taskID, forUserID, userSuperuser); err != nil {
-		return 0, nil, err
-	}
-	if err := k.CancelTaskHeld(ctx, peer.ID, taskID); err != nil {
+	if err := k.CancelTaskHeld(ctx, scope, taskID); err != nil {
 		return 0, nil, err
 	}
 	return http.StatusOK, map[string]any{"task_id": taskID}, nil
@@ -433,13 +420,14 @@ func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpPubKey,
 // task's price was parked here at creation, so failures are plain typed errors: there is no remote
 // trace awaiting a signed rejection.
 func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, taskID, sigStr string, rawInput []byte, forUserID string, userSuperuser bool) (int, map[string]any, error) {
-	self, peer, err := taskRequester(k, ctx, cpPubKey, tsStr, func(self string) error {
+	self, err := taskRequester(k, ctx, tsStr, func(self string) error {
 		return k.Network().VerifyTaskSignature("complete", taskID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), forUserID, userSuperuser, sigStr)
 	})
 	if err != nil {
 		return 0, nil, err
 	}
-	if err := taskScope(k, ctx, peer, taskID, forUserID, userSuperuser); err != nil {
+	scope, err := taskScope(k, ctx, cpPubKey, taskID, forUserID, userSuperuser)
+	if err != nil {
 		return 0, nil, err
 	}
 
@@ -454,7 +442,7 @@ func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
 		return replayTaskOutcome(receipt, result, taskID)
 	}
-	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, peer.ID, string(rawInput))
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpPubKey, string(rawInput))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -466,7 +454,7 @@ func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	// completion — here, or later via the remote-dispatch retry loop — releases the lock atomically
 	// with the transaction and the receipt that replaces it (§5, §13). The service layer therefore
 	// disposes of the lock only in the cases where NO commit will ever happen.
-	reply, err := k.CompleteTaskFederated(ctx, peer.ID, taskID, rawInput, rec.ID, forUserID, userSuperuser)
+	reply, err := k.CompleteTaskFederated(ctx, scope, taskID, rawInput, rec.ID, forUserID, userSuperuser)
 	if err != nil {
 		// Disposition follows CompleteTask's outcome contract (§10) — never a re-read of the task's
 		// status, which cannot distinguish these three cases:
@@ -551,9 +539,9 @@ func duplicateInFlight() (int, map[string]any, error) {
 // against an answer that will never come. It commits nothing and holds no lock — a refusal is
 // deterministic, so a retry recomputes it — and every refusal reads the same to a stranger, which
 // is what keeps a catalogue it cannot see from being mapped by asking (U48, P4).
-func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, counterpartyID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
+func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, callerUserID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
 	code, msg := wireError(cause)
-	receipt, err := k.CreateSignedRejectionReceipt(counterpartyID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy)
+	receipt, err := k.CreateSignedRejectionReceipt(callerUserID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy)
 	if err != nil {
 		return 0, nil, cause
 	}
@@ -582,18 +570,12 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	}, cpPubKey, ownKey, tsStr, argsHash, sigStr); err != nil {
 		return 0, nil, err
 	}
-	// Resolve or lazily provision the caller's billing account (§13, handshake-free): a
-	// signature-valid caller with no account here gets a zero-balance one, so a price-0 call
-	// succeeds and a priced call hits the normal insufficient-funds rejection the provider clears
-	// with a deposit. A suspended counterparty needs no gate here — RunFederated rejects it via
-	// requireActiveUser and the pre-execution branch signs a zero-charge rejection receipt.
-	// No petname is bound here: a stranger calling us is not our act of naming (§13 lifecycle), so
-	// an inbound call can never seed a local name from a self-asserted nickname.
-	counterparty, err := k.ReadAccountByKernelKey(ctx, cpPubKey)
-	if err != nil || counterparty == nil {
-		if counterparty, err = k.EnsureKernelAccount(ctx, cpPubKey); err != nil {
-			return 0, nil, err
-		}
+	// A signature-valid caller is admitted without a handshake (P4): its kernel is made known here.
+	// A suspended counterparty needs no gate here — RunFederated refuses it and the pre-execution
+	// branch signs a zero-charge rejection receipt. No petname is bound: a stranger calling us is
+	// not our act of naming (D15), so an inbound call never seeds a local name from a nickname.
+	if err := k.KnowKernel(ctx, cpPubKey); err != nil {
+		return 0, nil, err
 	}
 
 	buyer.IdempotencyKey = idempotencyKey
@@ -614,7 +596,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// one would record a readable name with no identity beneath it, so it is refused where the
 	// request is admitted, with a signed rejection like every other pre-execution refusal.
 	if (buyer.CallerUserID == "") != (buyer.CallerHandle == "") {
-		return signedRejection(k, ctx, cpPubKey, counterparty.ID, actionParam, rawBody, idempotencyKey,
+		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
 			kernel.ErrInvalidInput.Wrap("caller names a handle without an id, or an id without a handle"), false)
 	}
 
@@ -627,7 +609,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// takes no lock, so a flood of them leaves nothing behind.
 	action, err := k.ReadAction(ctx, actionParam)
 	if err != nil || !k.ServedAbroad(action) {
-		return signedRejection(k, ctx, cpPubKey, counterparty.ID, actionParam, rawBody, idempotencyKey,
+		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
 			kernel.ErrNotFound.Wrap("action not found"), false)
 	}
 
@@ -635,7 +617,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// refused before execution with a signed refresh_proxy rejection so the caller re-resolves.
 	if expectedContractHash != "" {
 		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
-			return signedRejection(k, ctx, cpPubKey, counterparty.ID, action.ID, rawBody, idempotencyKey,
+			return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, action.ID, rawBody, idempotencyKey,
 				kernel.ErrInvalidState.Wrap("contract changed"), true)
 		}
 	}
@@ -643,7 +625,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// The lock is taken only now, when execution may actually begin, and released by the commit
 	// that writes the receipt. Whichever commit finally settles — here, the retry loop, crash
 	// recovery — carries the record id, so the release is atomic with the outcome (§5, §13).
-	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, counterparty.ID, string(rawBody))
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpPubKey, string(rawBody))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -651,7 +633,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		return duplicateInFlight()
 	}
 
-	reply, callErr := k.RunFederated(ctx, counterparty.ID, action, args, rec.ID, buyer)
+	reply, callErr := k.RunFederated(ctx, cpPubKey, action, args, rec.ID, buyer)
 	if callErr != nil {
 		wireCode, wireMsg := wireError(callErr)
 		// A committed transaction (reply carries a receipt) means the call settled — possibly
@@ -672,7 +654,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		// lock and sign a zero-charge rejection so the caller settles at once. Not a contract-hash
 		// fault — re-resolving would not change the outcome — so refresh_proxy is false.
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
-		return signedRejection(k, ctx, cpPubKey, counterparty.ID, action.ID, rawBody, idempotencyKey, callErr, false)
+		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, action.ID, rawBody, idempotencyKey, callErr, false)
 	}
 
 	var receipt *kernel.Receipt

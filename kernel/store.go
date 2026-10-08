@@ -260,12 +260,8 @@ type Store interface {
 
 	CreateUser(ctx context.Context, u *Account) error
 	ReadUser(ctx context.Context, id string) (*Account, error)
-	// ReadUserByHandle resolves the user namespace. A kernel account holds no handle, so it is
-	// unreachable here by construction (§13).
+	// ReadUserByHandle resolves the user namespace (D15).
 	ReadUserByHandle(ctx context.Context, handle string) (*Account, error)
-	// ReadAccountByKernelKey returns the account settling for a remote kernel, or ErrNotFound.
-	ReadAccountByKernelKey(ctx context.Context, publicKey string) (*Account, error)
-	// ListUsers returns local user accounts; kernel accounts are excluded (§14).
 	ListUsers(ctx context.Context, limit, offset int) ([]*Account, error)
 	SuspendUser(ctx context.Context, id string) error
 	UnsuspendUser(ctx context.Context, id string) error
@@ -277,7 +273,15 @@ type Store interface {
 	CreateAction(ctx context.Context, a *Action) error
 	ReadAction(ctx context.Context, id string) (*Action, error)
 	ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*Action, error)
-	ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*Action, error)
+	// ReadProxyByName reads the cached copy of a peer's action by the peer's key, its owner's handle
+	// and its name (D13).
+	ReadProxyByName(ctx context.Context, peerKey, handle, name string) (*Action, error)
+	// RetireProxy soft-deletes the live cached copy of a peer's action under one owner and name: the
+	// action the peer now serves there is another, which supersedes it (D13).
+	RetireProxy(ctx context.Context, peerKey, ownerID, name string) error
+	// ReadProxyByRemoteID reads the cached copy of a peer's action by the peer's key and the action's
+	// id there, which is unique (D13).
+	ReadProxyByRemoteID(ctx context.Context, peerKey, remoteActionID string) (*Action, error)
 	UpdateAction(ctx context.Context, a *Action) error
 	// UpdateActionLifecycle atomically updates the action record and, as flagged, zeros its stats
 	// row and deletes its delegated grants. One update can need both effects at once — an active
@@ -369,7 +373,7 @@ type Store interface {
 	// ---- Idempotency ----
 
 	// ReadIdempotencyRecord returns the lock held for key + counterparty, or ErrNotFound.
-	ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*IdempotencyRecord, error)
+	ReadIdempotencyRecord(ctx context.Context, key, counterparty string) (*IdempotencyRecord, error)
 	// ReadIdempotencyRecordByID reads the lock a trace was admitted under, for recovery.
 	ReadIdempotencyRecordByID(ctx context.Context, id string) (*IdempotencyRecord, error)
 	// InsertPendingIdempotencyRecord takes the lock for one request, or returns the record already
@@ -453,8 +457,8 @@ type Store interface {
 	//
 	// The call's budget pays the obligation and the import fee exactly, whatever the draw said: the
 	// refund (q − obligation − importFee) returns to the caller wallet and importFee to
-	// feeRecipientID. The obligation itself does not go to the peer's row — a peer row holds no money
-	// — it returns to the caller C, whose own stake then carries the draw: on a losing ticket C keeps
+	// feeRecipientID. The obligation itself goes to no peer — a peer holds no account here — but
+	// returns to the caller C, whose own stake then carries the draw: on a losing ticket C keeps
 	// it, and on a winning one `payout` reserves the face value from C into the operator's hold for
 	// the rail to send. releaseStake is what C locked at dispatch.
 	//
@@ -659,11 +663,12 @@ type Store interface {
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.
 	BindPetname(ctx context.Context, publicKey, desired string, exact bool) (string, error)
-	// SuspendKernelAccount provisions (when absent) and suspends a kernel's account in one
-	// transaction (§13), so an inbound signed call cannot slip between the two writes.
-	SuspendKernelAccount(ctx context.Context, publicKey, newAccountID string, now time.Time) error
-	// ListKernels returns the whole `admin peers` roster (§14) — every known kernel with its account
-	// state when one exists — from one kernels LEFT JOIN accounts, excluding selfKey.
+	// SetKernelSuspended suspends a kernel, making its row in the same statement when it has none, so
+	// an inbound call cannot slip between the two (D15); or lifts a suspension, ErrNotFound for a
+	// kernel nobody here knows.
+	SetKernelSuspended(ctx context.Context, publicKey string, suspend bool, now time.Time) error
+	// ListKernels returns the whole `admin peers` roster (§14) — every known kernel, whether a
+	// transaction here names it — from one query, excluding selfKey.
 	ListKernels(ctx context.Context, selfKey string, includeSuspended bool, limit, offset int) ([]*RemoteKernelView, error)
 	// ReadKernel returns the kernel row for a public key, or nil if unknown.
 	ReadKernel(ctx context.Context, publicKey string) (*RemoteKernel, error)
@@ -701,23 +706,22 @@ type Store interface {
 
 	// ---- Peer lifecycle ----
 
-	// ListPurgeablePeers returns the IDs of peer users (kernel_public_key set) that are idle past
-	// cutoff at zero balance (§13 Retention): available=0, locked=0, last activity (max of
-	// created_at, latest transaction naming them, latest deposit/withdrawal, latest gossip
-	// mention) before cutoff, and no waiting/running task addressed to them or to their actions.
+	// ListPurgeablePeers returns the keys of counterparties idle past cutoff (D16 Retention): last
+	// activity (the latest transaction naming them, the latest gossip mention) at or before cutoff,
+	// not suspended, and nothing unresolved either way — no open task addressed to them or held by
+	// them, no call of theirs unrevealed or unpaid, none of ours to them unanswered or untold.
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
-	// PurgePeerCascade atomically deletes a purged peer's derived data — its proxy actions,
-	// their stats, its tasks, its discovered_kernels row, its discovery_docs, and its evidence
-	// rows (as issuer and as subject) — and forgets the peer identity by clearing kernel_public_key on the
-	// user row. The immutable transaction/receipt ledger is preserved (party ids carry no FK),
-	// keeping local counterparties' credits reconstructible (§11); the anonymized user row stays as
-	// a ledger anchor so old history remains legible.
-	PurgePeerCascade(ctx context.Context, userID string) error
+	// PurgePeer atomically deletes a purged peer's derived data — its proxy actions, their stats, its
+	// tasks and mailbox entries, its discovery_docs, and its evidence rows (as issuer and as subject) —
+	// and forgets its naming state, keeping its kernel row marked forgotten with its key and proven
+	// address: the records that name it keep naming it, and a payment from it that lands late is
+	// still recognised (D23). The immutable ledger is untouched (G3).
+	PurgePeer(ctx context.Context, publicKey string) error
 	// PurgeStaleDiscovery evicts the regenerable discovery cache of kernels learned only from the
-	// directory — a discovered_kernels row (with its discovery_docs, FTS mirror, and evidence) whose
-	// updated_at is at or before cutoff and which is NOT backed by a peer user row (§13 Retention).
-	// Peer-backed kernels are governed by PurgePeerCascade instead, so this never touches a kernel
-	// this one trades with, and never this kernel's own row (D15). Returns the number evicted.
+	// directory — a kernel row (with its discovery_docs, FTS mirror, and evidence) whose updated_at is
+	// at or before cutoff and which no record here names (D16 Retention). Counterparties are governed
+	// by PurgePeer instead, so this never touches a kernel this one trades with, a suspended one, or
+	// this kernel's own row (D15). Returns the number evicted.
 	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error)
 	// DeactivateImportedIfHash deactivates a remote_proxy action only while its contract hash still
 	// matches expectedHash (§13 rule C: hash-conditional so a stale dispatch's late rejection cannot

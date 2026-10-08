@@ -24,7 +24,7 @@ import (
 // promoted one to render.) Resolution is server-side, so HTTP and CLI stay in parity (§14).
 
 // taskWithAction enriches a task with its action's address, its creator's, and the parties as
-// addresses. waiting_on_peer flags a waiting task whose required caller is a peer's account — work
+// addresses. waiting_on_peer flags a waiting task whose required caller is on a peer — work
 // parked on someone who may be offline (§13); its age is the task's created_at.
 type taskWithAction struct {
 	kernel.TaskNotice
@@ -95,7 +95,6 @@ type actionResp struct {
 	*kernel.Action
 	OwnerUserID   string    `json:"owner_user_id,omitempty"`
 	OwnerHandle   string    `json:"owner_handle,omitempty"`
-	RemoteOwnerID string    `json:"remote_owner_id,omitempty"` // a proxy's match key (D13), not a read
 	ActionRef     string    `json:"action"`
 	HTTP          *httpView `json:"http,omitempty"`
 	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
@@ -117,12 +116,6 @@ type httpView struct {
 
 // ---- Enrichment helpers ----
 
-// isPeer reports whether an account stands for a peer kernel.
-func isPeer(k *kernel.Kernel, ctx context.Context, id string) bool {
-	u, err := k.ReadUser(ctx, id)
-	return err == nil && u != nil && u.KernelPublicKey != ""
-}
-
 // enrichTask renders a mailbox entry by address. The creating action carries the task's meaning —
 // the target can be a generic sink (sys/message parks a sys/sink task) — and the owner is the payer
 // of the transaction it settles into, or the kernel holding it, which withholds both (P8).
@@ -134,16 +127,16 @@ func enrichTask(k *kernel.Kernel, ctx context.Context, e *kernel.TaskEntry, name
 		v.Action, v.CreatedBy = names.Action(ctx, action), k.ActionAddressByID(ctx, e.CreatedByID)
 	}
 	if e.OwnerUserID != "" {
-		v.Owner = names.Address(ctx, kernel.Principal{AccountID: e.OwnerUserID})
+		v.Owner = names.Address(ctx, kernel.User(e.OwnerUserID))
 	}
-	v.WaitingOnPeer = e.Status == kernel.TaskWaiting && isPeer(k, ctx, e.RequiredCaller.AccountID)
+	v.WaitingOnPeer = e.Status == kernel.TaskWaiting && !e.RequiredCaller.Local()
 	return v
 }
 
 // enrichProcess names the owner by address and flags a process awaiting a remote receipt, with the
 // earliest such call's start time from the awaiting-receipt map (kernel.AwaitingReceiptSince).
 func enrichProcess(ctx context.Context, p *kernel.Process, since map[string]time.Time, names *kernel.Names) *processView {
-	v := &processView{Process: p, Owner: names.Address(ctx, kernel.Principal{AccountID: p.OwnerUserID})}
+	v := &processView{Process: p, Owner: names.Address(ctx, kernel.User(p.OwnerUserID))}
 	if t, ok := since[p.ID]; ok {
 		tt := t
 		v.AwaitingReceipt = true
@@ -187,7 +180,7 @@ type accountView struct {
 }
 
 func accountView1(ctx context.Context, names *kernel.Names, a *kernel.Account) accountView {
-	return accountView{Account: a, Address: names.Address(ctx, kernel.Principal{AccountID: a.ID})}
+	return accountView{Account: a, Address: names.Address(ctx, kernel.User(a.ID))}
 }
 
 func accountViews(ctx context.Context, names *kernel.Names, as []*kernel.Account) []accountView {
@@ -210,7 +203,7 @@ func railTransferViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Rai
 	names := k.NewNames()
 	out := make([]*railTransferView, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, &railTransferView{RailTransfer: r, Party: names.Address(ctx, kernel.Principal{AccountID: r.Party})})
+		out = append(out, &railTransferView{RailTransfer: r, Party: names.Address(ctx, kernel.User(r.Party))})
 	}
 	return out
 }
@@ -233,35 +226,27 @@ func owedViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Owed) []*ow
 	names := k.NewNames()
 	out := make([]*owedView, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, &owedView{Owed: r, Peer: names.Address(ctx, kernel.Principal{AccountID: r.PeerUserID})})
+		out = append(out, &owedView{Owed: r, Peer: names.Address(ctx, kernel.Principal{Kernel: r.PeerKey})})
 	}
 	return out
 }
 
 func enrichLedger(ctx context.Context, e *kernel.LedgerEntry, names *kernel.Names) *ledgerView {
-	one := func(id string) string { return names.Address(ctx, kernel.Principal{AccountID: id}) }
+	one := func(id string) string { return names.Address(ctx, kernel.User(id)) }
 	return &ledgerView{LedgerEntry: e, Operator: one(e.OperatorUserID), From: one(e.FromUserID), To: one(e.ToUserID)}
 }
 
-// enrichTx names a transaction's three parties (payer, caller, payee) and its action. The action's
-// address is the target's plus the stored name: a proxy transaction keeps the folded name (D4), so
-// the owner is split out of it rather than re-read from a row that may since be gone.
+// enrichTx names a transaction's three parties (payer, caller, payee) and its action, whose address
+// is the target's plus the stored name — read from the transaction alone, since the action row may
+// since be gone (D4).
 func enrichTx(ctx context.Context, tv *kernel.TransactionView, names *kernel.Names) *txView {
-	name := tv.ActionName
-	target := tv.Target()
-	if tv.RemoteActionID != "" {
-		owner, rest := kernel.SplitProxyName(name)
-		if target.Handle == "" {
-			target.Handle = owner
-		}
-		name = rest
-	}
+	target := names.Address(ctx, tv.Target())
 	return &txView{
 		TransactionView: tv,
-		Owner:           names.Address(ctx, kernel.Principal{AccountID: tv.OwnerUserID}),
+		Owner:           names.Address(ctx, kernel.User(tv.OwnerUserID)),
 		Caller:          names.Address(ctx, tv.Caller()),
-		Target:          names.Address(ctx, target),
-		Action:          names.Address(ctx, target) + "/" + name,
+		Target:          target,
+		Action:          target + "/" + tv.ActionName,
 	}
 }
 
@@ -313,7 +298,7 @@ func parseParams(specs []string) ([]kernel.HTTPParam, error) {
 func userView(ctx context.Context, k *kernel.Kernel, u *kernel.Account) map[string]any {
 	v := map[string]any{
 		"id":          u.ID,
-		"address":     k.Address(ctx, kernel.Principal{AccountID: u.ID}),
+		"address":     k.Address(ctx, kernel.User(u.ID)),
 		"description": u.Description,
 		"available":   u.Available,
 		"locked":      u.Locked,
@@ -336,21 +321,19 @@ func resolveTarget(k *kernel.Kernel, ctx context.Context, ident, noun string) (*
 		return nil, "", kernel.ErrInvalidInput.Wrapf("name the %s", noun)
 	}
 	if noun == "user" {
-		// A user is named by address, so a key never resolves here however well it would; a purged
-		// account's tombstone resolves but names no live target (§13 Retention).
+		// A user is named by address, so a key never resolves here however well it would.
 		acct, err := k.ResolveLocalPrincipal(ctx, ident)
 		if err != nil {
 			return nil, "", err
 		}
 		return acct, "", nil
 	}
-	// A peer is named by its public key or the petname this kernel gave it; its account exists
-	// only once money has been involved, so a nil one is ordinary (D15).
+	// A peer is named by its public key or the petname this kernel gave it (D15).
 	kr, err := k.ResolveKernel(ctx, ident)
 	if err != nil || kr.Local {
 		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or public key", ident)
 	}
-	return kr.Account, kr.Key, nil
+	return nil, kr.Key, nil
 }
 
 // ---- User operations ----

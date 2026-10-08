@@ -99,8 +99,6 @@ flow_rail_settlement() {
     # mp 10 → sr 11 → q 12. With no lottery the obligation of 11 is paid exactly, so the caller is
     # out the whole all-in price less the import fee its own kernel keeps.
     assert_eq "rail_settlement.charged_exactly" 11 "$(( before - $(balance_of "$FED_DBL" "$FED_HL") ))"
-    # The obligation is a ticket, not a balance: a peer row holds nothing.
-    assert_eq "rail_settlement.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin peer show -- "$lkey")" available)"
 
     # The buyer pays and then tells the seller which payment settles it. On a world with no
     # addresses that signed reveal IS the payment, so the seller's books close against it with

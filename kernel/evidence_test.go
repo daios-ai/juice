@@ -504,19 +504,19 @@ func TestABuyerSeesTheEvidenceAboutARemoteAction(t *testing.T) {
 
 	k := newTestKernel(st)
 	setupSys(t, k, st)
-	provider, err := k.EnsureKernelAccount(ctx, providerKey)
+	provider, err := knownPeer(k, ctx, providerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: remoteAction, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: remoteAction, OwnerID: "provider-id", OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: time.Now().UTC(),
 	}
 	m.Signature, _ = testNet.SignManifest(providerPriv, &m)
-	proxy, err := k.ImportPeerAction(ctx, provider.ID, m)
+	proxy, err := k.ImportPeerAction(ctx, provider, m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,19 +704,19 @@ func TestTheRatingsSurfaceAndTheActionRecordAgree(t *testing.T) {
 	const buyer, remoteAction = "BUYER", "remote-1"
 
 	setupSys(t, k, st)
-	provider, err := k.EnsureKernelAccount(ctx, providerKey)
+	provider, err := knownPeer(k, ctx, providerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: remoteAction, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: remoteAction, OwnerID: "provider-id", OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: now,
 	}
 	m.Signature, _ = testNet.SignManifest(providerPriv, &m)
-	proxy, err := k.ImportPeerAction(ctx, provider.ID, m)
+	proxy, err := k.ImportPeerAction(ctx, provider, m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,19 +763,19 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 	const buyer, elsewhere, action = "BUYER", "OTHER-KERNEL", "act-1"
 
 	setupSys(t, k, st)
-	provider, err := k.EnsureKernelAccount(ctx, providerKey)
+	provider, err := knownPeer(k, ctx, providerKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bindPetnameForTest(t, k, ctx, providerKey, "provider")
 	m := kernel.ActionManifest{
-		ActionID: action, OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
+		ActionID: action, OwnerID: "provider-id", OwnerHandle: "provider", Title: "Test action", Name: "translate", Kind: kernel.KindHTTP,
 		Price: 10, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "d",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		UpdatedAt: now,
 	}
 	m.Signature, _ = testNet.SignManifest(providerPriv, &m)
-	proxy, err := k.ImportPeerAction(ctx, provider.ID, m)
+	proxy, err := k.ImportPeerAction(ctx, provider, m)
 	if err != nil {
 		t.Fatal(err)
 	}

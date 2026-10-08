@@ -584,14 +584,14 @@ func TestSolvencyNamesABrokenRecord(t *testing.T) {
 	}
 }
 
-// peerWithAddress provisions a peer account whose kernel has proved it is paid from addr.
-func peerWithAddress(t *testing.T, k *kernel.Kernel, st kernel.Store, key, addr string) *kernel.Account {
+// peerWithAddress makes known a peer that has proved it is paid from addr, and returns its key.
+func peerWithAddress(t *testing.T, k *kernel.Kernel, st kernel.Store, key, addr string) string {
 	t.Helper()
 	ctx := context.Background()
 	if err := st.UpsertKernel(ctx, key, "peer", "", addr, "proof", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	peer, err := k.EnsureKernelAccount(ctx, key)
+	peer, err := knownPeer(k, ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,17 +601,17 @@ func peerWithAddress(t *testing.T, k *kernel.Kernel, st kernel.Store, key, addr 
 // announcedOwed puts a seller-side obligation in the state the buyer has said it paid, so a test can
 // drive the half of settlement that waits for the money to actually arrive. It goes through the same
 // admission and commit the kernel uses, because those are what the obligation is read off.
-func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, txHash string, amount int64) *kernel.Owed {
+func announcedOwed(t *testing.T, st kernel.Store, id, peer, sellerID, from, txHash string, amount int64) *kernel.Owed {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, CounterpartyUserID: peerID, CreatedAt: now}
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: id, Counterparty: peer, CreatedAt: now}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
 	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: sellerID, Status: kernel.ProcessOpen, CreatedAt: now}
 	tr := &kernel.Trace{ID: uuid.NewString(), ProcessID: p.ID, ActionOwnerID: sellerID, ActionID: "a",
-		CallerUserID: peerID, IdempotencyRecordID: &rec.ID, OwedBlockchainAddress: from, CreatedAt: now,
+		CallerKernel: peer, IdempotencyRecordID: &rec.ID, OwedBlockchainAddress: from, CreatedAt: now,
 		DispatchJSON: kernel.ServingRecordForTest(0, 0, amount, "0a0b", "cm")}
 	// The execution itself is free here so the seller's balance stays what each test set it to; the
 	// obligation is read off the receipt's charge, which is what the buyer owes.
@@ -619,7 +619,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 		t.Fatal(err)
 	}
 	tx := &kernel.Transaction{ID: uuid.NewString(), ProcessID: p.ID, TraceID: tr.ID, OwnerUserID: sellerID,
-		CallerUserID: peerID, TargetUserID: sellerID, ActionID: "a", Status: kernel.TxSuccess,
+		CallerKernel: peer, TargetUserID: sellerID, ActionID: "a", Status: kernel.TxSuccess,
 		StartedAt: now, EndedAt: now}
 	receipt := &kernel.Receipt{ID: uuid.NewString(), IssuerUserID: sellerID, TxID: tx.ID, TraceID: tr.ID, IdempotencyKey: id, Counterparty: "peer",
 		ActionID: "a", Status: kernel.TxSuccess, Charge: amount, Nonce: "0a0b", CreatedAt: now}
@@ -629,7 +629,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peerID, sellerID, from, tx
 	if err := st.ApplyReveal(ctx, "", tr.ID, amount, txHash, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := st.ReadOwed(ctx, id, peerID)
+	got, _ := st.ReadOwed(ctx, id, peer)
 	return got
 }
 
@@ -641,7 +641,7 @@ func TestASellersTransactionNamesItsObligation(t *testing.T) {
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
-	announcedOwed(t, st, "tk-view", peer.ID, seller.ID, "0xdebtor", "0xpaid-view", 40)
+	announcedOwed(t, st, "tk-view", peer, seller.ID, "0xdebtor", "0xpaid-view", 40)
 
 	txs, err := st.ListTransactions(ctx, kernel.TxFilter{PartyUserID: seller.ID})
 	if err != nil || len(txs) == 0 {
@@ -654,7 +654,7 @@ func TestASellersTransactionNamesItsObligation(t *testing.T) {
 	if v.TicketID != "tk-view" {
 		t.Fatalf("the seller must name its obligation: got %q, want tk-view", v.TicketID)
 	}
-	if again, _ := st.ReadOwed(ctx, v.TicketID, peer.ID); again == nil {
+	if again, _ := st.ReadOwed(ctx, v.TicketID, peer); again == nil {
 		t.Error("the name the transaction gives must be the name the obligation answers to")
 	}
 }
@@ -666,24 +666,21 @@ func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
-	announcedOwed(t, st, "tk-1", peer.ID, seller.ID, "0xdebtor", "0xpaid", 40)
+	announcedOwed(t, st, "tk-1", peer, seller.ID, "0xdebtor", "0xpaid", 40)
 
 	fr.deposits = []kernel.RailDeposit{{Key: "rail:0xpaid:0", TxHash: "0xpaid", From: "0xstranger", Amount: 40, Block: 1}}
 	k.RailPass(ctx)
-	if got, _ := st.ReadOwed(ctx, "tk-1", peer.ID); got.Status != kernel.OwedAnnounced {
+	if got, _ := st.ReadOwed(ctx, "tk-1", peer); got.Status != kernel.OwedAnnounced {
 		t.Fatalf("a stranger's payment closed the obligation: %s", got.Status)
 	}
 
 	fr.deposits = append(fr.deposits, kernel.RailDeposit{Key: "rail:0xpaid:1", TxHash: "0xpaid", From: "0xdebtor", Amount: 40, Block: 1})
 	k.RailPass(ctx)
-	if got, _ := st.ReadOwed(ctx, "tk-1", peer.ID); got.Status != kernel.OwedCredited {
+	if got, _ := st.ReadOwed(ctx, "tk-1", peer); got.Status != kernel.OwedCredited {
 		t.Fatalf("the buyer's own payment must close the obligation: %s", got.Status)
 	}
 	if avail, _ := balanceOf(t, st, seller.ID); avail != 40 {
 		t.Errorf("the seller must be credited what it was owed: %d", avail)
-	}
-	if avail, _ := balanceOf(t, st, peer.ID); avail != 0 {
-		t.Errorf("a peer row holds no money: %d", avail)
 	}
 	_ = sys
 }
@@ -868,13 +865,13 @@ func TestTicketMatchesWithinAMultiPaymentTransaction(t *testing.T) {
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
-	announcedOwed(t, st, "tk-3", peer.ID, seller.ID, "0xdebtor", "0xshared", 40)
+	announcedOwed(t, st, "tk-3", peer, seller.ID, "0xdebtor", "0xshared", 40)
 	fr.deposits = []kernel.RailDeposit{
 		{Key: "rail:0xshared:0", TxHash: "0xshared", From: "0xdebtor", Amount: 40, Block: 1},
 		{Key: "rail:0xshared:1", TxHash: "0xshared", From: "0xother", Amount: 40, Block: 1},
 	}
 	k.RailPass(ctx)
-	if got, _ := st.ReadOwed(ctx, "tk-3", peer.ID); got.Status != kernel.OwedCredited {
+	if got, _ := st.ReadOwed(ctx, "tk-3", peer); got.Status != kernel.OwedCredited {
 		t.Fatalf("the buyer's payment shares a transaction with another and must still close it: %s", got.Status)
 	}
 	if other, _ := st.ReadRailTransfer(ctx, "rail:0xshared:1"); other.Status != kernel.RailStatusHeld {
@@ -927,7 +924,7 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 	buyer := setupUser(t, st, "buyer", 0)
 
 	// A draw that lost: no payment was made, and the seller still has to be told so.
-	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-lost", "aa")
+	trace := dispatchedCall(t, st, buyer.ID, peer, "tk-lost", "aa")
 
 	k.RailPass(ctx)
 	k.RevealPending(ctx)
@@ -956,7 +953,7 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 // secret it committed to, and the transaction naming the peer it bought from and what it owes. Those
 // two records are the whole buy-side memory of a draw — there is no separate obligation row on this
 // side — and the transaction's net is the obligation, which is what makes the call revealable.
-func dispatchedCall(t *testing.T, st kernel.Store, buyerID, peerID, key, secret string) string {
+func dispatchedCall(t *testing.T, st kernel.Store, buyerID, peerKey, key, secret string) string {
 	t.Helper()
 	ctx := context.Background()
 	p := &kernel.Process{ID: uuid.NewString(), OwnerUserID: buyerID, Status: kernel.ProcessOpen, CreatedAt: time.Now().UTC()}
@@ -969,9 +966,9 @@ func dispatchedCall(t *testing.T, st kernel.Store, buyerID, peerID, key, secret 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := st.(*store.DB).ExecForTest(ctx,
 		`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,
-		   target_user_id,action_id,status,gross,net,started_at,ended_at)
-		 VALUES (?,?,?,'',?,?,?,'a','success',11,11,?,?)`,
-		uuid.NewString(), p.ID, tr.ID, buyerID, buyerID, peerID, now, now); err != nil {
+		   target_kernel,target_user_id,action_id,status,gross,net,started_at,ended_at)
+		 VALUES (?,?,?,'',?,?,?,'','a','success',11,11,?,?)`,
+		uuid.NewString(), p.ID, tr.ID, buyerID, buyerID, peerKey, now, now); err != nil {
 		t.Fatal(err)
 	}
 	return tr.ID
@@ -1006,7 +1003,7 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 100, "", "earn"); err != nil {
 		t.Fatal(err)
 	}
-	dispatchedCall(t, st, buyer.ID, peer.ID, "tk-won", "aa")
+	dispatchedCall(t, st, buyer.ID, peer, "tk-won", "aa")
 	pay := &kernel.RailTransfer{ID: "tk-won", Kind: kernel.RailKindObligation, Party: buyer.ID,
 		Destination: "0xcreditor", Amount: 100, Credit: 100,
 		Status: kernel.RailStatusPending, CreatedAt: time.Now().UTC()}
@@ -1098,7 +1095,7 @@ func TestTheCreditLimitCountsTheWholeObligation(t *testing.T) {
 	if err := st.UpdateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", kernel.BuyerTerms{Commitment: "cm"}); err != nil {
+	if _, err := k.RunFederated(ctx, peer, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", kernel.BuyerTerms{Commitment: "cm"}); err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}
 	// The call charged 100 and the seller's own markup adds 5, so the buyer owes 105 and that is
@@ -1182,7 +1179,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := func(terms kernel.BuyerTerms) error {
-		_, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", terms)
+		_, err := k.RunFederated(ctx, peer, mustResolve(t, k, ctx, seller.ID, "quote"), map[string]any{}, "", terms)
 		return err
 	}
 
@@ -1201,11 +1198,11 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	}
 	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
 	// that would reject an empty address if asked.
-	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: "free-1", CounterpartyUserID: peer.ID, CreatedAt: time.Now().UTC()}
+	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: "free-1", Counterparty: peer, CreatedAt: time.Now().UTC()}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.RunFederated(ctx, peer.ID, mustResolve(t, k, ctx, seller.ID, "free"), map[string]any{}, rec.ID, kernel.BuyerTerms{IdempotencyKey: "free-1"}); err != nil {
+	if _, err := k.RunFederated(ctx, peer, mustResolve(t, k, ctx, seller.ID, "free"), map[string]any{}, rec.ID, kernel.BuyerTerms{IdempotencyKey: "free-1"}); err != nil {
 		t.Fatalf("a free call must not need a payer: %v", err)
 	}
 	// It records which request it answers, as every admitted call does, and no ticket: there is
@@ -1239,7 +1236,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	}
 	var id string
 	if err := st.(*store.DB).QueryRowForTest(ctx,
-		`SELECT owed_blockchain_address FROM traces WHERE caller_user_id=? AND owed_blockchain_address <> ''`, peer.ID, &id); err != nil {
+		`SELECT owed_blockchain_address FROM traces WHERE caller_kernel=? AND owed_blockchain_address <> ''`, peer, &id); err != nil {
 		t.Fatalf("no trace froze the payer: %v", err)
 	}
 	if id != "0xbuyer" {
@@ -1263,7 +1260,7 @@ func TestARepudiatedRevealIsRetired(t *testing.T) {
 	ctx := context.Background()
 	peer := peerWithAddress(t, k, st, "kpeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "0xcreditor")
 	buyer := setupUser(t, st, "repudiated-buyer", 0)
-	trace := dispatchedCall(t, st, buyer.ID, peer.ID, "tk-repudiated", "aa")
+	trace := dispatchedCall(t, st, buyer.ID, peer, "tk-repudiated", "aa")
 
 	k.RailPass(ctx)
 	k.RevealPending(ctx)
@@ -1310,7 +1307,7 @@ func transferAbroadFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *fakeRai
 	}
 	alice := setupUser(t, st, "alice", 1000)
 	peerKey := "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-	if _, err := k.EnsureKernelAccount(context.Background(), peerKey); err != nil {
+	if _, err := knownPeer(k, context.Background(), peerKey); err != nil {
 		t.Fatal(err)
 	}
 	return k, st, fr, fake, alice, peerKey

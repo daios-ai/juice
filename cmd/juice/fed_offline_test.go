@@ -77,15 +77,14 @@ func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 func (f *fakeFed) ListenAddrs() []string { return f.addrs }
 func (f *fakeFed) Close() error          { return nil }
 
-// seedPeer creates a proxy peer with one active+public imported proxy action, returning its
+// seedPeer makes a peer known with one active+public imported proxy action, returning its
 // @handle and base64url key — the local state that offline inspect should surface.
 func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, key)
-	if err != nil {
+	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)
 	}
 	// The outbound-use path also binds the local petname (§13), which is how the peer is
@@ -94,7 +93,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
+		ActionID: "act-1", OwnerID: handle + "-id", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "sha256-x",
 		UpdatedAt: time.Now(),
@@ -102,7 +101,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	sig, _ := testNet.SignManifest(priv, &m)
 	m.Signature = sig
 	// Cold resolve caches and activates the proxy (§8): the sole import path.
-	if _, err := k.ImportPeerAction(ctx, peer.ID, m); err != nil {
+	if _, err := k.ImportPeerAction(ctx, key, m); err != nil {
 		t.Fatalf("seed import: %v", err)
 	}
 	return handle, key
@@ -162,8 +161,7 @@ func TestListPeersHidesSuspended(t *testing.T) {
 	}
 	seedPeer(t, k, "peer-live")
 	_, goneKey := seedPeer(t, k, "peer-gone")
-	gone, _ := k.ReadAccountByKernelKey(ctx, goneKey)
-	if err := k.SuspendUser(ctx, sys.ID, gone.ID); err != nil {
+	if err := k.SuspendKernel(ctx, sys.ID, goneKey); err != nil {
 		t.Fatal(err)
 	}
 	srv := &server{kernel: k, log: log.Discard()}
@@ -210,7 +208,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 	const mp, wantAllIn = int64(20), float64(23)
 	rbps := kernel.DefaultEconomy().RemoteBPS
 	m := kernel.ActionManifest{
-		ActionID: "act-1", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
+		ActionID: "act-1", OwnerID: handle + "-id", OwnerHandle: handle, Title: "Test action", Name: "greet", Description: "greet",
 		Kind: kernel.KindHTTP, Price: mp, RemoteBPS: rbps,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
@@ -330,7 +328,7 @@ func TestInspectOnlineLive(t *testing.T) {
 	livekey := base64.RawURLEncoding.EncodeToString(pub)
 	doc, _ := json.Marshal(kernel.GossipResponse{
 		Handle: "live-peer", PublicKey: livekey,
-		ActionManifests: []*kernel.ActionManifest{{ActionID: "a", Name: "x", OwnerHandle: "live-peer", Price: 3}},
+		ActionManifests: []*kernel.ActionManifest{{ActionID: "a", Name: "x", OwnerID: "live-peer-id", OwnerHandle: "live-peer", Price: 3}},
 	})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 

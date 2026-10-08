@@ -417,33 +417,6 @@ func TestUserUpdateNoFields(t *testing.T) {
 	}
 }
 
-func TestUserUpdateProxyUser(t *testing.T) {
-	env := newTestEnv(t)
-	ctx := context.Background()
-
-	proxy := &kernel.Account{
-		ID:              "proxy-id-1",
-		KernelPublicKey: "dGVzdGtleQ==",
-		CreatedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}
-	if err := env.db.UpsertKernel(ctx, "dGVzdGtleQ==", "remote-peer", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if err := env.db.CreateUser(ctx, proxy); err != nil {
-		t.Fatal(err)
-	}
-
-	desc := "x"
-	_, err := env.k.UpdateUser(ctx, proxy.ID, kernel.UpdateUserRequest{Description: &desc})
-	if err == nil {
-		t.Fatal("expected error for proxy user")
-	}
-	if !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("expected ErrInvalidState, got %v", err)
-	}
-}
-
 // ---- action ----
 
 var minSchema = map[string]any{"type": "object", "properties": map[string]any{}}
@@ -1620,8 +1593,8 @@ func TestRemoteImport(t *testing.T) {
 
 	const actionID = "action-remote-id"
 	m := kernel.ActionManifest{
-		ActionID:     actionID,
-		OwnerHandle:  "import-remote",
+		ActionID: actionID,
+		OwnerID:  "import-remote-id", OwnerHandle: "import-remote",
 		Title:        "Test action",
 		Name:         "greet",
 		Description:  "says hello",
@@ -1647,13 +1620,12 @@ func TestRemoteImport(t *testing.T) {
 	}))
 	defer remote.Close()
 
-	remoteUser, err := k.EnsureKernelAccount(t.Context(), pubB64)
-	if err != nil {
+	if err := k.KnowKernel(t.Context(), pubB64); err != nil {
 		t.Fatal(err)
 	}
 
 	// Cold resolve caches and activates the proxy (§8): the sole import path.
-	if _, err := k.ImportPeerAction(t.Context(), remoteUser.ID, m); err != nil {
+	if _, err := k.ImportPeerAction(t.Context(), pubB64, m); err != nil {
 		t.Fatalf("ImportPeerAction: %v", err)
 	}
 
@@ -1663,7 +1635,7 @@ func TestRemoteImport(t *testing.T) {
 	}
 	found := false
 	for _, a := range actions {
-		if a.Name == "import-remote/greet" { // owner-qualified: addressed @import-remote.import-remote/greet
+		if a.OwnerHandle == "import-remote" && a.Name == "greet" {
 			found = true
 		}
 	}

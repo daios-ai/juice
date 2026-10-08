@@ -170,7 +170,7 @@ takes `--visibility`. `create` requires `--title`. The schemas follow
 | `juice admin user rename USER NEW_NAME` | the only way a handle changes |
 | `juice admin user deposit USER [AMOUNT]` | credit against a payment received; `--ref` names it ([Crediting accounts](../operating/duties.html#crediting-accounts)) |
 | `juice admin peer list` | known kernels, traded and discovered |
-| `juice admin peer show PEER` | one peer's account here |
+| `juice admin peer show PEER` | what this kernel knows of one peer |
 | `juice admin peer suspend PEER` | refuse its requests, reversibly |
 | `juice admin peer unsuspend PEER` | restore |
 | `juice admin peer rename PEER NEW_NAME` | bind a petname |

@@ -87,14 +87,13 @@ func (k *Kernel) Recover(ctx context.Context) error {
 
 // newTraceFailureTx builds the failure Transaction skeleton for a trace settled after the fact.
 func newTraceFailureTx(trace *Trace, process *Process, action *Action, gross int64, now time.Time) *Transaction {
-	return &Transaction{
-		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
-		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
-		CallerRemoteID: trace.CallerRemoteID, CallerHandle: trace.CallerHandle,
-		TargetRemoteID: trace.TargetRemoteID, TargetHandle: trace.TargetHandle,
+	tx := &Transaction{
+		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID, OwnerUserID: process.OwnerUserID,
 		ActionID: trace.ActionID, ActionName: action.Name, Status: TxFailure, Gross: gross,
 		StartedAt: trace.CreatedAt, EndedAt: now,
 	}
+	tx.setParties(trace)
+	return tx
 }
 
 // settleTrace commits an outcome onto an unsettled trace, after the fact: the deferred settlement
@@ -126,14 +125,12 @@ func (k *Kernel) settleTrace(ctx context.Context, trace *Trace, o TraceOutcome) 
 		gross = trace.Available + trace.Locked + consumed
 	}
 	ktx := &Transaction{
-		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID,
-		OwnerUserID: process.OwnerUserID, CallerUserID: trace.CallerUserID, TargetUserID: trace.ActionOwnerID,
-		CallerRemoteID: trace.CallerRemoteID, CallerHandle: trace.CallerHandle,
-		TargetRemoteID: trace.TargetRemoteID, TargetHandle: trace.TargetHandle,
+		ID: uuid.New().String(), ProcessID: trace.ProcessID, TraceID: trace.ID, OwnerUserID: process.OwnerUserID,
 		ActionID: trace.ActionID, ActionName: action.Name, Status: o.Status, Reason: o.Reason,
 		Gross: gross, StartedAt: trace.CreatedAt, EndedAt: o.EndedAt,
 		ArgsJSON: o.Args, ReplyJSON: o.Reply,
 	}
+	ktx.setParties(trace)
 	if trace.ParentTraceID != nil {
 		ktx.ParentTraceID = *trace.ParentTraceID
 	}
@@ -226,30 +223,21 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 	// A task is a partially applied future Call: the creator names the target, so visibility binds
 	// here against the creating trace's action owner (§4 binding rule) — completion re-checks only
 	// liveness, never visibility, so the completer needs no sight of a target the creator captured.
-	creator, err := k.store.ReadUser(ctx, parent.ActionOwnerID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("creator not found")
-	}
-	if !canCall(creator, action) {
+	if !canCall(parent.Target(), action) {
 		if !action.Active {
 			return nil, ErrInvalidState.Wrap("action is inactive")
 		}
 		return nil, ErrUnauthorized.Wrap("creator cannot call action")
 	}
-	// The required caller must resolve to a real account so the task is completable (§10).
-	rc, err := k.store.ReadUser(ctx, caller.AccountID)
-	if err != nil {
-		return nil, ErrNotFound.Wrap("required caller not found")
-	}
-	// A remote required caller (§13) names a peer's proxy user as the accounting/routing account and
-	// the completer's stable user_id on that peer kernel; completion then demands that the peer's
-	// signed completion name that id (P8), so a remote handle rename never mis-addresses the task.
-	var remoteID *string
-	if caller.RemoteID != "" {
-		if !rc.IsPeer() {
-			return nil, ErrInvalidInput.Wrap("a remote required caller must be a peer proxy user")
+	// The required caller must be someone who can complete the task (§10): a user here, or a peer
+	// this kernel knows — the kernel itself, or a user of it by its stable id there, which the
+	// peer's signed completion must name (P8), so a remote handle rename never mis-addresses it.
+	if caller.Local() {
+		if _, err := k.store.ReadUser(ctx, caller.UserID); err != nil {
+			return nil, ErrNotFound.Wrap("required caller not found")
 		}
-		remoteID = &caller.RemoteID
+	} else if rk, err := k.store.ReadKernel(ctx, caller.Kernel); err != nil || rk == nil {
+		return nil, ErrNotFound.Wrap("required caller's kernel is not known here")
 	}
 	// Omitted and null both mean nothing is filled in yet; anything else must be an object.
 	var partial map[string]any
@@ -261,16 +249,16 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 	}
 	now := time.Now().UTC()
 	task := &Task{
-		ID:                     uuid.New().String(),
-		ParentTraceID:          &traceID,
-		RequiredCallerUserID:   caller.AccountID,
-		RequiredCallerRemoteID: remoteID,
-		RequiredCallerHandle:   caller.Handle,
-		ActionID:               actionID,
-		PartialArgs:            partialArgs,
-		Price:                  action.Price,
-		Status:                 TaskWaiting,
-		CreatedAt:              now,
+		ID:                   uuid.New().String(),
+		ParentTraceID:        &traceID,
+		RequiredCallerKernel: caller.Kernel,
+		RequiredCallerUserID: caller.UserID,
+		RequiredCallerHandle: caller.Handle,
+		ActionID:             actionID,
+		PartialArgs:          partialArgs,
+		Price:                action.Price,
+		Status:               TaskWaiting,
+		CreatedAt:            now,
 	}
 	// A funding boundary (§16 Price Snapshot Pattern): the price is parked now and may settle long
 	// after import_bps changes, so the rate is frozen alongside it. Proxies only.
@@ -314,7 +302,7 @@ func (k *Kernel) ReadTask(ctx context.Context, callerID, taskID string) (*TaskEn
 	if err != nil {
 		return nil, err
 	}
-	if callerID == "" || callerID != e.RequiredCaller.AccountID && callerID != e.OwnerUserID && !k.IsSuperuser(ctx, callerID) {
+	if callerID == "" || !e.RequiredCaller.IsUser(callerID) && callerID != e.OwnerUserID && !k.IsSuperuser(ctx, callerID) {
 		return nil, ErrUnauthorized.Wrap("read permission denied")
 	}
 	return e, nil
@@ -343,7 +331,7 @@ func (k *Kernel) CancelTask(ctx context.Context, callerID, taskID string) (*Task
 	if e.HolderKey != k.SelfKey(ctx) {
 		_, err = k.sendTask(ctx, callerID, e, "cancel", nil)
 	} else {
-		err = k.CancelTaskHeld(ctx, callerID, e.ID)
+		err = k.CancelTaskHeld(ctx, User(callerID), e.ID)
 	}
 	if err != nil {
 		return nil, err
@@ -351,17 +339,17 @@ func (k *Kernel) CancelTask(ctx context.Context, callerID, taskID string) (*Task
 	return k.store.ReadMailbox(ctx, e.ID)
 }
 
-// CancelTaskHeld declines a waiting task this kernel holds, for its required caller — a peer's
-// account when the decline arrives over P8, scope already matched — or its process owner.
-func (k *Kernel) CancelTaskHeld(ctx context.Context, callerID, taskID string) error {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+// CancelTaskHeld declines a waiting task this kernel holds, for its required caller — a peer when
+// the decline arrives over P8, as the principal its scope matched — or its process owner.
+func (k *Kernel) CancelTaskHeld(ctx context.Context, caller Principal, taskID string) error {
+	if _, err := k.requireCaller(ctx, caller); err != nil {
 		return err
 	}
 	e, err := k.store.ReadMailbox(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	if callerID != e.RequiredCaller.AccountID && callerID != e.OwnerUserID {
+	if !caller.Same(e.RequiredCaller) && !caller.IsUser(e.OwnerUserID) {
 		return ErrUnauthorized.Wrap("only the task's required caller or its process owner may decline it")
 	}
 	if err := k.store.CancelTask(ctx, taskID); err != nil {
@@ -398,7 +386,7 @@ func (k *Kernel) CompleteTask(ctx context.Context, callerID, taskID string, inpu
 	if e.HolderKey != k.SelfKey(ctx) {
 		return k.sendTask(ctx, callerID, e, "complete", input)
 	}
-	return k.completeTask(ctx, callerID, taskID, input, "", "", peerCompleter{})
+	return k.completeTask(ctx, User(callerID), taskID, input, "", "", peerCompleter{})
 }
 
 // CompleteTaskInTrace resumes a task from inside a running execution — a WASM juice.task_complete or
@@ -410,15 +398,16 @@ func (k *Kernel) CompleteTaskInTrace(ctx context.Context, callerID, traceID, tas
 	if traceID == "" {
 		return nil, ErrUnauthorized.Wrap("in-execution completion requires an authorizing trace")
 	}
-	return k.completeTask(ctx, callerID, taskID, input, "", traceID, peerCompleter{})
+	return k.completeTask(ctx, User(callerID), taskID, input, "", traceID, peerCompleter{})
 }
 
 // CompleteTaskFederated resumes a task on behalf of a peer, threading the inbound cross-kernel
 // idempotency record (§13) so the commit that settles the call completes that record atomically —
 // including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
-// RunFederated, which does the same for an inbound call.
-func (k *Kernel) CompleteTaskFederated(ctx context.Context, callerID, taskID string, input json.RawMessage, idempotencyRecordID, forUserID string, superuser bool) (*TaskReply, error) {
-	return k.completeTask(ctx, callerID, taskID, input, idempotencyRecordID, "", peerCompleter{UserID: forUserID, Superuser: superuser})
+// RunFederated, which does the same for an inbound call. scope is the principal the task is
+// addressed to, already matched to the signed request (P8); forUserID is who on the peer completed.
+func (k *Kernel) CompleteTaskFederated(ctx context.Context, scope Principal, taskID string, input json.RawMessage, idempotencyRecordID, forUserID string, superuser bool) (*TaskReply, error) {
+	return k.completeTask(ctx, scope, taskID, input, idempotencyRecordID, "", peerCompleter{UserID: forUserID, Superuser: superuser})
 }
 
 // peerCompleter is who on the peer completed a task, as its home kernel signed it (P8): the user's
@@ -428,18 +417,18 @@ type peerCompleter struct {
 	Superuser bool
 }
 
-// TaskRemoteRequiredCaller returns a task's required remote-caller id (nil = a local/kernel-level
-// required caller), for the federation completion path to match against the signed user_id (P8).
-func (k *Kernel) TaskRemoteRequiredCaller(ctx context.Context, taskID string) (*string, error) {
+// TaskRequiredCaller returns who a task is parked for, for the federation completion path to match
+// against the signed request (P8).
+func (k *Kernel) TaskRequiredCaller(ctx context.Context, taskID string) (Principal, error) {
 	task, err := k.store.ReadTask(ctx, taskID)
 	if err != nil {
-		return nil, err
+		return Principal{}, err
 	}
-	return task.RequiredCallerRemoteID, nil
+	return task.RequiredCaller(), nil
 }
 
-func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, completer peerCompleter) (*TaskReply, error) {
-	caller, err := k.requireActiveUser(ctx, callerID)
+func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, completer peerCompleter) (*TaskReply, error) {
+	callerAcct, err := k.requireCaller(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +450,7 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 	if _, err := k.readOpenProcess(ctx, parentTrace.ProcessID); err != nil {
 		return nil, err
 	}
-	if callerID != task.RequiredCallerUserID {
+	if !caller.Same(task.RequiredCaller()) {
 		return nil, ErrUnauthorized.Wrap("only the task's required caller may complete it")
 	}
 	// In-execution completion is confined to the trace that authorized it (§10): a capability or WASM
@@ -531,25 +520,24 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 		ID:            uuid.New().String(),
 		ProcessID:     parentTrace.ProcessID,
 		ParentTraceID: task.ParentTraceID,
-		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
-		CallerUserID:  callerID,
 		CreatedAt:     time.Now().UTC(),
 	}
-	taskTrace.TargetRemoteID, taskTrace.TargetHandle = targetPrincipal(action)
-	// The completer as a principal (D4): a user on the peer, attested by its home kernel and already
-	// matched to the task's addressing — the handle is the one the task was made for; its operator
-	// completing a kernel-addressed task is that kernel's `sys`; nothing beyond the account
-	// otherwise, which is the completer here or the peer kernel itself.
+	taskTrace.setTarget(action.Owner())
+	// The completer as a principal (D15): a user here; on a peer, a user attested by its home kernel
+	// and already matched to the task's addressing — the handle the task was made for — or its
+	// operator completing a kernel-addressed task, that kernel's `sys`; else the peer kernel itself.
+	done := caller
 	switch {
-	case completer.UserID == "":
-	case task.RequiredCallerRemoteID != nil && *task.RequiredCallerRemoteID == completer.UserID:
-		taskTrace.CallerRemoteID, taskTrace.CallerHandle = completer.UserID, task.RequiredCallerHandle
+	case caller.Local() || completer.UserID == "":
+	case task.RequiredCallerUserID == completer.UserID:
+		done.UserID, done.Handle = completer.UserID, task.RequiredCallerHandle
 	case completer.Superuser:
-		taskTrace.CallerRemoteID, taskTrace.CallerHandle = completer.UserID, SuperuserHandle
+		done.UserID, done.Handle = completer.UserID, SuperuserHandle
 	default:
-		taskTrace.CallerRemoteID = completer.UserID
+		done.UserID = completer.UserID
 	}
+	taskTrace.setCaller(done)
 	if eff != nil {
 		eff.stage(taskTrace)
 	}
@@ -575,7 +563,7 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 		if task.ImportBPS != nil {
 			ibps = *task.ImportBPS
 		}
-		if err := k.prepareDispatch(ctx, taskTrace, action, args, taskID, task.Price, ibps, caller); err != nil {
+		if err := k.prepareDispatch(ctx, taskTrace, action, args, taskID, task.Price, ibps, callerAcct); err != nil {
 			return nil, err
 		}
 	}
@@ -588,7 +576,7 @@ func (k *Kernel) completeTask(ctx context.Context, callerID, taskID string, inpu
 	}
 
 	reply, callErr := k.call(ctx, callRequest{
-		CallerID:            callerID,
+		Caller:              done,
 		ExistingTraceID:     taskTrace.ID, // BeginTaskCall pre-created and funded this completion trace
 		Action:              action,
 		Args:                args,

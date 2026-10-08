@@ -262,6 +262,18 @@ func (s *DB) applyMigration(version, sqlText string) error {
 			return fmt.Errorf("%s: %w", version, err)
 		}
 	}
+	// Enforcement is off while a migration rebuilds tables, so the references it leaves are checked
+	// here, before it commits, as SQLite's own rebuild procedure prescribes. Inside a migration file
+	// the pragma would only return rows, and a migration that dangles a reference would commit.
+	var table, parent string
+	var rowid, fkid sql.NullInt64
+	err = tx.QueryRow(`PRAGMA foreign_key_check`).Scan(&table, &rowid, &parent, &fkid)
+	if err == nil {
+		return fmt.Errorf("%s: a row of %s references a missing row of %s", version, table, parent)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%s: foreign key check: %w", version, err)
+	}
 	if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, timeToStr(time.Now().UTC())); err != nil {
 		return err
 	}
@@ -328,25 +340,14 @@ func strVal(s *string) string {
 
 // ---- Accounts ----
 
-// liveUser is Account.IsLiveUser in SQL: an account holding a handle is a local user, a peer holds
-// none (the accounts CHECK), and a purged peer's tombstone holds none either. alias qualifies the
-// column in a join ("a"), or is empty.
-func liveUser(alias string) string {
-	if alias != "" {
-		alias += "."
-	}
-	return "COALESCE(" + alias + "handle,'') <> ''"
-}
-
-const userCols = `id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,blockchain_address,created_at,updated_at`
+const userCols = `id,handle,description,password_hash,available,locked,suspended_at,recovery_public_key,blockchain_address,created_at,updated_at`
 
 func (s *DB) CreateUser(ctx context.Context, u *kernel.Account) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO accounts (id,handle,description,password_hash,available,locked,suspended_at,kernel_public_key,recovery_public_key,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, nullStr(u.Handle), u.Description, u.PasswordHash, u.Available, u.Locked,
-		nullTimeToStr(u.SuspendedAt),
-		nullStr(u.KernelPublicKey), nullStr(u.RecoveryPublicKey),
+		`INSERT INTO accounts (id,handle,description,password_hash,available,locked,suspended_at,recovery_public_key,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Handle, u.Description, u.PasswordHash, u.Available, u.Locked,
+		nullTimeToStr(u.SuspendedAt), nullStr(u.RecoveryPublicKey),
 		timeToStr(u.CreatedAt), timeToStr(u.UpdatedAt),
 	)
 	if err != nil {
@@ -362,20 +363,13 @@ func (s *DB) ReadUser(ctx context.Context, id string) (*kernel.Account, error) {
 
 func (s *DB) ReadUserByHandle(ctx context.Context, handle string) (*kernel.Account, error) {
 	// Canonicalize at the single read funnel so every caller (login, federation, CLI, HTTP)
-	// resolves the same row. A kernel account has no handle, so it is unreachable here by
-	// construction — the user and kernel namespaces are disjoint (§13).
+	// resolves the same row. Kernels are another table, so the namespaces are disjoint (D15).
 	handle = kernel.NormalizeHandle(handle)
 	if handle == "" {
 		return nil, kernel.ErrNotFound.Wrap("account not found")
 	}
 	return s.scanUser(s.db.QueryRowContext(ctx,
 		`SELECT `+userCols+` FROM accounts WHERE handle=?`, handle))
-}
-
-// ReadAccountByKernelKey returns the account settling for a remote kernel, or ErrNotFound.
-func (s *DB) ReadAccountByKernelKey(ctx context.Context, publicKey string) (*kernel.Account, error) {
-	return s.scanUser(s.db.QueryRowContext(ctx,
-		`SELECT `+userCols+` FROM accounts WHERE kernel_public_key=?`, publicKey))
 }
 
 // DeactivateImportedIfHash deactivates a remote_proxy action only while it still carries the given
@@ -388,103 +382,91 @@ func (s *DB) DeactivateImportedIfHash(ctx context.Context, actionID, expectedHas
 	return dbErr(err, "deactivate imported by hash")
 }
 
-// ListPurgeablePeers returns peer accounts (kernel_public_key set) idle past cutoff at zero balance (§13).
-// last_active = max(created_at, latest transaction naming the peer, latest deposit/withdrawal to
-// the peer, latest gossip mention of the peer's key). Timestamps are compared via julianday() so
-// the variable-width RFC3339Nano text (timeLayout) can't misorder near a second boundary. The
-// comparison is `<=`: julianday() returns a float64 whose resolution near today's epoch is only
-// ~tens of microseconds, so last_active and a cutoff a hair later can round equal; since seeds
-// always precede the cutoff and julianday is monotonic, `<=` is deterministic where `<` flaked.
-// A peer with any open task addressed to it, bound to one of its actions, or held by it for one of
-// ours is still in use and skipped.
+// namesKernel holds when some record here names the kernel k as a party — a transaction, a trace, a
+// cached action it owns, a task addressed to it or held by it, a lock it took — which is what makes it a
+// counterparty rather than a kernel known only from the directory (D16).
+const namesKernel = `(EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.public_key OR x.target_kernel = k.public_key)
+   OR EXISTS (SELECT 1 FROM traces t WHERE t.caller_kernel = k.public_key OR t.target_kernel = k.public_key)
+   OR EXISTS (SELECT 1 FROM actions a WHERE a.owner_kernel = k.public_key)
+   OR EXISTS (SELECT 1 FROM tasks s WHERE s.required_caller_kernel = k.public_key)
+   OR EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key = k.public_key)
+   OR EXISTS (SELECT 1 FROM idempotency_records r WHERE r.counterparty = k.public_key))`
+
+// ListPurgeablePeers returns the keys of counterparties idle past cutoff (D16 Retention): last
+// activity — first seen, the latest transaction naming the kernel, the latest gossip mention — at or
+// before cutoff, not suspended, and nothing unresolved either way. Timestamps are compared via
+// julianday() so the variable-width RFC3339Nano text (timeLayout) can't misorder near a second
+// boundary. The comparison is `<=`: julianday() returns a float64 whose resolution near today's
+// epoch is only ~tens of microseconds, so last activity and a cutoff a hair later can round equal;
+// since seeds always precede the cutoff and julianday is monotonic, `<=` is deterministic where `<`
+// flaked.
 func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT u.id FROM accounts u
-WHERE u.kernel_public_key IS NOT NULL AND u.kernel_public_key != ''
-  AND u.suspended_at IS NULL
-  AND u.available = 0 AND u.locked = 0
+SELECT k.public_key FROM kernels k
+WHERE k.forgotten_at IS NULL AND k.suspended_at IS NULL AND `+namesKernel+`
   AND max(
-        julianday(u.created_at),
+        julianday(k.first_seen),
         COALESCE((SELECT MAX(julianday(ended_at)) FROM transactions
-                    WHERE owner_user_id=u.id OR caller_user_id=u.id OR target_user_id=u.id), julianday(u.created_at)),
-        COALESCE((SELECT MAX(julianday(created_at)) FROM ledger WHERE from_user_id=u.id OR to_user_id=u.id), julianday(u.created_at)),
-        COALESCE((SELECT MAX(julianday(updated_at)) FROM kernels WHERE public_key=u.kernel_public_key), julianday(u.created_at))
+                    WHERE caller_kernel=k.public_key OR target_kernel=k.public_key), julianday(k.first_seen)),
+        julianday(k.updated_at)
       ) <= julianday(?)
   AND NOT EXISTS (
         SELECT 1 FROM tasks s
          WHERE s.status IN ('waiting','running')
-           AND (s.required_caller_user_id=u.id
-                OR s.action_id IN (SELECT id FROM actions WHERE owner_user_id=u.id)))
-  AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key=u.kernel_public_key AND m.status IN ('waiting','running'))
+           AND (s.required_caller_kernel=k.public_key
+                OR s.action_id IN (SELECT id FROM actions WHERE owner_kernel=k.public_key)))
+  AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key=k.public_key AND m.status IN ('waiting','running'))
   -- Nothing owed either way: no call it made is still unrevealed or unpaid here, and no call we
-  -- made to it is still waiting to tell it how the draw came out. Purging would drop the account
+  -- made to it is still waiting to tell it how the draw came out. Purging would forget the kernel
   -- the reveal or the payment is keyed on, and the obligation could never close (P10).
-  AND NOT EXISTS (SELECT 1 FROM traces ot`+unresolvedTrace+` AND ot.caller_user_id=u.id)
+  AND NOT EXISTS (SELECT 1 FROM traces ot`+unresolvedTrace+` AND ot.caller_kernel=k.public_key)
   AND NOT EXISTS (
         SELECT 1 FROM transactions x JOIN traces t ON t.id = x.trace_id
-         WHERE x.target_user_id=u.id AND x.net > 0 AND t.revealed = 0)
+         WHERE x.target_kernel=k.public_key AND x.net > 0 AND t.revealed = 0)
   -- Nor a call made to it still awaiting its receipt: the retry settles through the proxy this
   -- peer owns, and purging would take that proxy with it.
   AND NOT EXISTS (
         SELECT 1 FROM traces t
-         WHERE t.action_owner_id=u.id AND t.idempotency_key IS NOT NULL
+         WHERE t.target_kernel=k.public_key AND t.idempotency_key IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id = t.id))
-ORDER BY u.id`, timeToStr(cutoff))
+ORDER BY k.public_key`, timeToStr(cutoff))
 	if err != nil {
 		return nil, dbErr(err, "list purgeable peers")
 	}
 	return queryList(rows, "list purgeable peers", scanID)
 }
 
-// PurgePeerCascade deletes a purged peer's derived data and anonymizes the user row (§13 Retention).
-// It removes the peer's proxy actions and their stats/stat_tags, the peer's tasks and any tasks
-// bound to its actions, and its kernel row; it first clears the account→kernel link so the identity is
-// forgotten (a later re-resolve starts fresh). The transaction/receipt ledger is left intact —
-// its party ids carry no foreign key, so a now-dangling peer id is harmless and local counterparties'
-// history stays reconstructible (§11). Deletes run children-before-parents so the RESTRICT foreign
-// keys (tasks→actions, stats→actions) never block.
-func (s *DB) PurgePeerCascade(ctx context.Context, userID string) error {
-	return s.withTx(ctx, "purge peer cascade", func(tx *sql.Tx) error {
-		var pubKey sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT kernel_public_key FROM accounts WHERE id=?`, userID).Scan(&pubKey); err != nil {
-			return dbErr(err, "read peer key")
-		}
-		const owned = `SELECT id FROM actions WHERE owner_user_id=?`
-		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, userID); err != nil {
+// PurgePeer deletes a purged peer's derived data and forgets its naming state (D16 Retention): its
+// proxy actions and their stats, its tasks — those addressed to it and those bound to its actions —
+// with their mailbox entries and those it holds, its discovery cache. Its kernel row stays, marked
+// forgotten, so every record that names it keeps naming it. The transaction/receipt ledger is left
+// intact (G3). Deletes run children-before-parents so the RESTRICT foreign keys (tasks→actions,
+// stats→actions) never block.
+func (s *DB) PurgePeer(ctx context.Context, pubKey string) error {
+	return s.withTx(ctx, "purge peer", func(tx *sql.Tx) error {
+		const owned = `SELECT id FROM actions WHERE owner_kernel=?`
+		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, pubKey); err != nil {
 			return dbErr(err, "delete action_stats")
 		}
 		// The peer's tasks go with their mailbox entries, and so does everything it delivered here.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM mailbox WHERE holder_key=? OR id IN (SELECT id FROM tasks WHERE required_caller_user_id=? OR action_id IN (`+owned+`))`,
-			pubKey.String, userID, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mailbox WHERE holder_key=? OR id IN (SELECT id FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`))`,
+			pubKey, pubKey, pubKey); err != nil {
 			return dbErr(err, "delete mailbox entries")
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_user_id=? OR action_id IN (`+owned+`)`, userID, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`)`, pubKey, pubKey); err != nil {
 			return dbErr(err, "delete tasks")
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_user_id=?`, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_kernel=?`, pubKey); err != nil {
 			return dbErr(err, "delete actions")
 		}
-		// Clear the account→kernel link BEFORE deleting the kernel row: the foreign key is
-		// restrictive on purpose, so the delete would otherwise fail (§13 Retention).
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE accounts SET kernel_public_key=NULL, updated_at=? WHERE id=?`,
-			timeToStr(time.Now().UTC()), userID); err != nil {
-			return dbErr(err, "anonymize peer")
-		}
-		if pubKey.Valid && pubKey.String != "" {
-			// Regenerable discovery/evidence caches purge with the peer (§13).
-			if err := deleteDiscoveryCache(ctx, tx, pubKey.String); err != nil {
-				return err
-			}
-		}
-		return nil
+		return deleteDiscoveryCache(ctx, tx, pubKey)
 	})
 }
 
-// deleteDiscoveryCache removes one kernel's regenerable discovery cache within tx: its discovery
-// docs and their FTS mirror, its evidence rows (as issuer and as subject), and its kernels
-// row. Shared by peer purge (§13 Retention) and stale non-peer eviction; order is free — no FK links
-// these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key —
+// deleteDiscoveryCache removes one kernel's regenerable discovery cache within tx — its discovery
+// docs and their FTS mirror, its evidence rows (as issuer and as subject) — and forgets its naming
+// state, marking its row forgotten. Shared by peer purge and stale directory eviction (D16
+// Retention); order is free — no FK links these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key —
 // by range, not LIKE, since '_' in a base64url key would be a single-char wildcard and could match
 // another kernel's rows ('0' is the ASCII successor of '/').
 func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error {
@@ -497,12 +479,9 @@ func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey, pubKey); err != nil {
 		return dbErr(err, "delete evidence")
 	}
-	// A kernel that proved a vault keeps its key and that address, marked forgotten and emptied of
-	// everything else: a payment from the vault may arrive after it is forgotten, and must still wait
-	// for its word (D23). Seeing the kernel again brings it back (UpsertKernel).
-	if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=? AND blockchain_address = ''`, pubKey); err != nil {
-		return dbErr(err, "delete kernel")
-	}
+	// The row keeps its key and proven address, emptied of everything else: a payment from the vault
+	// may arrive after it is forgotten, and must still wait for its word (D23). Seeing the kernel again
+	// brings it back (UpsertKernel).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE kernels SET petname=NULL, nickname='', about='', gossip_cursor='', last_seen=NULL,
 		        last_contact_failed_at=NULL, catalog_cursor='', catalog_generation=0, forgotten_at=?
@@ -512,17 +491,18 @@ func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error 
 	return nil
 }
 
-// PurgeStaleDiscovery evicts directory-only discovered kernels — those stale past cutoff and not
-// backed by a peer user row — with their whole discovery cache (§13 Retention). Peer-backed kernels
-// are left to PurgePeerCascade. One transaction; returns the count evicted.
+// PurgeStaleDiscovery evicts directory-only kernels — stale past cutoff, named by no record here, not
+// suspended — with their whole discovery cache (D16 Retention); the row itself goes unless it proved a
+// vault, whose payment may still arrive (D23). Counterparties are left to PurgePeer. One transaction;
+// returns the count evicted.
 func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error) {
 	var evicted int
 	err := s.withTx(ctx, "purge stale discovery", func(tx *sql.Tx) error {
-		// This kernel's own row holds its name and no account, by design (D15): never a stale peer.
+		// This kernel's own row holds its name (D15): never a stale peer. Moderation outlives idleness.
 		rows, err := tx.QueryContext(ctx,
-			`SELECT public_key FROM kernels
-			  WHERE updated_at <= ? AND public_key <> ? AND forgotten_at IS NULL
-			    AND public_key NOT IN (SELECT kernel_public_key FROM accounts WHERE kernel_public_key IS NOT NULL)`,
+			`SELECT public_key FROM kernels k
+			  WHERE updated_at <= ? AND public_key <> ? AND forgotten_at IS NULL AND suspended_at IS NULL
+			    AND NOT `+namesKernel,
 			timeToStr(cutoff), selfKey)
 		if err != nil {
 			return dbErr(err, "list stale discovery")
@@ -541,6 +521,9 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey 
 			return dbErr(err, "stale discovery rows")
 		}
 		for _, k := range keys {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=? AND blockchain_address = ''`, k); err != nil {
+				return dbErr(err, "delete kernel")
+			}
 			if err := deleteDiscoveryCache(ctx, tx, k); err != nil {
 				return err
 			}
@@ -554,16 +537,14 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey 
 func scanUserFn(scan func(...any) error) (*kernel.Account, error) {
 	var u kernel.Account
 	var createdAt, updatedAt string
-	var handle, suspendedAt, kernelPublicKey, recoveryPublicKey, blockchainAddress *string
-	if err := scan(&u.ID, &handle, &u.Description, &u.PasswordHash,
-		&u.Available, &u.Locked, &suspendedAt, &kernelPublicKey, &recoveryPublicKey, &blockchainAddress,
+	var suspendedAt, recoveryPublicKey, blockchainAddress *string
+	if err := scan(&u.ID, &u.Handle, &u.Description, &u.PasswordHash,
+		&u.Available, &u.Locked, &suspendedAt, &recoveryPublicKey, &blockchainAddress,
 		&createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	u.BlockchainAddress = strVal(blockchainAddress)
-	u.Handle = strVal(handle)
 	u.SuspendedAt = strToNullTime(suspendedAt)
-	u.KernelPublicKey = strVal(kernelPublicKey)
 	u.RecoveryPublicKey = strVal(recoveryPublicKey)
 	u.CreatedAt = strToTime(createdAt)
 	u.UpdatedAt = strToTime(updatedAt)
@@ -581,15 +562,13 @@ func (s *DB) scanUser(row *sql.Row) (*kernel.Account, error) {
 	return u, nil
 }
 
-// ListUsers returns live local user accounts. A live local user has a handle: kernel accounts hold
-// none and belong to the peer roster (§14), and a purged peer leaves a handleless, keyless row that
-// stays as a ledger anchor (§13 Retention) but is history, not a user.
+// ListUsers returns this kernel's users.
 func (s *DB) ListUsers(ctx context.Context, limit, offset int) ([]*kernel.Account, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+userCols+` FROM accounts WHERE `+liveUser("")+`
+		`SELECT `+userCols+` FROM accounts
 		 ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list accounts")
@@ -659,27 +638,47 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_user_id,name,title,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_owner_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.OwnerUserID, a.Name, a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
+		 (id,owner_kernel,owner_user_id,owner_handle,name,title,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.OwnerKernel, a.OwnerUserID, remoteHandle(a), a.Name, a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
-		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
+		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
 }
 
-// actionCols is the canonical column list for action SELECT statements.
+// remoteHandle is what an action row stores as its owner's handle: a peer's user's, as last
+// resolved; a local owner's is its account's alone, so the row keeps none.
+func remoteHandle(a *kernel.Action) string {
+	if a.OwnerKernel == "" {
+		return ""
+	}
+	return a.OwnerHandle
+}
+
+// actionsFrom joins each action to its owner: the account of a user here, or the row of the peer a
+// cached copy belongs to (D13). The account join is gated on a local owner, so a peer's user whose id
+// equals a local one never reads that account.
+const actionsFrom = `actions a LEFT JOIN accounts u ON a.owner_kernel='' AND u.id=a.owner_user_id
+	LEFT JOIN kernels ok ON a.owner_kernel<>'' AND ok.public_key=a.owner_kernel`
+
+// ownerSuspended fails closed: an owner that is missing is as uncallable as one suspended (D5).
+const ownerSuspended = `(CASE WHEN a.owner_kernel='' THEN u.id IS NULL OR u.suspended_at IS NOT NULL
+	ELSE ok.public_key IS NULL OR ok.suspended_at IS NOT NULL END)`
+
+// actionCols is the canonical column list for action SELECT statements over actionsFrom.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_user_id,COALESCE(u.handle,''),(u.suspended_at IS NOT NULL),a.name,a.title,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,COALESCE(a.remote_owner_id,''),a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_kernel,a.owner_user_id,COALESCE(u.handle,a.owner_handle),` + ownerSuspended + `,a.name,a.title,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id WHERE a.id=? AND a.deleted_at IS NULL`, id))
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.id=? AND a.deleted_at IS NULL`, id))
 }
 
+// ReadActionByOwnerName reads an action of a user here by its name.
 func (s *DB) ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.owner_kernel='' AND a.owner_user_id=? AND a.name=? AND a.deleted_at IS NULL`, ownerID, name))
 }
 
 func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) error {
@@ -691,11 +690,11 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 		return dbErr(err, "update action: read schema")
 	}
 	_, err := tx.ExecContext(ctx,
-		`UPDATE actions SET title=?,kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,remote_owner_id=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
-		a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
+		`UPDATE actions SET owner_handle=?,title=?,kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
+		 source=?,artifact_hash=?,wasm_artifact=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
+		remoteHandle(a), a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		a.RemoteOwnerID, a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
+		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
 	if err != nil || !schemaMoved {
 		return dbErr(err, "update action")
@@ -770,33 +769,32 @@ func (s *DB) DeleteActionAndGrants(ctx context.Context, id string) error {
 	})
 }
 
-// visibleTo is canCall in SQL for every caller but the owner, over actions a joined to their owner
-// u: live (active, not deleted, owner not suspended) and public, or also local when the caller is a
-// local user (D5).
+// visibleTo is canCall in SQL for every caller but the owner, over actionsFrom: live (active, not
+// deleted, owner not suspended) and public, or also local when the caller is a local user (D5).
 func visibleTo(includeLocal bool) string {
 	vis := `a.visibility='public'`
 	if includeLocal {
 		vis = `a.visibility IN ('public','local')`
 	}
-	return `a.active=1 AND a.deleted_at IS NULL AND u.suspended_at IS NULL AND ` + vis
+	return `a.active=1 AND a.deleted_at IS NULL AND NOT ` + ownerSuspended + ` AND ` + vis
 }
 
 // ListCatalog is one page of the catalog (D20), ordered by title so a page is cut only after scope
 // and order are applied: a caller's own actions in every state, every other live one visible to it
 // (visibleTo), and, for a local caller, the actions discovered on peers that no live cached copy
 // already shows, keyed as the FTS mirror keys them. A superuser sees every action. An owner narrows
-// it: a local account, or one user of a peer, whose cached copies fold the handle into their name.
+// it: a local account, or one user of a peer by the handle its cached copies keep.
 func (s *DB) ListCatalog(ctx context.Context, q kernel.CatalogQuery, limit, offset int) ([]kernel.CatalogEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT a.id AS id, '' AS doc, a.title AS title FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
-		 WHERE a.deleted_at IS NULL AND (?1 OR a.owner_user_id=?2 OR (`+visibleTo(q.Local)+`))
-		   AND (?3='' OR a.owner_user_id=?3)
-		   AND (?4='' OR (u.kernel_public_key=?4 AND substr(a.name, 1, length(?5)+1)=?5||'/'))
+		`SELECT a.id AS id, '' AS doc, a.title AS title FROM `+actionsFrom+`
+		 WHERE a.deleted_at IS NULL AND (?1 OR (a.owner_kernel='' AND a.owner_user_id=?2) OR (`+visibleTo(q.Local)+`))
+		   AND (?3='' OR (a.owner_kernel='' AND a.owner_user_id=?3))
+		   AND (?4='' OR (a.owner_kernel=?4 AND a.owner_handle=?5))
 		 UNION ALL
 		 SELECT '', d.kernel_public_key||'/'||d.action_id, d.title FROM discovery_docs d
 		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel_public_key=?4 AND d.handle=?5))
-		   AND NOT EXISTS (SELECT 1 FROM actions p JOIN accounts pa ON pa.id=p.owner_user_id
-		     WHERE pa.kernel_public_key=d.kernel_public_key AND p.remote_action_id=d.action_id
+		   AND NOT EXISTS (SELECT 1 FROM actions p
+		     WHERE p.owner_kernel=d.kernel_public_key AND p.remote_action_id=d.action_id
 		       AND p.active=1 AND p.deleted_at IS NULL)
 		 ORDER BY title, id, doc LIMIT ?7 OFFSET ?8`,
 		q.Superuser, q.CallerID, q.OwnerID, q.PeerKey, q.PeerHandle, q.Local, limit, offset)
@@ -818,7 +816,7 @@ func (s *DB) ListCatalog(ctx context.Context, q kernel.CatalogQuery, limit, offs
 // and the caller filters.
 func (s *DB) ListExportableActionsAfter(ctx context.Context, afterActionID string, limit int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
+		`SELECT `+actionCols+` FROM `+actionsFrom+`
 		 WHERE `+visibleTo(false)+`
 		   AND a.id > ?
 		 ORDER BY a.id ASC LIMIT ?`, afterActionID, limit)
@@ -830,8 +828,8 @@ func (s *DB) ListExportableActionsAfter(ctx context.Context, afterActionID strin
 
 func (s *DB) ListActionsByOwner(ctx context.Context, ownerID string, limit, offset int) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
-		 WHERE a.owner_user_id=? AND a.deleted_at IS NULL
+		`SELECT `+actionCols+` FROM `+actionsFrom+`
+		 WHERE a.owner_kernel='' AND a.owner_user_id=? AND a.deleted_at IS NULL
 		 ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list actions by owner")
@@ -844,7 +842,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list all actions")
 	}
@@ -853,7 +851,7 @@ func (s *DB) ListAllActions(ctx context.Context, limit, offset int) ([]*kernel.A
 
 func (s *DB) ListNativeActions(ctx context.Context) ([]*kernel.Action, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id
+		`SELECT `+actionCols+` FROM `+actionsFrom+`
 		 WHERE a.kind='native' AND a.deleted_at IS NULL ORDER BY a.name`)
 	if err != nil {
 		return nil, dbErr(err, "list native actions")
@@ -867,9 +865,9 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var deletedAt sql.NullString
 	var remoteBPS, basePrice sql.NullInt64
 	var active, ownerSuspended int
-	if err := scan(&a.ID, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &a.Title, &kind, &active, &visibility, &a.Price,
+	if err := scan(&a.ID, &a.OwnerKernel, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &a.Title, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&a.RemoteOwnerID, &remoteBPS, &basePrice, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
+		&remoteBPS, &basePrice, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
 	if remoteBPS.Valid {
@@ -895,10 +893,26 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	return a, nil
 }
 
-func (s *DB) ReadActionByOwnerRemoteID(ctx context.Context, ownerID, remoteActionID string) (*kernel.Action, error) {
+// ReadProxyByName reads a peer's cached action by its owner's handle and its name. A user renamed on
+// the peer can leave an older copy under the handle a newer owner now holds; the copy refreshed last
+// answers.
+func (s *DB) ReadProxyByName(ctx context.Context, peerKey, handle, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM actions a LEFT JOIN accounts u ON u.id=a.owner_user_id WHERE a.owner_user_id=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
-		ownerID, remoteActionID))
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.owner_kernel=? AND a.owner_handle=? AND a.name=? AND a.deleted_at IS NULL
+		 ORDER BY a.updated_at DESC LIMIT 1`, peerKey, handle, name))
+}
+
+func (s *DB) RetireProxy(ctx context.Context, peerKey, ownerID, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE actions SET active=FALSE, deleted_at=?
+		WHERE owner_kernel=? AND owner_kernel<>'' AND owner_user_id=? AND name=? AND deleted_at IS NULL`,
+		timeToStr(time.Now().UTC()), peerKey, ownerID, name)
+	return dbErr(err, "retire proxy")
+}
+
+func (s *DB) ReadProxyByRemoteID(ctx context.Context, peerKey, remoteActionID string) (*kernel.Action, error) {
+	return s.scanAction(s.db.QueryRowContext(ctx,
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.owner_kernel=? AND a.remote_action_id=? AND a.remote_action_id!='' AND a.deleted_at IS NULL`,
+		peerKey, remoteActionID))
 }
 
 func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON, outJSON, createdAt, updatedAt string, deletedAt sql.NullString) (*kernel.Action, error) {
@@ -925,13 +939,26 @@ func finishAction(a *kernel.Action, kind, visibility string, active int, inJSON,
 // BeginRun atomically debits price from owner.available→locked, creates the process
 // with available=0/locked=price, and creates the root trace with available=price.
 // lockReserveTx atomically debits `amount` from userID.available into userID.locked. Every account
-// is prepaid — a peer row funds nothing (P10), so there is no admission clause and no row may go
-// negative. A zero amount is a no-op. Returns ErrInsufficientFunds when the balance is short.
+// is prepaid (P10), so there is no admission clause and no row may go negative. A zero amount is a no-op. Returns ErrInsufficientFunds when the balance is short.
 func lockReserveTx(ctx context.Context, tx *sql.Tx, userID string, amount int64) error {
 	if err := debitAvailable(ctx, tx, accountWallet, userID, amount, "lock reserve"); err != nil {
 		return err
 	}
 	return lockFunds(ctx, tx, accountWallet, userID, amount, "lock reserve")
+}
+
+// lockStakes locks the immediate caller C's own two stakes on t — the transfer value it delivers and
+// the lottery stake that funds a winning ticket — from C's account. A caller on a peer holds no
+// account here and stakes nothing, so a stake asked of one is refused rather than locked from a user
+// here whose id it happens to share (D15).
+func lockStakes(ctx context.Context, tx *sql.Tx, t *kernel.Trace) error {
+	if t.CallerKernel == "" {
+		return lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket)
+	}
+	if t.Value+t.Ticket > 0 {
+		return kernel.ErrInsufficientFunds.Wrap("a peer holds no balance here")
+	}
+	return nil
 }
 
 // admitExposure raises the kernel's unpaid-delivered-service counter by `amount`, but only while the
@@ -981,7 +1008,7 @@ func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, o
 		// The immediate caller C's own two stakes, atomic with the execution reserve: the transfer
 		// value it delivers, and the lottery stake that funds a winning ticket. For a root call
 		// C == P; a composed subcall differs.
-		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
+		if err := lockStakes(ctx, tx, t); err != nil {
 			return err
 		}
 		// The owner's key for this run commits with its funding, so a run either holds its key or never
@@ -1047,10 +1074,10 @@ func insertTraceTx(ctx context.Context, tx *sql.Tx, t *kernel.Trace, parentTrace
 	// never queued for a reveal they have no secret for, but every call made since owes one.
 	_, err := tx.ExecContext(ctx,
 		`INSERT INTO traces (id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,revealed,owed_blockchain_address,value,value_to,value_peer,created_at,
-		                     caller_remote_id,caller_handle,target_remote_id,target_handle)
+		                     caller_kernel,caller_handle,target_kernel,target_handle)
 		 VALUES (?,?,?,?,?,?,?,0,?,?,?,?,0,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.ProcessID, parentTraceID, t.ActionOwnerID, t.ActionID, t.CallerUserID, price, t.IdempotencyKey, t.DispatchJSON, t.IdempotencyRecordID, t.Ticket, t.OwedBlockchainAddress, t.Value, nullStr(t.ValueTo), t.ValuePeer, timeToStr(t.CreatedAt),
-		t.CallerRemoteID, t.CallerHandle, t.TargetRemoteID, t.TargetHandle,
+		t.CallerKernel, t.CallerHandle, t.TargetKernel, t.TargetHandle,
 	)
 	return dbErr(err, "insert trace")
 }
@@ -1106,7 +1133,7 @@ func (s *DB) BeginSubcall(ctx context.Context, parentTraceID string, t *kernel.T
 		// The immediate caller C's own stakes from C's OWN balance — a composed transfer (an action
 		// subcalls sys/transfer) pays the value from the composing action owner, not the process
 		// budget, and a composed remote call stakes its own lottery ticket the same way.
-		if err := lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
+		if err := lockStakes(ctx, tx, t); err != nil {
 			return err
 		}
 		return insertTraceTx(ctx, tx, t, &parentTraceID, price)
@@ -1143,7 +1170,7 @@ func (s *DB) BeginTaskCall(ctx context.Context, taskID string, t *kernel.Trace) 
 		// The completer C funds its own stakes — the delivered value, and a lottery ticket when the
 		// completion reaches a remote action — atomic with claiming the task; the task's execution
 		// price stays creator-parked above.
-		if err = lockReserveTx(ctx, tx, t.CallerUserID, t.Value+t.Ticket); err != nil {
+		if err = lockStakes(ctx, tx, t); err != nil {
 			return err
 		}
 		// Insert the completion trace first so the FK on tasks.completion_trace_id is satisfied.
@@ -1168,14 +1195,14 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
 		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,evidence_eligible,started_at,ended_at,
-		  caller_remote_id,caller_handle,target_remote_id,target_handle)
+		  caller_kernel,caller_handle,target_kernel,target_handle)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
 		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSignerKey),
 		ktx.EvidenceEligible, timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
-		ktx.CallerRemoteID, ktx.CallerHandle, ktx.TargetRemoteID, ktx.TargetHandle,
+		ktx.CallerKernel, ktx.CallerHandle, ktx.TargetKernel, ktx.TargetHandle,
 	); err != nil {
 		return dbErr(err, label+": insert transaction")
 	}
@@ -1644,8 +1671,8 @@ func (s *DB) CommitFailedCall(ctx context.Context, ktx *kernel.Transaction, buil
 
 // CommitRemoteSettlement settles an outbound remote-proxy call (P7, P10). The economics differ from
 // a local call in two ways. The budget pays only the obligation and the import fee, so the refund
-// (q − obligation − importFee) is explicit rather than implied. And the obligation itself does not
-// land on a peer row — a peer row holds no money — it returns to the caller C, whose own stake then
+// (q − obligation − importFee) is explicit rather than implied. And the obligation itself goes to
+// no peer — a peer holds no account here — but returns to the caller C, whose own stake then
 // carries the draw: a losing ticket leaves C exactly the obligation better off than the refund
 // alone, and a winning one reserves the face value from C for the rail to send.
 func (s *DB) CommitRemoteSettlement(ctx context.Context, ktx *kernel.Transaction, receipt *kernel.Receipt, traceID, callerWalletID, callerWalletKind, feeRecipientID string, obligation, importFee int64, payout *kernel.RailTransfer, stats *kernel.Stats, idempotencyRecordID, taskID string) error {
@@ -1838,7 +1865,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 
 // ---- Traces ----
 
-const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,value_peer,created_at,outcome_json,caller_remote_id,caller_handle,target_remote_id,target_handle`
+const traceCols = `id,process_id,parent_trace_id,action_owner_id,action_id,caller_user_id,available,locked,idempotency_key,dispatch_json,idempotency_record_id,ticket,value,value_to,value_peer,created_at,outcome_json,caller_kernel,caller_handle,target_kernel,target_handle`
 
 func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var createdAt string
@@ -1846,7 +1873,7 @@ func scanTrace(t *kernel.Trace, scanFn func(...any) error) error {
 	var ticket, value sql.NullInt64
 	err := scanFn(&t.ID, &t.ProcessID, &parentID, &t.ActionOwnerID, &t.ActionID, &t.CallerUserID,
 		&t.Available, &t.Locked, &idempotencyKey, &dispatchJSON, &recordID, &ticket, &value, &valueTo, &t.ValuePeer, &createdAt, &outcome,
-		&t.CallerRemoteID, &t.CallerHandle, &t.TargetRemoteID, &t.TargetHandle)
+		&t.CallerKernel, &t.CallerHandle, &t.TargetKernel, &t.TargetHandle)
 	if err != nil {
 		return err
 	}
@@ -1923,7 +1950,7 @@ func (s *DB) TraceHasTransaction(ctx context.Context, traceID string) (bool, err
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
 	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer_key,''),started_at,ended_at,` +
-	`caller_remote_id,caller_handle,target_remote_id,target_handle`
+	`caller_kernel,caller_handle,target_kernel,target_handle`
 
 // scanTx scans one transaction row using the provided scan function.
 // scan must be called with exactly the destinations expected by txColumns.
@@ -1935,7 +1962,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName, &tx.RemoteActionID,
 		&argsJSON, &replyJSON, &status,
 		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON, &tx.RemoteSignerKey,
-		&startedAt, &endedAt, &tx.CallerRemoteID, &tx.CallerHandle, &tx.TargetRemoteID, &tx.TargetHandle); err != nil {
+		&startedAt, &endedAt, &tx.CallerKernel, &tx.CallerHandle, &tx.TargetKernel, &tx.TargetHandle); err != nil {
 		return tx, err
 	}
 	tx.ArgsJSON = strToRawJSON(argsJSON)
@@ -1989,11 +2016,11 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		args = append(args, f.OwnerUserID)
 	}
 	if f.CallerUserID != "" {
-		q += ` AND caller_user_id=?`
+		q += ` AND caller_kernel='' AND caller_user_id=?`
 		args = append(args, f.CallerUserID)
 	}
 	if f.TargetUserID != "" {
-		q += ` AND target_user_id=?`
+		q += ` AND target_kernel='' AND target_user_id=?`
 		args = append(args, f.TargetUserID)
 	}
 	if f.ProcessID != "" {
@@ -2001,7 +2028,7 @@ func (s *DB) ListTransactions(ctx context.Context, f kernel.TxFilter) ([]*kernel
 		args = append(args, f.ProcessID)
 	}
 	if f.PartyUserID != "" {
-		q += ` AND (owner_user_id=? OR caller_user_id=? OR target_user_id=?)`
+		q += ` AND (owner_user_id=? OR (caller_kernel='' AND caller_user_id=?) OR (target_kernel='' AND target_user_id=?))`
 		args = append(args, f.PartyUserID, f.PartyUserID, f.PartyUserID)
 	}
 	q += idPrefixClause
@@ -2070,11 +2097,11 @@ func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
 			}
 		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_kernel,
 			                    required_caller_handle,action_id,
 			                    partial_args,price,import_bps,status,created_at)
 			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			task.ID, task.ParentTraceID, task.RequiredCallerUserID, task.RequiredCallerRemoteID,
+			task.ID, task.ParentTraceID, task.RequiredCallerUserID, task.RequiredCallerKernel,
 			task.RequiredCallerHandle, task.ActionID, rawJSONStr(task.PartialArgs),
 			task.Price, task.ImportBPS, string(task.Status), timeToStr(task.CreatedAt),
 		)
@@ -2086,14 +2113,14 @@ func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
 	})
 }
 
-const taskCols = `id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
+const taskCols = `id,parent_trace_id,required_caller_user_id,required_caller_kernel,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
 
 func scanTask(scanFn func(...any) error) (*kernel.Task, error) {
 	task := &kernel.Task{}
-	var parentTraceID, txID, completionTraceID, remoteID *string
+	var parentTraceID, txID, completionTraceID *string
 	var createdAt, partialArgs, status string
 	var importBPS sql.NullInt64
-	if err := scanFn(&task.ID, &parentTraceID, &task.RequiredCallerUserID, &remoteID, &task.RequiredCallerHandle,
+	if err := scanFn(&task.ID, &parentTraceID, &task.RequiredCallerUserID, &task.RequiredCallerKernel, &task.RequiredCallerHandle,
 		&task.ActionID, &partialArgs, &task.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
 		return nil, err
 	}
@@ -2101,7 +2128,6 @@ func scanTask(scanFn func(...any) error) (*kernel.Task, error) {
 		v := importBPS.Int64
 		task.ImportBPS = &v
 	}
-	task.RequiredCallerRemoteID = remoteID
 	task.ParentTraceID = parentTraceID
 	task.PartialArgs = strToRawJSON(partialArgs)
 	task.Status = kernel.TaskStatus(status)
@@ -2167,7 +2193,7 @@ func reviseTasks(ctx context.Context, tx *sql.Tx, set, where string, args ...any
 		return nil, err
 	}
 	for _, id := range ids {
-		e, _, err := readOwnTask(ctx, tx, id)
+		e, err := readOwnTask(ctx, tx, id)
 		if err == nil {
 			err = upsertMailbox(ctx, tx, e)
 		}
@@ -2178,31 +2204,29 @@ func reviseTasks(ctx context.Context, tx *sql.Tx, set, where string, args ...any
 	return ids, nil
 }
 
-// readOwnTask builds a task this kernel holds as its mailbox entry, and the key of the peer it is
-// addressed to, empty when its addressee is here.
-func readOwnTask(ctx context.Context, q rowQuerier, id string) (*kernel.TaskEntry, string, error) {
+// readOwnTask builds a task this kernel holds as its mailbox entry.
+func readOwnTask(ctx context.Context, q rowQuerier, id string) (*kernel.TaskEntry, error) {
 	e := &kernel.TaskEntry{}
-	var status, partial, createdAt, schema, outcome, reply, peerKey string
+	var status, partial, createdAt, schema, outcome, reply string
 	err := q.QueryRowContext(ctx, `
-SELECT s.id, s.revision, s.status, s.required_caller_user_id, COALESCE(s.required_caller_remote_id,''),
+SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_user_id,
        s.required_caller_handle, s.partial_args, s.price, COALESCE(s.tx_id,''), s.created_at, s.action_id,
        COALESCE(a.input_schema,''), COALESCE(t.action_id,''), COALESCE(p.owner_user_id,''), COALESCE(t.process_id,''),
-       COALESCE(x.status,''), COALESCE(x.reply_json,''), COALESCE(rc.kernel_public_key,''),
+       COALESCE(x.status,''), COALESCE(x.reply_json,''),
        COALESCE((SELECT value FROM config WHERE key='signing_public_key'),'')
   FROM tasks s
   LEFT JOIN actions a ON a.id=s.action_id
   LEFT JOIN traces t ON t.id=s.parent_trace_id
   LEFT JOIN processes p ON p.id=t.process_id
   LEFT JOIN transactions x ON x.id=s.tx_id
-  LEFT JOIN accounts rc ON rc.id=s.required_caller_user_id
- WHERE s.id=?`, id).Scan(&e.ID, &e.Revision, &status, &e.RequiredCaller.AccountID, &e.RequiredCaller.RemoteID,
+ WHERE s.id=?`, id).Scan(&e.ID, &e.Revision, &status, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID,
 		&e.RequiredCaller.Handle, &partial, &e.Price, &e.TxID, &createdAt, &e.ActionID,
-		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &peerKey, &e.HolderKey)
+		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &e.HolderKey)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", kernel.ErrNotFound.Wrap("task not found")
+		return nil, kernel.ErrNotFound.Wrap("task not found")
 	}
 	if err != nil {
-		return nil, "", dbErr(err, "read task notice")
+		return nil, dbErr(err, "read task notice")
 	}
 	e.Status, e.Outcome = kernel.TaskStatus(status), kernel.TxStatus(outcome)
 	e.PartialArgs, e.CreatedAt = strToRawJSON(partial), strToTime(createdAt)
@@ -2214,7 +2238,7 @@ SELECT s.id, s.revision, s.status, s.required_caller_user_id, COALESCE(s.require
 		_ = json.Unmarshal([]byte(schema), &in)
 		e.AllowedInput = kernel.DeriveAllowedSchema(in, e.PartialArgs)
 	}
-	return e, peerKey, nil
+	return e, nil
 }
 
 // upsertMailbox is the one writer of the mailbox: an entry is kept iff it is newer than the one held.
@@ -2224,22 +2248,22 @@ func upsertMailbox(ctx context.Context, tx *sql.Tx, e *kernel.TaskEntry) error {
 		return dbErr(err, "encode task notice")
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO mailbox (holder_key,id,required_caller_user_id,required_caller_remote_id,required_caller_handle,
+INSERT INTO mailbox (holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,
                      owner_user_id,process_id,status,revision,notice_json,created_at)
 VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(holder_key,id) DO UPDATE SET status=excluded.status, revision=excluded.revision, notice_json=excluded.notice_json
  WHERE excluded.revision > mailbox.revision`,
-		e.HolderKey, e.ID, e.RequiredCaller.AccountID, nullStr(e.RequiredCaller.RemoteID), e.RequiredCaller.Handle,
+		e.HolderKey, e.ID, e.RequiredCaller.Kernel, e.RequiredCaller.UserID, e.RequiredCaller.Handle,
 		nullStr(e.OwnerUserID), nullStr(e.ProcessID), string(e.Status), e.Revision, string(notice), timeToStr(e.CreatedAt))
 	return dbErr(err, "deliver task")
 }
 
-const mailboxCols = `holder_key,id,required_caller_user_id,COALESCE(required_caller_remote_id,''),required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json`
+const mailboxCols = `holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json`
 
 func scanMailbox(scan func(...any) error) (*kernel.TaskEntry, error) {
 	e := &kernel.TaskEntry{}
 	var notice string
-	if err := scan(&e.HolderKey, &e.ID, &e.RequiredCaller.AccountID, &e.RequiredCaller.RemoteID, &e.RequiredCaller.Handle,
+	if err := scan(&e.HolderKey, &e.ID, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID, &e.RequiredCaller.Handle,
 		&e.OwnerUserID, &e.ProcessID, &notice); err != nil {
 		return nil, err
 	}
@@ -2253,7 +2277,7 @@ func (s *DB) ListMailbox(ctx context.Context, f kernel.TaskFilter) ([]*kernel.Ta
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+mailboxCols+`
 		 FROM mailbox
-		 WHERE (required_caller_user_id=? OR owner_user_id=? OR ?)
+		 WHERE ((required_caller_kernel='' AND required_caller_user_id=?) OR owner_user_id=? OR ?)
 		   AND (?='' OR process_id=?)
 		   AND (?='' OR status=?)
 		   AND (? OR ?<>'' OR status IN ('waiting','running'))`+idPrefixClause+`
@@ -2287,19 +2311,20 @@ func (s *DB) ReadMailbox(ctx context.Context, id string) (*kernel.TaskEntry, err
 func (s *DB) RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID string, n *kernel.TaskNotice) error {
 	return s.withTx(ctx, "record task notice", func(tx *sql.Tx) error {
 		var held, addressee string
-		err := tx.QueryRowContext(ctx, `SELECT holder_key, required_caller_user_id FROM mailbox WHERE id=?`, n.ID).Scan(&held, &addressee)
-		if err == nil && (held != holderKey || addressee != requiredCallerID) {
+		var addresseeKernel string
+		err := tx.QueryRowContext(ctx, `SELECT holder_key, required_caller_kernel, required_caller_user_id FROM mailbox WHERE id=?`, n.ID).Scan(&held, &addresseeKernel, &addressee)
+		if err == nil && (held != holderKey || addresseeKernel != "" || addressee != requiredCallerID) {
 			return kernel.ErrInvalidInput.Wrap("a task id is delivered by one holder to one addressee")
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return dbErr(err, "record task notice: read")
 		}
-		var live bool
-		if err := tx.QueryRowContext(ctx, `SELECT `+liveUser("")+` FROM accounts WHERE id=?`, requiredCallerID).Scan(&live); err != nil || !live {
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM accounts WHERE id=?`, requiredCallerID).Scan(&one); err != nil {
 			return kernel.ErrNotFound.Wrap("the task names no user of this kernel")
 		}
 		return upsertMailbox(ctx, tx, &kernel.TaskEntry{TaskNotice: *n, HolderKey: holderKey,
-			RequiredCaller: kernel.Principal{AccountID: requiredCallerID}})
+			RequiredCaller: kernel.User(requiredCallerID)})
 	})
 }
 
@@ -2316,8 +2341,8 @@ func (s *DB) RedeliverTasks(ctx context.Context) error {
 // it has not acknowledged — never tried first, then least recently failed, as reveals are ordered.
 func (s *DB) ListUndeliveredTasks(ctx context.Context, limit int) ([]*kernel.OutgoingNotice, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id FROM tasks s JOIN accounts a ON a.id=s.required_caller_user_id
-		  WHERE a.kernel_public_key IS NOT NULL AND s.revision<>s.told_revision
+		`SELECT s.id FROM tasks s
+		  WHERE s.required_caller_kernel<>'' AND s.revision<>s.told_revision
 		  ORDER BY COALESCE(s.told_failed_at,'') ASC, s.created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, dbErr(err, "list undelivered tasks")
@@ -2339,14 +2364,14 @@ func (s *DB) ListUndeliveredTasks(ctx context.Context, limit int) ([]*kernel.Out
 
 // ReadOutgoingNotice is a task's current notice as the kernel of its addressee may see it.
 func (s *DB) ReadOutgoingNotice(ctx context.Context, id string) (*kernel.OutgoingNotice, error) {
-	e, peerKey, err := readOwnTask(ctx, s.db, id)
+	e, err := readOwnTask(ctx, s.db, id)
 	if err != nil {
 		return nil, err
 	}
-	if peerKey == "" {
+	if e.RequiredCaller.Local() {
 		return nil, kernel.ErrNotFound.Wrap("task is not addressed to a peer")
 	}
-	return &kernel.OutgoingNotice{PeerKey: peerKey, Notice: e.ForPeer(e.RequiredCaller.RemoteID)}, nil
+	return &kernel.OutgoingNotice{PeerKey: e.RequiredCaller.Kernel, Notice: e.ForPeer(e.RequiredCaller.UserID)}, nil
 }
 
 // MarkTaskTold records the revision a peer acknowledged. It never moves back, so an older send
@@ -3236,35 +3261,29 @@ func (s *DB) BindPetname(ctx context.Context, publicKey, desired string, exact b
 	return bound, err
 }
 
-// SuspendKernelAccount provisions (when absent) and suspends a kernel's account in ONE transaction
-// (§13): two calls would let an inbound signed call land between them and execute against a briefly
-// active account. Idempotent — re-suspending an already-suspended kernel just rewrites the stamp.
-func (s *DB) SuspendKernelAccount(ctx context.Context, publicKey, newAccountID string, now time.Time) error {
-	return s.withTx(ctx, "suspend kernel account", func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO kernels (public_key,nickname,about,first_seen,updated_at) VALUES (?,'','',?,?)
-			 ON CONFLICT(public_key) DO NOTHING`,
-			publicKey, timeToStr(now), timeToStr(now)); err != nil {
-			return dbErr(err, "ensure kernel")
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO accounts (id,description,password_hash,available,locked,suspended_at,kernel_public_key,created_at,updated_at)
-			 SELECT ?,'','',0,0,?,?,?,?
-			  WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE kernel_public_key=?)`,
-			newAccountID, timeToStr(now), publicKey, timeToStr(now), timeToStr(now), publicKey); err != nil {
-			return dbErr(err, "ensure kernel account")
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE accounts SET suspended_at=?, updated_at=? WHERE kernel_public_key=?`,
-			timeToStr(now), timeToStr(now), publicKey); err != nil {
-			return dbErr(err, "suspend kernel account")
-		}
-		return nil
-	})
+// SetKernelSuspended suspends a kernel in one statement, making its row when it has none (D15), so a
+// kernel can be blocked before its first call and nothing lands between the two; re-suspending just
+// rewrites the stamp. Lifting a suspension needs a kernel this one knows.
+func (s *DB) SetKernelSuspended(ctx context.Context, publicKey string, suspend bool, now time.Time) error {
+	if suspend {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO kernels (public_key,nickname,about,first_seen,updated_at,suspended_at) VALUES (?,'','',?,?,?)
+			 ON CONFLICT(public_key) DO UPDATE SET suspended_at=excluded.suspended_at`,
+			publicKey, timeToStr(now), timeToStr(now), timeToStr(now))
+		return dbErr(err, "suspend kernel")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE kernels SET suspended_at=NULL WHERE public_key=?`, publicKey)
+	if err != nil {
+		return dbErr(err, "unsuspend kernel")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrNotFound.Wrapf("kernel %s is not known here", publicKey)
+	}
+	return nil
 }
 
-// ListKernels returns the whole `admin peers` roster in one query (§14): every known kernel, with
-// its account state when one exists. selfKey is excluded; suspended counterparties appear only when
+// ListKernels returns the whole `admin peers` roster in one query (§14): every known kernel, and
+// whether a transaction here names it. selfKey is excluded; suspended kernels appear only when
 // includeSuspended.
 func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended bool, limit, offset int) ([]*kernel.RemoteKernelView, error) {
 	if limit <= 0 {
@@ -3272,11 +3291,11 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT k.public_key, COALESCE(k.petname,''), k.nickname, k.about,
-		        CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END, a.suspended_at,
-		        k.last_seen, k.last_contact_failed_at,
+		        EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.public_key OR x.target_kernel = k.public_key),
+		        k.suspended_at, k.last_seen, k.last_contact_failed_at,
 		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key)
-		 FROM kernels k LEFT JOIN accounts a ON a.kernel_public_key = k.public_key
-		 WHERE k.public_key != ? AND k.forgotten_at IS NULL AND (? OR a.suspended_at IS NULL)
+		 FROM kernels k
+		 WHERE k.public_key != ? AND k.forgotten_at IS NULL AND (? OR k.suspended_at IS NULL)
 		 ORDER BY k.updated_at DESC, k.public_key
 		 LIMIT ? OFFSET ?`, selfKey, includeSuspended, limit, offset)
 	if err != nil {
@@ -3284,13 +3303,11 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	}
 	return queryList(rows, "list kernels", func(scan func(...any) error) (*kernel.RemoteKernelView, error) {
 		var v kernel.RemoteKernelView
-		var hasAccount int
 		var suspendedAt, lastSeen, failedAt *string
-		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &hasAccount,
+		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &v.Traded,
 			&suspendedAt, &lastSeen, &failedAt, &v.Actions); err != nil {
 			return nil, err
 		}
-		v.HasAccount = hasAccount == 1
 		v.SuspendedAt = strToNullTime(suspendedAt)
 		v.LastSeen = strToNullTime(lastSeen)
 		v.LastContactFailedAt = strToNullTime(failedAt)
@@ -3312,12 +3329,12 @@ func (s *DB) ReadKernelByPetname(ctx context.Context, petname string) (*kernel.R
 func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteKernel, error) {
 	var k kernel.RemoteKernel
 	var firstSeen, updatedAt string
-	var lastSeen, failedAt *string
+	var lastSeen, failedAt, suspendedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,blockchain_proof,gossip_cursor,last_seen,last_contact_failed_at,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,blockchain_proof,gossip_cursor,last_seen,last_contact_failed_at,suspended_at,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
 		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.BlockchainAddress, &k.BlockchainProof, &k.GossipCursor,
-			&lastSeen, &failedAt, &firstSeen, &updatedAt)
+			&lastSeen, &failedAt, &suspendedAt, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -3326,6 +3343,7 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	}
 	k.LastSeen = strToNullTime(lastSeen)
 	k.LastContactFailedAt = strToNullTime(failedAt)
+	k.SuspendedAt = strToNullTime(suspendedAt)
 	k.FirstSeen = strToTime(firstSeen)
 	k.UpdatedAt = strToTime(updatedAt)
 	return &k, nil
@@ -3633,20 +3651,18 @@ WITH eligible AS (
          r.started_at AS started_at, r.created_at AS created_at,
          rt.note AS rating_note, rt.rating AS rating_value,
          rt.rated_receipt_hash AS rated_receipt_hash, rt.created_at AS rating_created_at,
-         CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.kernel_public_key,'') ELSE '' END AS subj_kernel,
+         a.owner_kernel AS subj_kernel,
          CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END AS subj_action,
-         CASE WHEN a.kind='remote_proxy' THEN '' ELSE COALESCE(ca.kernel_public_key,'') END AS cp_kernel,
+         CASE WHEN a.kind='remote_proxy' THEN '' ELSE t.caller_kernel END AS cp_kernel,
          COALESCE(t.remote_receipt_json,'') AS remote_receipt_json,
          COALESCE(rt.created_at, r.created_at) AS eff,
          ROW_NUMBER() OVER (
-           PARTITION BY CASE WHEN a.kind='remote_proxy' THEN COALESCE(ow.kernel_public_key,'') ELSE '' END,
+           PARTITION BY a.owner_kernel,
                         CASE WHEN a.kind='remote_proxy' THEN a.remote_action_id ELSE r.action_id END
            ORDER BY r.created_at DESC, r.id DESC) AS recency
   FROM receipts r
   JOIN transactions t ON t.id = r.tx_id
   JOIN actions a ON a.id = r.action_id
-  LEFT JOIN "accounts" ow ON ow.id = a.owner_user_id
-  LEFT JOIN "accounts" ca ON ca.id = t.caller_user_id
   LEFT JOIN ratings rt ON rt.rated_tx_id = r.tx_id
   WHERE t.evidence_eligible = 1
 )
@@ -3879,11 +3895,10 @@ func (s *DB) ListPublicRatings(ctx context.Context, actionID, subjectKernel, sub
 	args := []any{actionID, subjectKernel, subjectKernel, subjectAction}
 	if subjectKernel == selfKey {
 		// This kernel is the subject, so its record is the receipt itself, and the trade is named
-		// by the account that called it.
+		// by the kernel that called it.
 		subjectRecord = `
 		  JOIN receipts rc ON rc.hash = e.remote_receipt_hash AND rc.action_id = ?
-		  JOIN transactions t2 ON t2.id = rc.tx_id
-		  JOIN "accounts" a ON a.id = t2.caller_user_id AND a.kernel_public_key = e.issuer_public_key`
+		  JOIN transactions t2 ON t2.id = rc.tx_id AND t2.caller_kernel = e.issuer_public_key`
 		subjectStatus = `MIN(t2.status)`
 		args = []any{actionID, actionID, subjectKernel, subjectAction}
 	}
@@ -4007,9 +4022,9 @@ func (s *DB) ReadRatingByTxID(ctx context.Context, txID string) (*kernel.Rating,
 // and the loser is told by the row rather than by the driver's error text (P4).
 func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.IdempotencyRecord) (*kernel.IdempotencyRecord, error) {
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,args_json,created_at)
-		 VALUES (?,?,?,?,?) ON CONFLICT (idempotency_key,counterparty_user_id) DO NOTHING`,
-		r.ID, r.IdempotencyKey, r.CounterpartyUserID, r.ArgsJSON, timeToStr(r.CreatedAt),
+		`INSERT INTO idempotency_records (id,idempotency_key,counterparty,args_json,created_at)
+		 VALUES (?,?,?,?,?) ON CONFLICT (idempotency_key,counterparty) DO NOTHING`,
+		r.ID, r.IdempotencyKey, r.Counterparty, r.ArgsJSON, timeToStr(r.CreatedAt),
 	)
 	if err != nil {
 		return nil, dbErr(err, "insert pending idempotency record")
@@ -4017,7 +4032,7 @@ func (s *DB) InsertPendingIdempotencyRecord(ctx context.Context, r *kernel.Idemp
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil, nil
 	}
-	return s.ReadIdempotencyRecord(ctx, r.IdempotencyKey, r.CounterpartyUserID)
+	return s.ReadIdempotencyRecord(ctx, r.IdempotencyKey, r.Counterparty)
 }
 
 // DeleteIdempotencyRecord releases the lock, and only while nothing depends on it. A lock whose
@@ -4060,8 +4075,8 @@ func (s *DB) ConsumeRecoveryChallenge(ctx context.Context, nonce string) (string
 	return userID, nil
 }
 
-func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterpartyUserID string) (*kernel.IdempotencyRecord, error) {
-	return s.readIdempotencyRecord(ctx, `idempotency_key=? AND counterparty_user_id=?`, key, counterpartyUserID)
+func (s *DB) ReadIdempotencyRecord(ctx context.Context, key, counterparty string) (*kernel.IdempotencyRecord, error) {
+	return s.readIdempotencyRecord(ctx, `idempotency_key=? AND counterparty=?`, key, counterparty)
 }
 
 // ReadIdempotencyRecordByID reads the lock a trace was admitted under: recovery signs over the
@@ -4074,9 +4089,9 @@ func (s *DB) readIdempotencyRecord(ctx context.Context, where string, args ...an
 	var r kernel.IdempotencyRecord
 	var createdAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,idempotency_key,counterparty_user_id,args_json,created_at
+		`SELECT id,idempotency_key,counterparty,args_json,created_at
 		 FROM idempotency_records WHERE `+where, args...,
-	).Scan(&r.ID, &r.IdempotencyKey, &r.CounterpartyUserID, &r.ArgsJSON, &createdAt)
+	).Scan(&r.ID, &r.IdempotencyKey, &r.Counterparty, &r.ArgsJSON, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("idempotency record not found")
 	}

@@ -60,26 +60,6 @@ func TestRefundLawAcceptsWhatBalancesAndRejectsWhatDoesNot(t *testing.T) {
 	}
 }
 
-// A debt is one row on the serving side, so two kernels each recording the other as a debtor is a
-// contradiction — and the earlier version of this check asserted the rows were opposites, which
-// only ever passed when both were zero.
-func TestContradictoryDebtsAreTheOnesDetected(t *testing.T) {
-	ka := &Kernel{Name: "a", Key: "KA"}
-	kb := &Kernel{Name: "b", Key: "KB"}
-	sa := Snapshot{Peers: []map[string]any{{"public_key": "KB", "available": float64(-50)}}}
-	sb := Snapshot{Peers: []map[string]any{{"public_key": "KA", "available": float64(0)}}}
-	if peerBalance(sa, kb) != -50 {
-		t.Error("a's row for b should show b owing 50")
-	}
-	if peerBalance(sb, ka) != 0 {
-		t.Error("b's row for a should be zero; a debt is recorded once, on the serving side")
-	}
-	both := Snapshot{Peers: []map[string]any{{"public_key": "KA", "available": float64(-30)}}}
-	if peerBalance(sa, kb) < 0 && peerBalance(both, ka) < 0 == false {
-		t.Error("two kernels each recording the other as owing is the contradiction to catch")
-	}
-}
-
 // A run that collected nothing must not report a pass. The check that enforces this is the one
 // most likely to be quietly weakened, because a passing report is what everyone wants to see.
 func TestAnEmptyRunCannotPass(t *testing.T) {
@@ -299,39 +279,18 @@ func TestOutstandingDebtIsFoundInBothDirections(t *testing.T) {
 	defer f.Close()
 	// The obligation is recorded on zzz, the later name: zzz says aaa owes it for two calls.
 	snaps := map[string]Snapshot{
-		"aaa": {Peers: []map[string]any{{"public_key": "KB", "available": float64(0)}}},
-		"zzz": {
-			Peers: []map[string]any{{"public_key": "KA", "available": float64(0)}},
-			Owed:  []map[string]any{{"id": "c1", "peer": "KA"}, {"id": "c2", "peer": "KA"}},
-		},
+		"aaa": {},
+		"zzz": {Owed: []map[string]any{{"id": "c1", "peer": "KA"}, {"id": "c2", "peer": "KA"}}},
 	}
 	if owedBy(snaps["zzz"], ka) != 2 {
 		t.Fatal("the fixture does not record the debt where the test says it does")
 	}
-	contradictions, outstanding := positions(snaps, n.Kernels)
-	if len(contradictions) != 0 {
-		t.Errorf("rows holding nothing were reported as contradictions: %v", contradictions)
-	}
+	outstanding := positions(snaps, n.Kernels)
 	var found []string
 	for _, o := range outstanding {
 		found = append(found, strings.Fields(o)[0])
 	}
 	if len(found) != 1 || found[0] != "aaa" {
 		t.Errorf("the debt owed by the earlier-sorting kernel was not found: %v", found)
-	}
-}
-
-// A peer account is identity, attribution and moderation state — never a wallet. A row that holds
-// anything at all is a contradiction under this economy, and the report must say so.
-func TestAPeerRowHoldingMoneyIsAContradiction(t *testing.T) {
-	ka, kb := &Kernel{Name: "aaa", Key: "KA"}, &Kernel{Name: "zzz", Key: "KB"}
-	n := &Net{Root: t.TempDir(), Kernels: map[string]*Kernel{"aaa": ka, "zzz": kb}}
-	snaps := map[string]Snapshot{
-		"aaa": {Peers: []map[string]any{{"public_key": "KB", "available": float64(-750)}}},
-		"zzz": {Peers: []map[string]any{{"public_key": "KA", "available": float64(0)}}},
-	}
-	contradictions, _ := positions(snaps, n.Kernels)
-	if len(contradictions) != 1 {
-		t.Errorf("a peer row holding -750 was not reported: %v", contradictions)
 	}
 }

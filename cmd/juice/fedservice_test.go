@@ -22,8 +22,8 @@ import (
 )
 
 // Tests for /juice/fed/task/1 (§13): the wire verb that makes a task addressed to a peer
-// completable. Before it existed such a task was a permanent funds trap — a key account holds no
-// session token, and the federation protocols carried `run` but not `complete`.
+// completable. Before it existed such a task was a permanent funds trap — a peer holds no
+// session token here, and the federation protocols carried `run` but not `complete`.
 
 // fedPeer registers a peer with a fresh keypair and returns its key and private key.
 func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.PrivateKey) {
@@ -34,9 +34,6 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.BindPetname(context.Background(), pubB64, handle, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := k.EnsureKernelAccount(context.Background(), pubB64); err != nil {
 		t.Fatal(err)
 	}
 	return pubB64, priv
@@ -60,12 +57,8 @@ func parkTaskForPeerUser(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := k.ReadAccountByKernelKey(ctx, peerKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), parkTaskAction(t, k), json.RawMessage(`{}`), kernel.Principal{AccountID: peer.ID, RemoteID: remoteUserID})
+	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), parkTaskAction(t, k), json.RawMessage(`{}`), kernel.Principal{Kernel: peerKey, UserID: remoteUserID})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -307,8 +300,7 @@ func TestFedTask_RequestsAreRejected(t *testing.T) {
 		}},
 		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
 			sys, _ := k.ReadUserByHandle(ctx, "sys")
-			peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
-			if err := k.SuspendUser(ctx, sys.ID, peer.ID); err != nil {
+			if err := k.SuspendKernel(ctx, sys.ID, keyA); err != nil {
 				t.Fatalf("suspend: %v", err)
 			}
 			ts := time.Now().UTC().Format(time.RFC3339)
@@ -379,13 +371,12 @@ func TestFedTask_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	if task.Status != kernel.TaskDone {
 		t.Errorf("expected task done, got %s", task.Status)
 	}
-	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 	tx, err := k.ReadTransaction(ctx, sys.ID, txID)
 	if err != nil {
 		t.Fatalf("ReadTransaction: %v", err)
 	}
-	if tx.CallerUserID != peer.ID {
-		t.Errorf("expected caller_user_id=%s (the peer), got %s", peer.ID, tx.CallerUserID)
+	if tx.CallerKernel != keyA || tx.CallerUserID != "" {
+		t.Errorf("expected the peer kernel as caller, got kernel=%q user=%q", tx.CallerKernel, tx.CallerUserID)
 	}
 
 	// A replay with the same idempotency key returns the stored result, re-executing nothing.
@@ -413,7 +404,6 @@ func TestFedTask_PeerCompletesLocalAction(t *testing.T) {
 	ctx := context.Background()
 
 	keyA, privA := fedPeer(t, k, "peer-a")
-	peer, _ := k.ReadAccountByKernelKey(ctx, keyA)
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	// A local action owned by @sys — the creator — and a task parked for the peer against it.
@@ -423,7 +413,7 @@ func TestFedTask_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.Principal{AccountID: peer.ID})
+	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.Principal{Kernel: keyA})
 	if err != nil {
 		t.Fatalf("CreateTask parking a local action for a peer: %v", err)
 	}

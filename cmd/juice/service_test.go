@@ -44,13 +44,12 @@ func TestResolveHandle(t *testing.T) {
 	// A peer is resolvable by its base64url public key (the global name) in the kernel position.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, keyB64)
-	if err != nil {
+	if err := k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
 	}
 	kr, err := k.ResolveKernel(ctx, keyB64)
-	if err != nil || kr.Local || kr.Account == nil || kr.Account.ID != peer.ID {
-		t.Errorf("ResolveKernel(key): got %+v (err %v), want peer %q", kr, err, peer.ID)
+	if err != nil || kr.Local || kr.Key != keyB64 {
+		t.Errorf("ResolveKernel(key): got %+v (err %v), want peer %q", kr, err, keyB64)
 	}
 }
 
@@ -137,7 +136,7 @@ func TestEnrichTask(t *testing.T) {
 	entry := func(status kernel.TaskStatus, actionID string, rc kernel.Principal) *kernel.TaskEntry {
 		return &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s1", Status: status, ActionID: actionID}, RequiredCaller: rc}
 	}
-	v := enrichTask(k, ctx, entry(kernel.TaskDone, action.ID, kernel.Principal{AccountID: alice.ID}), k.NewNames())
+	v := enrichTask(k, ctx, entry(kernel.TaskDone, action.ID, kernel.Principal{UserID: alice.ID}), k.NewNames())
 	if v.Action != "alice@k/greet" {
 		t.Errorf("enrichTask: Action = %q, want alice@k/greet", v.Action)
 	}
@@ -158,14 +157,10 @@ func TestEnrichTask(t *testing.T) {
 	// waiting_on_peer and names the kernel bare — a user always carries `@`, a kernel never does.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, peerKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := k.BindPetname(ctx, peerKey, "peer", true); err != nil {
 		t.Fatal(err)
 	}
-	v2 := enrichTask(k, ctx, entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID}), k.NewNames())
+	v2 := enrichTask(k, ctx, entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey}), k.NewNames())
 	if v2.Action != "" {
 		t.Errorf("enrichTask(no action): Action = %q, want empty", v2.Action)
 	}
@@ -179,12 +174,12 @@ func TestEnrichTask(t *testing.T) {
 	// A task parked for a principal on a peer names that principal beneath the peer's local name.
 	// The handle it went by when the task was made is display; the stable id underneath is what
 	// authorises the completion, so a rename there leaves the task addressed and only this stales.
-	named := entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID, RemoteID: "u-9f2c", Handle: "bob"})
+	named := entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey, UserID: "u-9f2c", Handle: "bob"})
 	if got := enrichTask(k, ctx, named, k.NewNames()).RequiredCaller; got != "bob@peer" {
 		t.Errorf("enrichTask: RequiredCaller = %q, want bob@peer", got)
 	}
 	// A row parked before the handle was kept still renders, by the id it does hold.
-	unnamed := entry(kernel.TaskWaiting, "", kernel.Principal{AccountID: peer.ID, RemoteID: "u-9f2c"})
+	unnamed := entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey, UserID: "u-9f2c"})
 	if got := enrichTask(k, ctx, unnamed, k.NewNames()).RequiredCaller; got != "u-9f2c@peer" {
 		t.Errorf("enrichTask(no handle): RequiredCaller = %q, want u-9f2c@peer", got)
 	}
@@ -235,7 +230,7 @@ func TestEnrichAction(t *testing.T) {
 		t.Errorf("enrichAction: ActionRef = %q, want bob@k/ping", r.ActionRef)
 	}
 
-	// A remote proxy is owned by a kernel account: its address is the remote owner's, beneath the
+	// A remote proxy is owned by a user on a peer kernel: its address is that owner's, beneath the
 	// peer's local name.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
@@ -245,18 +240,10 @@ func TestEnrichAction(t *testing.T) {
 	if _, err := k.BindPetname(ctx, key, "", false); err != nil {
 		t.Fatal(err)
 	}
-	mount, err := k.EnsureKernelAccount(ctx, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proxy := &kernel.Action{ID: "a2", OwnerUserID: mount.ID, Name: "bob/greet", Kind: kernel.KindRemoteProxy}
+	proxy := &kernel.Action{ID: "a2", OwnerKernel: key, OwnerUserID: "bob-id", OwnerHandle: "bob", Name: "greet", Kind: kernel.KindRemoteProxy}
 	r2 := enrichAction(ctx, k, proxy, k.NewNames())
 	if r2.ActionRef != "bob@provider/greet" {
 		t.Errorf("proxy ActionRef = %q, want bob@provider/greet", r2.ActionRef)
-	}
-	// The response is built from a copy, so enrichment never writes display state back onto the row.
-	if proxy.OwnerHandle != "" {
-		t.Errorf("enrichAction mutated the caller's action: owner_handle = %q", proxy.OwnerHandle)
 	}
 	// owner_handle is not a response field: the address names the owner.
 	b, _ := json.Marshal(r2)
@@ -683,10 +670,10 @@ func TestNamesAddressFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := k.NewNames()
-	if got := names.Address(ctx, kernel.Principal{AccountID: u.ID}); got != "alice@k" {
+	if got := names.Address(ctx, kernel.Principal{UserID: u.ID}); got != "alice@k" {
 		t.Errorf("Address(alice) = %q, want alice@k", got)
 	}
-	if got := names.Address(ctx, kernel.Principal{AccountID: "gone"}); got != "gone" {
+	if got := names.Address(ctx, kernel.Principal{UserID: "gone"}); got != "gone" {
 		t.Errorf("Address(gone) = %q, want raw-id fallback", got)
 	}
 	if got := names.Address(ctx, kernel.Principal{}); got != "" {
@@ -834,45 +821,25 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 	}
 }
 
-// TestAccountCacheReferenceRendersKernels: an unbound kernel account renders as its public key, not
+// TestAddressRendersKernels: an unbound kernel renders as its public key, not
 // a raw UUID — §14 requires a rendered identity to be a consumable command input, and a key is one.
-func TestAccountCacheReferenceRendersKernels(t *testing.T) {
+func TestAddressRendersKernels(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
 
-	acct, err := k.EnsureKernelAccount(ctx, key)
-	if err != nil {
+	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	if got := k.Address(ctx, kernel.Principal{AccountID: acct.ID}); got != key {
-		t.Errorf("unbound kernel account rendered %q, want its key %s", got, key)
+	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got != key {
+		t.Errorf("unbound kernel rendered %q, want its key %s", got, key)
 	}
 	if _, err := k.BindPetname(ctx, key, "named-peer", true); err != nil {
 		t.Fatal(err)
 	}
-	if got := k.Address(ctx, kernel.Principal{AccountID: acct.ID}); got != "named-peer" {
-		t.Errorf("bound kernel account rendered %q, want its petname", got)
-	}
-}
-
-// TestATargetIsNeverATombstone: the mixed admin commands take an id, so the purged-peer anchor
-// must be refused there too — it names no live entity (§13).
-func TestATargetIsNeverATombstone(t *testing.T) {
-	k, st := newRemoteTestKernel(t)
-	ctx := context.Background()
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
-	acct, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.PurgePeerCascade(ctx, acct.ID); err != nil {
-		t.Fatal(err)
-	}
-	// A tombstone has no handle, so no address reaches it, and an id is not an address.
-	if _, _, err := resolveTarget(k, ctx, acct.ID, "user"); err == nil {
-		t.Error("tombstone id: want an error")
+	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got != "named-peer" {
+		t.Errorf("bound kernel rendered %q, want its petname", got)
 	}
 }
 

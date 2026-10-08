@@ -78,7 +78,7 @@ func TestTaskCreateReturnsWaitingTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestTaskCompleteMergesArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"from_partial":"A","shared":"partial-val"}`)
-	task, err := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestTaskCompleteInputValidatedAgainstInputSchema(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestTaskCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: rightCaller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(rightCaller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestCompleteTaskInTraceIsTraceConfined(t *testing.T) {
 
 	// A task in VICTIM's process, addressed to mallory.
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
-	task, err := k.CreateTask(ctx, victimTrace.ID, action.ID, nil, kernel.Principal{AccountID: mallory.ID})
+	task, err := k.CreateTask(ctx, victimTrace.ID, action.ID, nil, kernel.User(mallory.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestTaskCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestTaskCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestTaskTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestTaskCompletionTraceParentTraceID(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	parentTraceID := orphan.ID
 
-	task, err := k.CreateTask(ctx, parentTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, parentTraceID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestCanListTaskProcessOwnerSeesOwnTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestCanListTaskRequiredCallerSeesTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestCanListTaskUnrelatedUserDenied(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestCanReadTaskSameRulesAsCanListTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestBootstrapResetsRunningTasksToWaiting(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, _ := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, _ := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 
 	// Manually claim the task via BeginTaskCall to simulate a crash mid-execution (task running, no tx).
 	taskTrace := &kernel.Trace{
@@ -505,7 +505,7 @@ func TestWaitingTaskOnClosedProcessIsNonCompletable(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestTaskCompletionTraceCrossProcessParentRef(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	foreignTraceID := orphan.ID
 
-	task, err := k.CreateTask(ctx, foreignTraceID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, foreignTraceID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"key":"from-partial","other":"base"}`)
-	task, _ := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.Principal{AccountID: caller.ID})
+	task, _ := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID))
 
 	// input's "key" should win over partial's "key"
 	input := json.RawMessage(`{"key":"from-input"}`)
@@ -636,7 +636,7 @@ func TestTaskCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestTaskCompleteAllowsDisjointInputAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestTaskCompleteGrossEqualsTaskPriceAcrossPriceChange(t *testing.T) {
 
 	// Fund a root trace with the action's price (100) and snapshot task.price = 100 at creation.
 	_, tr := beginTestRun(t, st, owner.ID, action)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestCreateTaskTraceAuthority(t *testing.T) {
 	parentTraceID := orphan.ID
 
 	// Any caller can create a task; service layer enforces trace authority. Kernel just checks action/process.
-	task, err := k.CreateTask(ctx, parentTraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
+	task, err := k.CreateTask(ctx, parentTraceID, nextAction.ID, nil, kernel.User(nextUser.ID))
 	if err != nil {
 		t.Fatalf("CreateTask with trace authority: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestCreateTaskTraceAuthorityWrongProcess(t *testing.T) {
 	p1TraceID := reply.TraceID
 
 	// p1 is now closed; CreateTask using p1's trace must fail with ErrInvalidState.
-	_, err = k.CreateTask(ctx, p1TraceID, nextAction.ID, nil, kernel.Principal{AccountID: nextUser.ID})
+	_, err = k.CreateTask(ctx, p1TraceID, nextAction.ID, nil, kernel.User(nextUser.ID))
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for closed-process trace, got %v", err)
 	}
@@ -809,7 +809,7 @@ func TestCreateTaskRejectsNonObjectPartialArgs(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	_, err := k.CreateTask(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.Principal{AccountID: caller.ID})
+	_, err := k.CreateTask(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.User(caller.ID))
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-object partial_args, got %v", err)
 	}
@@ -828,7 +828,7 @@ func TestNullPartialArgsMeanNothingFilledIn(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "null-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`null`), kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`null`), kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask(null): %v", err)
 	}
@@ -860,7 +860,7 @@ func TestCreateTaskEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	caller := setupUser(t, st, "nil-pt-caller", 0)
 	action := setupLocalAction(t, st, owner.ID, "nil-pt-action", 0)
 
-	_, err := k.CreateTask(ctx, "", action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	_, err := k.CreateTask(ctx, "", action.ID, nil, kernel.User(caller.ID))
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty traceID, got %v", err)
 	}
@@ -898,7 +898,7 @@ func TestCreateTaskChecksCreatorNotRequiredCaller(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
 	// canCall(customer, action) is false (private, non-owner) — the OLD rule rejected this.
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
 	if err != nil {
 		t.Fatalf("CreateTask parking a private action for a non-owner: %v", err)
 	}
@@ -929,7 +929,7 @@ func TestCreateTaskRejectedWhenCreatorCannotCall(t *testing.T) {
 	// The required caller is the action owner, who could call it: irrelevant under the binding rule.
 	_, tr := setupOrphanTrace(t, st, creator.ID, creator.ID, creator.ID)
 
-	_, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: actionOwner.ID})
+	_, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(actionOwner.ID))
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when the creator cannot call the action, got %v", err)
 	}
@@ -948,7 +948,7 @@ func TestTaskCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "narrow-action", "", 0) // public
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -981,7 +981,7 @@ func TestTaskCompletionResetsOnDeactivatedAction(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "deact-action", "", 0)
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: customer.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1032,7 +1032,7 @@ func setupTaskWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		t.Fatalf("setupTaskWithCompletionTrace: BeginRun: %v", err)
 	}
 	ptID := root.ID
-	task, err := k.CreateTask(ctx, ptID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, ptID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("setupTaskWithCompletionTrace: CreateTask: %v", err)
 	}
@@ -1281,9 +1281,9 @@ func TestTaskCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 
 	owner := setupUser(t, st, "rp-idem-owner", 0)
 	remoteAction := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID,
+		ID: uuid.New().String(), OwnerKernel: knownTestPeer(t, k), OwnerUserID: "remote-owner",
 		Name: "rp-idem-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 0, BasePrice: basePrice(0),
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/rp-idem-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1294,7 +1294,7 @@ func TestTaskCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1330,12 +1330,12 @@ func TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
 	ctx := context.Background()
 
-	procOwner := setupUser(t, st, "rpme2-procowner", 50)
+	procOwner := setupUser(t, st, "rpme2-procowner", 100)
 	completer := setupUser(t, st, "rpme2-completer", 0)
 	remoteAct := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: procOwner.ID,
+		ID: uuid.New().String(), OwnerKernel: knownTestPeer(t, k), OwnerUserID: "remote-owner",
 		Name: "rpme2-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityPublic, Price: 50,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 50, BasePrice: basePrice(50),
 		Source:    "https://remote.example.com/v1/federation/call?action=@rpme2-procowner/rpme2-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -1343,9 +1343,13 @@ func TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 		t.Fatalf("CreateAction: %v", err)
 	}
 
-	// Fund a root trace with 50 and park task.price=50 from it.
-	_, root := beginTestRun(t, st, procOwner.ID, remoteAct)
-	task, err := k.CreateTask(ctx, root.ID, remoteAct.ID, nil, kernel.Principal{AccountID: completer.ID})
+	// Fund a root trace with the proxy's local total and park task.price from it.
+	priced, err := k.ResolveAction(ctx, remoteAct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, root := beginTestRun(t, st, procOwner.ID, priced)
+	task, err := k.CreateTask(ctx, root.ID, remoteAct.ID, nil, kernel.User(completer.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1369,8 +1373,8 @@ func TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	if tx.Status != kernel.TxFailure {
 		t.Errorf("transaction status: got %q, want failure", tx.Status)
 	}
-	if tx.Gross != 50 {
-		t.Errorf("gross must be the parked task.price snapshot 50, got %d", tx.Gross)
+	if tx.Gross != priced.Price {
+		t.Errorf("gross must be the parked task.price snapshot %d, got %d", priced.Price, tx.Gross)
 	}
 }
 
@@ -1527,11 +1531,8 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			st := newTestStore(t)
 			ctx := context.Background()
 			provider := setupUser(t, st, "icc-provider", 1000)
-			if err := st.UpsertKernel(ctx, "aWNjLXBlZXI", "icc-peer", "", "", "", time.Now().UTC()); err != nil {
-				t.Fatal(err)
-			}
-			peer := &kernel.Account{ID: uuid.New().String(), KernelPublicKey: "aWNjLXBlZXI", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-			if err := st.CreateUser(ctx, peer); err != nil {
+			const peer = "aWNjLXBlZXI"
+			if err := st.UpsertKernel(ctx, peer, "icc-peer", "", "", "", time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			parent := &kernel.Action{ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "icc-parent", Kind: kernel.KindWasm,
@@ -1550,7 +1551,7 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			exec := &composingExec{child: provider.Handle + "@k/" + child.Name, proceed: make(chan struct{})}
 			childHTTP := &blockingHTTP{release: make(chan struct{}), fail: tc.childFails}
 			k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: exec, HTTP: childHTTP})
-			rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "icc-" + name, CounterpartyUserID: peer.ID,
+			rec := &kernel.IdempotencyRecord{ID: uuid.New().String(), IdempotencyKey: "icc-" + name, Counterparty: peer,
 				CreatedAt: time.Now().UTC()}
 			if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 				t.Fatal(err)
@@ -1562,7 +1563,7 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			}
 			done := make(chan outcome, 1)
 			go func() {
-				r, err := k.RunFederated(ctx, peer.ID, parent, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+				r, err := k.RunFederated(ctx, peer, parent, map[string]any{}, rec.ID, kernel.BuyerTerms{})
 				done <- outcome{r, err}
 			}()
 			// The child has started when two traces of the process are unsettled.
@@ -1722,7 +1723,7 @@ func TestParentFailureLeavesRunningTaskAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
-	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1817,7 +1818,7 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free subcall on a settled trace: want ErrInvalidState, got %v", err)
 	}
-	if _, err := k.CreateTask(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: owner.ID}); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.CreateTask(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.User(owner.ID)); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free task on a settled trace: want ErrInvalidState, got %v", err)
 	}
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
@@ -1866,7 +1867,7 @@ func TestEndProcessRefusesToCloseOverACallStartedMeanwhile(t *testing.T) {
 	act := setupLocalAction(t, st, owner.ID, "epr-act", price)
 	taskAct := setupLocalAction(t, st, owner.ID, "epr-task", 40)
 	p, root := beginTestRun(t, st, owner.ID, act)
-	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.Principal{AccountID: completer.ID})
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2172,9 +2173,9 @@ func TestTaskCompleteRemoteProxyTimeoutLeavesTaskRunning(t *testing.T) {
 
 	owner := setupUser(t, st, "rp-running-owner", 0)
 	remoteAction := &kernel.Action{
-		ID: uuid.New().String(), OwnerUserID: owner.ID,
+		ID: uuid.New().String(), OwnerKernel: knownTestPeer(t, k), OwnerUserID: "remote-owner",
 		Name: "rp-running-action", Kind: kernel.KindRemoteProxy,
-		Active: true, Visibility: kernel.VisibilityPublic, Price: 0,
+		Active: true, Visibility: kernel.VisibilityPublic, Price: 0, BasePrice: basePrice(0),
 		Source:    "https://remote.example.com/v1/federation/call?action=@owner/rp-running-action&counterparty=us",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
@@ -2185,7 +2186,7 @@ func TestTaskCompleteRemoteProxyTimeoutLeavesTaskRunning(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2219,7 +2220,7 @@ func TestTaskCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2254,7 +2255,7 @@ func TestCompleteTaskClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "claim-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2298,7 +2299,7 @@ func TestCompleteTaskRejectionIsNotAClaimFailure(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "rej-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2336,7 +2337,7 @@ func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
 	if err := db.ExecForTest(ctx, `UPDATE traces SET available=100 WHERE id=?`, tr.ID); err != nil {
 		t.Fatalf("fund trace: %v", err)
 	}
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2442,7 +2443,7 @@ func TestCompleteTaskReportsACommittedWasmTimeout(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "to-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2510,7 +2511,7 @@ func TestCreateTaskHealsLegacyProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task, err := k.CreateTask(ctx, root.ID, a.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, root.ID, a.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatalf("CreateTask against a legacy proxy: %v", err)
 	}
@@ -2555,7 +2556,7 @@ func TestTaskSettlementPostsToLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, tr := beginTestRun(t, st, payer.ID, action)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.Principal{AccountID: worker.ID})
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(worker.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2578,7 +2579,7 @@ func TestDeclineReturnsTheParkOnce(t *testing.T) {
 	stranger := setupUser(t, st, "decline-stranger", 0)
 	target := setupLocalAction(t, st, owner.ID, "decline-target", 30)
 	p, root := beginTestRun(t, st, owner.ID, setupLocalAction(t, st, owner.ID, "decline-root", 100))
-	task, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.Principal{AccountID: caller.ID})
+	task, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2610,7 +2611,7 @@ func TestDeclineReturnsTheParkOnce(t *testing.T) {
 	}
 
 	// The process owner may decline too.
-	own, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.Principal{AccountID: caller.ID})
+	own, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2621,7 +2622,7 @@ func TestDeclineReturnsTheParkOnce(t *testing.T) {
 	// A running task's price funds a call in flight.
 	other := setupUser(t, st, "decline-other", 10)
 	running, _ := setupTaskWithCompletionTrace(t, st, k, other.ID, 10)
-	if err := k.CancelTaskHeld(ctx, other.ID, running.ID); !errors.Is(err, kernel.ErrInvalidState) {
+	if err := k.CancelTaskHeld(ctx, kernel.User(other.ID), running.ID); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("declining a running task: %v, want ErrInvalidState", err)
 	}
 	if got, _ := st.ReadTask(ctx, running.ID); got.Status != kernel.TaskRunning {
@@ -2642,7 +2643,7 @@ func TestTaskReadsOneRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, root := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, root.ID, target.ID, json.RawMessage(`{"a":1}`), kernel.Principal{AccountID: owner.ID})
+	task, err := k.CreateTask(ctx, root.ID, target.ID, json.RawMessage(`{"a":1}`), kernel.User(owner.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2701,4 +2702,18 @@ func TestRemoteCompletionNeedsItsOwnNotice(t *testing.T) {
 	if _, err := k.CompleteTask(ctx, alice.ID, "asked", json.RawMessage(`{}`)); !errors.Is(err, kernel.ErrExecutionFailed) {
 		t.Errorf("a reply carrying an old notice: %v, want an execution failure", err)
 	}
+}
+
+// basePrice is a proxy row's snapshotted seller price, which every funded proxy carries (§16).
+func basePrice(p int64) *int64 { return &p }
+
+// knownTestPeer makes a peer kernel known here and returns its key, for a cached remote action to
+// be owned by.
+func knownTestPeer(t *testing.T, k *kernel.Kernel) string {
+	t.Helper()
+	key := testKernelKey(91)
+	if err := k.KnowKernel(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

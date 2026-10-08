@@ -166,7 +166,6 @@ func TestRemoteSettlement(t *testing.T) {
 // interface stays nil, so any accidental use of it fails loudly.
 type owedStore struct {
 	Store
-	peer    *Account
 	row     *Owed
 	payment *RailTransfer
 }
@@ -174,10 +173,6 @@ type owedStore struct {
 // ReconcileDeposits is what a recorded payment is followed by; it writes nothing here.
 func (s *owedStore) ReconcileDeposits(context.Context, string, int) ([]*LedgerEntry, error) {
 	return nil, nil
-}
-
-func (s *owedStore) ReadAccountByKernelKey(context.Context, string) (*Account, error) {
-	return s.peer, nil
 }
 
 func (s *owedStore) ReadOwed(context.Context, string, string) (*Owed, error) {
@@ -217,9 +212,8 @@ func revealFixture(t *testing.T, obligation, lottery int64, secret, status strin
 	}
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	st := &owedStore{
-		peer: &Account{ID: "peer-1", KernelPublicKey: peerKey},
 		row: &Owed{
-			ID: "call-1", PeerUserID: "peer-1", UserID: "seller-1", TraceID: "tr-1", Settled: settled,
+			ID: "call-1", PeerKey: peerKey, UserID: "seller-1", TraceID: "tr-1", Settled: settled,
 			Terms:      *marshalServing(500, lottery, obligation, "0a0b", commitmentOf(secret)),
 			Obligation: obligation, Status: status, CreatedAt: time.Now().UTC(),
 		},

@@ -31,7 +31,7 @@ One pass, every `--interval` (default 5 minutes):
 
 1. Read the whole roster, one page at a time, until a page comes back short:
    `juice --as sys@<kernel> admin peer list --all --json --limit 200 --offset N`.
-   Each row carries `public_key`, `petname`, `nickname`, `has_account`, `actions`, `suspended_at`,
+   Each row carries `public_key`, `petname`, `nickname`, `traded`, `actions`, `suspended_at`,
    `last_seen`, `last_contact_failed_at`. Only `public_key` is used.
 2. For every key: `juice --as sys@<kernel> admin peer inspect <key> --json`. The reply's
    `reachability` object carries `path` (`direct` | `relayed` | `unreachable`), `rtt_millis` (a

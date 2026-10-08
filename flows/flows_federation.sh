@@ -242,8 +242,6 @@ flow_fed_import_duty() {
     # L's sys is caller AND origin fee recipient: locks 1103, gets the 53 import fee back. With the
     # lottery off, the obligation of 1050 is paid exactly, so the caller is out exactly that.
     assert_eq "fed_pricing.user_charged" 1050 "$(( ub - ua ))"
-    # A peer row holds no money at all: what L owes rides on an obligation, not on a balance (P10).
-    assert_eq "fed_pricing.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin peer show -- "$FED_LKEY")" available)"
     local tx; tx=$(jj "$FED_DBL" "$FED_HL" tx show "$tx_id")
     assert_jnum "fed_pricing.tx_gross" "$tx" gross 1103
     assert_jnum "fed_pricing.tx_net"   "$tx" net 1050
@@ -548,9 +546,8 @@ r=json.loads(sys.argv[1]); res=r.get('result',r).get('results',[])
 print(next((x.get('price') for x in res if sys.argv[2] in str(x.get('action',''))),'missing'))" "$lk" "@$rkey/greet" 2>/dev/null)
     assert_eq "fed_discovery.indicative_price" 1103 "$dprice"
     # L discovered R but never resolved or called it: R appears in the MERGED roster (§14) as a
-    # discovery-only kernel — present, but with NO account (has_account=false). Discovery creates no
-    # billing account.
-    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('account' if e.get('has_account') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peer list)" "$rkey" 2>/dev/null)
+    # discovery-only kernel — present, but not traded (traded=false).
+    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('traded' if e.get('traded') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peer list)" "$rkey" 2>/dev/null)
     assert_eq "fed_discovery.r_is_discovery_only" discovery-only "$rentry"
 
     # The discovery/proxy quote equality (§4 precondition 7): the hash on a catalog card, computed
@@ -812,9 +809,6 @@ flow_ticket() {
     local before; before=$(numfield "$(jj "$FED_DBL" "$FED_HL" user me)" available)
 
     assert_nonempty "ticket.call" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/paid '{}')" tx_id)"
-
-    # Whatever the draw, a peer row holds nothing: what is owed rides on the obligation, never a balance.
-    assert_eq "ticket.peer_row_is_zero" 0 "$(numfield "$(jj "$FED_DBR" "$FED_HR" admin peer show -- "$lkey")" available)"
 
     # mp 10 → sr 11 → q 12, of which the import fee of 1 returns to this kernel's own sys — the
     # caller here. So a losing draw costs the caller nothing at all, and a winning one costs exactly

@@ -203,9 +203,8 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 	}
 
 	// ---- bilateral consistency. An obligation is one row on the serving side, so the test is what
-	// each kernel says it is still owed — and that no peer row holds money at all, since under this
-	// economy a peer account is identity and never a wallet.
-	contradictions, outstanding := positions(snaps, n.Kernels)
+	// each kernel says it is still owed.
+	outstanding := positions(snaps, n.Kernels)
 	w("## Positions between kernels")
 	w("")
 	if len(outstanding) == 0 {
@@ -214,9 +213,6 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 		for _, o := range outstanding {
 			w("- %s", o)
 		}
-	}
-	for _, c := range contradictions {
-		n.Product("positions", c)
 	}
 	w("")
 	r.Metrics["unsettled_positions"] = len(outstanding)
@@ -384,7 +380,6 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 	r.Verdicts = map[string]bool{
 		"evidence_sufficient":      len(r.Blocking) == 0,
 		"refund_law_holds":         len(breaches) == 0,
-		"no_contradictory_debts":   len(contradictions) == 0,
 		"every_debt_settled":       len(outstanding) == 0,
 		"no_call_left_parked":      parked == 0,
 		"every_check_as_specified": len(n.Unexpected) == 0,
@@ -564,18 +559,12 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 
 // positions reads what every pair of kernels still owes each other, in both directions. An
 // obligation is one row on the serving side, so it can be recorded on either kernel; looking at only
-// one of them hides every debt owed by whichever name happens to sort first. A peer row that holds
-// money at all is a contradiction under this economy — a peer account is identity, never a wallet —
-// and is reported as one.
-func positions(snaps map[string]Snapshot, kernels map[string]*Kernel) (contradictions, outstanding []string) {
+// one of them hides every debt owed by whichever name happens to sort first.
+func positions(snaps map[string]Snapshot, kernels map[string]*Kernel) (outstanding []string) {
 	for a, sa := range snaps {
 		for b := range snaps {
 			if a == b {
 				continue
-			}
-			if bal := peerBalance(sa, kernels[b]); bal != 0 {
-				contradictions = append(contradictions,
-					fmt.Sprintf("%s's row for %s holds %d; a peer account is never a wallet", a, b, bal))
 			}
 			if n := owedBy(sa, kernels[b]); n > 0 {
 				outstanding = append(outstanding, fmt.Sprintf("%s still owes %s for %d calls", b, a, n))
@@ -583,8 +572,7 @@ func positions(snaps map[string]Snapshot, kernels map[string]*Kernel) (contradic
 		}
 	}
 	sort.Strings(outstanding)
-	sort.Strings(contradictions)
-	return contradictions, outstanding
+	return outstanding
 }
 
 // parkedIn reads the processes still waiting for a receipt: how many, what they hold, and since
@@ -640,19 +628,6 @@ func owedBy(s Snapshot, of *Kernel) int {
 		}
 	}
 	return n
-}
-
-// peerBalance is what a peer's row holds here, which under this economy is always nothing.
-func peerBalance(s Snapshot, of *Kernel) int64 {
-	if of == nil {
-		return 0
-	}
-	for _, p := range s.Peers {
-		if str(p, "public_key") == of.Key {
-			return num(p, "available")
-		}
-	}
-	return 0
 }
 
 func readLog(root string) []record {

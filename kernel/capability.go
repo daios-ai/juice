@@ -61,5 +61,8 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	if settled {
 		return "", "", ErrUnauthorized.Wrap("capability expired: call already settled")
 	}
+	if !trace.Target().Local() {
+		return "", "", ErrUnauthorized.Wrap("capability names no action of this kernel")
+	}
 	return traceID, trace.ActionOwnerID, nil
 }

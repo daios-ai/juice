@@ -968,7 +968,7 @@ Order matters, because each step decides what the buyer can be told afterwards
 1. **Check the timestamp.** Too old or too far ahead and the call is refused outright.
 2. **Check the signature**, using the seller's own key as the recipient. A request captured from
    another kernel's wire does not verify here.
-3. **Find or create the buyer's account.** A stranger with a valid signature gets a zero-balance
+3. **Make the buyer's kernel known.** A stranger with a valid signature gets a kernel row and no
    account. No petname is bound: being called is not an act of naming.
 4. **Answer a name already settled from its receipt.** Looked up by (name of the call, buyer),
    before anything else is read, because that answer outlives everything else here.
@@ -1035,8 +1035,8 @@ units of the world's money. When the call finishes, the figure is corrected down
 
 That the limit is per kernel rather than per buyer is what makes it Sybil-proof. A buyer who creates
 a thousand identities on their own kernel still meets one number here, because the number counts
-what this kernel has handed out, not who asked. A peer's account on this kernel holds no money at
-all — it exists for identity, attribution and moderation, and its balance is zero on every path.
+what this kernel has handed out, not who asked. A peer holds no account on this kernel: it is named
+on every record by its key.
 
 ### Refusals are signed
 

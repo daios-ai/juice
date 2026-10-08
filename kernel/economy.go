@@ -154,7 +154,7 @@ func ceilDiv(a, b int64) int64 {
 // rail row carrying a winning payment.
 type Owed struct {
 	ID             string    `json:"id"` // the call's idempotency key — the name both kernels share
-	PeerUserID     string    `json:"-"`  // the buyer's account here
+	PeerKey        string    `json:"-"`  // the buying kernel
 	UserID         string    `json:"-"`  // the provider who is owed
 	TraceID        string    `json:"-"`
 	Settled        bool      `json:"-"`          // the call has committed, so the obligation is known
@@ -240,7 +240,7 @@ func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args 
 	if err != nil {
 		return err
 	}
-	if err := k.payableOnThisRail(ctx, a.OwnerUserID, dmax); err != nil {
+	if err := k.payableOnThisRail(ctx, a.OwnerKernel, dmax); err != nil {
 		return err
 	}
 	// A call that can owe nothing has nothing to draw for, and carries no ticket terms (P4).
@@ -261,31 +261,27 @@ func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args 
 }
 
 // callerOnWire is the principal a dispatch carries for its immediate caller (P4): a user of this
-// kernel by stable id and handle; nothing when the caller is a peer's account, since a kernel
-// attests only its own users and the seller then records the kernel.
+// kernel by stable id and handle; nothing when the caller is a peer, since a kernel attests only its
+// own users and the seller then records the kernel.
 func callerOnWire(caller *Account) Principal {
-	if caller == nil || caller.Handle == "" {
+	if caller == nil {
 		return Principal{}
 	}
-	return Principal{RemoteID: caller.ID, Handle: caller.Handle}
+	return Principal{UserID: caller.ID, Handle: caller.Handle}
 }
 
 // payableOnThisRail refuses a paid cross-kernel call whose obligation this kernel could not pay: a
 // peer whose address is unknown or unproven could never collect, and taking on the debt anyway would
 // leave the seller owed with no way to be paid. A free call owes nothing and is always allowed,
 // which is what keeps a cold resolve and a price-0 action working before any address is known.
-func (k *Kernel) payableOnThisRail(ctx context.Context, peerAccountID string, obligation int64) error {
+func (k *Kernel) payableOnThisRail(ctx context.Context, peerKey string, obligation int64) error {
 	if obligation <= 0 || !k.hasAddresses() {
 		return nil // nothing owed, or a world with no addresses: the operator's record is the payment
 	}
-	if k.peerBlockchainAddress(ctx, peerAccountID) != "" {
+	if k.peerBlockchainAddress(ctx, peerKey) != "" {
 		return nil
 	}
-	peer, _ := k.store.ReadUser(ctx, peerAccountID)
-	name := peerAccountID
-	if peer != nil && peer.KernelPublicKey != "" {
-		name = k.KernelName(ctx, peer.KernelPublicKey)
-	}
+	name := k.KernelName(ctx, peerKey)
 	return ErrPeerUnreachable.Wrapf("%s has not proved where it is paid, so this call could not be settled", name).
 		WithMeta("peer", name)
 }
@@ -301,7 +297,7 @@ type BuyerTerms struct {
 	BlockchainAddress string
 	BlockchainProof   string
 	// CallerUserID and CallerHandle are the buyer's own user the call is made for, as it signed
-	// them (P4): the principal this kernel records as the caller beneath the buyer's account.
+	// them (P4): the principal this kernel records as the caller, on the buyer's kernel.
 	CallerUserID string
 	CallerHandle string
 	// IdempotencyKey is the call's own name, as the buyer signed it. It is frozen with the rest of
@@ -327,14 +323,7 @@ type RevealPayload struct {
 // won; a repeat of a reveal already applied returns the stored row, which makes a lost reply safe
 // to resend.
 func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPayload, signature string) (*Owed, error) {
-	peer, err := k.store.ReadAccountByKernelKey(ctx, peerKey)
-	if err != nil {
-		return nil, err
-	}
-	if peer == nil {
-		return nil, ErrNotFound.Wrap("no obligation for this peer")
-	}
-	r, err := k.store.ReadOwed(ctx, p.TicketID, peer.ID)
+	r, err := k.store.ReadOwed(ctx, p.TicketID, peerKey)
 	if err != nil {
 		return nil, err
 	}

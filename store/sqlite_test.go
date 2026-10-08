@@ -266,6 +266,34 @@ func rawDB(t *testing.T, path string) *sql.DB {
 	return raw
 }
 
+// openThrough applies the migrations up to and including version, as the runner does, for a test of a
+// migration whose database a later one refuses to carry further.
+func openThrough(t *testing.T, path, version string) *DB {
+	t.Helper()
+	raw := rawDB(t, path)
+	raw.SetMaxOpenConns(1)
+	db := &DB{db: raw}
+	t.Cleanup(func() { db.Close() })
+	files, err := migrationFileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		v := strings.TrimSuffix(filepath.Base(f), ".sql")
+		if applied, err := db.migrationApplied(v); err != nil || applied || v > version {
+			continue
+		}
+		body, err := migrationFS.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.applyMigration(v, string(body)); err != nil {
+			t.Fatalf("apply %s: %v", v, err)
+		}
+	}
+	return db
+}
+
 func openAt(t *testing.T, path string) *DB {
 	t.Helper()
 	db, err := Open(path)
@@ -496,29 +524,17 @@ func newProcess(ownerID string) *kernel.Process {
 	}
 }
 
-// newPeer builds and inserts a proxy/peer user (public_key set) with explicit balances and
-// creation time, for §13 retention-purge tests.
-func newPeer(t *testing.T, db *DB, handle, key string, available, locked int64, createdAt time.Time) *kernel.Account {
+// newPeer makes a peer kernel known, first seen at createdAt and bound to the petname handle, and
+// returns its key: a peer is its kernel row and holds nothing else here (D4).
+func newPeer(t *testing.T, db *DB, handle, key string, createdAt time.Time) string {
 	t.Helper()
-	u := newUser(handle, available)
-	// A kernel account holds no session credential at all (§3 CHECK): no handle, no password, no
-	// recovery key. It is named by its kernel's petname and authenticates by federation signature.
-	u.Handle, u.PasswordHash, u.RecoveryPublicKey = "", "", ""
-	u.Locked = locked
-	u.KernelPublicKey = key
-	u.CreatedAt = createdAt
-	u.UpdatedAt = createdAt
-	// The kernel row must exist first — accounts.kernel_public_key is a restrictive foreign key.
 	if err := db.UpsertKernel(context.Background(), key, handle, "", "", "", createdAt); err != nil {
 		t.Fatalf("upsert kernel %s: %v", handle, err)
 	}
 	if _, err := db.BindPetname(context.Background(), key, handle, false); err != nil {
 		t.Fatalf("bind petname %s: %v", handle, err)
 	}
-	if err := db.CreateUser(context.Background(), u); err != nil {
-		t.Fatalf("create peer %s: %v", handle, err)
-	}
-	return u
+	return key
 }
 
 // insertTx inserts a bare transaction row naming the given users, for ledger/activity assertions.
@@ -540,6 +556,17 @@ func insertTxID(t *testing.T, db *DB, id, ownerID, callerID, targetID, actionID 
 		"success", 0, 0, 0, timeToStr(endedAt), timeToStr(endedAt))
 	if err != nil {
 		t.Fatalf("insert tx: %v", err)
+	}
+	return id
+}
+
+// insertPeerTx records a call a peer made here, which names it a counterparty (D16): its caller is
+// the peer kernel itself, and its payer the local seller.
+func insertPeerTx(t *testing.T, db *DB, sellerID, peerKey, actionID string, endedAt time.Time) string {
+	t.Helper()
+	id := insertTx(t, db, sellerID, "", sellerID, actionID, endedAt)
+	if _, err := db.db.ExecContext(context.Background(), `UPDATE transactions SET caller_kernel=? WHERE id=?`, peerKey, id); err != nil {
+		t.Fatal(err)
 	}
 	return id
 }
@@ -853,23 +880,26 @@ func TestListCatalog(t *testing.T) {
 	alice, bob := newUser("alice", 0), newUser("bob", 0)
 	_ = db.CreateUser(ctx, alice)
 	_ = db.CreateUser(ctx, bob)
-	peer := newPeer(t, db, "beta", "K", 0, 0, time.Now().UTC())
+	peer := newPeer(t, db, "beta", "K", time.Now().UTC())
 	label := map[string]string{}
-	add := func(owner *kernel.Account, name string, active bool, vis kernel.ActionVisibility, remoteID string) {
-		a := newAction(owner.ID, name, 0, active)
-		a.Title, a.Visibility, a.RemoteActionID = name, vis, remoteID
+	add := func(owner kernel.Principal, name string, active bool, vis kernel.ActionVisibility, remoteID string) {
+		a := newAction(owner.UserID, name, 0, active)
+		a.OwnerKernel, a.OwnerHandle, a.Title, a.Visibility, a.RemoteActionID = owner.Kernel, owner.Handle, name, vis, remoteID
+		if owner.Handle != "" {
+			a.Title = owner.Handle + "/" + name
+		}
 		if err := db.CreateAction(ctx, a); err != nil {
 			t.Fatal(err)
 		}
-		label[a.ID] = name
+		label[a.ID] = a.Title
 	}
-	add(alice, "a-pub", true, kernel.VisibilityPublic, "")
-	add(alice, "a-priv", true, kernel.VisibilityPrivate, "")
-	add(alice, "a-off", false, kernel.VisibilityPublic, "")
-	add(bob, "b-local", true, kernel.VisibilityLocal, "")
-	add(bob, "b-priv", true, kernel.VisibilityPrivate, "")
-	add(bob, "b-off", false, kernel.VisibilityPublic, "")
-	add(peer, "dave/sum", true, kernel.VisibilityLocal, "r1")
+	add(kernel.User(alice.ID), "a-pub", true, kernel.VisibilityPublic, "")
+	add(kernel.User(alice.ID), "a-priv", true, kernel.VisibilityPrivate, "")
+	add(kernel.User(alice.ID), "a-off", false, kernel.VisibilityPublic, "")
+	add(kernel.User(bob.ID), "b-local", true, kernel.VisibilityLocal, "")
+	add(kernel.User(bob.ID), "b-priv", true, kernel.VisibilityPrivate, "")
+	add(kernel.User(bob.ID), "b-off", false, kernel.VisibilityPublic, "")
+	add(kernel.Principal{Kernel: peer, UserID: "dave-id", Handle: "dave"}, "sum", true, kernel.VisibilityLocal, "r1")
 	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{
 		{KernelPublicKey: "K", ActionID: "r1", Handle: "dave", Name: "sum", Title: "d-sum", ObservedAt: time.Now()},
 		{KernelPublicKey: "K", ActionID: "r2", Handle: "dave", Name: "tr", Title: "d-tr", ObservedAt: time.Now()},
@@ -2510,36 +2540,6 @@ func TestListTransactionsByParty(t *testing.T) {
 	}
 }
 
-// ---- ReadUserByPublicKey tests ----
-
-func TestReadAccountByKernelKey(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	newPeer(t, db, "remote", "ed25519pubkeyABC", 0, 0, time.Now().UTC())
-
-	got, err := db.ReadAccountByKernelKey(ctx, "ed25519pubkeyABC")
-	if err != nil {
-		t.Fatalf("ReadAccountByKernelKey: %v", err)
-	}
-	if got.Handle != "" {
-		t.Errorf("a kernel account holds no handle, got %q", got.Handle)
-	}
-	if got.KernelPublicKey != "ed25519pubkeyABC" {
-		t.Errorf("KernelPublicKey: got %q", got.KernelPublicKey)
-	}
-	// Its name lives in the other namespace: the kernel's petname (§13).
-	rk, err := db.ReadKernelByPetname(ctx, "remote")
-	if err != nil || rk == nil || rk.PublicKey != "ed25519pubkeyABC" {
-		t.Errorf("petname must resolve to the kernel: %+v, %v", rk, err)
-	}
-
-	// Unknown key returns ErrNotFound.
-	if _, err := db.ReadAccountByKernelKey(ctx, "unknown-key"); err == nil {
-		t.Error("expected error for unknown public key")
-	}
-}
-
 // ---- Idempotency record tests ----
 
 // TestIdempotencyLockLifecycle: the record is a lock, not an outcome. Taking it twice tells the
@@ -2549,16 +2549,14 @@ func TestIdempotencyLockLifecycle(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	cp := newUser("cp-sm", 0)
-	_ = db.CreateUser(ctx, cp)
-
+	const cp = "kcp"
 	now := time.Now().UTC()
 	rec := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "sm-key-1",
-		CounterpartyUserID: cp.ID,
-		ArgsJSON:           `{"a":1}`,
-		CreatedAt:          now,
+		ID:             uuid.New().String(),
+		IdempotencyKey: "sm-key-1",
+		Counterparty:   cp,
+		ArgsJSON:       `{"a":1}`,
+		CreatedAt:      now,
 	}
 	held, err := db.InsertPendingIdempotencyRecord(ctx, rec)
 	if err != nil || held != nil {
@@ -2568,10 +2566,10 @@ func TestIdempotencyLockLifecycle(t *testing.T) {
 	// A second arrival of the same request is told the lock is held, and by which record — not an
 	// error to interpret, and no driver error text to match on.
 	dup := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "sm-key-1",
-		CounterpartyUserID: cp.ID,
-		CreatedAt:          now,
+		ID:             uuid.New().String(),
+		IdempotencyKey: "sm-key-1",
+		Counterparty:   cp,
+		CreatedAt:      now,
 	}
 	held, err = db.InsertPendingIdempotencyRecord(ctx, dup)
 	if err != nil {
@@ -2589,14 +2587,14 @@ func TestIdempotencyLockLifecycle(t *testing.T) {
 	if err := db.DeleteIdempotencyRecord(ctx, rec.ID); err != nil {
 		t.Fatalf("DeleteIdempotencyRecord: %v", err)
 	}
-	if _, err := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp.ID); err == nil {
+	if _, err := db.ReadIdempotencyRecord(ctx, "sm-key-1", cp); err == nil {
 		t.Error("expected ErrNotFound after release")
 	}
 	again := &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     "sm-key-1",
-		CounterpartyUserID: cp.ID,
-		CreatedAt:          now,
+		ID:             uuid.New().String(),
+		IdempotencyKey: "sm-key-1",
+		Counterparty:   cp,
+		CreatedAt:      now,
 	}
 	if held, err := db.InsertPendingIdempotencyRecord(ctx, again); err != nil || held != nil {
 		t.Errorf("re-taking the lock after release should succeed: held=%v err=%v", held, err)
@@ -2759,13 +2757,13 @@ func TestCommitCallFeeDestructionRejected(t *testing.T) {
 
 // ---- Idempotency atomicity in CommitCall / CommitFailedCall ----
 
-func newIdempotencyRecord(cpID string) *kernel.IdempotencyRecord {
+func newIdempotencyRecord(counterparty string) *kernel.IdempotencyRecord {
 	now := time.Now().UTC()
 	return &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     uuid.New().String(),
-		CounterpartyUserID: cpID,
-		CreatedAt:          now,
+		ID:             uuid.New().String(),
+		IdempotencyKey: uuid.New().String(),
+		Counterparty:   counterparty,
+		CreatedAt:      now,
 	}
 }
 
@@ -2946,26 +2944,6 @@ func TestUpsertAndListEmbeddings(t *testing.T) {
 }
 
 // ---- Federation store methods ----
-
-func TestProxyUserIdentifiedByPublicKey(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-
-	// A key-only account: a public key, no password (that credential combination is what makes it
-	// a peer). Same CreateUser insert as any account.
-	peer := newPeer(t, db, "key-peer", "somepubkey", 0, 0, time.Now().UTC())
-
-	found, err := db.ReadAccountByKernelKey(ctx, "somepubkey")
-	if err != nil {
-		t.Fatalf("ReadAccountByKernelKey: %v", err)
-	}
-	if found.ID != peer.ID {
-		t.Errorf("expected peer ID %s, got %s", peer.ID, found.ID)
-	}
-	if found.KernelPublicKey == "" || found.PasswordHash != "" {
-		t.Errorf("kernel account should hold a key and no password, got key=%q hash=%q", found.KernelPublicKey, found.PasswordHash)
-	}
-}
 
 func TestUpdateActionAndResetStats(t *testing.T) {
 	db := openTestDB(t)
@@ -3630,15 +3608,16 @@ func TestResetTaskAndReparkNonEmptyTrace(t *testing.T) {
 
 // ---- Peer retention purge (§13) ----
 
-func TestPurgePeerCascade(t *testing.T) {
+func TestPurgePeer(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	peer := newPeer(t, db, "peerP", "peerkeyAAA", 0, 0, time.Now().UTC())
+	peer := newPeer(t, db, "peerP", "peerkeyAAA", time.Now().UTC())
 
 	var actIDs []string
 	for _, n := range []string{"svc-1", "svc-2"} {
-		a := newAction(peer.ID, n, 10, true)
+		a := newAction("remote-owner", n, 10, true)
+		a.OwnerKernel = peer
 		if err := db.CreateAction(ctx, a); err != nil {
 			t.Fatalf("create action: %v", err)
 		}
@@ -3647,23 +3626,17 @@ func TestPurgePeerCascade(t *testing.T) {
 			t.Fatalf("upsert stats: %v", err)
 		}
 	}
-
-	// A discovered_kernels row about the peer (must be deleted) and one about another kernel (must
-	// survive — it is information about a different peer).
 	now := time.Now().UTC()
-	if err := db.UpsertKernel(ctx, "peerkeyAAA", "peerP", "", "", "", now); err != nil {
-		t.Fatal(err)
-	}
 	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
-	// Ledger: a transaction crediting the peer as target, referencing a peer action that gets
-	// deleted. It must survive the purge with its now-dangling action id intact (§11).
-	txID := insertTx(t, db, "some-local-owner", "some-local-owner", peer.ID, actIDs[0], now)
+	// Ledger: a transaction naming the peer, referencing a peer action that gets deleted. It must
+	// survive the purge with its now-dangling action id intact (G3).
+	txID := insertPeerTx(t, db, "some-local-owner", peer, actIDs[0], now)
 
-	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
-		t.Fatalf("PurgePeerCascade: %v", err)
+	if err := db.PurgePeer(ctx, peer); err != nil {
+		t.Fatalf("PurgePeer: %v", err)
 	}
 
 	count := func(q string, args ...any) int {
@@ -3673,27 +3646,21 @@ func TestPurgePeerCascade(t *testing.T) {
 		}
 		return n
 	}
-	if n := count(`SELECT COUNT(*) FROM actions WHERE owner_user_id=?`, peer.ID); n != 0 {
+	if n := count(`SELECT COUNT(*) FROM actions WHERE owner_kernel=?`, peer); n != 0 {
 		t.Errorf("peer actions after purge = %d, want 0", n)
 	}
 	if n := count(`SELECT COUNT(*) FROM action_stats WHERE action_id IN (?,?)`, actIDs[0], actIDs[1]); n != 0 {
 		t.Errorf("action_stats after purge = %d, want 0", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "peerkeyAAA"); n != 0 {
-		t.Errorf("discovered_kernels(peer) after purge = %d, want 0", n)
+	// The kernel row stays, forgotten and nameless, so the records that name it keep naming it.
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=? AND forgotten_at IS NOT NULL AND petname IS NULL`, peer); n != 1 {
+		t.Errorf("the purged peer's row must stay forgotten, got %d", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "otherkeyBBB"); n != 1 {
-		t.Errorf("discovered_kernels(other) after purge = %d, want 1 (preserved)", n)
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=? AND forgotten_at IS NULL`, "otherkeyBBB"); n != 1 {
+		t.Errorf("another kernel's row after purge = %d, want 1 (untouched)", n)
 	}
-	if _, err := db.ReadTransaction(ctx, txID); err != nil {
-		t.Errorf("ledger transaction must survive purge: %v", err)
-	}
-	u, err := db.ReadUser(ctx, peer.ID)
-	if err != nil {
-		t.Fatalf("peer user must remain as ledger anchor: %v", err)
-	}
-	if u.KernelPublicKey != "" {
-		t.Errorf("account→kernel link must be cleared, got %q", u.KernelPublicKey)
+	if tx, err := db.ReadTransaction(ctx, txID); err != nil || tx.CallerKernel != peer {
+		t.Errorf("ledger transaction must survive purge naming the peer: %+v, %v", tx, err)
 	}
 }
 
@@ -3720,9 +3687,10 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", "", "", fresh); err != nil {
 		t.Fatal(err)
 	}
-	// A stale but peer-backed kernel survives here (peer retention governs it, not this sweep).
-	newPeer(t, db, "peerP", "peerKey", 0, 0, old)
-	if err := db.UpsertKernel(ctx, "peerKey", "peerP", "", "", "", old); err != nil {
+	// A stale counterparty survives here (peer retention governs it, not this sweep), and so does a
+	// stale suspended kernel: moderation outlives idleness.
+	insertPeerTx(t, db, "seller", newPeer(t, db, "peerP", "peerKey", old), "a", old)
+	if err := db.SetKernelSuspended(ctx, "bannedKey", true, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3749,8 +3717,8 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	if c := count(`SELECT COUNT(*) FROM evidence WHERE issuer_public_key=?`, "staleKey"); c != 0 {
 		t.Errorf("stale evidence = %d, want 0", c)
 	}
-	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key IN ('freshKey','peerKey')`); c != 2 {
-		t.Errorf("fresh + peer-backed survivors = %d, want 2", c)
+	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key IN ('freshKey','peerKey','bannedKey') AND forgotten_at IS NULL`); c != 3 {
+		t.Errorf("fresh, counterparty and suspended survivors = %d, want 3", c)
 	}
 }
 
@@ -3760,46 +3728,48 @@ func TestListPurgeablePeers(t *testing.T) {
 	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
 	now := time.Now().UTC()
 	cutoff := now.Add(-30 * 24 * time.Hour)
+	owner := newUser("sowner", 0)
+	_ = db.CreateUser(ctx, owner)
+	// counterparty is a peer an old call names, which is what makes it more than a directory entry.
+	counterparty := func(handle, key string, seen time.Time) string {
+		insertPeerTx(t, db, owner.ID, newPeer(t, db, handle, key, seen), "a", old)
+		return key
+	}
 
-	idle := newPeer(t, db, "idle", "k-idle", 0, 0, old) // the only purgeable peer
+	idle := counterparty("idle", "k-idle", old) // the only purgeable peer
 
-	newPeer(t, db, "funded", "k-funded", 100, 0, old) // excluded: holds value (available)
-	newPeer(t, db, "locked", "k-locked", 0, 50, old)  // excluded: holds value (locked)
-	newPeer(t, db, "recent", "k-recent", 0, 0, now)   // excluded: created within the window
-
-	// excluded: a recent gossip mention keeps it live
-	newPeer(t, db, "gossip", "k-gossip", 0, 0, old)
+	newPeer(t, db, "stranger", "k-stranger", old) // excluded: no record names it; discovery evicts it
+	counterparty("recent", "k-recent", now)       // excluded: first seen within the window
+	counterparty("gossip", "k-gossip", old)       // excluded: a recent gossip mention keeps it live
 	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetKernelSuspended(ctx, counterparty("banned", "k-banned", old), true, old); err != nil {
+		t.Fatal(err) // excluded: moderation outlives idleness
+	}
 
-	// excluded: a recent transaction names the peer, though its balance is zero
-	txp := newPeer(t, db, "txp", "k-txp", 0, 0, old)
-	insertTx(t, db, txp.ID, txp.ID, "some-target", "some-action", now)
+	// excluded: a recent transaction names the peer
+	insertPeerTx(t, db, owner.ID, counterparty("txp", "k-txp", old), "a", now)
 
 	// excluded: a waiting task is addressed to the peer as required caller
-	taskp := newPeer(t, db, "taskp", "k-taskp", 0, 0, old)
-	owner := newUser("sowner", 0)
-	_ = db.CreateUser(ctx, owner)
 	act := newAction(owner.ID, "approve", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CreateTask(ctx, &kernel.Task{ID: uuid.New().String(), RequiredCallerUserID: taskp.ID, ActionID: act.ID, Price: 0, Status: kernel.TaskWaiting, CreatedAt: now}); err != nil {
+	if err := db.CreateTask(ctx, &kernel.Task{ID: uuid.New().String(), RequiredCallerKernel: counterparty("taskp", "k-taskp", old),
+		ActionID: act.ID, Price: 0, Status: kernel.TaskWaiting, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 
-	// excluded: a foreign call it made here is still unrevealed — its reveal is keyed on this account
-	owedp := newPeer(t, db, "owedp", "k-owedp", 0, 0, old)
+	// excluded: a foreign call it made here is still unrevealed — its reveal is keyed on this kernel
 	{
 		p := newProcess(owner.ID)
-		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerUserID: owedp.ID, CreatedAt: old}
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerKernel: counterparty("owedp", "k-owedp", old), CreatedAt: old}
 		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// excluded: a call we made to it is still waiting to tell it how the draw came out
-	unrev := newPeer(t, db, "unrev", "k-unrev", 0, 0, old)
 	{
 		p := newProcess(owner.ID)
 		key := "idem-unrev"
@@ -3807,41 +3777,35 @@ func TestListPurgeablePeers(t *testing.T) {
 		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.ExecForTest(ctx, `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,action_id,status,gross,net,started_at,ended_at)
-			VALUES (?,?,?,'',?,?,?,'a','success',11,11,?,?)`, uuid.New().String(), p.ID, tr.ID, owner.ID, owner.ID, unrev.ID, timeToStr(old), timeToStr(old)); err != nil {
+		if err := db.ExecForTest(ctx, `INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_kernel,target_user_id,action_id,status,gross,net,started_at,ended_at)
+			VALUES (?,?,?,'',?,?,?,'','a','success',11,11,?,?)`, uuid.New().String(), p.ID, tr.ID, owner.ID, owner.ID, counterparty("unrev", "k-unrev", old), timeToStr(old), timeToStr(old)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// excluded: a call we made to it is still awaiting its receipt — the retry settles through the
 	// proxy this peer owns
-	parked := newPeer(t, db, "parked", "k-parked", 0, 0, old)
 	{
 		p := newProcess(owner.ID)
 		key := "idem-parked"
-		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: parked.ID, CallerUserID: owner.ID, IdempotencyKey: &key, CreatedAt: old}
+		tr := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, TargetKernel: counterparty("parked", "k-parked", old), CallerUserID: owner.ID, IdempotencyKey: &key, CreatedAt: old}
 		if err := db.BeginRun(ctx, p, tr, owner.ID, 0, 0, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// excluded: a local (non-peer) account, even though old and zero-balance
-	local := newUser("local", 0)
-	local.CreatedAt = old
-	_ = db.CreateUser(ctx, local)
-
 	// The §13 contact cache must NOT count as activity: a fresh last_seen on the idle peer keeps
 	// it purgeable, or answering gossip would immortalize a zombie peer.
-	if err := db.RecordKernelContact(ctx, idle.KernelPublicKey, true, now); err != nil {
+	if err := db.RecordKernelContact(ctx, idle, true, now); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
 	}
 
-	ids, err := db.ListPurgeablePeers(ctx, cutoff)
+	keys, err := db.ListPurgeablePeers(ctx, cutoff)
 	if err != nil {
 		t.Fatalf("ListPurgeablePeers: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != idle.ID {
-		t.Fatalf("purgeable = %v, want exactly [%s (@idle)]", ids, idle.ID)
+	if len(keys) != 1 || keys[0] != idle {
+		t.Fatalf("purgeable = %v, want exactly [%s]", keys, idle)
 	}
 }
 
@@ -3851,8 +3815,7 @@ func TestRecordKernelContact(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	peer := newPeer(t, db, "synced", "k-synced", 0, 0, now)
-	key := peer.KernelPublicKey
+	key := newPeer(t, db, "synced", "k-synced", now)
 
 	if err := db.RecordKernelContact(ctx, key, true, now); err != nil {
 		t.Fatalf("RecordKernelContact: %v", err)
@@ -4159,8 +4122,9 @@ func TestCommitRemoteSettlementReleasesTheLock(t *testing.T) {
 	if err := db.BeginRun(ctx, p, root, owner.ID, 10, 0, 0); err != nil {
 		t.Fatal(err)
 	}
+	const proxyKernelKey = "rs-peer-key"
 	rec := &kernel.IdempotencyRecord{
-		ID: uuid.New().String(), IdempotencyKey: "k-rs", CounterpartyUserID: proxy.ID,
+		ID: uuid.New().String(), IdempotencyKey: "k-rs", Counterparty: proxyKernelKey,
 		CreatedAt: time.Now().UTC(),
 	}
 	if _, err := db.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
@@ -4175,7 +4139,6 @@ func TestCommitRemoteSettlementReleasesTheLock(t *testing.T) {
 		ActionID: act.ID, ActionName: act.Name, Status: kernel.TxFailure,
 		Gross: 10, Reason: "remote call failed", StartedAt: now, EndedAt: now,
 	}
-	const proxyKernelKey = "rs-peer-key"
 	receipt := &kernel.Receipt{
 		ID: uuid.New().String(), IssuerUserID: sys.ID, TxID: ktx.ID, TraceID: root.ID,
 		ActionID: act.ID, CallerUserID: owner.ID, ProcessID: p.ID,
@@ -4187,7 +4150,7 @@ func TestCommitRemoteSettlementReleasesTheLock(t *testing.T) {
 		t.Fatalf("CommitRemoteSettlement: %v", err)
 	}
 
-	if _, err := db.ReadIdempotencyRecord(ctx, "k-rs", proxy.ID); err == nil {
+	if _, err := db.ReadIdempotencyRecord(ctx, "k-rs", proxyKernelKey); err == nil {
 		t.Error("a settled remote failure must release the lock")
 	}
 	stored, _, err := db.ReadFederatedOutcome(ctx, proxyKernelKey, "k-rs")
@@ -4207,10 +4170,10 @@ func TestListReceiptsForGossip(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	owner := newUser("gprov", 0)
+	owner := newUser("gprov", 10)
 	_ = db.CreateUser(ctx, owner)
-	// A peer caller (public_key set) so the evidence names it as counterparty.
-	peer := newPeer(t, db, "gpeer", "peerKeyXYZ", 100, 0, time.Now().UTC())
+	// A peer caller, so the evidence names it as counterparty.
+	peer := newPeer(t, db, "gpeer", "peerKeyXYZ", time.Now().UTC())
 	fee := newUser("gfee", 0)
 	_ = db.CreateUser(ctx, fee)
 
@@ -4222,14 +4185,15 @@ func TestListReceiptsForGossip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := newProcess(peer.ID)
-	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CreatedAt: time.Now().UTC()}
-	if err := db.BeginRun(ctx, p, root, peer.ID, 10, 0, 0); err != nil {
+	// A foreign call runs on the seller's own money (D14): the process is the seller's.
+	p := newProcess(owner.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, CallerKernel: peer, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 10, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	tx := &kernel.Transaction{
 		ID: uuid.New().String(), ProcessID: p.ID, TraceID: root.ID,
-		OwnerUserID: peer.ID, CallerUserID: peer.ID, TargetUserID: owner.ID,
+		OwnerUserID: owner.ID, CallerKernel: peer, TargetUserID: owner.ID,
 		ActionID: act.ID, Status: kernel.TxSuccess, Gross: 10, Net: 8, Fee: 2,
 		// Eligibility is decided by the kernel when the call settles and stored with it; the
 		// store serves what that decision said (P9).
@@ -4285,7 +4249,7 @@ func TestListReceiptsForGossip(t *testing.T) {
 	}
 	ratedNote := "did what it said"
 	rated := &kernel.Rating{ID: uuid.New().String(), RatedTxID: tx.ID, RatedReceiptHash: "rh",
-		RaterUserID: peer.ID, Rating: 1, Note: &ratedNote, CreatedAt: time.Now().UTC(), Signature: "sig"}
+		RaterUserID: owner.ID, Rating: 1, Note: &ratedNote, CreatedAt: time.Now().UTC(), Signature: "sig"}
 	if err := db.CreateRatingAndUpdateStats(ctx, rated, act.ID, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -4305,81 +4269,6 @@ func TestListReceiptsForGossip(t *testing.T) {
 
 // ---- Account/kernel split: schema invariants, roster, migration (§3, §13, §14) ----
 
-// TestKernelAccountCredentialSeparation: the split is enforced by the schema, not by convention — a
-// kernel account can never hold a session credential, so a peer can never authenticate as a user.
-func TestKernelAccountCredentialSeparation(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	const key = "credsepkey"
-	if err := db.UpsertKernel(ctx, key, "credsep", "", "", "", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	base := func() *kernel.Account {
-		return &kernel.Account{ID: uuid.New().String(), KernelPublicKey: key,
-			CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	}
-	for _, tc := range []struct {
-		name  string
-		mutet func(*kernel.Account)
-	}{
-		{"handle", func(a *kernel.Account) { a.Handle = "named" }},
-		{"password", func(a *kernel.Account) { a.PasswordHash = "hash" }},
-		{"recovery key", func(a *kernel.Account) { a.RecoveryPublicKey = "reckey" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a := base()
-			tc.mutet(a)
-			if err := db.CreateUser(ctx, a); err == nil {
-				t.Errorf("a kernel account with a %s must be rejected", tc.name)
-			}
-		})
-	}
-	if err := db.CreateUser(ctx, base()); err != nil {
-		t.Errorf("a credentialless kernel account must be accepted: %v", err)
-	}
-}
-
-// TestKernelDeleteBlockedByAccount: the account→kernel foreign key is restrictive on purpose, so a
-// code path that deletes a kernel outside the purge fails loudly instead of orphaning a ledger
-// principal. The purge clears the link first, which is why it succeeds.
-func TestKernelDeleteBlockedByAccount(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	peer := newPeer(t, db, "fk-peer", "fkpeerkey", 0, 0, time.Now().UTC())
-
-	if _, err := db.db.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=?`, "fkpeerkey"); err == nil {
-		t.Fatal("deleting a kernel with a linked account must be rejected")
-	}
-	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
-		t.Fatalf("PurgePeerCascade: %v", err)
-	}
-	if rk, _ := db.ReadKernel(ctx, "fkpeerkey"); rk != nil {
-		t.Error("purge must remove the kernel row once the link is cleared")
-	}
-}
-
-// TestSuspendedKernelAccountSurvivesRetention: a suspension must outlive idleness, or the peer
-// returns unsuspended after the sweep and the moderation decision quietly evaporates (§13).
-func TestSuspendedKernelAccountSurvivesRetention(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	old := time.Now().UTC().Add(-40 * 24 * time.Hour)
-	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
-
-	idle := newPeer(t, db, "ret-idle", "retidlekey", 0, 0, old)
-	banned := newPeer(t, db, "ret-banned", "retbannedkey", 0, 0, old)
-	if err := db.SuspendUser(ctx, banned.ID); err != nil {
-		t.Fatal(err)
-	}
-	ids, err := db.ListPurgeablePeers(ctx, cutoff)
-	if err != nil {
-		t.Fatalf("ListPurgeablePeers: %v", err)
-	}
-	if len(ids) != 1 || ids[0] != idle.ID {
-		t.Fatalf("purgeable = %v, want only the unsuspended idle peer %s", ids, idle.ID)
-	}
-}
-
 // TestListKernelsRoster: the whole `admin peers` view comes from one query — counterparties and
 // discovery-only kernels merged, self excluded, suspended hidden unless asked for (§14).
 func TestListKernelsRoster(t *testing.T) {
@@ -4393,12 +4282,11 @@ func TestListKernelsRoster(t *testing.T) {
 		t.Fatalf("empty roster: got %#v, %v; want a non-nil empty slice", empty, err)
 	}
 
-	newPeer(t, db, "titan", "rosterK1", 5, 0, now)
-	banned := newPeer(t, db, "banned", "rosterK4", 0, 0, now)
-	if err := db.SuspendUser(ctx, banned.ID); err != nil {
+	insertPeerTx(t, db, "seller", newPeer(t, db, "titan", "rosterK1", now), "a", now)
+	if err := db.SetKernelSuspended(ctx, newPeer(t, db, "banned", "rosterK4", now), true, now); err != nil {
 		t.Fatal(err)
 	}
-	// Discovery-only: a kernel row with a nickname and no account or petname.
+	// Discovery-only: a kernel row with a nickname, no petname, and no record naming it.
 	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", "", "", now); err != nil {
 		t.Fatal(err)
 	}
@@ -4425,11 +4313,11 @@ func TestListKernelsRoster(t *testing.T) {
 	if _, ok := def["rosterK4"]; ok {
 		t.Error("a suspended counterparty must be hidden by default")
 	}
-	if v := def["rosterK1"]; v == nil || !v.HasAccount || v.Petname != "titan" {
-		t.Errorf("counterparty row = %+v, want an account under the petname titan", v)
+	if v := def["rosterK1"]; v == nil || !v.Traded || v.Petname != "titan" {
+		t.Errorf("counterparty row = %+v, want traded under the petname titan", v)
 	}
-	if v := def["rosterK3"]; v == nil || v.HasAccount || v.Nickname != "minibox" || v.Petname != "" {
-		t.Errorf("discovery-only row = %+v, want no account and an unbound nickname", v)
+	if v := def["rosterK3"]; v == nil || v.Traded || v.Nickname != "minibox" || v.Petname != "" {
+		t.Errorf("discovery-only row = %+v, want untraded and an unbound nickname", v)
 	}
 	if all := byKey(true); all["rosterK4"] == nil {
 		t.Error("--all must include suspended counterparties")
@@ -4500,18 +4388,6 @@ func TestSchemaAccountIntegrity(t *testing.T) {
 	if children == 0 {
 		t.Error("child tables must reference accounts after the rename")
 	}
-	// No legacy row may hold both a password and a kernel key — the CHECK would have failed the
-	// migration, and no production path creates one.
-	var mixed int
-	if err := db.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM accounts WHERE kernel_public_key IS NOT NULL AND (password_hash != '' OR handle IS NOT NULL)`).
-		Scan(&mixed); err != nil {
-		t.Fatal(err)
-	}
-	if mixed != 0 {
-		t.Errorf("%d kernel accounts hold a session credential", mixed)
-	}
-
 	// A child insert still works, proving the rewritten foreign keys resolve.
 	u := newUser("fk-child", 0)
 	if err := db.CreateUser(ctx, u); err != nil {
@@ -4527,38 +4403,6 @@ func TestSchemaAccountIntegrity(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Error("PRAGMA foreign_key_check reported violations")
-	}
-}
-
-// TestPurgedPeerIsHistoryNotAUser: retention keeps the credentialless row as the ledger anchor §13
-// requires, but a handleless, keyless account is history — it must not surface as a live local user.
-func TestPurgedPeerIsHistoryNotAUser(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	live := newUser("still-here", 0)
-	if err := db.CreateUser(ctx, live); err != nil {
-		t.Fatal(err)
-	}
-	peer := newPeer(t, db, "gone-peer", "gonekey", 0, 0, time.Now().UTC())
-	if err := db.PurgePeerCascade(ctx, peer.ID); err != nil {
-		t.Fatalf("PurgePeerCascade: %v", err)
-	}
-	// The anchor survives for the ledger…
-	if _, err := db.ReadUser(ctx, peer.ID); err != nil {
-		t.Fatalf("the tombstone must remain readable as a ledger anchor: %v", err)
-	}
-	// …but never as a user.
-	users, err := db.ListUsers(ctx, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, u := range users {
-		if u.ID == peer.ID {
-			t.Error("a purged peer must not appear in the user list")
-		}
-	}
-	if len(users) != 1 || users[0].ID != live.ID {
-		t.Errorf("user list = %d rows, want only the live local user", len(users))
 	}
 }
 
@@ -4903,7 +4747,12 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 		}
 	})
 
-	db := openAt(t, path)
+	// Such a database names peer accounts in its ledger, which 059 refuses to carry: it predates
+	// every network served today. What 043 made of it is checked where 043 left it.
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "names a peer kernel's account") {
+		t.Fatalf("059 carried a ledger naming peer accounts: %v", err)
+	}
+	db := openThrough(t, path, "058_titles")
 	ctx := context.Background()
 	for _, want := range []*kernel.RailTransfer{
 		// "claim" and "settlement" are retired kinds no new row ever takes; these are history, kept
@@ -4941,11 +4790,8 @@ func TestRailMigrationConvertsRetiredCashRecords(t *testing.T) {
 func TestIdempotencyLockKeepsItsArgsForRecovery(t *testing.T) {
 	s := openTestDB(t)
 	ctx := context.Background()
-	peer := newUser("peer-args", 0)
-	if err := s.CreateUser(ctx, peer); err != nil {
-		t.Fatal(err)
-	}
-	rec := &kernel.IdempotencyRecord{ID: "rec-args", IdempotencyKey: "k1", CounterpartyUserID: peer.ID,
+	const peer = "kpeer-args"
+	rec := &kernel.IdempotencyRecord{ID: "rec-args", IdempotencyKey: "k1", Counterparty: peer,
 		ArgsJSON: `{"msg":"kept"}`, CreatedAt: time.Now().Add(-48 * time.Hour)}
 	if _, err := s.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
@@ -4953,7 +4799,7 @@ func TestIdempotencyLockKeepsItsArgsForRecovery(t *testing.T) {
 	// Age retires nothing: the lock stands until the commit that settles the call releases it, so
 	// a peer returning after two days is answered rather than served a second execution.
 	held, err := s.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
-		ID: "rec-args-2", IdempotencyKey: "k1", CounterpartyUserID: peer.ID, CreatedAt: time.Now()})
+		ID: "rec-args-2", IdempotencyKey: "k1", Counterparty: peer, CreatedAt: time.Now()})
 	if err != nil || held == nil || held.ID != "rec-args" {
 		t.Fatalf("an old lock must still be held: held=%v err=%v", held, err)
 	}
@@ -5188,53 +5034,6 @@ func mustExec(t *testing.T, raw *sql.DB, q string, args ...any) {
 	}
 }
 
-// The live-user rule is spoken once in Go and once in SQL, and the two agree on every kind of
-// account: a user and a suspended user are live, a peer's account and a purged peer's tombstone
-// are not.
-func TestLiveUserAgreesWithItsSQL(t *testing.T) {
-	db := openTestDB(t)
-	ctx := context.Background()
-	user, suspended := newUser("live-user", 0), newUser("live-suspended", 0)
-	for _, u := range []*kernel.Account{user, suspended} {
-		if err := db.CreateUser(ctx, u); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := db.SuspendUser(ctx, suspended.ID); err != nil {
-		t.Fatal(err)
-	}
-	peerOf := func(key string) *kernel.Account {
-		if err := db.UpsertKernel(ctx, key, key, "", "", "", time.Now().UTC()); err != nil {
-			t.Fatal(err)
-		}
-		a := &kernel.Account{ID: uuid.NewString(), KernelPublicKey: key, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-		if err := db.CreateUser(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-		return a
-	}
-	peer, gone := peerOf("livepeerkey"), peerOf("livegonekey")
-	if err := db.PurgePeerCascade(ctx, gone.ID); err != nil {
-		t.Fatal(err)
-	}
-	for name, c := range map[string]struct {
-		id   string
-		want bool
-	}{"user": {user.ID, true}, "suspended": {suspended.ID, true}, "peer": {peer.ID, false}, "tombstone": {gone.ID, false}} {
-		a, err := db.ReadUser(ctx, c.id)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		var inSQL bool
-		if err := db.db.QueryRowContext(ctx, `SELECT `+liveUser("")+` FROM accounts WHERE id=?`, c.id).Scan(&inSQL); err != nil {
-			t.Fatal(err)
-		}
-		if a.IsLiveUser() != c.want || inSQL != c.want {
-			t.Errorf("%s: Go says %v, SQL says %v, want %v", name, a.IsLiveUser(), inSQL, c.want)
-		}
-	}
-}
-
 // The three lists narrow to an id prefix by a range on the key, and without a status show only
 // what is open: a finished task or a closed process is there under All. The prefix is what a
 // person typed from the first groups of an id (D15); the open default is what `task list` and
@@ -5423,7 +5222,7 @@ func TestRecordTaskNoticeKeepsOnlyNewer(t *testing.T) {
 	if err := db.RecordTaskNotice(ctx, "holder-h", bob.ID, notice(9, kernel.TaskWaiting)); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("a notice moving the task to another addressee: %v, want ErrInvalidInput", err)
 	}
-	if e := held(); e.Revision != 3 || e.RequiredCaller.AccountID != alice.ID {
+	if e := held(); e.Revision != 3 || !e.RequiredCaller.IsUser(alice.ID) {
 		t.Errorf("a refused notice changed the entry: %+v", e)
 	}
 	if err := db.RecordTaskNotice(ctx, "holder-h", "nobody", &kernel.TaskNotice{ID: "task-2", Revision: 1, Status: kernel.TaskWaiting}); !errors.Is(err, kernel.ErrNotFound) {
@@ -5447,7 +5246,7 @@ func TestTaskRevisionsAreToldUntilAcknowledged(t *testing.T) {
 	if err := db.CreateUser(ctx, owner); err != nil {
 		t.Fatal(err)
 	}
-	peer := newPeer(t, db, "rev-peer", "peer-key", 0, 0, time.Now().UTC())
+	peer := newPeer(t, db, "rev-peer", "peer-key", time.Now().UTC())
 	act := newAction(owner.ID, "rev-act", 0, true)
 	if err := db.CreateAction(ctx, act); err != nil {
 		t.Fatal(err)
@@ -5458,8 +5257,8 @@ func TestTaskRevisionsAreToldUntilAcknowledged(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := "alice-there"
-	task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &root.ID, RequiredCallerUserID: peer.ID,
-		RequiredCallerRemoteID: &remote, ActionID: act.ID, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
+	task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &root.ID, RequiredCallerKernel: peer,
+		RequiredCallerUserID: remote, ActionID: act.ID, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
 	if err := db.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -5575,7 +5374,7 @@ func TestPurgeKeepsAHolderAndTakesItsEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-48 * time.Hour)
-	holder := newPeer(t, db, "purge-holder", "holder-key", 0, 0, old)
+	holder := newPeer(t, db, "purge-holder", "holder-key", old)
 	if err := db.RecordTaskNotice(ctx, "holder-key", alice.ID, &kernel.TaskNotice{ID: "held-1", Revision: 1, Status: kernel.TaskWaiting}); err != nil {
 		t.Fatal(err)
 	}
@@ -5585,7 +5384,7 @@ func TestPurgeKeepsAHolderAndTakesItsEntries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(ids) == 1 && ids[0] == holder.ID
+		return len(ids) == 1 && ids[0] == holder
 	}
 	if purgeable() {
 		t.Fatal("a peer holding an open task for one of ours was purgeable")
@@ -5596,7 +5395,7 @@ func TestPurgeKeepsAHolderAndTakesItsEntries(t *testing.T) {
 	if !purgeable() {
 		t.Fatal("a peer whose task is done is not purgeable")
 	}
-	if err := db.PurgePeerCascade(ctx, holder.ID); err != nil {
+	if err := db.PurgePeer(ctx, holder); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ReadMailbox(ctx, "held-1"); !errors.Is(err, kernel.ErrNotFound) {
@@ -5687,5 +5486,147 @@ func TestTitlesRoundTrip(t *testing.T) {
 	}
 	if _, ok := db.DiscoveryEmbedding(ctx, key, "r1", "Another title translates"); ok {
 		t.Error("a new title must not reuse the old embedding")
+	}
+}
+
+// TestMigration059NamesPartiesAsPrincipals: a peer stops being an account. Every record that named a
+// peer by its account names it by kernel key and, for a user there, that user's id; a tombstone's
+// rows keep its id with no kernel; a signed receipt is untouched; and the suspension moves to the
+// kernel row. The two guards refuse a database with a call in doubt or a ledger naming a peer.
+func TestMigration059NamesPartiesAsPrincipals(t *testing.T) {
+	now := timeToStr(time.Now().UTC())
+	seed := func(t *testing.T, extra ...string) string {
+		path := preValueMigrationDB(t, func(*sql.DB) {})
+		db := openThrough(t, path, "058_titles")
+		for _, q := range append([]string{
+			`INSERT INTO accounts (id,handle,available,locked,created_at,updated_at) VALUES ('u2','bob',0,0,'` + now + `','` + now + `')`,
+			`INSERT INTO kernels (public_key,petname,first_seen,updated_at) VALUES ('KEYK','acme','` + now + `','` + now + `')`,
+			`INSERT INTO accounts (id,kernel_public_key,available,locked,suspended_at,created_at,updated_at) VALUES ('pk','KEYK',0,0,'` + now + `','` + now + `','` + now + `')`,
+			`INSERT INTO accounts (id,available,locked,created_at,updated_at) VALUES ('tomb',0,0,'` + now + `','` + now + `')`,
+			`INSERT INTO processes (id,owner_user_id,created_at) VALUES ('p1','u1','` + now + `')`,
+			`INSERT INTO processes (id,owner_user_id,created_at) VALUES ('p2','u2','` + now + `')`,
+			// Outbound: alice calls bob@acme. Inbound: carol@acme calls bob here. And a tombstone's call.
+			`INSERT INTO traces (id,process_id,caller_user_id,action_owner_id,target_remote_id,target_handle,created_at) VALUES ('t1','p1','u1','pk','r-bob','bob','` + now + `')`,
+			`INSERT INTO traces (id,process_id,caller_user_id,caller_remote_id,caller_handle,action_owner_id,created_at) VALUES ('t2','p2','pk','r-carol','carol','u2','` + now + `')`,
+			`INSERT INTO traces (id,process_id,caller_user_id,action_owner_id,created_at) VALUES ('t3','p2','tomb','u2','` + now + `')`,
+			`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,target_remote_id,action_id,action_name,remote_action_id,status,started_at,ended_at) VALUES ('x1','p1','t1','','u1','u1','pk','r-bob','ap','bob/greet','r-greet','success','` + now + `','` + now + `')`,
+			`INSERT INTO transactions (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,caller_remote_id,target_user_id,action_id,status,started_at,ended_at) VALUES ('x2','p2','t2','','u2','pk','r-carol','u2','a1','success','` + now + `','` + now + `')`,
+			`INSERT INTO receipts (id,issuer_user_id,tx_id,trace_id,action_id,caller_user_id,status,signature,counterparty,created_at) VALUES ('rc2','u2','x2','t2','a1','pk','success','SIG','KEYK','` + now + `')`,
+			`INSERT INTO actions (id,owner_user_id,remote_owner_id,name,kind,source,remote_action_id,created_at,updated_at) VALUES ('ap','pk','r-bob','bob/greet','remote_proxy','bob/greet','r-greet','` + now + `','` + now + `')`,
+			// Bob, renamed Carol on the peer, replaced greet: two cached copies, one name once unfolded.
+			`INSERT INTO actions (id,owner_user_id,remote_owner_id,name,kind,remote_action_id,created_at,updated_at) VALUES ('ap2','pk','r-bob','carol/greet','remote_proxy','r-greet2','` + now + `','9999-01-01T00:00:00Z')`,
+			`INSERT INTO actions (id,owner_user_id,name,kind,created_at,updated_at) VALUES ('a1','u2','greet','wasm','` + now + `','` + now + `')`,
+			`INSERT INTO actions (id,owner_user_id,name,kind,deleted_at,created_at,updated_at) VALUES ('a0','u2','greet','wasm','` + now + `','` + now + `','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,status,created_at) VALUES ('s1','t2','pk','r-carol','carol','a1','waiting','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s2','t2','pk','a1','waiting','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s3','t2','u1','a1','waiting','` + now + `')`,
+			`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,created_at) VALUES ('ir1','k1','pk','` + now + `')`,
+			`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,created_at) VALUES ('ir2','k2','tomb','` + now + `')`,
+		}, extra...) {
+			if _, err := db.db.Exec(q); err != nil {
+				t.Fatalf("seed %q: %v", q, err)
+			}
+		}
+		db.Close()
+		return path
+	}
+
+	t.Run("migrates", func(t *testing.T) {
+		db := openAt(t, seed(t))
+		ctx := context.Background()
+		q := func(query string, dest ...any) {
+			t.Helper()
+			if err := db.db.QueryRowContext(ctx, query).Scan(dest...); err != nil {
+				t.Fatalf("%s: %v", query, err)
+			}
+		}
+		var n int
+		q(`SELECT COUNT(*) FROM accounts WHERE id IN ('pk','tomb')`, &n)
+		if n != 0 {
+			t.Errorf("%d peer or tombstone accounts survived", n)
+		}
+		var suspended sql.NullString
+		q(`SELECT suspended_at FROM kernels WHERE public_key='KEYK'`, &suspended)
+		if !suspended.Valid {
+			t.Error("the peer's suspension did not move to its kernel row")
+		}
+		for _, tc := range []struct{ query, want string }{
+			{`SELECT target_kernel || '|' || action_owner_id FROM traces WHERE id='t1'`, "KEYK|r-bob"},
+			{`SELECT caller_kernel || '|' || caller_user_id || '|' || caller_handle FROM traces WHERE id='t2'`, "KEYK|r-carol|carol"},
+			{`SELECT caller_kernel || '|' || caller_user_id FROM traces WHERE id='t3'`, "|tomb"},
+			{`SELECT target_kernel || '|' || target_user_id FROM transactions WHERE id='x1'`, "KEYK|r-bob"},
+			{`SELECT caller_kernel || '|' || caller_user_id FROM transactions WHERE id='x2'`, "KEYK|r-carol"},
+			{`SELECT owner_kernel || '|' || owner_user_id || '|' || owner_handle || '|' || name || '|' || source FROM actions WHERE id='ap'`, "KEYK|r-bob|bob|greet|"},
+			{`SELECT target_handle || '|' || action_name FROM transactions WHERE id='x1'`, "bob|greet"},
+			{`SELECT owner_kernel || '|' || owner_user_id || '|' || owner_handle || '|' || name FROM actions WHERE id='a1'`, "|u2||greet"},
+			{`SELECT required_caller_kernel || '|' || required_caller_user_id || '|' || required_caller_handle FROM tasks WHERE id='s1'`, "KEYK|r-carol|carol"},
+			{`SELECT required_caller_kernel || '|' || required_caller_user_id FROM tasks WHERE id='s2'`, "KEYK|"},
+			{`SELECT required_caller_kernel || '|' || required_caller_user_id FROM tasks WHERE id='s3'`, "|u1"},
+			{`SELECT counterparty FROM idempotency_records WHERE id='ir1'`, "KEYK"},
+			// Signed bytes are never rewritten (G3).
+			{`SELECT caller_user_id || '|' || signature || '|' || counterparty FROM receipts WHERE id='rc2'`, "pk|SIG|KEYK"},
+		} {
+			var got string
+			q(tc.query, &got)
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.query, got, tc.want)
+			}
+		}
+		var retired, kept sql.NullString
+		q(`SELECT (SELECT deleted_at FROM actions WHERE id='ap'), (SELECT deleted_at FROM actions WHERE id='ap2')`, &retired, &kept)
+		if !retired.Valid || kept.Valid {
+			t.Errorf("superseded copy deleted_at=%v, newer copy deleted_at=%v; want the older retired and the newer live", retired, kept)
+		}
+		q(`SELECT COUNT(*) FROM idempotency_records WHERE id='ir2'`, &n)
+		if n != 0 {
+			t.Error("a lock whose counterparty cannot be named survived")
+		}
+		// The soft-delete predicate survives the rebuild: a deleted name stays reusable, a live one is not.
+		if _, err := db.db.ExecContext(ctx, `INSERT INTO actions (id,owner_user_id,name,kind,created_at,updated_at) VALUES ('a2','u2','greet','wasm',?,?)`, now, now); err == nil {
+			t.Error("two live actions of one owner share a name")
+		}
+		if _, err := db.db.ExecContext(ctx, `INSERT INTO actions (id,owner_kernel,owner_user_id,name,kind,created_at,updated_at) VALUES ('a3','KEYK','u2','greet','remote_proxy',?,?)`, now, now); err != nil {
+			t.Errorf("a remote owner whose id equals a local one collided with it: %v", err)
+		}
+		if _, err := db.db.ExecContext(ctx, `UPDATE accounts SET available=-1 WHERE id='u1'`); err == nil {
+			t.Error("an account went negative")
+		}
+	})
+
+	for name, tc := range map[string]struct{ extra, want string }{
+		"refuses a call in doubt": {
+			`INSERT INTO traces (id,process_id,caller_user_id,action_owner_id,idempotency_key,created_at) VALUES ('t9','p1','u1','pk','ik9','` + now + `')`,
+			"awaiting a peer's receipt"},
+		"refuses a ledger naming a peer": {
+			`INSERT INTO ledger (id,operator_user_id,to_user_id,amount,reason,created_at) VALUES ('l9','u1','pk',5,'x','` + now + `')`,
+			"names a peer kernel's account"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Open(seed(t, tc.extra)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Open = %v, want a refusal naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A user renamed on a peer can leave a cached copy under a handle another user there takes later:
+// a reference by handle reads the copy refreshed last.
+func TestReadProxyByNameReadsTheNewestUnderAHandle(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	peer := newPeer(t, db, "beta", "K", time.Now().UTC())
+	var ids []string
+	for i, owner := range []string{"old-dave", "new-dave"} {
+		a := newAction(owner, "sum", 0, true)
+		a.OwnerKernel, a.OwnerHandle, a.Kind, a.RemoteActionID = peer, "dave", kernel.KindRemoteProxy, owner+"-r"
+		a.UpdatedAt = time.Now().UTC().Add(time.Duration(i) * time.Minute)
+		if err := db.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, a.ID)
+	}
+	got, err := db.ReadProxyByName(ctx, peer, "dave", "sum")
+	if err != nil || got.ID != ids[1] {
+		t.Fatalf("read %v (err %v), want the newer copy %s", got, err, ids[1])
 	}
 }

@@ -66,8 +66,8 @@ func TestOwnNameIsAPetnameOnTheOwnKey(t *testing.T) {
 	if _, err := k.RenameKernel(ctx, sys.ID, self, "other"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("renaming this kernel as a peer: want ErrInvalidInput, got %v", err)
 	}
-	if _, err := k.EnsureKernelAccount(ctx, self); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Errorf("an account with itself: want ErrInvalidInput, got %v", err)
+	if _, err := knownPeer(k, ctx, self); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("a kernel as its own peer: want ErrInvalidInput, got %v", err)
 	}
 
 	// The sweep past the retention age evicts account-less rows, which the self row is by design.
@@ -119,22 +119,22 @@ func TestIsRemoteRef(t *testing.T) {
 }
 
 // Every party renders as an address (D20): a user here beneath the own name, a peer's user beneath
-// the peer's name, the peer kernel itself as its name alone, an unbound peer as its key, and only a
-// purged tombstone as its raw id. An action's address is its owner's plus the name, a proxy's the
+// the peer's name, the peer kernel itself as its name alone, an unbound peer as its key, and an id
+// naming nobody here as itself. An action's address is its owner's plus the name, a proxy's the
 // remote owner's beneath the peer.
 func TestNamesRenderPrincipalsAndActions(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
 	alice := setupUser(t, st, "alice", 0)
-	named, err := k.EnsureKernelAccount(ctx, testKernelKey(6))
+	named, err := knownPeer(k, ctx, testKernelKey(6))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.BindPetname(ctx, testKernelKey(6), "peer", true); err != nil {
 		t.Fatal(err)
 	}
-	unbound, err := k.EnsureKernelAccount(ctx, testKernelKey(7))
+	unbound, err := knownPeer(k, ctx, testKernelKey(7))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +143,13 @@ func TestNamesRenderPrincipalsAndActions(t *testing.T) {
 		p    kernel.Principal
 		want string
 	}{
-		{kernel.Principal{AccountID: alice.ID}, "alice@k"},
-		{kernel.Principal{AccountID: named.ID}, "peer"},
-		{kernel.Principal{AccountID: named.ID, RemoteID: "u-1", Handle: "bob"}, "bob@peer"},
-		{kernel.Principal{AccountID: named.ID, RemoteID: "u-1"}, "u-1@peer"},
-		{kernel.Principal{AccountID: unbound.ID}, testKernelKey(7)},
-		{kernel.Principal{AccountID: "gone"}, "gone"},
+		{kernel.User(alice.ID), "alice@k"},
+		{kernel.Principal{Kernel: named}, "peer"},
+		{kernel.Principal{Kernel: named, UserID: "u-1", Handle: "bob"}, "bob@peer"},
+		{kernel.Principal{Kernel: named, UserID: "u-1"}, "u-1@peer"},
+		{kernel.Principal{Kernel: named, UserID: alice.ID}, alice.ID + "@peer"},
+		{kernel.Principal{Kernel: unbound}, testKernelKey(7)},
+		{kernel.User("gone"), "gone"},
 		{kernel.Principal{}, ""},
 	} {
 		if got := names.Address(ctx, c.p); got != c.want {
@@ -156,7 +157,7 @@ func TestNamesRenderPrincipalsAndActions(t *testing.T) {
 		}
 	}
 	local := &kernel.Action{OwnerUserID: alice.ID, Name: "greet"}
-	proxy := &kernel.Action{OwnerUserID: named.ID, Name: kernel.JoinProxyName("bob", "greet"), Kind: kernel.KindRemoteProxy, RemoteOwnerID: "u-1"}
+	proxy := &kernel.Action{OwnerKernel: named, OwnerUserID: "u-1", OwnerHandle: "bob", Name: "greet", Kind: kernel.KindRemoteProxy}
 	if got := names.Action(ctx, local); got != "alice@k/greet" {
 		t.Errorf("local action = %q", got)
 	}

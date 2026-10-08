@@ -33,22 +33,17 @@ const (
 	TxFailure TxStatus = "failure"
 )
 
-// Account is the local financial, authentication, and moderation principal: balances, credentials,
-// and the ledger identity every transaction party is captured under (§3). A local user holds a
-// Handle and password/recovery credentials; a remote kernel's account instead holds
-// KernelPublicKey and no credentials at all, so the two entities stay distinct while sharing one
-// wallet model. RecoveryPublicKey is a recovery credential (§12), never a federation identity.
+// Account is a user of this kernel: balance, credentials, and the identity its records name it by
+// (D4). A peer kernel holds none; it is its Kernel row, and records name it by key (D15).
+// RecoveryPublicKey is a recovery credential (§12), never a federation identity.
 type Account struct {
 	ID           string     `json:"id"`
-	Handle       string     `json:"handle"`      // empty on a kernel account — a kernel is named by its petname (§13)
+	Handle       string     `json:"handle"`
 	Description  string     `json:"description"` // free-text "about"; sys's is the kernel's about (§13)
 	PasswordHash string     `json:"-"`
 	Available    int64      `json:"available"`
 	Locked       int64      `json:"locked"`
 	SuspendedAt  *time.Time `json:"suspended_at,omitempty"`
-	// KernelPublicKey links this account to the remote kernel it settles for — the sole
-	// account↔kernel relationship (§3), and the peer discriminator. Empty on a local user.
-	KernelPublicKey string `json:"kernel_public_key,omitempty"`
 	// RecoveryPublicKey is the account's own Ed25519 recovery key (base64url), enrolled at
 	// creation from a client-held seed phrase; the server stores only the public half and never
 	// the mnemonic (§12).
@@ -58,20 +53,6 @@ type Account struct {
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
-
-// IsPeer reports whether a is a remote kernel's account (§13): it authenticates by federation
-// signature and is denied local-visibility actions (§4).
-func (a *Account) IsPeer() bool { return a != nil && a.KernelPublicKey != "" }
-
-// IsLiveUser reports whether a is a usable local user: an account holding a handle. The three
-// states are exhaustive — a handle means a live user, a kernel key means a kernel account, and
-// neither means a purged peer's tombstone, which anchors the ledger (§13 Retention) but is history.
-// "Not a peer" therefore does not imply "live user", and mutating operations must test this.
-func (a *Account) IsLiveUser() bool { return a != nil && a.Handle != "" }
-
-// IsLive reports whether a names something that still exists to act or be acted upon. A tombstone
-// stays readable for historical enrichment but is refused by every live and mutating operation.
-func (a *Account) IsLive() bool { return a.IsLiveUser() || a.IsPeer() }
 
 // ActionVisibility is the callability scope of an action (§4). It replaces the earlier boolean
 // public flag with three levels, controlling the direct dependency surface, not reachability.
@@ -93,7 +74,10 @@ func ValidActionVisibility(v ActionVisibility) bool {
 
 // Action is a callable capability.
 type Action struct {
-	ID             string           `json:"id"`
+	ID string `json:"id"`
+	// OwnerKernel and OwnerUserID are the owner's principal (D15): a user here, or for a cached remote
+	// action (D13) the peer's key and its owner's stable id there.
+	OwnerKernel    string           `json:"owner_kernel,omitempty"`
 	OwnerUserID    string           `json:"owner_user_id"`
 	OwnerHandle    string           `json:"owner_handle,omitempty"`    // populated via JOIN; empty if not loaded
 	OwnerSuspended bool             `json:"owner_suspended,omitempty"` // populated via JOIN; true when the owner is suspended (§12)
@@ -110,7 +94,6 @@ type Action struct {
 	ArtifactHash   string           `json:"artifact_hash,omitempty"`    // content-addressed compiled WASM artifact
 	WasmArtifact   string           `json:"wasm_artifact,omitempty"`    // base64-encoded compiled WASM bytes (wasm only); Source holds the TinyGo text
 	RemoteActionID string           `json:"remote_action_id,omitempty"` // ID of the action on the remote kernel (remote_proxy only)
-	RemoteOwnerID  string           `json:"remote_owner_id,omitempty"`  // stable owner user_id on the remote kernel (with peer key = PrincipalID, §13)
 	RemoteBPS      *int64           `json:"remote_bps,omitempty"`       // provider premium snapshot from the signed manifest; nil = pre-v0.12 proxy row
 	// BasePrice is the seller's manifest price (mp) on a remote_proxy row. Price is DERIVED from it
 	// and the current import_bps at read (§8, §16 Price Snapshot Pattern), so local policy reprices
@@ -226,10 +209,13 @@ const (
 // Core invariant: CompleteTask(caller, id, input) = Call(caller, trace, action_id, partial_args ⊕ input)
 // The allowed completion input is derived live as action.input_schema \ keys(partial_args).
 type Task struct {
-	ID                     string  `json:"id"`
-	ParentTraceID          *string `json:"parent_trace_id,omitempty"`
-	RequiredCallerUserID   string  `json:"required_caller_user_id"`
-	RequiredCallerRemoteID *string `json:"required_caller_remote_id,omitempty"` // stable remote user_id on the peer kernel (§13); nil = local required caller
+	ID            string  `json:"id"`
+	ParentTraceID *string `json:"parent_trace_id,omitempty"`
+	// RequiredCallerKernel and RequiredCallerUserID are who the task is parked for (D15): a user here;
+	// a user on a peer, by the peer's key and the user's stable id there; or the peer kernel itself,
+	// with no user. A rename on the peer leaves the task addressed correctly.
+	RequiredCallerKernel string `json:"required_caller_kernel,omitempty"`
+	RequiredCallerUserID string `json:"required_caller_user_id"`
 	// RequiredCallerHandle is what that remote principal was called when the task was made. Display
 	// only, exactly like a proxy's owner_handle (P6): the id above stays the identity, so a rename
 	// on the peer leaves the task addressed correctly and only this line goes stale.
@@ -320,14 +306,14 @@ type Trace struct {
 	ActionOwnerID string  `json:"action_owner_id"`
 	ActionID      string  `json:"action_id"`
 	CallerUserID  string  `json:"caller_user_id"`
-	// CallerRemoteID/CallerHandle and TargetRemoteID/TargetHandle complete the caller's and the
-	// target's principal (D4) when the account stands for a user on a peer: the caller a buying
-	// kernel attested in its signed request, or the task completer it attested; the target a proxy
-	// row names as its remote owner. Set once, where the call enters the kernel, and copied onto
-	// the transaction by every settlement path. Empty for a local user or the peer kernel itself.
-	CallerRemoteID string  `json:"-"`
+	// CallerKernel/CallerHandle and TargetKernel/TargetHandle complete the caller's and the target's
+	// principal (D15) beside CallerUserID and ActionOwnerID: empty for a party here; for one on a peer,
+	// the peer's key, and the handle the user went by — the caller its home kernel attested in a signed
+	// request or completion, the target a proxy row names as its owner. Set once, where the call
+	// enters the kernel, and copied onto the transaction by every settlement path.
+	CallerKernel   string  `json:"-"`
 	CallerHandle   string  `json:"-"`
-	TargetRemoteID string  `json:"-"`
+	TargetKernel   string  `json:"-"`
 	TargetHandle   string  `json:"-"`
 	Available      int64   `json:"available"`
 	Locked         int64   `json:"locked"`
@@ -373,15 +359,15 @@ type Transaction struct {
 	OwnerUserID   string `json:"owner_user_id"`
 	CallerUserID  string `json:"caller_user_id"`
 	TargetUserID  string `json:"target_user_id"`
-	// The remote halves of the caller's and target's principal, copied from the trace at
-	// settlement (D4): the transaction outlives its trace, so it keeps its own.
-	CallerRemoteID string `json:"-"`
-	CallerHandle   string `json:"-"`
-	TargetRemoteID string `json:"-"`
-	TargetHandle   string `json:"-"`
-	ActionID       string `json:"action_id"`
-	// ActionName is the action's stored name at the time — for a proxy the folded form
-	// (JoinProxyName) — never rewritten (G3); readers render it through Names.
+	// The rest of the caller's and target's principal, copied from the trace at settlement (D15):
+	// the transaction outlives its trace, so it keeps its own.
+	CallerKernel string `json:"-"`
+	CallerHandle string `json:"-"`
+	TargetKernel string `json:"-"`
+	TargetHandle string `json:"-"`
+	ActionID     string `json:"action_id"`
+	// ActionName is the action's name at the time, never rewritten (G3); the address is the target's
+	// plus this name.
 	ActionName        string          `json:"action_name"`
 	RemoteActionID    string          `json:"remote_action_id,omitempty"` // remote action ID on the far kernel; empty for local calls
 	ArgsJSON          json.RawMessage `json:"args"`
@@ -405,27 +391,45 @@ type Transaction struct {
 
 // Caller and Target are the transaction's parties as principals (D4).
 func (t *Transaction) Caller() Principal {
-	return Principal{AccountID: t.CallerUserID, RemoteID: t.CallerRemoteID, Handle: t.CallerHandle}
+	return Principal{Kernel: t.CallerKernel, UserID: t.CallerUserID, Handle: t.CallerHandle}
 }
 func (t *Transaction) Target() Principal {
-	return Principal{AccountID: t.TargetUserID, RemoteID: t.TargetRemoteID, Handle: t.TargetHandle}
+	return Principal{Kernel: t.TargetKernel, UserID: t.TargetUserID, Handle: t.TargetHandle}
 }
+
+// setParties copies the trace's two principals onto the transaction that settles it.
+func (t *Transaction) setParties(tr *Trace) {
+	t.CallerKernel, t.CallerUserID, t.CallerHandle = tr.CallerKernel, tr.CallerUserID, tr.CallerHandle
+	t.TargetKernel, t.TargetUserID, t.TargetHandle = tr.TargetKernel, tr.ActionOwnerID, tr.TargetHandle
+}
+
+// Owner is the transaction's payer, always a user of this kernel.
+func (t *Transaction) Owner() Principal { return Principal{UserID: t.OwnerUserID} }
 
 // Caller and Target are the trace's parties as principals; a transaction copies them at settlement.
 func (t *Trace) Caller() Principal {
-	return Principal{AccountID: t.CallerUserID, RemoteID: t.CallerRemoteID, Handle: t.CallerHandle}
+	return Principal{Kernel: t.CallerKernel, UserID: t.CallerUserID, Handle: t.CallerHandle}
 }
 func (t *Trace) Target() Principal {
-	return Principal{AccountID: t.ActionOwnerID, RemoteID: t.TargetRemoteID, Handle: t.TargetHandle}
+	return Principal{Kernel: t.TargetKernel, UserID: t.ActionOwnerID, Handle: t.TargetHandle}
+}
+
+// setCaller and setTarget write a principal onto the trace's two parties.
+func (t *Trace) setCaller(p Principal) {
+	t.CallerKernel, t.CallerUserID, t.CallerHandle = p.Kernel, p.UserID, p.Handle
+}
+func (t *Trace) setTarget(p Principal) {
+	t.TargetKernel, t.ActionOwnerID, t.TargetHandle = p.Kernel, p.UserID, p.Handle
 }
 
 // RequiredCaller is who the task is parked for, as a principal.
 func (s *Task) RequiredCaller() Principal {
-	p := Principal{AccountID: s.RequiredCallerUserID, Handle: s.RequiredCallerHandle}
-	if s.RequiredCallerRemoteID != nil {
-		p.RemoteID = *s.RequiredCallerRemoteID
-	}
-	return p
+	return Principal{Kernel: s.RequiredCallerKernel, UserID: s.RequiredCallerUserID, Handle: s.RequiredCallerHandle}
+}
+
+// Owner is the action owner's principal (D13).
+func (a *Action) Owner() Principal {
+	return Principal{Kernel: a.OwnerKernel, UserID: a.OwnerUserID, Handle: a.OwnerHandle}
 }
 
 // Stats tracks fixed performance and usage statistics for an action.
@@ -458,8 +462,8 @@ type LedgerEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-// RemoteKernel is a known remote kernel: one row per public key, whether or not it holds an
-// account here (§3). It owns Stiegler naming state — the self-certifying key, the Nickname the
+// RemoteKernel is a known remote kernel: one row per public key, the whole of what this kernel keeps
+// about a peer (D4). It owns Stiegler naming state — the self-certifying key, the Nickname the
 // remote asserts about itself (never resolves a reference), and the Petname assigned locally
 // (resolves). GossipCursor is the persisted evidence high-watermark (§13 peer sync), advanced only
 // after a page is verified and committed, so it is never written by ordinary observation.
@@ -477,8 +481,11 @@ type RemoteKernel struct {
 	GossipCursor        string     `json:"gossip_cursor,omitempty"`
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
 	LastContactFailedAt *time.Time `json:"last_contact_failed_at,omitempty"`
-	FirstSeen           time.Time  `json:"first_seen"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	// SuspendedAt is this operator's refusal to deal with the peer at all, set by `admin peer
+	// suspend` and read at every door a peer comes through (U37).
+	SuspendedAt *time.Time `json:"suspended_at,omitempty"`
+	FirstSeen   time.Time  `json:"first_seen"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // AuthCode is a short-lived PKCE authorization code.
@@ -626,13 +633,14 @@ const (
 	IncomingCredited  = "credited"
 )
 
-// IdempotencyRecord prevents duplicate cross-kernel calls.
+// IdempotencyRecord prevents duplicate cross-kernel calls: one per (key, counterparty), the
+// counterparty being the key of the kernel that signed the request (P4).
 type IdempotencyRecord struct {
-	ID                 string
-	IdempotencyKey     string
-	CounterpartyUserID string
-	ArgsJSON           string // the request's exact argument bytes, so recovery can sign over them
-	CreatedAt          time.Time
+	ID             string
+	IdempotencyKey string
+	Counterparty   string
+	ArgsJSON       string // the request's exact argument bytes, so recovery can sign over them
+	CreatedAt      time.Time
 }
 
 // ImportResult summarises the outcome of an import operation.
@@ -795,9 +803,9 @@ type RemoteKernelView struct {
 	Petname   string `json:"petname,omitempty"`
 	Nickname  string `json:"nickname,omitempty"`
 	About     string `json:"about,omitempty"`
-	// HasAccount is true iff this kernel has ever been a counterparty here — it has called us or we
-	// have called it. False for a kernel known only from discovery.
-	HasAccount bool `json:"has_account"`
+	// Traded is true iff a transaction here names this kernel — it has called us or we have called
+	// it. False for a kernel known only from discovery.
+	Traded bool `json:"traded"`
 	// Actions is the kernel's cached public-action count (from discovery docs), 0 when unknown.
 	Actions     int        `json:"actions"`
 	SuspendedAt *time.Time `json:"suspended_at,omitempty"`

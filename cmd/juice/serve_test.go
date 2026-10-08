@@ -1644,7 +1644,7 @@ func TestFederationCall(t *testing.T) {
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 
 	// Register the remote peer with its real public key.
-	_, err = k.EnsureKernelAccount(ctx, pubB64)
+	err = k.KnowKernel(ctx, pubB64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1742,8 +1742,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, pubB64)
-	if err != nil {
+	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1776,13 +1775,13 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 
 	// A cached proxy row is never re-served, even when named by its id.
 	m := kernel.ActionManifest{
-		ActionID: "remote-act", OwnerHandle: "far", Title: "Test action", Name: "far-act", Kind: kernel.KindHTTP,
+		ActionID: "remote-act", OwnerID: "far-id", OwnerHandle: "far", Title: "Test action", Name: "far-act", Kind: kernel.KindHTTP,
 		Price: 0, RemoteBPS: kernel.DefaultEconomy().RemoteBPS, Description: "far",
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 		ArtifactHash: "sha256-far", UpdatedAt: time.Now(),
 	}
 	m.Signature, _ = testNet.SignManifest(priv, &m)
-	proxy, err := k.ImportPeerAction(ctx, peer.ID, m)
+	proxy, err := k.ImportPeerAction(ctx, pubB64, m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1813,7 +1812,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.EnsureKernelAccount(ctx, pubB64); err != nil {
+	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1877,7 +1876,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	assertSignedRejection("active-private", fedCall(t, k, priv, a.ID, "idem-s-2", map[string]any{}))
 }
 
-// TestWaitingOnPeer: a waiting task whose required caller is a peer (proxy) user is flagged
+// TestWaitingOnPeer: a waiting task whose required caller is on a peer kernel is flagged
 // waiting_on_peer; a local-user caller or a non-waiting task is not (§13 — advisory, never a gate).
 func TestWaitingOnPeer(t *testing.T) {
 	srv, k := newTestHTTPServer(t)
@@ -1887,17 +1886,13 @@ func TestWaitingOnPeer(t *testing.T) {
 	localID, _ := makeUser(t, k, "local-caller")
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, peerKey)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := k.BindPetname(ctx, peerKey, "peer-caller", false); err != nil {
 		t.Fatal(err)
 	}
 
 	names := k.NewNames()
 	waiting := kernel.TaskNotice{Status: kernel.TaskWaiting}
-	peerTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: peer.ID}}
+	peerTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{Kernel: peerKey}}
 	pv := enrichTask(k, ctx, peerTask, names)
 	if !pv.WaitingOnPeer {
 		t.Error("task addressed to a peer should be waiting_on_peer")
@@ -1906,11 +1901,11 @@ func TestWaitingOnPeer(t *testing.T) {
 	if pv.RequiredCaller != "peer-caller" {
 		t.Errorf("required_caller: got %q, want peer-caller", pv.RequiredCaller)
 	}
-	userTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: peer.ID, RemoteID: "alice-remote-id", Handle: "alice"}}
+	userTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{Kernel: peerKey, UserID: "alice-remote-id", Handle: "alice"}}
 	if got := enrichTask(k, ctx, userTask, names).RequiredCaller; got != "alice@peer-caller" {
 		t.Errorf("a task addressed to a user on the peer: got %q, want alice@peer-caller", got)
 	}
-	localTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{AccountID: localID}}
+	localTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{UserID: localID}}
 	lv := enrichTask(k, ctx, localTask, names)
 	if lv.WaitingOnPeer {
 		t.Error("task addressed to a local user should not be waiting_on_peer")
@@ -1918,7 +1913,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	if !strings.HasSuffix(lv.RequiredCaller, "@"+testOwnName) {
 		t.Errorf("a local user is addressed on this kernel: got %q", lv.RequiredCaller)
 	}
-	doneTask := &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{Status: kernel.TaskDone}, RequiredCaller: kernel.Principal{AccountID: peer.ID}}
+	doneTask := &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{Status: kernel.TaskDone}, RequiredCaller: kernel.Principal{Kernel: peerKey}}
 	if enrichTask(k, ctx, doneTask, names).WaitingOnPeer {
 		t.Error("a non-waiting task should never be waiting_on_peer")
 	}
@@ -2095,7 +2090,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.EnsureKernelAccount(ctx, pubB64); err != nil {
+	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2133,16 +2128,16 @@ func TestFederationCallAuth(t *testing.T) {
 	}
 
 	// Unknown but signature-valid counterparty → handshake-free subscription (§13): the caller's
-	// zero-balance billing account is lazily provisioned and the price-0 call succeeds.
+	// kernel becomes known and the price-0 call succeeds.
 	_, unknownPriv, _ := ed25519.GenerateKey(rand.Reader)
 	unknownKey := base64.RawURLEncoding.EncodeToString(unknownPriv.Public().(ed25519.PublicKey))
 	r2 := fedCall(t, k, unknownPriv, action, "idem-auth-2", map[string]any{})
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
-		t.Errorf("unknown counterparty: want 200 (lazily provisioned), got %d", r2.StatusCode)
+		t.Errorf("unknown counterparty: want 200 (made known), got %d", r2.StatusCode)
 	}
-	if u, _ := k.ReadAccountByKernelKey(ctx, unknownKey); u == nil || u.KernelPublicKey != unknownKey {
-		t.Error("unknown caller should have been provisioned a proxy account")
+	if kr, _ := k.ReadKernel(ctx, unknownKey); kr == nil {
+		t.Error("an unknown caller's kernel should have been made known")
 	}
 
 	// Missing timestamp → 401.
@@ -2195,7 +2190,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.EnsureKernelAccount(ctx, pubB64)
+	_ = k.KnowKernel(ctx, pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID:  sys.ID,
@@ -2472,7 +2467,7 @@ func TestFederationReplay(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.EnsureKernelAccount(ctx, pubB64)
+	_ = k.KnowKernel(ctx, pubB64)
 
 	ikey1 := uuid.New().String()
 	r1 := fedCall(t, k, priv, a.ID, ikey1, map[string]any{})
@@ -2488,19 +2483,14 @@ func TestFederationReplay(t *testing.T) {
 		t.Errorf("replay: want 200, got %d", r2.StatusCode)
 	}
 
-	// Pending in-flight key → 409. The inbound caller is a kernel account, addressed by its key:
-	// it holds no handle (§13).
-	caller, err := k.ReadAccountByKernelKey(ctx, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Pending in-flight key → 409. The inbound caller is a kernel, named by its key (P4).
 	ikey2 := uuid.New().String()
 	now := time.Now().UTC()
 	_, _ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
-		ID:                 uuid.New().String(),
-		IdempotencyKey:     ikey2,
-		CounterpartyUserID: caller.ID,
-		CreatedAt:          now,
+		ID:             uuid.New().String(),
+		IdempotencyKey: ikey2,
+		Counterparty:   base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+		CreatedAt:      now,
 	})
 	r3 := fedCall(t, k, priv, a.ID, ikey2, map[string]any{})
 	defer r3.Body.Close()
@@ -2526,7 +2516,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.EnsureKernelAccount(ctx, pubB64)
+	_ = k.KnowKernel(ctx, pubB64)
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
 	a, err := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2590,7 +2580,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, _ = k.EnsureKernelAccount(ctx, pubB64)
+	_ = k.KnowKernel(ctx, pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
 		OwnerUserID: sys.ID, Title: "Test action", Name: "fail-exec", Kind: kernel.KindHTTP,
@@ -2640,7 +2630,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	if _, err := k.EnsureKernelAccount(ctx, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
+	if err := k.KnowKernel(ctx, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2687,8 +2677,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	_, err := k.EnsureKernelAccount(ctx, pubB64)
-	if err != nil {
+	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2788,7 +2777,7 @@ func TestServeRendersATaskHeldByAPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := enrichTask(k, ctx, &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s-1", UserID: id, Status: kernel.TaskWaiting},
-		HolderKey: peerKey, RequiredCaller: kernel.Principal{AccountID: id}}, k.NewNames())
+		HolderKey: peerKey, RequiredCaller: kernel.Principal{UserID: id}}, k.NewNames())
 	if v.RequiredCaller != "peer-list-me@"+testOwnName || v.Owner != "holder" || v.WaitingOnPeer {
 		t.Fatalf("view = %+v; want required_caller peer-list-me@%s, owner holder, not waiting on a peer", v, testOwnName)
 	}
@@ -3741,12 +3730,11 @@ func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := k.EnsureKernelAccount(ctx, pubB64)
-	if err != nil {
+	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
 	locked := func(key string) bool {
-		rec, rerr := db.ReadIdempotencyRecord(ctx, key, peer.ID)
+		rec, rerr := db.ReadIdempotencyRecord(ctx, key, pubB64)
 		return rerr == nil && rec != nil
 	}
 

@@ -21,12 +21,14 @@ import (
 )
 
 // TestCanCallVisibilityMatrix exercises the caller-scoped, three-level visibility predicate (§4):
-// public is callable by anyone; local by any local (non-peer) caller but not a peer; private only
-// by the owner; and inactive/suspended-owner actions are never callable regardless of visibility.
+// public is callable by anyone; local by a user here but not a peer; private only by the owner; and
+// inactive/suspended-owner actions are never callable regardless of visibility. A party is its
+// kernel and its id together: a peer's user whose id equals the owner's is not the owner (D15).
 func TestCanCallVisibilityMatrix(t *testing.T) {
-	owner := &Account{ID: "owner"}
-	other := &Account{ID: "other"}
-	peer := &Account{ID: "peer", KernelPublicKey: "cGVlcg"}
+	owner := User("owner")
+	other := User("other")
+	peer := Principal{Kernel: "cGVlcg"}
+	impostor := Principal{Kernel: "cGVlcg", UserID: "owner", Handle: "owner"}
 
 	mk := func(vis ActionVisibility) *Action {
 		return &Action{OwnerUserID: "owner", Active: true, Visibility: vis}
@@ -34,19 +36,23 @@ func TestCanCallVisibilityMatrix(t *testing.T) {
 	cases := []struct {
 		name    string
 		action  *Action
-		caller  *Account
+		caller  Principal
 		canCall bool
 	}{
 		{"public/owner", mk(VisibilityPublic), owner, true},
 		{"public/other", mk(VisibilityPublic), other, true},
 		{"public/peer", mk(VisibilityPublic), peer, true},
+		{"public/nobody", mk(VisibilityPublic), Principal{}, true},
 		{"local/owner", mk(VisibilityLocal), owner, true},
 		{"local/other", mk(VisibilityLocal), other, true},
 		{"local/peer", mk(VisibilityLocal), peer, false},
-		{"local/nil", mk(VisibilityLocal), nil, false},
+		{"local/impostor", mk(VisibilityLocal), impostor, false},
+		{"local/nobody", mk(VisibilityLocal), Principal{}, false},
 		{"private/owner", mk(VisibilityPrivate), owner, true},
 		{"private/other", mk(VisibilityPrivate), other, false},
 		{"private/peer", mk(VisibilityPrivate), peer, false},
+		{"private/impostor", mk(VisibilityPrivate), impostor, false},
+		{"private/nobody", mk(VisibilityPrivate), Principal{}, false},
 	}
 	for _, c := range cases {
 		if got := canCall(c.caller, c.action); got != c.canCall {
@@ -293,8 +299,8 @@ func TestRatingSigningRequiresConfiguredKey(t *testing.T) {
 
 func TestRemoteManifestHashIncludesKindAndArtifact(t *testing.T) {
 	base := ActionManifest{
-		ActionID:     "act-1",
-		OwnerHandle:  "peer",
+		ActionID: "act-1",
+		OwnerID:  "peer-id", OwnerHandle: "peer",
 		Title:        "Test action",
 		Name:         "svc",
 		Description:  "test",

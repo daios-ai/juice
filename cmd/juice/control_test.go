@@ -115,11 +115,10 @@ func TestPeerRosterIsAPlainArrayWhenEmpty(t *testing.T) {
 	}
 }
 
-// TestAdminDepositToAPeerIsRefused: a peer account is identity, never a wallet (P10, D14). What a
-// peer owes closes when it pays, which no operator records by hand, so a deposit never names one —
-// refused rather than preloading a balance no path would ever spend. And a refusal writes nothing:
-// a peer this kernel has never met still does not exist afterwards, since a peer relationship comes
-// from a verified resolve or a signed inbound call, never from a money command that failed.
+// TestAdminDepositToAPeerIsRefused: a peer holds no account here (P10, D14). What a peer owes
+// closes when it pays, which no operator records by hand, so a deposit never names one. And a
+// refusal writes nothing: a kernel becomes known from a verified resolve or a signed inbound call,
+// never from a money command that failed.
 func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
@@ -127,35 +126,23 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
-	peer, err := env.k.EnsureKernelAccount(ctx, keyB64)
-	if err != nil {
+	if err := env.k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
 	}
-
-	// Addressed by key or by petname, and with or without an amount, it is the same refusal.
-	body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+keyB64+"/deposit",
-		map[string]any{"amount": 300, "ref": "test-payment"})
-	if status == http.StatusOK {
-		t.Fatalf("a bare deposit to a peer was accepted: %s", body)
-	}
-	u, err := env.k.ReadUser(ctx, peer.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.Available != 0 || u.Locked != 0 {
-		t.Errorf("peer row after the refusal: %d/%d, want 0/0 — a peer account holds no money on any path",
-			u.Available, u.Locked)
+	if body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+keyB64+"/deposit",
+		map[string]any{"amount": 300, "ref": "test-payment"}); status == http.StatusOK {
+		t.Fatalf("a deposit to a peer was accepted: %s", body)
 	}
 
-	// A key this kernel has never seen: the refusal must leave no account behind it.
+	// A key this kernel has never seen: the refusal must leave no kernel row behind it.
 	stranger, _, _ := ed25519.GenerateKey(rand.Reader)
 	strangerKey := base64.RawURLEncoding.EncodeToString(stranger)
 	if body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+strangerKey+"/deposit",
 		map[string]any{"amount": 300, "ref": "test-payment-2"}); status == http.StatusOK {
 		t.Fatalf("a deposit to an unknown kernel was accepted: %s", body)
 	}
-	if acct, _ := env.k.ReadAccountByKernelKey(ctx, strangerKey); acct != nil {
-		t.Error("a refused deposit provisioned a peer account, which only a verified resolve or a signed call may do")
+	if kr, _ := env.k.ReadKernel(ctx, strangerKey); kr != nil {
+		t.Error("a refused deposit made a kernel known, which only a verified resolve or a signed call may do")
 	}
 }
 

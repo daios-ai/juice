@@ -613,38 +613,21 @@ func (s *simNode) balance(t *testing.T, userID string) int64 {
 	return u.Available
 }
 
-// peerRow returns what this kernel's books say the named peer's account holds: negative means the
-// peer owes this kernel (§13 bilateral position).
-// peerBalance is what a peer's account holds here, which under the ticket economy is always
-// nothing: a peer row is identity and attribution, never a wallet (P10).
-func (s *simNode) peerBalance(t *testing.T, peerKey string) int64 {
-	t.Helper()
-	acct, err := s.db.ReadAccountByKernelKey(context.Background(), peerKey)
-	if err != nil || acct == nil {
-		return 0
-	}
-	return acct.Available
-}
-
 // owedBy is the obligation this kernel holds against one peer, or nil when it holds none.
 func (s *simNode) owedBy(t *testing.T, peerKey string) *kernel.Owed {
 	t.Helper()
 	ctx := context.Background()
-	acct, err := s.db.ReadAccountByKernelKey(ctx, peerKey)
-	if err != nil || acct == nil {
-		return nil
-	}
 	// The obligation is named by the call the seller admitted: once committed, by the receipt that
 	// names the request it answered — the execution lock is long gone by the time the money is
 	// owed (P4, P10).
 	var id string
 	if err := s.db.QueryRowForTest(ctx,
 		`SELECT r.idempotency_key FROM receipts r JOIN traces t ON t.id = r.trace_id
-		  WHERE t.caller_user_id=? AND r.idempotency_key <> '' LIMIT 1`,
-		acct.ID, &id); err != nil || id == "" {
+		  WHERE t.caller_kernel=? AND r.idempotency_key <> '' LIMIT 1`,
+		peerKey, &id); err != nil || id == "" {
 		return nil
 	}
-	r, _ := s.db.ReadOwed(ctx, id, acct.ID)
+	r, _ := s.db.ReadOwed(ctx, id, peerKey)
 	return r
 }
 
@@ -726,13 +709,10 @@ func TestSimCrossKernelPriceIsExact(t *testing.T) {
 		t.Errorf("buyer paid %d, want the all-in price 30 (1000 → 970), got balance %d", 1000-got, got)
 	}
 	// The seller's books show one obligation the buyer owes: charge 25 + premium 2. It is a ticket,
-	// not a balance — a peer row holds no money (P10).
+	// not a balance (P10).
 	tk := seller.owedBy(t, buyer.key)
 	if tk == nil || tk.Obligation != 27 {
 		t.Fatalf("seller's obligation for the buyer = %+v, want 27 (charge 25 + premium 2)", tk)
-	}
-	if got := seller.peerBalance(t, buyer.key); got != 0 {
-		t.Errorf("a peer row must hold no money, got %d", got)
 	}
 	// The provider funded its own work and got it back less its own fee: taxable 25, fee
 	// ceil(25·10%) = 3, net 22. What the buyer owes arrives later, when the ticket settles.
@@ -1283,14 +1263,6 @@ func TestSimTicketSettlesEitherWay(t *testing.T) {
 				t.Errorf("the replay reported charge %s (%v), want the first run's %d", chargeOf(again), err, *reply.Charge)
 			}
 
-			// Whatever the draw, a peer row holds no money at all.
-			if got := seller.peerBalance(t, buyer.key); got != 0 {
-				t.Errorf("the seller's row for the buyer holds %d, want 0", got)
-			}
-			if got := buyer.peerBalance(t, seller.key); got != 0 {
-				t.Errorf("the buyer's row for the seller holds %d, want 0", got)
-			}
-
 			// Nobody records anything by hand. This world has no addresses, so the buyer's signed
 			// reveal is itself the finalized payment (D23): one pass of the buyer's own worker sends
 			// it, and the seller's books close against it — the provider credited exactly what the
@@ -1444,53 +1416,6 @@ func (s *simNode) exposure(t *testing.T) int64 {
 		t.Fatalf("%s: read exposure: %v", s.name, err)
 	}
 	return e
-}
-
-// A peer account is identity, attribution and moderation state — never a wallet. The old economy
-// let it hold a balance, and the migration drops that; nothing in the new one may put money back.
-// This drives a real cross-kernel call in both directions and checks the rows stay at zero
-// throughout, which is the invariant that replaced the schema constraint.
-func TestSimPeerRowsNeverHoldMoney(t *testing.T) {
-	net := newSimNet(t)
-
-	cfg := defaultSimConfig()
-	cfg.Lottery = 1000
-	a := net.addNode("a", cfg)
-	b := net.addNode("b", cfg)
-
-	alice := a.user(t, "alice", sellerCapital)
-	a.publish(t, alice, "quote", 25)
-	bob := b.user(t, "bob", sellerCapital)
-	b.publish(t, bob, "advice", 40)
-
-	// Each buys from the other, so both kernels are seller and buyer at once.
-	if _, err := b.run(t, bob.ID, remoteRef(a, "alice", "quote")); err != nil {
-		net.dump()
-		t.Fatalf("b buys from a: %v", err)
-	}
-	if _, err := a.run(t, alice.ID, remoteRef(b, "bob", "advice")); err != nil {
-		net.dump()
-		t.Fatalf("a buys from b: %v", err)
-	}
-
-	for _, c := range []struct {
-		node *simNode
-		peer string
-	}{{a, b.key}, {b, a.key}} {
-		acct, err := c.node.db.ReadAccountByKernelKey(context.Background(), c.peer)
-		if err != nil || acct == nil {
-			t.Fatalf("%s has no account for its counterparty: %v", c.node.name, err)
-		}
-		if acct.Available != 0 || acct.Locked != 0 {
-			net.dump()
-			t.Errorf("%s's row for its peer holds %d available and %d locked, want 0/0",
-				c.node.name, acct.Available, acct.Locked)
-		}
-		// The row is still there and still names the kernel: what it stops being is a wallet.
-		if acct.KernelPublicKey != c.peer {
-			t.Errorf("%s's peer row lost its identity", c.node.name)
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1796,8 +1721,7 @@ func TestSimTaskNoticeIsToldUntilAcknowledged(t *testing.T) {
 	if entries() != 0 || owed() != 1 {
 		t.Fatalf("a suspended holder delivered: %d entries, %d still owed", entries(), owed())
 	}
-	peer, _ := home.db.ReadAccountByKernelKey(ctx, holder.key)
-	if err := home.k.UnsuspendUser(ctx, home.sysID, peer.ID); err != nil {
+	if err := home.k.UnsuspendKernel(ctx, home.sysID, holder.key); err != nil {
 		t.Fatal(err)
 	}
 

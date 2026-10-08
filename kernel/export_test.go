@@ -16,13 +16,16 @@ import (
 // to drive those modes directly, so they reach them here rather than through an exported surface a
 // client could misuse.
 type TestCallRequest struct {
-	CallerID        string
+	CallerID        string // a user of this kernel; CallerKernel set makes it a user of that peer
+	CallerKernel    string
 	ParentTraceID   string
 	Action          *Action
 	ActionRef       string
 	Args            map[string]any
 	TaskID          string
 	ExistingTraceID string
+	// IdempotencyRecordID is the inbound record the call answers, as a federated run threads it.
+	IdempotencyRecordID string
 	// TargetUserID + ActionName name the action by owner id and stored name, a test convenience
 	// that reads the row directly: production names an action by address or id alone.
 	TargetUserID string
@@ -33,20 +36,16 @@ type TestCallRequest struct {
 func (k *Kernel) TestCall(ctx context.Context, req TestCallRequest) (*CallReply, error) {
 	if req.TargetUserID != "" && req.Action == nil && req.ActionRef == "" {
 		// The owner's address on this kernel, so the engine resolves — and refuses — in its own order.
-		owner, err := k.resolveUser(ctx, req.TargetUserID)
+		owner, err := k.store.ReadUser(ctx, req.TargetUserID)
 		if err != nil || owner == nil {
 			return nil, ErrNotFound.Wrap("target user not found")
 		}
-		if owner.Handle != "" {
-			req.ActionRef = Address{Handle: owner.Handle, Kernel: TestOwnName, Name: req.ActionName}.String()
-		} else {
-			// A proxy is owned by a peer's account: its address is the remote owner's, beneath the peer.
-			ro, rest := SplitProxyName(req.ActionName)
-			req.ActionRef = Address{Handle: ro, Kernel: owner.KernelPublicKey, Name: rest}.String()
-		}
+		req.ActionRef = Address{Handle: owner.Handle, Kernel: TestOwnName, Name: req.ActionName}.String()
 	}
-	return k.call(ctx, callRequest{CallerID: req.CallerID, ParentTraceID: req.ParentTraceID, Action: req.Action,
-		ActionRef: req.ActionRef, Args: req.Args, TaskID: req.TaskID, ExistingTraceID: req.ExistingTraceID})
+	caller := Principal{Kernel: req.CallerKernel, UserID: req.CallerID}
+	return k.call(ctx, callRequest{Caller: caller, ParentTraceID: req.ParentTraceID, Action: req.Action,
+		ActionRef: req.ActionRef, Args: req.Args, TaskID: req.TaskID, ExistingTraceID: req.ExistingTraceID,
+		IdempotencyRecordID: req.IdempotencyRecordID})
 }
 
 // DispatchRecordForTest builds the record beginRun freezes on a dispatched trace: the rates, the

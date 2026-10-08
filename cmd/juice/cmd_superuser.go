@@ -385,10 +385,8 @@ func peerInspectCmd() *cobra.Command {
 						Description string `json:"description"`
 						Price       int64  `json:"price"`
 					} `json:"actions"`
-					Evidence []*kernel.SubjectEvidenceRow `json:"evidence"`
-					Account  *struct {
-						Suspended bool `json:"suspended"`
-					} `json:"account"`
+					Evidence     []*kernel.SubjectEvidenceRow `json:"evidence"`
+					Suspended    bool                         `json:"suspended"`
 					Reachability struct {
 						Path      string `json:"path"`
 						RTTmillis int64  `json:"rtt_millis"`
@@ -427,12 +425,8 @@ func peerInspectCmd() *cobra.Command {
 					version = "unknown"
 				}
 				fmt.Printf("Version:      %s\n", version)
-				if out.Account != nil {
-					susp := ""
-					if out.Account.Suspended {
-						susp = " [suspended]"
-					}
-					fmt.Printf("Traded here:  yes%s\n", susp)
+				if out.Suspended {
+					fmt.Println("Suspended:    yes")
 				}
 				if out.Source == "none" {
 					fmt.Println("This peer is offline and not known locally (no cached data).")
@@ -491,7 +485,7 @@ func peerListCmd() *cobra.Command {
 				column{"PETNAME", dash("petname")},
 				column{"NICKNAME", dash("nickname")},
 				column{"TRADED", func(row json.RawMessage) string {
-					if strField(row, "has_account") == "true" {
+					if strField(row, "traded") == "true" {
 						return "yes"
 					}
 					return "—"

@@ -624,7 +624,7 @@ var reservedDeposit = `d.party <> '' AND (EXISTS (SELECT 1 FROM kernels v WHERE 
 // the rest of what the call was sold under (D19). Reading it from there rather than from the
 // execution lock is what lets the lock be released the moment the call commits: an obligation
 // outlives the work, and a lock does not (P4, P10).
-const owedSelect = `SELECT COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key, ''), t.caller_user_id,
+const owedSelect = `SELECT COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key, ''), t.caller_kernel,
        t.action_owner_id, t.id,
        t.dispatch_json, x.id IS NOT NULL, COALESCE(r.charge + r.premium, 0),
        t.owed_status, t.owed_amount, t.owed_tx_hash, t.owed_blockchain_address, t.created_at
@@ -644,7 +644,7 @@ func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 	var o kernel.Owed
 	var terms sql.NullString
 	var createdAt string
-	if err := scan(&o.ID, &o.PeerUserID, &o.UserID, &o.TraceID, &terms, &o.Settled, &o.Obligation,
+	if err := scan(&o.ID, &o.PeerKey, &o.UserID, &o.TraceID, &terms, &o.Settled, &o.Obligation,
 		&o.Status, &o.Amount, &o.TxHash, &o.BlockchainAddr, &createdAt); err != nil {
 		return nil, err
 	}
@@ -653,9 +653,9 @@ func scanOwed(scan func(...any) error) (*kernel.Owed, error) {
 	return &o, nil
 }
 
-func (s *DB) ReadOwed(ctx context.Context, id, peerUserID string) (*kernel.Owed, error) {
+func (s *DB) ReadOwed(ctx context.Context, id, peerKey string) (*kernel.Owed, error) {
 	o, err := scanOwed(s.db.QueryRowContext(ctx,
-		owedSelect+` WHERE `+owedIsAdmitted+` AND COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key)=? AND t.caller_user_id=?`, id, peerUserID).Scan)
+		owedSelect+` WHERE `+owedIsAdmitted+` AND COALESCE(NULLIF(r.idempotency_key,''), ir.idempotency_key)=? AND t.caller_kernel=?`, id, peerKey).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -843,7 +843,7 @@ func (s *DB) ReconcileDeposits(ctx context.Context, sysID string, limit int) ([]
 			`SELECT '', '', d.id, a.id FROM rail_transfers d
 			   JOIN accounts a ON a.blockchain_address = d.party
 			  WHERE d.kind = 'deposit' AND d.status = 'held' AND d.party <> ''
-			    AND `+liveUser("a")+` AND a.suspended_at IS NULL AND a.password_hash <> ''
+			    AND a.suspended_at IS NULL AND a.password_hash <> ''
 			    AND NOT (`+reservedDeposit+`)
 			  ORDER BY d.created_at LIMIT ?`, limit)
 		if err != nil {
@@ -895,25 +895,21 @@ func (s *DB) PeersWithUnresolvedMoney(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT DISTINCT key FROM (
   -- a peer that owes us for work we delivered
-  SELECT COALESCE(a.kernel_public_key,'') AS key
+  SELECT t.caller_kernel AS key
     FROM traces t
-    JOIN accounts a ON a.id = t.caller_user_id
     LEFT JOIN transactions x ON x.trace_id = t.id
     LEFT JOIN receipts r ON r.trace_id = t.id
    WHERE `+owedIsAdmitted+` AND `+unresolved("t", "x", "r")+`
   UNION
   -- a peer that has not heard how a draw it is owed came out
-  SELECT COALESCE(a.kernel_public_key,'')
+  SELECT x.target_kernel
     FROM traces t
     JOIN transactions x ON x.trace_id = t.id
-    JOIN accounts a ON a.id = x.target_user_id
    WHERE t.revealed = 0 AND t.idempotency_key IS NOT NULL AND x.net > 0
   UNION
   -- a peer holding a call of ours whose answer decides money already reserved
-  SELECT COALESCE(ow.kernel_public_key,'')
+  SELECT t.target_kernel
     FROM traces t
-    JOIN actions act ON act.id = t.action_id
-    LEFT JOIN accounts ow ON ow.id = act.owner_user_id
    WHERE t.idempotency_key IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM transactions x2 WHERE x2.trace_id = t.id)
 ) WHERE key <> ''`)
@@ -948,13 +944,12 @@ func (s *DB) ListPendingReveals(ctx context.Context, limit int) ([]*kernel.Pendi
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT t.idempotency_key, t.id, a.kernel_public_key, t.dispatch_json, COALESCE(p.tx_hash,'')
+		`SELECT t.idempotency_key, t.id, x.target_kernel, t.dispatch_json, COALESCE(p.tx_hash,'')
 		   FROM traces t
 		   JOIN transactions x ON x.trace_id = t.id
-		   JOIN accounts a ON a.id = x.target_user_id
 		   LEFT JOIN rail_transfers p ON p.id = t.idempotency_key AND p.kind = 'obligation'
 		  WHERE t.revealed = 0 AND t.idempotency_key IS NOT NULL
-		    AND a.kernel_public_key IS NOT NULL AND x.net > 0
+		    AND x.target_kernel <> '' AND x.net > 0
 		    AND (p.id IS NULL OR p.status = 'confirmed')
 		  ORDER BY COALESCE(t.reveal_failed_at,'') ASC, t.created_at ASC LIMIT ?`, limit)
 	if err != nil {
@@ -1001,10 +996,8 @@ func (s *DB) RecordIncomingTransfer(ctx context.Context, sys string, it *kernel.
 		case !errors.Is(err, sql.ErrNoRows):
 			return dbErr(err, "read incoming transfer")
 		}
-		var live bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT `+liveUser("")+` FROM accounts WHERE id=?`,
-			it.BeneficiaryID).Scan(&live); err != nil || !live {
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM accounts WHERE id=?`, it.BeneficiaryID).Scan(&one); err != nil {
 			return kernel.ErrNotFound.Wrap("the transfer names no user of this kernel")
 		}
 		if _, err := tx.ExecContext(ctx,

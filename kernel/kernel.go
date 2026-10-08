@@ -144,20 +144,6 @@ func (k *Kernel) ProcessOwnerID(ctx context.Context, processID string) string {
 	return p.OwnerUserID
 }
 
-// ownerKernelKey returns the key of the kernel an action is served from, empty for a local one. Only
-// a proxy has a foreign host, and it names it the way §13 does — through its owner, the peer's
-// billing account — never by storing the peer's location on the row.
-func (k *Kernel) ownerKernelKey(ctx context.Context, a *Action) string {
-	if a == nil || a.Kind != KindRemoteProxy {
-		return ""
-	}
-	u, err := k.store.ReadUser(ctx, a.OwnerUserID)
-	if err != nil || u == nil {
-		return ""
-	}
-	return u.KernelPublicKey
-}
-
 // SetSecretBox installs the credential encryption adapter. Must be called before any
 // CreateAction/UpdateAction calls that include an Auth payload.
 func (k *Kernel) SetSecretBox(box SecretBox) { k.secretBox = box }
@@ -366,7 +352,7 @@ func (k *Kernel) validateAuthInput(ctx context.Context, auth *AuthInput) error {
 }
 
 // isDelegatedAuth reports whether an action uses a delegated (per-caller Grant) scheme, so
-// federation can exclude it from manifests: a remote peer's single proxy user can never complete
+// federation can exclude it from manifests: a peer kernel can never complete
 // a browser consent nor hold a per-caller token, so importing one could only fail (§8/§13).
 func (k *Kernel) isDelegatedAuth(a *Action) bool {
 	if a.Kind != KindHTTP || a.AuthJSON == "" {
@@ -452,7 +438,7 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	if auth.Scheme != AuthSchemeOAuthDelegated {
 		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth; supply its token via POST /v1/grants")
 	}
-	if !canCall(caller, a) {
+	if !canCall(User(caller.ID), a) {
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 	}
 	return auth, nil
@@ -696,7 +682,7 @@ func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matc
 			skippedLoginless++
 			continue
 		}
-		if !canCall(caller, a) {
+		if !canCall(User(caller.ID), a) {
 			skippedUncallable++
 			continue
 		}
@@ -824,7 +810,7 @@ func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string,
 		if err != nil {
 			return nil, err
 		}
-		if !canCall(caller, a) {
+		if !canCall(User(caller.ID), a) {
 			return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 		}
 		pk, err := connectionKey(a, auth)
@@ -928,7 +914,7 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel strin
 	var revoked []string
 	for _, g := range grants {
 		a, aerr := k.store.ReadAction(ctx, g.ActionID)
-		if aerr != nil || a == nil || a.OwnerUserID != owner.ID || !selectorPathMatches(path, a.Name) {
+		if aerr != nil || a == nil || !a.Owner().IsUser(owner.ID) || !selectorPathMatches(path, a.Name) {
 			continue
 		}
 		if derr := k.store.DeleteGrant(ctx, callerID, g.ActionID); derr == nil {
@@ -1142,11 +1128,6 @@ func (k *Kernel) ReadUserByHandle(ctx context.Context, handle string) (*Account,
 	return k.store.ReadUserByHandle(ctx, handle)
 }
 
-// ReadAccountByKernelKey returns the user with the given base64url Ed25519 public key.
-func (k *Kernel) ReadAccountByKernelKey(ctx context.Context, publicKey string) (*Account, error) {
-	return k.store.ReadAccountByKernelKey(ctx, publicKey)
-}
-
 func rejectSuspended(u *Account) error {
 	if u.SuspendedAt != nil {
 		return ErrUnauthenticated.Wrap("account suspended")
@@ -1175,7 +1156,7 @@ func (k *Kernel) setSuspended(ctx context.Context, operatorID, targetID string, 
 		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	if err := k.requireLiveAccount(ctx, targetID); err != nil {
+	if _, err := k.store.ReadUser(ctx, targetID); err != nil {
 		logger.Warn("user."+verb+".failed", "target_id", targetID, "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
@@ -1212,15 +1193,6 @@ func (k *Kernel) RenameUser(ctx context.Context, operatorID, targetID, newHandle
 	target, err := k.store.ReadUser(ctx, targetID)
 	if err != nil {
 		return nil, err
-	}
-	if !target.IsLiveUser() {
-		// A kernel account is named by its kernel's petname, in the other namespace (§13); a
-		// tombstone has no name at all. Renaming either would name the wrong entity — or, worse,
-		// give a purged peer's ledger history a fresh handle and resurrect it as a live user.
-		if target.IsPeer() {
-			return nil, ErrInvalidInput.Wrap("this account belongs to a remote kernel; rename it by its public key or petname")
-		}
-		return nil, ErrInvalidInput.Wrap("this account is a purged peer's ledger anchor and cannot be renamed")
 	}
 	if k.isUserSuperuser(ctx, target) {
 		return nil, ErrInvalidInput.Wrap("the superuser handle cannot be renamed")
@@ -1823,7 +1795,7 @@ func (k *Kernel) ReadActionForSubject(ctx context.Context, callerID, actionID st
 			return a, nil
 		}
 	default: // private
-		if a.OwnerUserID == callerID {
+		if a.Owner().IsUser(callerID) {
 			return a, nil
 		}
 	}
@@ -1850,8 +1822,7 @@ func (k *Kernel) ReadCallableAction(ctx context.Context, ref, callerID string) (
 	if err != nil {
 		return nil, err
 	}
-	caller, _ := k.store.ReadUser(ctx, callerID)
-	if !canCall(caller, a) {
+	if !canCall(User(callerID), a) {
 		return nil, ErrUnauthorized.Wrap("action not callable by this caller")
 	}
 	return a, nil
@@ -2413,14 +2384,14 @@ func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
 // ---- Process / Run operations ----
 
 // beginRun consolidates all preconditions for a new process, atomically creates the process
-// and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated.
-func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms, key runKey) (*CallReply, error) {
+// and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated: the
+// caller is a user here, with its account, or a peer that has been admitted, with none.
+func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms, key runKey) (*CallReply, error) {
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
-	// §6), so the same check runs here before BeginRun parks funds.
-	// Root/federated runs have C = P (the caller owns the process), so one identity feeds both the
-	// caller-scoped visibility check and the process-owner-scoped grant check.
-	if err := k.checkCallPreconditions(ctx, caller, caller.ID, action, args, true, quoteHash); err != nil {
+	// §6), so the same check runs here before BeginRun parks funds. The grant check is the paying
+	// user's: a local root run's caller; a peer, which can hold no consent here, nobody.
+	if err := k.checkCallPreconditions(ctx, caller, localID(caller), action, args, true, quoteHash); err != nil {
 		return nil, err
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
@@ -2445,10 +2416,10 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 	// owe, markup included; the commit corrects that to what it actually charged. Reserving the bare
 	// price instead would let every admitted call carry its markup past the limit.
 	lockPrice := action.Price
-	owner := caller
+	owner := acct
 	var limit, reserve int64
 	var servingTerms *string
-	if caller.IsPeer() {
+	if !caller.Local() {
 		seller, serr := k.store.ReadUser(ctx, action.OwnerUserID)
 		if serr != nil {
 			return nil, serr
@@ -2471,7 +2442,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		var payer string
 		if buyer.BlockchainAddress != "" {
 			var perr error
-			if payer, perr = k.verifyBlockchainIdentity(caller.KernelPublicKey, buyer.BlockchainAddress, buyer.BlockchainProof); perr != nil {
+			if payer, perr = k.verifyBlockchainIdentity(caller.Kernel, buyer.BlockchainAddress, buyer.BlockchainProof); perr != nil {
 				return nil, ErrUnauthorized.Wrap("the caller's paying address is not proven")
 			}
 		}
@@ -2499,11 +2470,11 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 			// read it.
 			k.log.With(ctx).Info("call.provider_unfunded", "action", action.Name, "owner", seller.Handle,
 				"balance", seller.Available, "price", lockPrice)
-			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
+			return nil, PeerUnfundedError(k.KernelName(ctx, caller.Kernel))
 		}
-	} else if caller.Available < lockPrice+value {
+	} else if acct.Available < lockPrice+value {
 		return nil, ErrInsufficientFunds.Wrapf("your balance is %s and this call costs %s; ask the operator to credit your account",
-			k.cfg.Network.Amount(caller.Available), k.cfg.Network.Amount(lockPrice+value))
+			k.cfg.Network.Amount(acct.Available), k.cfg.Network.Amount(lockPrice+value))
 	}
 	now := time.Now().UTC()
 	p := &Process{
@@ -2514,19 +2485,11 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		RequestHash: key.hash,
 		CreatedAt:   now,
 	}
-	t := &Trace{
-		ID:            uuid.New().String(),
-		ProcessID:     p.ID,
-		ActionOwnerID: action.OwnerUserID,
-		ActionID:      action.ID,
-		CallerUserID:  caller.ID,
-		// The caller as a principal (D4): the buyer's own user, as the buyer signed it, beneath the
-		// buyer's account; empty for a user here. Set once, here, for every settlement path.
-		CallerRemoteID: buyer.CallerUserID,
-		CallerHandle:   buyer.CallerHandle,
-		CreatedAt:      now,
-	}
-	t.TargetRemoteID, t.TargetHandle = targetPrincipal(action)
+	// Both parties as principals (D15), set once, here, for every settlement path: the caller a user
+	// here, or the buyer's own user as the buyer signed it, on the buyer's kernel.
+	t := &Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionID: action.ID, CreatedAt: now}
+	t.setCaller(caller)
+	t.setTarget(action.Owner())
 	// Snapshot the TransferEffect on the trace so every settlement path releases the locked value
 	// config-independently (D18). All zero on a non-transfer call.
 	if eff != nil {
@@ -2546,22 +2509,22 @@ func (k *Kernel) beginRun(ctx context.Context, caller *Account, action *Action, 
 		t.DispatchJSON, t.OwedBlockchainAddress = servingTerms, buyer.BlockchainAddress
 	}
 	if action.Kind == KindRemoteProxy {
-		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS, caller); err != nil {
+		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS, acct); err != nil {
 			return nil, err
 		}
 	}
 	if err := k.store.BeginRun(ctx, p, t, owner.ID, lockPrice, reserve, limit); err != nil {
-		if caller.IsPeer() && errors.Is(err, ErrInsufficientFunds) {
-			return nil, PeerUnfundedError(k.KernelName(ctx, caller.KernelPublicKey))
+		if !caller.Local() && errors.Is(err, ErrInsufficientFunds) {
+			return nil, PeerUnfundedError(k.KernelName(ctx, caller.Kernel))
 		}
 		return nil, err
 	}
-	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", caller.ID, "price", action.Price)
+	k.log.With(ctx).Info("process.created", "process_id", p.ID, "owner", owner.ID, "price", action.Price)
 	// Pass the validated Action snapshot and the funded root trace into Call: binds execution to
 	// the row just funded (no TOCTOU window). Call re-validates the snapshot. The terms this call is
 	// sold at ride on the trace, which every settlement path already loads.
 	reply, err := k.call(ctx, callRequest{
-		CallerID:            caller.ID,
+		Caller:              caller,
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
@@ -2623,7 +2586,7 @@ func (k *Kernel) Run(ctx context.Context, req RunRequest) (*CallReply, error) {
 	if err != nil {
 		return nil, err
 	}
-	reply, err := k.beginRun(ctx, caller, action, req.Args, "", req.QuoteHash, BuyerTerms{}, key)
+	reply, err := k.beginRun(ctx, User(caller.ID), caller, action, req.Args, "", req.QuoteHash, BuyerTerms{}, key)
 	if errors.Is(err, ErrRunKeyTaken) {
 		// A concurrent first run under the same key committed first: answer as its repeat.
 		prior, rerr := k.store.ReadProcessByKey(ctx, caller.ID, key.name)
@@ -2677,16 +2640,17 @@ func (k *Kernel) replayRun(ctx context.Context, prior *Process, requestHash stri
 
 // RunFederated is like Run but accepts an idempotencyRecordID for federation calls.
 // Used by the federation handler to atomically settle the idempotency record. It stays a
-// separate entry point so federation-only authority is not representable in RunRequest.
-func (k *Kernel) RunFederated(ctx context.Context, callerID string, action *Action, args map[string]any, idempotencyRecordID string, buyer BuyerTerms) (*CallReply, error) {
-	caller, err := k.requireActiveUser(ctx, callerID)
-	if err != nil {
+// separate entry point so federation-only authority is not representable in RunRequest. The
+// caller is the buying kernel, or the user of it the buyer signed into the request (P4).
+func (k *Kernel) RunFederated(ctx context.Context, peerKey string, action *Action, args map[string]any, idempotencyRecordID string, buyer BuyerTerms) (*CallReply, error) {
+	caller := Principal{Kernel: peerKey, UserID: buyer.CallerUserID, Handle: buyer.CallerHandle}
+	if _, err := k.requireCaller(ctx, caller); err != nil {
 		return nil, err
 	}
 	// The row the handler checked is the row that runs. Reading it again here would open a window
 	// between the contract check and the execution in which the owner could put different terms,
 	// or a different action entirely, under the same name (§8).
-	return k.beginRun(ctx, caller, action, args, idempotencyRecordID, "", buyer, runKey{}) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
+	return k.beginRun(ctx, caller, nil, action, args, idempotencyRecordID, "", buyer, runKey{}) // a peer pins the manifest via expected_contract_hash (§8), not a local quote
 }
 
 // EndProcess closes a process and returns all remaining funds to the owner.
@@ -2805,7 +2769,7 @@ func (k *Kernel) AuthorizeTraceUse(ctx context.Context, callerID, traceID string
 	if err != nil {
 		return ErrNotFound.Wrap("trace not found")
 	}
-	if trace.ActionOwnerID == callerID {
+	if trace.Target().IsUser(callerID) {
 		return nil
 	}
 	process, err := k.store.ReadProcess(ctx, trace.ProcessID)
@@ -2847,10 +2811,11 @@ func (k *Kernel) ReadTransaction(ctx context.Context, callerID, txID string) (*T
 	return k.toTransactionView(ctx, tx), nil
 }
 
-// canReadTransaction reports whether callerID is a party to tx — process owner, call caller,
-// or action owner — or a superuser. All checks use immutable transaction fields.
+// canReadTransaction reports whether the user callerID is a party to tx — process owner, call
+// caller, or action owner — or a superuser. All checks use immutable transaction fields, a party on
+// a peer never matching a user here whose id it shares.
 func (k *Kernel) canReadTransaction(ctx context.Context, callerID string, tx *Transaction) bool {
-	if tx.OwnerUserID == callerID || tx.CallerUserID == callerID || tx.TargetUserID == callerID {
+	if tx.Owner().IsUser(callerID) || tx.Caller().IsUser(callerID) || tx.Target().IsUser(callerID) {
 		return true
 	}
 	if u, err := k.store.ReadUser(ctx, callerID); err == nil && u != nil && k.isUserSuperuser(ctx, u) {
@@ -3140,13 +3105,13 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	// the caches are empty, so ranking is bit-identical to local-only in that case. Synthetic ids
 	// "disc:<doc_key>" are disjoint from action UUIDs by construction.
 	discHits := map[string]*DiscoveryDoc{}
-	if req.CallerID != "" {
-		if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil && u.KernelPublicKey == "" {
-			k.forEachDiscoveryHit(ctx, req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
-				rr.add("disc:"+key, rank)
-				discHits["disc:"+key] = d
-			})
-		}
+	var caller Principal // anonymous, or a peer's caller: public actions only
+	if u, _ := k.store.ReadUser(ctx, req.CallerID); u != nil {
+		caller = User(u.ID)
+		k.forEachDiscoveryHit(ctx, req.Query, rr.oversample, func(key string, d *DiscoveryDoc, rank int) {
+			rr.add("disc:"+key, rank)
+			discHits["disc:"+key] = d
+		})
 	}
 
 	// UNDER REVISION: the stats-based quality multiplier is temporarily removed. It multiplied each
@@ -3156,12 +3121,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 	ranked := rr.ranked()
 
 	// Hydrate and filter by CanCall BEFORE truncating, so a run of others' private actions cannot
-	// starve the caller of results it may actually call. Visibility is caller-scoped (§4), so load
-	// the caller once; a nil caller (anonymous lookup) sees public actions only.
-	var caller *Account
-	if req.CallerID != "" {
-		caller, _ = k.store.ReadUser(ctx, req.CallerID)
-	}
+	// starve the caller of results it may actually call. Visibility is caller-scoped (§4).
 	out := make([]*LookupResult, 0, rr.limit)
 	// Hosting kernels, read once per distinct key across the page (hits cluster on few kernels).
 	hosts := map[string]*RemoteKernel{}
@@ -3184,10 +3144,8 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if doc, ok := discHits[r.id]; ok {
 			// Shadow: if we already hold an active local proxy for this remote action, the local row is
 			// already in the local legs — drop the discovery duplicate.
-			if peer, _ := k.store.ReadAccountByKernelKey(ctx, doc.KernelPublicKey); peer != nil {
-				if px, _ := k.store.ReadActionByOwnerRemoteID(ctx, peer.ID, doc.ActionID); px != nil && px.Active {
-					continue
-				}
+			if px, _ := k.store.ReadProxyByRemoteID(ctx, doc.KernelPublicKey, doc.ActionID); px != nil && px.Active {
+				continue
 			}
 			// Indicative all-in price: the peer's signed serving price plus this kernel's current
 			// import fee (§13), so local policy reprices the catalog with no re-pull. Resolve
@@ -3205,7 +3163,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 			continue
 		}
 		out = append(out, &LookupResult{Action: a, Price: a.Price, Score: float32(r.score),
-			QuoteHash: QuoteHash(a), Host: hostOf(k.ownerKernelKey(ctx, a))})
+			QuoteHash: QuoteHash(a), Host: hostOf(a.OwnerKernel)})
 	}
 	return out, nil
 }
@@ -3380,19 +3338,6 @@ func sqrt32(x float32) float32 {
 // ---- Helpers ----
 
 // requireActiveUser rejects missing or suspended users.
-// requireLiveAccount is the supervision-side twin of requireActiveUser: it admits a live user or a
-// kernel account and refuses a purged tombstone, which no operation may fund, freeze, or rename.
-func (k *Kernel) requireLiveAccount(ctx context.Context, id string) error {
-	u, err := k.store.ReadUser(ctx, id)
-	if err != nil {
-		return err
-	}
-	if !u.IsLive() {
-		return ErrNotFound.Wrapf("account %s is a purged ledger anchor, not a live target", id)
-	}
-	return nil
-}
-
 func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*Account, error) {
 	u, err := k.store.ReadUser(ctx, userID)
 	if err != nil {
@@ -3400,9 +3345,6 @@ func (k *Kernel) requireActiveUser(ctx context.Context, userID string) (*Account
 	}
 	if u.SuspendedAt != nil {
 		return nil, ErrUnauthenticated.Wrap("account suspended")
-	}
-	if !u.IsLive() {
-		return nil, ErrUnauthenticated.Wrap("account not found")
 	}
 	return u, nil
 }
@@ -3436,7 +3378,7 @@ func (k *Kernel) requireAdmin(ctx context.Context, callerID string, a *Action) e
 	if err != nil {
 		return err
 	}
-	if a.OwnerUserID == callerID || k.isUserSuperuser(ctx, u) {
+	if a.Owner().IsUser(callerID) || k.isUserSuperuser(ctx, u) {
 		return nil
 	}
 	return ErrUnauthorized.Wrap("owner or superuser required")
@@ -3667,6 +3609,10 @@ func (k *Kernel) commitProxyImport(ctx context.Context, plan importPlan) (*Impor
 	for _, op := range plan.New {
 		a := op.new()
 		op.apply(a)
+		// A new action under a name the owner already held there replaces the one cached for it.
+		if err := k.store.RetireProxy(ctx, a.OwnerKernel, a.OwnerUserID, a.Name); err != nil {
+			return nil, err
+		}
 		if err := k.store.CreateAction(ctx, a); err != nil {
 			return nil, err
 		}

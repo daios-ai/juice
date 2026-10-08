@@ -20,8 +20,9 @@ import (
 // ExistingTraceID for a pre-created, pre-funded trace — a root call (BeginRun) or a task
 // completion (BeginTaskCall). TaskID is an orthogonal flag, not a third trace mode.
 type callRequest struct {
-	// CallerID is the authenticated user making the call.
-	CallerID string
+	// Caller is the immediate caller C: a user here, or a peer — the kernel itself, or a user of it
+	// that kernel attested — completing a task (P8) or calling in (P4).
+	Caller Principal
 	// ParentTraceID is the parent trace of a subcall; the call's funds are moved from it by
 	// BeginSubcall. Empty for root calls and task completions (those set ExistingTraceID).
 	ParentTraceID string
@@ -62,16 +63,6 @@ func (k *Kernel) sold(ctx context.Context, t *Trace) (soldAs, error) {
 	rbps, _, n := ServingTerms(t.DispatchJSON)
 	key, cp, err := k.servedRequest(ctx, t)
 	return soldAs{RemoteBPS: rbps, Nonce: n, IdempotencyKey: key, Counterparty: cp}, err
-}
-
-// targetPrincipal is the remote half of an action owner's principal: a proxy names the peer's user
-// it stands for (D13); a local action's owner is a user here and needs none.
-func targetPrincipal(a *Action) (remoteID, handle string) {
-	if a == nil || a.Kind != KindRemoteProxy {
-		return "", ""
-	}
-	owner, _ := SplitProxyName(a.Name)
-	return a.RemoteOwnerID, owner
 }
 
 // RunRequest is input to Run, the ordinary root-call entry point (§4): a struct so a new optional
@@ -339,8 +330,8 @@ func indexCandidates(name string) []string {
 
 // ResolveLocalAction resolves an action of this kernel by its owner's handle and name, exact then
 // index: the local half of ResolveAction, and what the inbound resolve protocol calls, since its
-// request is addressed to this kernel and carries the owner bare. Proxies are stored under a peer's
-// account and are addressable only beneath that kernel's name, never here.
+// request is addressed to this kernel and carries the owner bare. Proxies belong to a peer's user and
+// are addressable only beneath that kernel's name, never here.
 func (k *Kernel) ResolveLocalAction(ctx context.Context, ownerHandle, name string) (*Action, error) {
 	owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
 	if err != nil || owner == nil {
@@ -348,7 +339,7 @@ func (k *Kernel) ResolveLocalAction(ctx context.Context, ownerHandle, name strin
 	}
 	for _, n := range indexCandidates(name) {
 		a, aerr := k.store.ReadActionByOwnerName(ctx, owner.ID, n)
-		if aerr == nil && a != nil && a.Kind != KindRemoteProxy {
+		if aerr == nil && a != nil {
 			return a, nil
 		}
 	}
@@ -356,14 +347,10 @@ func (k *Kernel) ResolveLocalAction(ctx context.Context, ownerHandle, name strin
 }
 
 // resolveRemote answers a kernel-qualified address: a cached proxy first, so a resolved group costs
-// no round trip, else one resolve on the peer (D13). A peer we have never dealt with holds no
-// account, and so nothing cached to consult.
+// no round trip, else one resolve on the peer (D13).
 func (k *Kernel) resolveRemote(ctx context.Context, kr KernelRef, r Address) (*Action, error) {
 	for _, name := range indexCandidates(r.Name) {
-		if kr.Account == nil {
-			break
-		}
-		row, aerr := k.store.ReadActionByOwnerName(ctx, kr.Account.ID, JoinProxyName(r.Handle, name))
+		row, aerr := k.store.ReadProxyByName(ctx, kr.Key, r.Handle, name)
 		if aerr != nil || row == nil {
 			continue
 		}
@@ -378,7 +365,7 @@ func (k *Kernel) resolveRemote(ctx context.Context, kr KernelRef, r Address) (*A
 	}
 	// One request, carrying the name as written — empty for a root. The serving kernel applies this
 	// same convention, and lazyResolveRemote binds the reply to what was asked.
-	a, lerr := k.lazyResolveRemote(ctx, kr.Key, kr.Account, r)
+	a, lerr := k.lazyResolveRemote(ctx, kr.Key, r)
 	if lerr != nil {
 		if errors.Is(lerr, ErrNotFound) {
 			return nil, ErrNotFound.Wrapf("action %s not found", r.String())
@@ -399,12 +386,7 @@ func (k *Kernel) ensureBasePrice(ctx context.Context, a *Action) (*Action, error
 	if a == nil || a.Kind != KindRemoteProxy || a.BasePrice != nil {
 		return a, nil
 	}
-	mount, merr := k.store.ReadUser(ctx, a.OwnerUserID)
-	if merr != nil || mount == nil || mount.KernelPublicKey == "" {
-		return a, nil // not addressable as a remote reference; leave it as it is
-	}
-	owner, rest := SplitProxyName(a.Name)
-	return k.resolveRemote(ctx, KernelRef{Key: mount.KernelPublicKey, Account: mount}, Address{Handle: owner, Kernel: mount.KernelPublicKey, Name: rest})
+	return k.resolveRemote(ctx, KernelRef{Key: a.OwnerKernel}, Address{Handle: a.OwnerHandle, Kernel: a.OwnerKernel, Name: a.Name})
 }
 
 // manifestAnswers reports whether a resolve reply answers the reference that was requested: same
@@ -424,7 +406,7 @@ func manifestAnswers(r Address, m *ActionManifest) bool {
 // (§13 subscription-free calls). It is invoked from ResolveAction's kernel-qualified miss branch, so
 // run, /v1/call, and WASM subcalls all reach unimported remote actions uniformly. Trust derives from
 // the manifest signature, not an operator act; a nil resolver (no transport) yields ErrNotFound.
-func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *Account, r Address) (*Action, error) {
+func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, r Address) (*Action, error) {
 	resolver := k.fedClient
 	if resolver == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
@@ -444,17 +426,15 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	// would cache and execute it under the reference the caller typed. The name may differ from the
 	// one asked for in exactly one way: the index convention (§13), which the serving kernel applies
 	// — so a request for a group answers with its index, and a root request answers with "index".
-	// Checked before any side effect, so a mismatched reply binds no petname and provisions no
-	// account.
+	// Checked before any side effect, so a mismatched reply binds no petname and caches nothing.
 	if !manifestAnswers(r, m) {
 		return nil, ErrUnauthorized.Wrapf("peer served a manifest for %s/%s, not %s", m.OwnerHandle, m.Name, r.String())
 	}
 	// First meaningful use (§13): our own verified outbound act, so this is where a local petname
 	// is bound — seeded from the kernel's cached nickname when one is known, else mechanically.
-	// Naming turns on the petname being unbound, NOT on the account being absent: a peer that
-	// called us first, or that we deposited to, already holds an account and would otherwise stay
-	// nameless forever. A non-exact bind keeps any existing petname, so this is idempotent.
-	// Best-effort and must never fail the call; the account must.
+	// Naming turns on the petname being unbound, so a peer that called us first is named here too.
+	// A non-exact bind keeps any existing petname, so this is idempotent. Best-effort and must
+	// never fail the call.
 	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
 		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
 	}
@@ -465,35 +445,7 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, mount *A
 	if _, verr := k.ObservePeerVault(ctx, peerKey, res.BlockchainAddress, res.BlockchainProof); verr != nil {
 		k.log.With(ctx).Warn("kernel.blockchain_address.store_failed", "public_key", peerKey, "error", verr.Error())
 	}
-	if mount == nil {
-		mount, err = k.EnsureKernelAccount(ctx, peerKey)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return k.ImportPeerAction(ctx, mount.ID, *m)
-}
-
-// resolveUser reads an account by a bare handle, a base64url public key, or a raw user id — the
-// shapes are disjoint, so a single lookup disambiguates. Internal: user input arrives as an address
-// (ParseAddress); this serves the places a bare handle is legitimate — the inbound resolve
-// protocol, whose request is addressed to this kernel, and the old call path below.
-func (k *Kernel) resolveUser(ctx context.Context, ident string) (*Account, error) {
-	ident = strings.TrimSpace(ident)
-	if looksLikeKey(ident) {
-		if u, err := k.store.ReadAccountByKernelKey(ctx, ident); err == nil && u != nil {
-			return u, nil
-		}
-	}
-	if looksLikeID(ident) {
-		if u, err := k.store.ReadUser(ctx, ident); err == nil && u != nil {
-			return u, nil
-		}
-	}
-	if u, err := k.store.ReadUserByHandle(ctx, ident); err == nil && u != nil {
-		return u, nil
-	}
-	return nil, errUserNotFound(ident)
+	return k.ImportPeerAction(ctx, peerKey, *m)
 }
 
 // Call executes the central kernel transition, checking D2's preconditions in their stated order.
@@ -516,7 +468,7 @@ type SubcallRequest struct {
 // orchestration mode internally.
 func (k *Kernel) Subcall(ctx context.Context, req SubcallRequest) (*CallReply, error) {
 	return k.call(ctx, callRequest{
-		CallerID:      req.CallerID,
+		Caller:        User(req.CallerID),
 		ParentTraceID: req.ParentTraceID,
 		ActionRef:     req.ActionRef,
 		Args:          req.Args,
@@ -526,12 +478,11 @@ func (k *Kernel) Subcall(ctx context.Context, req SubcallRequest) (*CallReply, e
 func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) {
 	logger := k.log.With(ctx)
 
-	// 1. Subject must be authenticated. The caller User is retained for the §4 precondition-6
-	// visibility check (canCall is caller-scoped).
-	if req.CallerID == "" {
-		return nil, ErrUnauthenticated.Wrap("subject is required")
-	}
-	caller, err := k.requireActiveUser(ctx, req.CallerID)
+	// 1. Subject must be authenticated, before anything reads what kind of party it is. The caller
+	// is retained for the §4 precondition-6 visibility check (canCall is caller-scoped); its account
+	// is nil when it is a peer, which holds none here.
+	caller := req.Caller
+	callerAcct, err := k.requireCaller(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -573,8 +524,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	var parentTrace *Trace
 	if req.ExistingTraceID == "" {
 		// preReadParent is the parent trace (derived processID came from it, so membership is implicit).
-		// Non-owner callers must have action_owner_id on the parent trace.
-		if process.OwnerUserID != req.CallerID && preReadParent.ActionOwnerID != req.CallerID {
+		// Non-owner callers must own the parent trace's action.
+		if !caller.IsUser(process.OwnerUserID) && !preReadParent.Target().Same(caller) {
 			return nil, ErrUnauthorized.Wrap("caller is not authorized to use this process")
 		}
 		parentTrace = preReadParent
@@ -585,15 +536,8 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// CompleteTask), so no DB read is needed — this binds execution to the exact action that
 	// was funded and eliminates the TOCTOU window. The snapshot is still validated below.
 	// Subcalls resolve the address they were given.
-	var action *Action
-	var target *Account
-	if req.Action != nil {
-		action = req.Action
-		target, err = k.store.ReadUser(ctx, action.OwnerUserID)
-		if err != nil || target == nil {
-			return nil, ErrNotFound.Wrap("target user not found")
-		}
-	} else {
+	action := req.Action
+	if action == nil {
 		// The resolver's typed errors are the answer — an unreachable peer, a malformed
 		// reference, a substituted manifest — and must not collapse into "not found".
 		action, err = k.ResolveAction(ctx, req.ActionRef)
@@ -603,12 +547,12 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		if action == nil {
 			return nil, ErrNotFound.Wrapf("action %s not found", req.ActionRef)
 		}
-		// Load the owner for the role law below.
-		{
-			target, err = k.store.ReadUser(ctx, action.OwnerUserID)
-			if err != nil || target == nil {
-				return nil, ErrNotFound.Wrap("target user not found")
-			}
+	}
+	// The owner the role law pays: a user here, who must exist. A proxy's owner is a user on its peer,
+	// paid there; this kernel settles with the peer (P7).
+	if action.Kind != KindRemoteProxy {
+		if owner, oerr := k.store.ReadUser(ctx, action.OwnerUserID); oerr != nil || owner == nil {
+			return nil, ErrNotFound.Wrap("target user not found")
 		}
 	}
 
@@ -645,12 +589,11 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		ID:            uuid.New().String(),
 		ProcessID:     processID,
 		ParentTraceID: parentTracePtr,
-		ActionOwnerID: action.OwnerUserID,
 		ActionID:      action.ID,
-		CallerUserID:  req.CallerID,
 		CreatedAt:     now,
 	}
-	trace.TargetRemoteID, trace.TargetHandle = targetPrincipal(action)
+	trace.setCaller(caller)
+	trace.setTarget(action.Owner())
 
 	// For remote_proxy: action.Price = q = proxyPrice (mp + import duty), set at import (§8 resolve).
 	// Derive the original remote manifest price (mp) from q for clamping and receipt audit.
@@ -673,7 +616,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		// The seller's own price, kept on the row since it was resolved — never reverse-calculated
 		// from the rounded local total, which cannot recover it exactly (§16).
 		mp = actionBasePrice(action)
-		if err := k.prepareDispatch(ctx, trace, action, req.Args, req.TaskID, lockPrice, k.econ.ImportBPS, caller); err != nil {
+		if err := k.prepareDispatch(ctx, trace, action, req.Args, req.TaskID, lockPrice, k.econ.ImportBPS, callerAcct); err != nil {
 			return nil, err
 		}
 	}
@@ -703,7 +646,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 
 	txID := uuid.New().String()
 	ctx = log.WithProcessID(ctx, processID)
-	ctx = log.WithCallerUserID(ctx, req.CallerID)
+	ctx = log.WithCallerUserID(ctx, caller.UserID)
 	ctx = log.WithTraceID(ctx, trace.ID)
 	ctx = log.WithActionID(ctx, action.ID)
 	ctx = log.WithTxID(ctx, txID)
@@ -720,8 +663,6 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		TraceID:        trace.ID,
 		ParentTraceID:  parentTraceIDStr,
 		OwnerUserID:    process.OwnerUserID,
-		CallerUserID:   req.CallerID,
-		TargetUserID:   target.ID,
 		ActionID:       action.ID,
 		ActionName:     action.Name,
 		RemoteActionID: action.RemoteActionID,
@@ -729,8 +670,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		Gross:          lockPrice,
 		StartedAt:      now,
 	}
-	ktx.CallerRemoteID, ktx.CallerHandle = trace.CallerRemoteID, trace.CallerHandle
-	ktx.TargetRemoteID, ktx.TargetHandle = trace.TargetRemoteID, trace.TargetHandle
+	ktx.setParties(trace)
 	argsJSON, _ := json.Marshal(req.Args)
 	ktx.ArgsJSON = json.RawMessage(argsJSON)
 
@@ -776,7 +716,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		// The commitment is derived from the secret the dispatch record froze, so a retry after
 		// restart offers the peer the same one it was first committed to (P10).
 		d := dispatched(trace.DispatchJSON)
-		fr, _ := fe.ExecuteFederation(ctx, target.KernelPublicKey, OutboundCall{
+		fr, _ := fe.ExecuteFederation(ctx, action.OwnerKernel, OutboundCall{
 			ActionID: action.RemoteActionID, ExpectedContractHash: action.ArtifactHash, IdempotencyKey: ikey,
 			Commitment: commitmentOf(d.Secret), Lottery: d.Lottery, CallerUserID: d.CallerUserID, CallerHandle: d.CallerHandle,
 		}, req.Args)
@@ -788,15 +728,15 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 			// that would repeat a request the peer never received. Only here — retryRemoteTrace
 			// never fail-fasts, since a parked request may already have executed. Mirrors the
 			// executor-not-configured settlement above (a funded trace must never be stranded).
-			pn := k.KernelName(ctx, target.KernelPublicKey)
-			logger.Warn("remote.unreachable", "action", action.Name, "peer", target.Handle)
+			pn := k.KernelName(ctx, action.OwnerKernel)
+			logger.Warn("remote.unreachable", "action", action.Name, "peer", pn)
 			return fail(PeerUnreachableError(pn).Wrapf(
 				"peer %s is unreachable; the call was not sent and has been refunded", pn), latency)
 		}
-		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, target, mp, fr, latency)
+		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, mp, fr, latency)
 	}
 
-	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, req.CallerID, process.OwnerUserID)
+	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, localID(caller), process.OwnerUserID)
 	latency := time.Since(started).Seconds()
 	ktx.EndedAt = time.Now().UTC()
 
@@ -860,7 +800,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 	// (payout + lock release + audit record) is never aborted mid-flight (§5).
 	sctx, cancel := settlementContext(ctx)
 	defer cancel()
-	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, target.ID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.TaskID)
+	commitErr := k.store.CommitCall(sctx, ktx, receipt, trace.ID, callerWalletID, callerWalletKind, action.OwnerUserID, k.cfg.FeeRecipientID, net, fee, stats, req.IdempotencyRecordID, req.TaskID)
 	if errors.Is(commitErr, ErrSettlementDeferred) {
 		// A trace beneath this call is still in flight (D3): the outcome is recorded with the
 		// refusal, and the settlement that follows the last child's commits it.
@@ -907,8 +847,8 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	// The admission record the call answers rides on the funded trace (P4): the receipt reads the
 	// request it names from there, so the adopted trace must carry it too.
 	trace.IdempotencyRecordID = dbTrace.IdempotencyRecordID
-	trace.CallerRemoteID, trace.CallerHandle = dbTrace.CallerRemoteID, dbTrace.CallerHandle
-	trace.TargetRemoteID, trace.TargetHandle = dbTrace.TargetRemoteID, dbTrace.TargetHandle
+	trace.setCaller(dbTrace.Caller())
+	trace.setTarget(dbTrace.Target())
 	// The stake and value snapshots (§13, P10) ride on the funded root trace; carry them into the
 	// adopted trace so settlement releases exactly what was locked and delivers the value to its
 	// beneficiary.
@@ -919,14 +859,24 @@ func applyPrefundedSnapshot(trace, dbTrace *Trace) int64 {
 	return dbTrace.Available
 }
 
+// localID is a caller's account id when it is a user here, and empty for a peer: a native names the
+// user it serves, and a peer's user is nobody here.
+func localID(p Principal) string {
+	if !p.Local() {
+		return ""
+	}
+	return p.UserID
+}
+
 // canCall returns true iff the action is callable by the immediate caller (§4). Visibility is
 // scoped to the caller, not the process owner, so a provider's public action may subcall the
 // provider's own private helpers in anyone's process, while foreign code funded by a process owner
-// cannot reach that owner's private actions.
+// cannot reach that owner's private actions. The caller has been validated (requireCaller) before
+// this reads its kind.
 // CanCall(C, a) := active(a) ∧ ¬suspended(a.owner) ∧
 //
-//	(public(a) ∨ (local(a) ∧ ¬IsPeer(C)) ∨ C = a.OwnerUserID)
-func canCall(caller *Account, action *Action) bool {
+//	(public(a) ∨ (local(a) ∧ C is a user here) ∨ C = a.owner)
+func canCall(caller Principal, action *Action) bool {
 	if !action.Active || action.OwnerSuspended {
 		return false
 	}
@@ -934,9 +884,9 @@ func canCall(caller *Account, action *Action) bool {
 	case VisibilityPublic:
 		return true
 	case VisibilityLocal:
-		return caller != nil && !caller.IsPeer()
+		return caller.Local() && caller.UserID != ""
 	default: // private
-		return caller != nil && caller.ID == action.OwnerUserID
+		return caller.UserID != "" && caller.Same(action.Owner())
 	}
 }
 
@@ -948,7 +898,7 @@ func canCall(caller *Account, action *Action) bool {
 // visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
 // change does not. The grant check stays keyed on the process owner: delegated consent binds to the
 // paying human (§8). quoteHash is empty on every path but a pinned root run.
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller *Account, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, quoteHash string) error {
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, quoteHash string) error {
 	if !action.Active {
 		return ErrInvalidState.Wrap("action is inactive")
 	}
@@ -1117,7 +1067,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 		return nil, ErrInvalidInput.Wrap("args must be a JSON object")
 	}
 	reply, err := h.kernel.call(ctx, callRequest{
-		CallerID:      h.targetID,
+		Caller:        User(h.targetID),
 		ParentTraceID: h.traceID,
 		ActionRef:     actionName,
 		Args:          args,

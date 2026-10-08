@@ -48,22 +48,35 @@ func (a Address) String() string {
 	return a.Handle + "@" + a.Kernel + "/" + a.Name
 }
 
-// Principal is who a record names: the local account that funds and routes (a user here, or a peer
-// kernel's billing account) and, when that account stands for a user on the peer, that user's
-// stable id there and the handle they went by at the time. The id is the identity; the handle
-// only displays it, exactly as a proxy's owner_handle does (P6).
+// Principal is who a record names (D15): the kernel the party lives on, empty for this one, and the
+// user there, empty for that kernel itself — a user here, a user on a peer, or the peer. Handle is
+// what a user on a peer was called when the record was made: display only, exactly as a proxy's
+// owner_handle is (P6), so it is never compared. A principal is a name, not an authority: every
+// path validates its caller before reading what kind of party it is.
 type Principal struct {
-	AccountID string
-	RemoteID  string
-	Handle    string
+	Kernel string
+	UserID string
+	Handle string
 }
 
-// KernelRef is a resolved kernel segment: the key it names, whether that is this kernel, and the
-// peer's billing account when one exists (nil until money has been involved, and nil for self).
+// User is a user of this kernel as a principal.
+func User(id string) Principal { return Principal{UserID: id} }
+
+// Local reports a party of this kernel; IsKernel a peer kernel itself, with no user of its named.
+func (p Principal) Local() bool    { return p.Kernel == "" }
+func (p Principal) IsKernel() bool { return p.Kernel != "" && p.UserID == "" }
+
+// Same compares two principals by identity: the kernel and the user id, never the handle.
+func (p Principal) Same(q Principal) bool { return p.Kernel == q.Kernel && p.UserID == q.UserID }
+
+// IsUser reports whether p is the user of this kernel with id — which a user of a peer whose id
+// happens to be the same never is.
+func (p Principal) IsUser(id string) bool { return p.Local() && id != "" && p.UserID == id }
+
+// KernelRef is a resolved kernel segment: the key it names, and whether that is this kernel.
 type KernelRef struct {
-	Key     string
-	Local   bool
-	Account *Account
+	Key   string
+	Local bool
 }
 
 // ResolveKernel is the one place a kernel segment becomes a key (D15): a bound petname — this
@@ -79,11 +92,7 @@ func (k *Kernel) ResolveKernel(ctx context.Context, seg string) (KernelRef, erro
 	} else {
 		return KernelRef{}, ErrNotFound.Wrapf("kernel %q is not a known name or key", seg)
 	}
-	if key == k.SelfKey(ctx) {
-		return KernelRef{Key: key, Local: true}, nil
-	}
-	acct, _ := k.store.ReadAccountByKernelKey(ctx, key)
-	return KernelRef{Key: key, Account: acct}, nil
+	return KernelRef{Key: key, Local: key == k.SelfKey(ctx)}, nil
 }
 
 // IsRemoteRef reports whether a reference is one this kernel does not answer itself: it names a
@@ -107,7 +116,7 @@ func (k *Kernel) ResolveLocalPrincipal(ctx context.Context, ref string) (*Accoun
 		return nil, err
 	}
 	u, err := k.store.ReadUserByHandle(ctx, handle)
-	if err != nil || u == nil || !u.IsLiveUser() {
+	if err != nil || u == nil {
 		return nil, errUserNotFound(ref)
 	}
 	return u, nil
@@ -134,10 +143,10 @@ func (k *Kernel) LocalHandle(ctx context.Context, addr string) (string, error) {
 	return a.Handle, nil
 }
 
-// ResolvePrincipal resolves an address to who a task may be parked for (P8): a live user here, or a
-// user on a peer — its stable id resolved over /juice/fed/resolve/1 and its billing account here,
-// which is the peer's, opened on this kernel's own act. The verified resolve binds the peer's
-// petname too, best-effort: naming turns on our own outbound act, never on a peer's.
+// ResolvePrincipal resolves an address to who a task may be parked for (P8): a user here, or a user on
+// a peer — the peer's key and the user's stable id there, resolved over /juice/fed/resolve/1. The
+// verified resolve makes the peer known and binds its petname too, best-effort: naming turns on our
+// own outbound act, never on a peer's.
 func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, error) {
 	a, err := ParseAddress(ref)
 	if err != nil {
@@ -152,11 +161,10 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	}
 	if kr.Local {
 		u, uerr := k.store.ReadUserByHandle(ctx, a.Handle)
-		if uerr != nil || u == nil || !u.IsLive() {
-			// A tombstone resolves but can never complete: the task would park its price forever.
+		if uerr != nil || u == nil {
 			return Principal{}, errUserNotFound(ref)
 		}
-		return Principal{AccountID: u.ID}, nil
+		return User(u.ID), nil
 	}
 	if k.fedClient == nil {
 		return Principal{}, ErrNotFound.Wrap("remote resolution unavailable")
@@ -174,25 +182,21 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if _, verr := k.ObservePeerVault(ctx, kr.Key, res.BlockchainAddress, res.BlockchainProof); verr != nil {
 		return Principal{}, verr
 	}
-	remoteID, remoteHandle := res.UserID, res.Handle
+	if err := k.knowKernel(ctx, kr.Key); err != nil {
+		return Principal{}, err
+	}
 	if _, berr := k.BindPetname(ctx, kr.Key, "", false); berr != nil {
 		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", kr.Key, "error", berr.Error())
 	}
-	mount := kr.Account
-	if mount == nil {
-		if mount, err = k.EnsureKernelAccount(ctx, kr.Key); err != nil {
-			return Principal{}, err
-		}
-	}
-	return Principal{AccountID: mount.ID, RemoteID: remoteID, Handle: NormalizeHandle(remoteHandle)}, nil
+	return Principal{Kernel: kr.Key, UserID: res.UserID, Handle: NormalizeHandle(res.Handle)}, nil
 }
 
-// LocalPrincipal answers the open /juice/fed/resolve/1 user question for a peer: a live user of
-// this kernel, named by the bare handle the peer's address carried, to its stable id and current
-// handle. Only a live account with a handle resolves; ids are addresses, not secrets.
+// LocalPrincipal answers the open /juice/fed/resolve/1 user question for a peer: a user of this
+// kernel who is not suspended, named by the bare handle the peer's address carried, to its stable id
+// and current handle; ids are addresses, not secrets.
 func (k *Kernel) LocalPrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
-	u, err := k.resolveUser(ctx, ref)
-	if err != nil || u == nil || u.SuspendedAt != nil || u.Handle == "" {
+	u, err := k.store.ReadUserByHandle(ctx, ref)
+	if err != nil || u == nil || u.SuspendedAt != nil {
 		return "", "", errUserNotFound(ref)
 	}
 	return u.ID, u.Handle, nil
@@ -241,28 +245,24 @@ func (n *Names) ownName(ctx context.Context) string {
 
 // Address renders a principal (D20): a user here as handle@<own name>; a user on a peer as their
 // handle beneath the peer's name — its petname, or its key while it has none; the peer kernel
-// itself, when no user is known, as that name alone. A user always carries `@`, a kernel never
-// does, so the two cannot be confused however they are named. Only a purged tombstone falls back
-// to the raw id, so an immutable ledger stays legible.
+// itself as that name alone. A user always carries `@`, a kernel never does, so the two cannot be
+// confused however they are named. An id that names nobody here — a party purged before kernels
+// were named by key — renders as itself, so an immutable ledger stays legible.
 func (n *Names) Address(ctx context.Context, p Principal) string {
-	if p.AccountID == "" {
-		return ""
-	}
-	u := n.account(ctx, p.AccountID)
-	if u == nil {
-		return p.AccountID
-	}
-	if u.Handle != "" {
-		return u.Handle + "@" + n.ownName(ctx)
-	}
-	if u.KernelPublicKey != "" {
-		host := n.kernel(ctx, u.KernelPublicKey)
-		if who := firstNonEmpty(p.Handle, p.RemoteID); who != "" {
+	if !p.Local() {
+		host := n.kernel(ctx, p.Kernel)
+		if who := firstNonEmpty(p.Handle, p.UserID); who != "" {
 			return who + "@" + host
 		}
 		return host
 	}
-	return p.AccountID
+	if p.UserID == "" {
+		return ""
+	}
+	if u := n.account(ctx, p.UserID); u != nil {
+		return u.Handle + "@" + n.ownName(ctx)
+	}
+	return p.UserID
 }
 
 // Action renders an action's address: its owner's, then the name. A proxy's owner is the peer's
@@ -271,11 +271,7 @@ func (n *Names) Action(ctx context.Context, a *Action) string {
 	if a == nil {
 		return ""
 	}
-	if a.Kind == KindRemoteProxy {
-		owner, rest := SplitProxyName(a.Name)
-		return n.Address(ctx, Principal{AccountID: a.OwnerUserID, RemoteID: a.RemoteOwnerID, Handle: owner}) + "/" + rest
-	}
-	return n.Address(ctx, Principal{AccountID: a.OwnerUserID}) + "/" + a.Name
+	return n.Address(ctx, a.Owner()) + "/" + a.Name
 }
 
 // Address is the single-shot form of Names.Address.
@@ -296,18 +292,3 @@ func (k *Kernel) ActionAddressByID(ctx context.Context, actionID string) string 
 	}
 	return k.ActionAddress(ctx, a)
 }
-
-// ---- The proxy row's stored name ----
-
-// A proxy row is stored under the peer's billing account with the remote owner's handle folded into
-// its name, `remoteowner/rest`, which is what keeps (owner, name) unique across a peer's many
-// owners. The fold is a storage encoding and these two functions are its only readers and writer.
-
-// SplitProxyName decodes a stored proxy name into the remote owner's handle and the action's name.
-func SplitProxyName(stored string) (owner, name string) {
-	owner, name, _ = strings.Cut(stored, "/")
-	return owner, name
-}
-
-// JoinProxyName encodes the pair the way the row stores it.
-func JoinProxyName(owner, name string) string { return owner + "/" + name }
