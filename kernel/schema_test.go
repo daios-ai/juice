@@ -47,19 +47,22 @@ func TestValidateTitle(t *testing.T) {
 // is kept as written.
 func TestNormalizeSchemaAcceptsTheSubset(t *testing.T) {
 	cases := map[string]map[string]any{
-		"annotations":       {"type": "string", "title": "T", "description": "d", "default": "x", "examples": []any{"a"}, "deprecated": true},
-		"string enum":       {"type": "string", "enum": []any{"a", "b"}},
-		"string format":     {"type": "string", "format": "date-time"},
-		"string bounds":     {"type": "string", "minLength": float64(1), "maxLength": float64(5), "pattern": "^[a-z]+$"},
-		"integer bounds":    {"type": "integer", "minimum": float64(0), "maximum": float64(9), "multipleOf": float64(3)},
-		"number exclusive":  {"type": "number", "exclusiveMinimum": float64(0), "exclusiveMaximum": float64(1)},
-		"boolean":           {"type": "boolean", "default": false},
-		"array bounds":      {"type": "array", "items": map[string]any{"type": "string"}, "minItems": float64(1), "maxItems": float64(3), "uniqueItems": true},
-		"nullable type":     {"type": []any{"integer", "null"}},
-		"nullable enum":     {"type": []any{"string", "null"}, "enum": []any{"a", nil}},
-		"open object":       {"type": "object", "description": "anything"},
-		"map-shaped object": {"type": "object", "properties": map[string]any{}, "additionalProperties": map[string]any{"type": "number"}},
-		"nested closed":     canonObj(map[string]any{"g": map[string]any{"type": "string"}}, "g"),
+		"annotations":         {"type": "string", "title": "T", "description": "d", "default": "x", "examples": []any{"a"}, "deprecated": true},
+		"string enum":         {"type": "string", "enum": []any{"a", "b"}},
+		"string format":       {"type": "string", "format": "date-time"},
+		"string bounds":       {"type": "string", "minLength": float64(1), "maxLength": float64(5), "pattern": "^[a-z]+$"},
+		"integer bounds":      {"type": "integer", "minimum": float64(0), "maximum": float64(9), "multipleOf": float64(3)},
+		"number exclusive":    {"type": "number", "exclusiveMinimum": float64(0), "exclusiveMaximum": float64(1)},
+		"boolean":             {"type": "boolean", "default": false},
+		"array bounds":        {"type": "array", "items": map[string]any{"type": "string"}, "minItems": float64(1), "maxItems": float64(3), "uniqueItems": true},
+		"nullable type":       {"type": []any{"integer", "null"}},
+		"nullable enum":       {"type": []any{"string", "null"}, "enum": []any{"a", nil}},
+		"open object":         {"type": "object", "description": "anything"},
+		"map-shaped object":   {"type": "object", "properties": map[string]any{}, "additionalProperties": map[string]any{"type": "number"}},
+		"map requiring a key": {"type": "object", "properties": map[string]any{}, "additionalProperties": map[string]any{"type": "number"}, "required": []any{"k"}},
+		"nullable default":    {"type": []any{"integer", "null"}, "default": nil},
+		"nested default":      {"type": "array", "items": map[string]any{"type": "integer", "default": float64(3)}, "default": []any{float64(1)}},
+		"nested closed":       canonObj(map[string]any{"g": map[string]any{"type": "string"}}, "g"),
 	}
 	for name, f := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -121,6 +124,12 @@ func TestNormalizeSchemaRefusesOutsideTheSubset(t *testing.T) {
 		"anyOf with null":             {map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}}}, `may be empty is "type": [T, "null"]`},
 		"sibling weakens a reference": {map[string]any{"$ref": "#/$defs/code", "minLength": float64(2)}, `minLength beside $ref "#/$defs/code" differs`},
 		"sibling retypes a reference": {map[string]any{"$ref": "#/$defs/code", "type": "integer"}, `type beside $ref "#/$defs/code" differs`},
+		"default of the wrong type":   {map[string]any{"type": "integer", "default": "10"}, "field input.properties.f default: expected integer, got a string"},
+		"default outside its enum":    {map[string]any{"type": "string", "enum": []any{"a"}, "default": "b"}, "default: value not in enum"},
+		"null default, not nullable":  {map[string]any{"type": "string", "default": nil}, "default: must not be null"},
+		"example out of bounds":       {map[string]any{"type": "integer", "maximum": float64(9), "example": float64(10)}, "input.properties.f example"},
+		"nested default names a path": {map[string]any{"type": "array", "items": map[string]any{"type": "integer", "default": true}}, "input.properties.f.items default"},
+		"required but undeclared":     {map[string]any{"type": "object", "properties": map[string]any{"g": map[string]any{"type": "string"}}, "required": []any{"h"}}, `input.properties.f: required names "h"`},
 		"nested error names its path": {map[string]any{"type": "array", "items": canonObj(map[string]any{"g": map[string]any{"oneOf": []any{}}})}, "input.properties.f.items.properties.g: oneOf"},
 	}
 	for name, c := range cases {

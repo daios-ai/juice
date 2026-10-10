@@ -29,7 +29,7 @@ type NativeLLMConfig struct {
 	JSON      string                       `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
 	Decide    string                       `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
 	Embed     string                       `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
-	Endpoints map[string]LLMEndpointConfig `json:"endpoints,omitempty" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
+	Endpoints map[string]LLMEndpointConfig `json:"endpoints" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
 }
 
 // LLMEndpointConfig is one endpoint's key and its models' prices.
@@ -95,20 +95,20 @@ func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
 // NativeLookupConfig holds configuration for the @sys/lookup native action.
 type NativeLookupConfig struct {
 	DefaultLimit int   `json:"default_limit" doc:"Results lookup returns when the caller names no limit."`
-	Price        int64 `json:"price" doc:"Price of a lookup call, in base units. Default 0."`
+	Price        int64 `json:"price" doc:"Price of a lookup call, in base units."`
 }
 
 // NativeWebConfig holds configuration for the @sys/web native action. The User-Agent it sends is
 // derived from the binary's own version, not configured: it identifies the software making the
 // request, which is a fact about the build rather than an operator preference.
 type NativeWebConfig struct {
-	Price int64 `json:"price" doc:"Price of a web fetch, in base units. Default 0."`
+	Price int64 `json:"price" doc:"Price of a web fetch, in base units."`
 }
 
 // NativePriceConfig is the whole configuration of a native whose only setting is its price —
 // most of the stdlib. One type instead of one struct per action; the JSON shape is unchanged (§14).
 type NativePriceConfig struct {
-	Price int64 `json:"price" doc:"Price of a call to this action, in base units. Default 0."`
+	Price int64 `json:"price" doc:"Price of a call to this action, in base units."`
 }
 
 // NativeConfig holds per-action configuration for all native actions (§14 `native.<action>`).
@@ -173,21 +173,21 @@ type ServerConfig struct {
 	FeeBPS                     int64        `json:"fee_bps" doc:"The operator's fee on each call's margin, in basis points (2000 = 20%)."`
 	RemoteBPS                  int64        `json:"remote_bps" doc:"Markup this kernel adds when serving another kernel's caller, in basis points."`
 	ImportBPS                  int64        `json:"import_bps" doc:"Fee this kernel keeps when its caller buys from another kernel, in basis points."`
-	Lottery                    *int64       `json:"lottery" doc:"Face value of the ticket this kernel writes to settle a small cross-kernel debt, in base units; 0 pays every debt exactly. Unset: the shipped economy's."`
-	LotteryMax                 *int64       `json:"lottery_max" doc:"Largest ticket this kernel accepts from a buyer, in base units. Unset: the shipped economy's."`
-	CreditLimit                *int64       `json:"credit_limit" doc:"Most work this kernel delivers to other kernels before being paid, in base units. Unset: the shipped economy's."`
+	Lottery                    int64        `json:"lottery" doc:"Face value of the ticket this kernel writes to settle a small cross-kernel debt, in base units; 0 pays every debt exactly."`
+	LotteryMax                 int64        `json:"lottery_max" doc:"Largest ticket this kernel accepts from a buyer, in base units."`
+	CreditLimit                int64        `json:"credit_limit" doc:"Most work this kernel delivers to other kernels before being paid, in base units."`
 	TokenTTL                   string       `json:"token_ttl" doc:"How long a login's access token lasts, as a Go duration (15m)."`
 	AuthIssuer                 string       `json:"auth_issuer" doc:"Issuer named in access tokens; empty is the kernel's own."`
 	AuthAudience               string       `json:"auth_audience" doc:"Audience named in access tokens; empty is the kernel's own."`
 	LogLevel                   string       `json:"log_level" doc:"debug, info, warn or error."`
 	LogFile                    string       `json:"log_file" doc:"A file the log is also written to; empty writes to the terminal only."`
 	LogFormat                  string       `json:"log_format" doc:"text or json."`
-	AllowLocalSources          bool         `json:"allow_local_sources" doc:"Let actions reach private-network addresses. Loopback is always allowed. Default false."`
+	AllowLocalSources          bool         `json:"allow_local_sources" doc:"Let actions reach private-network addresses. Loopback is always allowed."`
 	ListenAddr                 string       `json:"listen_addr" doc:"Address the client API listens on, host:port; no host listens on every interface, port 0 picks one."`
 	HTTPCallbackURL            string       `json:"http_callback_url" doc:"Base URL HTTP actions call back on to compose; empty derives it from listen_addr."`
-	KernelHandle               string       `json:"kernel_handle" doc:"This kernel's name on the network, the part after @ in every address here."`
+	KernelHandle               string       `json:"kernel_handle" default:"-" doc:"This kernel's name on the network, the part after @ in every address here."`
 	FedListenAddrs             []string     `json:"fed_listen_addrs" doc:"Addresses other kernels reach this one on, as multiaddrs; empty uses port 31313."`
-	CredentialsKey             string       `json:"credentials_key,omitempty" doc:"Key sealing every stored upstream credential, made at first boot. Keep it with your backups. No command-line flag."`
+	CredentialsKey             string       `json:"credentials_key,omitempty" default:"-" doc:"Key sealing every stored upstream credential, made at first boot. Keep it with your backups. No command-line flag."`
 	RemoteRetryIntervalSeconds int64        `json:"remote_retry_interval_seconds" doc:"How often calls waiting on another kernel are retried, in seconds; 0 or less uses the default."`
 	PeerRetentionDays          int64        `json:"peer_retention_days" doc:"Days an idle peer's cached data is kept; 0 or less keeps it forever."`
 	DiscoveryIntervalSeconds   int64        `json:"discovery_interval_seconds" doc:"How often other kernels are discovered and their catalogues read, in seconds; 0 or less uses the default."`
@@ -201,7 +201,7 @@ type ServerConfig struct {
 // value falls back to the 60s default.
 func (c ServerConfig) remoteRetryInterval() time.Duration {
 	if c.RemoteRetryIntervalSeconds <= 0 {
-		return 60 * time.Second
+		c = DefaultServerConfig()
 	}
 	return time.Duration(c.RemoteRetryIntervalSeconds) * time.Second
 }
@@ -213,7 +213,7 @@ func (c ServerConfig) remoteRetryInterval() time.Duration {
 // nothing (D23).
 func (c ServerConfig) discoveryInterval() time.Duration {
 	if c.DiscoveryIntervalSeconds <= 0 {
-		return 300 * time.Second
+		c = DefaultServerConfig()
 	}
 	return time.Duration(c.DiscoveryIntervalSeconds) * time.Second
 }
@@ -228,22 +228,28 @@ func (c ServerConfig) peerRetention() time.Duration {
 	return time.Duration(c.PeerRetentionDays) * 24 * time.Hour
 }
 
-// DefaultServerConfig returns a ServerConfig populated with safe defaults.
+// DefaultServerConfig is every setting's default, and the one place each is stated: first boot
+// writes it out whole, the schema publishes it, and a key absent from the file keeps it. The money
+// rules are the shipped economy's.
 func DefaultServerConfig() ServerConfig {
+	econ := kernel.DefaultEconomy()
 	return ServerConfig{
+		Schema: "../../schemas/config.schema.json", // kernels/<world>/config.json → schemas/
 		Native: NativeConfig{
-			LLM:    NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic"},
+			LLM: NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic",
+				Endpoints: map[string]LLMEndpointConfig{}},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
 		},
-		ScriptTimeoutMS:   10000,
-		ScriptMemoryBytes: 64 * 1024 * 1024,
-		FeeBPS:            2000,
-		RemoteBPS:         500,
-		ImportBPS:         500,
-		// The three money amounts are left unset here so they come from one place, the shipped
-		// economy (kernel.DefaultEconomy), which a written-out file then shows the operator.
+		ScriptTimeoutMS:            10000,
+		ScriptMemoryBytes:          64 * 1024 * 1024,
+		FeeBPS:                     econ.FeeBPS,
+		RemoteBPS:                  econ.RemoteBPS,
+		ImportBPS:                  econ.ImportBPS,
+		Lottery:                    econ.Lottery,
+		LotteryMax:                 econ.LotteryMax,
+		CreditLimit:                econ.CreditLimit,
 		TokenTTL:                   "15m",
 		AuthIssuer:                 "",
 		AuthAudience:               "",
@@ -257,6 +263,7 @@ func DefaultServerConfig() ServerConfig {
 		DiscoveryIntervalSeconds:   300,
 		MaxInboundPeers:            fed.DefaultMaxInboundPeers,
 		RelaySlots:                 fed.DefaultRelaySlots,
+		FedListenAddrs:             []string{},
 	}
 }
 
@@ -335,13 +342,6 @@ func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
 			return
 		}
 		usage := "sets " + strings.ReplaceAll(name, "-", "_") + " for this run"
-		// A setting held as a pointer says three things — absent, empty, and a value — so it is
-		// given a place to parse into before it is bound. Nothing is copied out of it unless the
-		// flag was actually typed, so the file keeps its own three states.
-		if f.Kind() == reflect.Ptr {
-			f.Set(reflect.New(f.Type().Elem()))
-			f = f.Elem()
-		}
 		switch p := f.Addr().Interface().(type) {
 		case *string:
 			fs.StringVar(p, name, *p, usage)
@@ -417,7 +417,6 @@ func configFields(c *ServerConfig, visit func(name string, field reflect.Value))
 }
 
 func writeConfig(path string, cfg ServerConfig) error {
-	cfg.Schema = "../../schemas/config.schema.json" // kernels/<world>/config.json → schemas/
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -451,41 +450,25 @@ func (c ServerConfig) KernelConfig(tokenSecret string) (kernel.Config, error) {
 	return cfg, nil
 }
 
-// Economy assembles the money rules from this configuration alone (P10): the ticket this kernel
-// writes, the largest it will accept from a buyer, and how much unpaid work it will carry. All
-// three are the operator's own, defaulted from the shipped economy.
+// Economy assembles the money rules from this configuration alone (P10): the fee rates, the ticket
+// this kernel writes, the largest it will accept from a buyer, and how much unpaid work it will
+// carry — all the operator's own, defaulted from the shipped economy (DefaultServerConfig).
 func (c ServerConfig) Economy() (kernel.Economy, error) {
-	econ := kernel.DefaultEconomy()
-	for _, bps := range []struct {
+	econ := kernel.Economy{FeeBPS: c.FeeBPS, RemoteBPS: c.RemoteBPS, ImportBPS: c.ImportBPS,
+		Lottery: c.Lottery, LotteryMax: c.LotteryMax, CreditLimit: c.CreditLimit}
+	type setting struct {
 		name  string
 		value int64
-		dst   *int64
-	}{
-		{"fee_bps", c.FeeBPS, &econ.FeeBPS},
-		{"remote_bps", c.RemoteBPS, &econ.RemoteBPS},
-		{"import_bps", c.ImportBPS, &econ.ImportBPS},
-	} {
+	}
+	for _, bps := range []setting{{"fee_bps", c.FeeBPS}, {"remote_bps", c.RemoteBPS}, {"import_bps", c.ImportBPS}} {
 		if bps.value < 0 || bps.value > 10000 {
 			return kernel.Economy{}, fmt.Errorf("%s must be between 0 and 10000 (basis points; 100 = 1%%)", bps.name)
 		}
-		*bps.dst = bps.value
 	}
-	for _, amount := range []struct {
-		name  string
-		value *int64
-		dst   *int64
-	}{
-		{"lottery", c.Lottery, &econ.Lottery},
-		{"lottery_max", c.LotteryMax, &econ.LotteryMax},
-		{"credit_limit", c.CreditLimit, &econ.CreditLimit},
-	} {
-		if amount.value == nil {
-			continue
-		}
-		if *amount.value < 0 {
+	for _, amount := range []setting{{"lottery", c.Lottery}, {"lottery_max", c.LotteryMax}, {"credit_limit", c.CreditLimit}} {
+		if amount.value < 0 {
 			return kernel.Economy{}, fmt.Errorf("%s must not be negative", amount.name)
 		}
-		*amount.dst = *amount.value
 	}
 	// A kernel that would not accept its own ticket could never be paid for what it sells.
 	if econ.Lottery > econ.LotteryMax {
@@ -616,14 +599,20 @@ func writeSchemas() error {
 	return nil
 }
 
-// jsonSchema describes v's type as a JSON Schema. It is editor help, not validation: the decoders'
-// own validators keep every rule across fields. A property's description is its field's doc tag,
-// its allowed values the enum tag, and a non-zero field of v its default (a zero default — false,
-// 0 — is said in the description). A pointer, map or slice also admits null, which Go decodes into
-// each. A field with no json or doc tag, or a kind outside these, is an error rather than a silent
-// gap, so a setting added without a description cannot ship.
+// jsonSchema describes v's type as a JSON Schema in the kernel's own subset (D4), canonical and
+// checked by the one function that checks every schema. It is editor and form help, not
+// validation: the decoders' own validators keep every rule across fields. A property's description
+// is its field's doc tag, its allowed values the enum tag, and its default the value v holds there
+// — every setting of v states one, zero included, unless tagged default:"-" (a value first boot
+// asks for or mints). Inside a map or list entry there is no default: an entry is the author's,
+// and its schema is built from no template. A field with no json or doc tag, or a kind outside
+// these, is an error rather than a silent gap, so a setting added without a description cannot ship.
 func jsonSchema(title string, v any) (map[string]any, error) {
-	schema, err := schemaOf(reflect.ValueOf(v))
+	raw, err := schemaOf(reflect.ValueOf(v), true)
+	if err != nil {
+		return nil, err
+	}
+	schema, _, err := kernel.NormalizeSchema(title, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -632,7 +621,9 @@ func jsonSchema(title string, v any) (map[string]any, error) {
 	return schema, nil
 }
 
-func schemaOf(v reflect.Value) (map[string]any, error) {
+// schemaOf describes v's type; template says whether v holds defaults, as a configuration does and
+// a map or list entry does not.
+func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 	t := v.Type()
 	switch t.Kind() {
 	case reflect.String:
@@ -644,23 +635,18 @@ func schemaOf(v reflect.Value) (map[string]any, error) {
 		return map[string]any{"type": "integer"}, nil
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}, nil
-	case reflect.Pointer, reflect.Slice, reflect.Map:
-		elem, err := schemaOf(reflect.Zero(t.Elem()))
+	case reflect.Slice, reflect.Map:
+		elem, err := schemaOf(reflect.Zero(t.Elem()), false)
 		if err != nil {
 			return nil, err
 		}
-		schema := elem
-		switch t.Kind() {
-		case reflect.Slice:
-			schema = map[string]any{"type": "array", "items": elem}
-		case reflect.Map:
-			if t.Key().Kind() != reflect.String {
-				return nil, fmt.Errorf("%s: a map key must be a string", t)
-			}
-			schema = map[string]any{"type": "object", "additionalProperties": elem}
+		if t.Kind() == reflect.Slice {
+			return map[string]any{"type": "array", "items": elem}, nil
 		}
-		schema["type"] = []any{schema["type"], "null"}
-		return schema, nil
+		if t.Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("%s: a map key must be a string", t)
+		}
+		return map[string]any{"type": "object", "additionalProperties": elem}, nil
 	case reflect.Struct:
 		props := map[string]any{}
 		for i := 0; i < t.NumField(); i++ {
@@ -676,7 +662,8 @@ func schemaOf(v reflect.Value) (map[string]any, error) {
 			if key == "" || doc == "" {
 				return nil, fmt.Errorf("%s.%s needs both a json and a doc tag", t.Name(), f.Name)
 			}
-			prop, err := schemaOf(v.Field(i))
+			fv := v.Field(i)
+			prop, err := schemaOf(fv, template)
 			if err != nil {
 				return nil, err
 			}
@@ -684,8 +671,13 @@ func schemaOf(v reflect.Value) (map[string]any, error) {
 			if enum := f.Tag.Get("enum"); enum != "" {
 				prop["enum"] = strings.Split(enum, ",")
 			}
-			if fv := v.Field(i); f.Type.Kind() != reflect.Struct && !fv.IsZero() {
+			if template && f.Type.Kind() != reflect.Struct && f.Tag.Get("default") != "-" {
 				prop["default"] = fv.Interface()
+				if fv.Kind() == reflect.Slice && fv.IsNil() {
+					prop["default"] = []any{} // Go writes a nil list as null, which no list is
+				} else if fv.Kind() == reflect.Map && fv.IsNil() {
+					prop["default"] = map[string]any{}
+				}
 			}
 			props[key] = prop
 		}

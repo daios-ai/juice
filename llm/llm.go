@@ -55,10 +55,10 @@ func Shipped() fs.FS {
 // its models this installation uses. A model is listed under a short name of the operator's, since
 // its own id may carry characters an action name cannot (gemma4:26b, vendor/model).
 type Endpoint struct {
-	Schema      string           `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
-	Protocol    string           `json:"protocol" enum:"openai,anthropic" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
-	URL         string           `json:"url" doc:"The API's base address, e.g. https://api.openai.com/v1."`
-	KeyRequired bool             `json:"key_required" doc:"The provider needs an API key, set in config.json under native.llm.endpoints.<this file's name>.key. Default false."`
+	Schema      string           `json:"$schema,omitempty" default:"-" doc:"The JSON Schema describing this file, for editors."`
+	Protocol    string           `json:"protocol" enum:"openai,anthropic" default:"-" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
+	URL         string           `json:"url" default:"-" doc:"The API's base address, e.g. https://api.openai.com/v1."`
+	KeyRequired bool             `json:"key_required" doc:"The provider needs an API key, set in config.json under native.llm.endpoints.<this file's name>.key."`
 	Models      map[string]Model `json:"models" doc:"The models used here, each under a short name of your own (lowercase, at most 32 characters)."`
 }
 

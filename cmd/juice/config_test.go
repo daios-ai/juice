@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -295,22 +296,24 @@ func TestFedListenAddrsIsReadFromConfig(t *testing.T) {
 // settlement (`lottery: 0`), or refusing every ticket (`lottery_max: 0`), must not quietly take the
 // credit limit with it and stop the kernel serving foreign work at all.
 func TestEconomyDefaultsAndIndependence(t *testing.T) {
-	base := ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500}
-	econ, err := base.Economy()
+	econ, err := DefaultServerConfig().Economy()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if econ.Lottery != 1_000_000 || econ.LotteryMax != 5_000_000 || econ.CreditLimit != 50_000_000 {
-		t.Errorf("unset money keys gave %d/%d/%d, want 1000000/5000000/50000000",
-			econ.Lottery, econ.LotteryMax, econ.CreditLimit)
+	if econ != kernel.DefaultEconomy() {
+		t.Errorf("the default configuration gave %+v, want the shipped economy %+v", econ, kernel.DefaultEconomy())
 	}
-	zero := int64(0)
+	with := func(edit func(*ServerConfig)) ServerConfig {
+		c := DefaultServerConfig()
+		edit(&c)
+		return c
+	}
 	for _, c := range []struct {
 		name string
 		cfg  ServerConfig
 	}{
-		{"paying every obligation exactly", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero}},
-		{"refusing every ticket", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &zero, LotteryMax: &zero}},
+		{"paying every obligation exactly", with(func(c *ServerConfig) { c.Lottery = 0 })},
+		{"refusing every ticket", with(func(c *ServerConfig) { c.Lottery, c.LotteryMax = 0, 0 })},
 	} {
 		got, err := c.cfg.Economy()
 		if err != nil {
@@ -321,22 +324,18 @@ func TestEconomyDefaultsAndIndependence(t *testing.T) {
 		}
 	}
 	// A kernel that would not accept its own ticket could never be paid for what it sells.
-	five, four := int64(5), int64(4)
-	if _, err := (ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &five, LotteryMax: &four}).Economy(); err == nil {
+	if _, err := with(func(c *ServerConfig) { c.Lottery, c.LotteryMax = 5, 4 }).Economy(); err == nil {
 		t.Error("a ticket above this kernel's own maximum was accepted")
 	}
 	// A negative amount is refused on its own account. Both cases below pass the size-against-maximum
 	// check, so only the sign check can catch them.
-	neg := int64(-1)
-	for _, c := range []struct {
-		name string
-		cfg  ServerConfig
-	}{
-		{"lottery", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, Lottery: &neg}},
-		{"credit_limit", ServerConfig{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500, CreditLimit: &neg}},
+	for name, cfg := range map[string]ServerConfig{
+		"lottery":      with(func(c *ServerConfig) { c.Lottery = -1 }),
+		"credit_limit": with(func(c *ServerConfig) { c.CreditLimit = -1 }),
+		"fee_bps":      with(func(c *ServerConfig) { c.FeeBPS = 10001 }),
 	} {
-		if _, err := c.cfg.Economy(); err == nil {
-			t.Errorf("a negative %s was accepted", c.name)
+		if _, err := cfg.Economy(); err == nil {
+			t.Errorf("an out-of-range %s was accepted", name)
 		}
 	}
 }
@@ -456,8 +455,7 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	file.Native.LLM.Chat = "file/chat"
 	file.Native.Lookup.DefaultLimit = 7
 	file.FedListenAddrs = []string{"/ip4/0.0.0.0/tcp/1"}
-	lot := int64(11)
-	file.Lottery = &lot
+	file.Lottery = 11
 
 	fs := pflag.NewFlagSet("serve", pflag.ContinueOnError)
 	serveOverride = DefaultServerConfig()
@@ -482,8 +480,8 @@ func TestCommandLineWinsOverTheFile(t *testing.T) {
 	if len(got.FedListenAddrs) != 1 || got.FedListenAddrs[0] != "/ip4/0.0.0.0/tcp/2" {
 		t.Fatalf("list setting not overridden: %v", got.FedListenAddrs)
 	}
-	if got.Lottery == nil || *got.Lottery != 22 {
-		t.Fatalf("pointer setting not overridden: %v", got.Lottery)
+	if got.Lottery != 22 {
+		t.Fatalf("money setting not overridden: %v", got.Lottery)
 	}
 	// Untyped on that command line, so the file still decides it.
 	if got.KernelHandle != "acme" {
@@ -587,13 +585,13 @@ func TestJSONSchemaKinds(t *testing.T) {
 		S    string           `json:"s" doc:"a string" enum:"a,b"`
 		N    int64            `json:"n" doc:"d"`
 		B    bool             `json:"b" doc:"d"`
-		P    *int64           `json:"p" doc:"d"`
 		L    []string         `json:"l" doc:"d"`
-		M    map[string]int64 `json:"m" doc:"d"`
+		M    map[string]inner `json:"m" doc:"d"`
 		In   inner            `json:"in" doc:"d"`
+		Ask  string           `json:"ask" doc:"d" default:"-"`
 		Skip string           `json:"-"`
 	}
-	got, err := jsonSchema("probe", probe{N: 7})
+	got, err := jsonSchema("probe", probe{S: "a", N: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -607,13 +605,15 @@ func TestJSONSchemaKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"s":  `{"description":"a string","enum":["a","b"],"type":"string"}`,
-		"n":  `{"default":7,"description":"d","type":"integer"}`,
-		"b":  `{"description":"d","type":"boolean"}`,
-		"p":  `{"description":"d","type":["integer","null"]}`,
-		"l":  `{"description":"d","items":{"type":"string"},"type":["array","null"]}`,
-		"m":  `{"additionalProperties":{"type":"integer"},"description":"d","type":["object","null"]}`,
-		"in": `{"additionalProperties":false,"description":"d","properties":{"x":{"description":"d","type":"number"}},"type":"object"}`,
+		// Every setting states its default, zero included; none is nullable.
+		"s": `{"default":"a","description":"a string","enum":["a","b"],"type":"string"}`,
+		"n": `{"default":7,"description":"d","type":"integer"}`,
+		"b": `{"default":false,"description":"d","type":"boolean"}`,
+		"l": `{"default":[],"description":"d","items":{"type":"string"},"type":"array"}`,
+		// A map entry is the author's, so its fields carry no default.
+		"m":   `{"additionalProperties":{"additionalProperties":false,"properties":{"x":{"description":"d","type":"number"}},"type":"object"},"default":{},"description":"d","properties":{},"type":"object"}`,
+		"in":  `{"additionalProperties":false,"description":"d","properties":{"x":{"default":0,"description":"d","type":"number"}},"type":"object"}`,
+		"ask": `{"description":"d","type":"string"}`,
 	}
 	if s.Title != "probe" || s.AdditionalProperties || len(s.Properties) != len(want) {
 		t.Fatalf("schema = %s", b)
@@ -639,6 +639,14 @@ func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
 		"map key": struct {
 			M map[int]string `json:"m" doc:"d"`
 		}{},
+		// A pointer says null, which a setting never means: absent keeps the default.
+		"pointer": struct {
+			P *int64 `json:"p" doc:"d"`
+		}{},
+		// A default the schema itself refuses is caught by the kernel's own check (D4).
+		"lying default": struct {
+			S string `json:"s" doc:"d" enum:"a,b"`
+		}{},
 	} {
 		if _, err := jsonSchema("x", v); err == nil {
 			t.Errorf("%s: a schema was generated", name)
@@ -647,7 +655,7 @@ func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
 }
 
 // Each file an operator writes gets a schema in $JUICE_HOME/schemas/, and Juice's own files are
-// valid under it: the config.json first boot writes, nulls included, and every shipped world and
+// valid under it: the config.json first boot writes and every shipped world and
 // endpoint file. Each names its schema in $schema, which the strict decoders accept and which is
 // no setting, so it has no flag.
 func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
@@ -697,5 +705,45 @@ func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
 			raw, _ := fs.ReadFile(files, e.Name())
 			valid(name+" "+e.Name(), s, raw)
 		}
+	}
+
+	// Each schema is in the kernel's canonical subset (D4), as a form reads it.
+	for _, name := range []string{"config", "world", "llm-endpoint"} {
+		s := schema(name)
+		delete(s, "$schema") // the one keyword a schema file carries that a schema node does not
+		if err := kernel.ValidateSchema(name, s); err != nil {
+			t.Errorf("%s schema: %v", name, err)
+		}
+	}
+	// A form shows every setting's default, so every setting states one except the two first boot
+	// asks for or mints; and the file first boot writes says every value, none of them null.
+	var missing []string
+	var walk func(s map[string]any, path string)
+	walk = func(s map[string]any, path string) {
+		props, _ := s["properties"].(map[string]any)
+		for k, v := range props {
+			child := v.(map[string]any)
+			if child["type"] == "object" && child["additionalProperties"] == false {
+				walk(child, path+k+".")
+			} else if _, ok := child["default"]; !ok {
+				missing = append(missing, path+k)
+			}
+		}
+	}
+	walk(schema("config"), "")
+	if sort.Strings(missing); strings.Join(missing, " ") != "credentials_key kernel_handle" {
+		t.Errorf("settings without a default: %v", missing)
+	}
+	if strings.Contains(string(raw), "null") {
+		t.Errorf("the first-boot config.json holds a null:\n%s", raw)
+	}
+	// A file written before every value was explicit holds null for four keys; it still loads,
+	// each keeping its default.
+	old := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(old, []byte(`{"lottery": null, "lottery_max": null, "credit_limit": null, "fed_listen_addrs": null}`), 0o600)
+	if cfg, err := LoadConfig(old); err != nil {
+		t.Errorf("an older config.json with nulls: %v", err)
+	} else if econ, _ := cfg.Economy(); econ != kernel.DefaultEconomy() {
+		t.Errorf("an older config.json with nulls gave %+v", econ)
 	}
 }

@@ -5,9 +5,11 @@ package kernel
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,6 +106,9 @@ func normalizeIn(label string, schema, doc map[string]any) (map[string]any, []st
 	n := &normalizer{root: doc, active: map[string]bool{}}
 	out, err := n.node(root, label, 0, true)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkAnnotationValues(out, label); err != nil {
 		return nil, nil, err
 	}
 	if t, ok := out["type"].(string); !ok || t != "object" {
@@ -497,6 +502,15 @@ func (n *normalizer) object(s map[string]any, path string, depth int) (map[strin
 	default:
 		return nil, ErrSchemaViolation.Wrapf("%s: additionalProperties must be false or a schema", path)
 	}
+	// A closed object requiring a name it does not declare admits no value at all.
+	if ap, isBool := s["additionalProperties"].(bool); isBool && !ap {
+		names, _ := s["required"].([]any)
+		for _, name := range names {
+			if _, declared := props[name.(string)]; !declared {
+				return nil, ErrSchemaViolation.Wrapf("%s: required names %q, which is not a declared property", path, name)
+			}
+		}
+	}
 	_, closed := s["additionalProperties"]
 	if len(props) > 0 || closed {
 		s["properties"] = props
@@ -548,6 +562,37 @@ func validateSchemaDescriptions(schema map[string]any, path string) error {
 		}
 		if err := validateSchemaDescriptions(child, path+"."+name); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkAnnotationValues refuses a default or an example its own node refuses: a form starts a field
+// from its default and a model copies an example, so either one must be a value the action accepts.
+// It runs on the canonical form, where a nullable node already admits null.
+func checkAnnotationValues(s map[string]any, path string) error {
+	if d, ok := s["default"]; ok {
+		if err := validateValue(s, d, path+" default"); err != nil {
+			return err
+		}
+	}
+	examples, _ := s["examples"].([]any)
+	for _, e := range examples {
+		if err := validateValue(s, e, path+" example"); err != nil {
+			return err
+		}
+	}
+	props, _ := s["properties"].(map[string]any)
+	for _, name := range slices.Sorted(maps.Keys(props)) {
+		if err := checkAnnotationValues(props[name].(map[string]any), path+".properties."+name); err != nil {
+			return err
+		}
+	}
+	for _, k := range []string{"items", "additionalProperties"} {
+		if child, ok := s[k].(map[string]any); ok {
+			if err := checkAnnotationValues(child, path+"."+k); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

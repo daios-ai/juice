@@ -62,8 +62,8 @@ type World struct {
 	// command line, the directory the kernel lives in, and the network itself, so the three
 	// cannot disagree.
 	Name     string `json:"-"`
-	Schema   string `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
-	Rail     string `json:"rail" enum:"manual,evm" doc:"How money is witnessed: manual (play money the operator records) or evm (a token on an EVM chain)."`
+	Schema   string `json:"$schema,omitempty" default:"-" doc:"The JSON Schema describing this file, for editors."`
+	Rail     string `json:"rail" enum:"manual,evm" default:"-" doc:"How money is witnessed: manual (play money the operator records) or evm (a token on an EVM chain)."`
 	ChainID  uint64 `json:"chainId" doc:"The EVM chain's id. Required for evm, absent for manual."`
 	Token    string `json:"token" doc:"The token contract's address. Required for evm, absent for manual."`
 	Decimals uint8  `json:"decimals" doc:"The token's decimals, at most 18. Required for evm."`
@@ -95,7 +95,7 @@ type venueCfg struct {
 	Quoter        string `json:"quoter" doc:"The Uniswap V3 QuoterV2's address."`
 	WrappedNative string `json:"wrappedNative" doc:"The wrapped native currency the pool trades (WETH, WPOL)."`
 	FeeTier       uint32 `json:"feeTier" doc:"The pool's fee in hundredths of a basis point (500 = 0.05%)."`
-	Router02      bool   `json:"router02" doc:"The router is SwapRouter02, which takes the deadline in multicall. Default false."`
+	Router02      bool   `json:"router02" doc:"The router is SwapRouter02, which takes the deadline in multicall."`
 }
 
 type gasCfg struct {
