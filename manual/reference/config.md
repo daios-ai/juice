@@ -110,17 +110,17 @@ and funding duties.
 The language models a kernel can use are described by files in `~/.juice/llm/`,
 one per provider, which Juice writes on first use and never overwrites. Each
 names how the provider is spoken to (`openai` or `anthropic`), its address,
-whether it needs a key, and the models you use there under short names of
-your own:
+whether it needs a key, and the models you use there, each under a short name
+of your own:
 
 ```json
 {
   "protocol": "anthropic",
   "url": "https://api.anthropic.com/v1",
   "key_required": true,
-  "models": {
-    "opus": {"id": "claude-opus-5-5", "kind": "chat", "max_tokens": 4096}
-  }
+  "models": [
+    {"name": "opus", "id": "claude-opus-5-5", "kind": "chat", "max_tokens": 4096}
+  ]
 }
 ```
 
@@ -135,9 +135,9 @@ provider's key and each model's price:
   "json": "anthropic/opus",
   "decide": "anthropic/opus",
   "embed": "ollama/nomic",
-  "endpoints": {
-    "anthropic": {"key": "sk-ant-…", "prices": {"opus": 20000}}
-  }
+  "endpoints": [
+    {"name": "anthropic", "key": "sk-ant-…", "prices": [{"model": "opus", "price": 20000}]}
+  ]
 }
 ```
 

@@ -4253,7 +4253,8 @@ func TestCanonicalizeStoredSchemas(t *testing.T) {
 		return a
 	}
 	legacy := row("legacy", map[string]any{"type": "object", "properties": map[string]any{"s": map[string]any{"type": "string", "nullable": true}}})
-	untyped := row("untyped", map[string]any{"type": "object", "properties": map[string]any{"anything": map[string]any{"description": "any value"}}})
+	outside := row("outside", map[string]any{"type": "object", "properties": map[string]any{"tags": map[string]any{
+		"type": "array", "items": map[string]any{"type": "string"}, "uniqueItems": true, "description": "tags"}}})
 	canonical := row("canonical", map[string]any{"type": "object"})
 	bare := setupAction(t, st, owner.ID, "no-schema", 0) // nil schemas: never callable, left alone
 
@@ -4265,7 +4266,7 @@ func TestCanonicalizeStoredSchemas(t *testing.T) {
 		if !got.Active || kernel.ValidateSchema("input", got.InputSchema) != nil {
 			t.Errorf("pass %d: a legacy spelling must be rewritten and stay live: %v active=%v", pass, got.InputSchema, got.Active)
 		}
-		if got, _ := st.ReadAction(ctx, untyped.ID); got.Active {
+		if got, _ := st.ReadAction(ctx, outside.ID); got.Active {
 			t.Errorf("pass %d: a schema outside the subset must be disabled", pass)
 		}
 		if got, _ := st.ReadAction(ctx, canonical.ID); !got.Active || !reflect.DeepEqual(got.InputSchema, map[string]any{"type": "object"}) {

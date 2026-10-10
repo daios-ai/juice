@@ -486,20 +486,20 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 	models := native.LLM{Chats: map[string]native.ChatModel{}, Embedders: map[string]kernel.Embedder{}}
 	reachable := map[string]bool{}
 	for _, name := range slices.Sorted(maps.Keys(eps)) {
-		ep, key := eps[name], cfg.Endpoints[name].Key
+		ep, key := eps[name], cfg.endpoint(name).Key
 		if len(ep.Models) == 0 {
 			continue
 		}
 		if ep.KeyRequired && key == "" {
-			logger.Info("llm.endpoint_skipped", "endpoint", name, "reason", "no key in native.llm.endpoints."+name+".key")
+			logger.Info("llm.endpoint_skipped", "endpoint", name, "reason", "no key for it in native.llm.endpoints")
 			continue
 		}
-		for m, model := range ep.Models {
+		for _, model := range ep.Models {
 			c := &llm.Client{Endpoint: ep, Model: model, Key: key}
 			if model.Kind == llm.KindEmbed {
-				models.Embedders[name+"/"+m] = c
+				models.Embedders[name+"/"+model.Name] = c
 			} else {
-				models.Chats[name+"/"+m] = c
+				models.Chats[name+"/"+model.Name] = c
 			}
 		}
 		if err := llm.Probe(context.Background(), ep, key); err != nil {
@@ -517,7 +517,8 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 		return models, "", false, nil
 	}
 	endpoint, m, _ := strings.Cut(cfg.Embed, "/")
-	identity := cfg.Embed + "|" + eps[endpoint].URL + "|" + eps[endpoint].Models[m].ID
+	model, _ := eps[endpoint].Model(m)
+	identity := cfg.Embed + "|" + eps[endpoint].URL + "|" + model.ID
 	return models, identity, reachable[endpoint], nil
 }
 

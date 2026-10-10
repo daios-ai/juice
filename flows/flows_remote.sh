@@ -143,9 +143,9 @@ flow_llm_endpoints() {
     start_llm_backend "$port"
     # An existing file is never overwritten by the shipped one, so ollama.json is the operator's.
     llm="$(khome "$db")/llm"; mkdir -p "$llm"
-    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":{"gemma":{"id":"g","kind":"chat"},"nomic":{"id":"n","kind":"embed"}}}' "$port" >"$llm/ollama.json"
-    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":{"m":{"id":"x","kind":"chat"}}}' "$down" >"$llm/down.json"
-    printf '{"protocol":"anthropic","url":"http://127.0.0.1:%s/v1","key_required":true,"models":{"m":{"id":"x","kind":"chat"}}}' "$port" >"$llm/cloud.json"
+    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":[{"name":"gemma","id":"g","kind":"chat"},{"name":"nomic","id":"n","kind":"embed"}]}' "$port" >"$llm/ollama.json"
+    printf '{"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":[{"name":"m","id":"x","kind":"chat"}]}' "$down" >"$llm/down.json"
+    printf '{"protocol":"anthropic","url":"http://127.0.0.1:%s/v1","key_required":true,"models":[{"name":"m","id":"x","kind":"chat"}]}' "$port" >"$llm/cloud.json"
     start_server "$db" "$hs" || { fail "llm.boot" "server did not start"; return; }
     know "$db" "$hs"
     j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1

@@ -78,7 +78,9 @@ func TestShippedEndpointsLoad(t *testing.T) {
 		t.Fatalf("shipped endpoints do not load: %v", err)
 	}
 	ollama := eps["ollama"]
-	if ollama.Models["gemma"].Kind != KindChat || ollama.Models["nomic"].Kind != KindEmbed || ollama.KeyRequired {
+	gemma, _ := ollama.Model("gemma")
+	nomic, _ := ollama.Model("nomic")
+	if gemma.Kind != KindChat || nomic.Kind != KindEmbed || ollama.KeyRequired {
 		t.Errorf("the default bindings' endpoint is not as configuration expects: %+v", ollama)
 	}
 	if !eps["anthropic"].KeyRequired || eps["anthropic"].Protocol != ProtocolAnthropic {
@@ -89,17 +91,18 @@ func TestShippedEndpointsLoad(t *testing.T) {
 // An endpoint file that would silently mean something else is refused, naming the file.
 func TestLoadRefuses(t *testing.T) {
 	for name, body := range map[string]string{
-		"unknown key":       `{"protocol":"openai","url":"u","modles":{}}`,
+		"unknown key":       `{"protocol":"openai","url":"u","modles":[]}`,
 		"unknown protocol":  `{"protocol":"grpc","url":"u"}`,
 		"no url":            `{"protocol":"openai"}`,
-		"model without id":  `{"protocol":"openai","url":"u","models":{"m":{"kind":"chat"}}}`,
-		"unknown kind":      `{"protocol":"openai","url":"u","models":{"m":{"id":"x","kind":"rerank"}}}`,
-		"anthropic embed":   `{"protocol":"anthropic","url":"u","models":{"m":{"id":"x","kind":"embed"}}}`,
-		"model name shape":  `{"protocol":"openai","url":"u","models":{"Big/One":{"id":"x","kind":"chat"}}}`,
-		"negative cap":      `{"protocol":"openai","url":"u","models":{"m":{"id":"x","kind":"chat","max_tokens":-1}}}`,
+		"model without id":  `{"protocol":"openai","url":"u","models":[{"name":"m","kind":"chat"}]}`,
+		"unknown kind":      `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"rerank"}]}`,
+		"anthropic embed":   `{"protocol":"anthropic","url":"u","models":[{"name":"m","id":"x","kind":"embed"}]}`,
+		"model name shape":  `{"protocol":"openai","url":"u","models":[{"name":"Big/One","id":"x","kind":"chat"}]}`,
+		"negative cap":      `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat","max_tokens":-1}]}`,
 		"two documents":     `{"protocol":"openai","url":"u"} {}`,
+		"model name twice":  `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat"},{"name":"m","id":"y","kind":"chat"}]}`,
 		"not json":          `protocol: openai`,
-		"unknown model key": `{"protocol":"openai","url":"u","models":{"m":{"id":"x","kind":"chat","temp":1}}}`,
+		"unknown model key": `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat","temp":1}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

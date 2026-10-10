@@ -3,5 +3,5 @@
   "protocol": "openai",
   "url": "https://api.groq.com/openai/v1",
   "key_required": true,
-  "models": {}
+  "models": []
 }

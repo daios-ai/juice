@@ -3,5 +3,5 @@
   "protocol": "openai",
   "url": "https://api.deepseek.com",
   "key_required": true,
-  "models": {}
+  "models": []
 }

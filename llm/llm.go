@@ -52,19 +52,20 @@ func Shipped() fs.FS {
 }
 
 // Endpoint is one file of $JUICE_HOME/llm/: where a provider is, how it is spoken to, and which of
-// its models this installation uses. A model is listed under a short name of the operator's, since
-// its own id may carry characters an action name cannot (gemma4:26b, vendor/model).
+// its models this installation uses. A model carries a short name of the operator's, since its own
+// id may carry characters an action name cannot (gemma4:26b, vendor/model).
 type Endpoint struct {
-	Schema      string           `json:"$schema,omitempty" default:"-" doc:"The JSON Schema describing this file, for editors."`
-	Protocol    string           `json:"protocol" enum:"openai,anthropic" default:"-" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
-	URL         string           `json:"url" default:"-" doc:"The API's base address, e.g. https://api.openai.com/v1."`
-	KeyRequired bool             `json:"key_required" doc:"The provider needs an API key, set in config.json under native.llm.endpoints.<this file's name>.key."`
-	Models      map[string]Model `json:"models" doc:"The models used here, each under a short name of your own (lowercase, at most 32 characters)."`
+	Schema      string  `json:"$schema,omitempty" default:"-" doc:"The JSON Schema describing this file, for editors."`
+	Protocol    string  `json:"protocol" enum:"openai,anthropic" default:"-" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
+	URL         string  `json:"url" default:"-" doc:"The API's base address, e.g. https://api.openai.com/v1."`
+	KeyRequired bool    `json:"key_required" doc:"The provider needs an API key, set in config.json under native.llm.endpoints, in the entry named for this file."`
+	Models      []Model `json:"models" doc:"The models used here, each named by you."`
 }
 
 // Model is one model of an endpoint: the provider's id for it, what it is for, and its output cap
 // (0 leaves the provider's own, except on Anthropic, which requires one).
 type Model struct {
+	Name      string `json:"name" doc:"Your short name for the model, used in config.json and action names: lowercase, at most 32 characters."`
 	ID        string `json:"id" doc:"The provider's own name for the model, e.g. gemma4:26b or claude-opus-5-5."`
 	Kind      string `json:"kind" enum:"chat,embed" doc:"chat (backs chat and decide) or embed (backs embeddings; not on anthropic)."`
 	MaxTokens int    `json:"max_tokens" doc:"Most tokens a reply may hold; 0 leaves the provider's own, except anthropic, which uses 4096."`
@@ -124,8 +125,12 @@ func (e Endpoint) validate(name string) error {
 	if e.URL == "" {
 		return fmt.Errorf("url is required")
 	}
-	for m, model := range e.Models {
+	seen := map[string]bool{}
+	for _, model := range e.Models {
+		m := model.Name
 		switch {
+		case seen[m]:
+			return fmt.Errorf("model name %q is used twice", m)
 		case !nameRe.MatchString(m):
 			return fmt.Errorf("model name %q must be lowercase letters, digits, '.', '_' or '-', at most 32", m)
 		case model.ID == "":
@@ -137,8 +142,18 @@ func (e Endpoint) validate(name string) error {
 		case model.MaxTokens < 0:
 			return fmt.Errorf("model %q: max_tokens must not be negative", m)
 		}
+		seen[m] = true
 	}
 	return nil
+}
+
+// Model returns the model of e named name.
+func (e Endpoint) Model(name string) (Model, bool) {
+	i := slices.IndexFunc(e.Models, func(m Model) bool { return m.Name == name })
+	if i < 0 {
+		return Model{}, false
+	}
+	return e.Models[i], true
 }
 
 // Client is one model on one endpoint, holding the endpoint's key. It is every capability the llm
@@ -359,11 +374,11 @@ func (c *Client) selectTool(ctx context.Context, messages []kernel.ChatMessage, 
 var structuredOutputRefuses = map[string]bool{
 	"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true,
 	"minLength": true, "maxLength": true, "pattern": true, "format": true,
-	"minItems": true, "maxItems": true, "uniqueItems": true,
+	"minItems": true, "maxItems": true,
 }
 
 // structuredSubset copies a canonical schema without those keywords. It descends only where a
-// schema nests one (properties, items, additionalProperties), so a property named "format" and data
+// schema nests one (properties, items), so a property named "format" and data
 // in "default" or "examples" are kept as written.
 func structuredSubset(s map[string]any) map[string]any {
 	sub := func(v any) any {
@@ -386,7 +401,7 @@ func structuredSubset(s map[string]any) map[string]any {
 				}
 				v = kept
 			}
-		case "items", "additionalProperties":
+		case "items":
 			v = sub(v)
 		}
 		out[k] = v

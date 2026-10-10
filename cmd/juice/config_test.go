@@ -508,18 +508,20 @@ func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
 // llmEndpoints is a pair of endpoint files as Load reads them: one local and free, one metered.
 func llmEndpoints() map[string]llm.Endpoint {
 	return map[string]llm.Endpoint{
-		"local": {Protocol: llm.ProtocolOpenAI, URL: "http://localhost:1/v1", Models: map[string]llm.Model{
-			"chat": {ID: "c", Kind: llm.KindChat}, "vec": {ID: "v", Kind: llm.KindEmbed}}},
-		"cloud": {Protocol: llm.ProtocolAnthropic, URL: "https://x/v1", KeyRequired: true, Models: map[string]llm.Model{
-			"big": {ID: "b", Kind: llm.KindChat}, "small": {ID: "s", Kind: llm.KindChat}}},
+		"local": {Protocol: llm.ProtocolOpenAI, URL: "http://localhost:1/v1", Models: []llm.Model{
+			{Name: "chat", ID: "c", Kind: llm.KindChat}, {Name: "vec", ID: "v", Kind: llm.KindEmbed}}},
+		"cloud": {Protocol: llm.ProtocolAnthropic, URL: "https://x/v1", KeyRequired: true, Models: []llm.Model{
+			{Name: "big", ID: "b", Kind: llm.KindChat}, {Name: "small", ID: "s", Kind: llm.KindChat}}},
 	}
 }
 
 // A configuration that cannot mean what it says is refused before anything is served, naming the
 // key to correct (D17); one that can is accepted, a metered endpoint stating every model's price.
 func TestLLMConfigCheck(t *testing.T) {
-	ok := NativeLLMConfig{Chat: "cloud/big", Decide: "local/chat", Embed: "local/vec", Endpoints: map[string]LLMEndpointConfig{
-		"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 0}}}}
+	cloud := func() []LLMEndpointConfig {
+		return []LLMEndpointConfig{{Name: "cloud", Key: "k", Prices: []LLMPrice{{"big", 20}, {"small", 0}}}}
+	}
+	ok := NativeLLMConfig{Chat: "cloud/big", Decide: "local/chat", Embed: "local/vec", Endpoints: cloud()}
 	if err := ok.check(llmEndpoints()); err != nil {
 		t.Fatalf("a sound configuration was refused: %v", err)
 	}
@@ -535,23 +537,25 @@ func TestLLMConfigCheck(t *testing.T) {
 		{"chat bound to an embed model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/vec" }},
 		{"embed bound to a chat model", "native.llm.embed", func(c *NativeLLMConfig) { c.Embed = "local/chat" }},
 		{"json bound to an embed model", "native.llm.json", func(c *NativeLLMConfig) { c.JSON = "local/vec" }},
-		{"bound endpoint lacks its key", "native.llm.endpoints.cloud.key", func(c *NativeLLMConfig) {
-			c.Endpoints = map[string]LLMEndpointConfig{"cloud": {Prices: map[string]int64{"big": 1, "small": 1}}}
+		{"bound endpoint lacks its key", `"cloud/big", whose endpoint needs its key`, func(c *NativeLLMConfig) { c.Endpoints[0].Key = "" }},
+		{"settings for no endpoint", `names "ghost", which is no endpoint file`, func(c *NativeLLMConfig) {
+			c.Endpoints = append(c.Endpoints, LLMEndpointConfig{Name: "ghost"})
 		}},
-		{"settings for no endpoint", "native.llm.endpoints.ghost", func(c *NativeLLMConfig) {
-			c.Endpoints["ghost"] = LLMEndpointConfig{}
+		{"an endpoint twice", `names "cloud" twice`, func(c *NativeLLMConfig) { c.Endpoints = append(c.Endpoints, c.Endpoints[0]) }},
+		{"price for no model", "prices cloud/huge, which no endpoint file holds", func(c *NativeLLMConfig) {
+			c.Endpoints[0].Prices = append(c.Endpoints[0].Prices, LLMPrice{"huge", 1})
 		}},
-		{"price for no model", "native.llm.endpoints.cloud.prices.huge", func(c *NativeLLMConfig) {
-			c.Endpoints["cloud"].Prices["huge"] = 1
+		{"a model priced twice", "prices cloud/big twice", func(c *NativeLLMConfig) {
+			c.Endpoints[0].Prices = append(c.Endpoints[0].Prices, LLMPrice{"big", 1})
 		}},
-		{"negative price", "must not be negative", func(c *NativeLLMConfig) { c.Endpoints["cloud"].Prices["big"] = -1 }},
-		{"metered model without a price", "native.llm.endpoints.cloud.prices.small", func(c *NativeLLMConfig) {
-			delete(c.Endpoints["cloud"].Prices, "small")
+		{"negative price", "the price of cloud/big must not be negative", func(c *NativeLLMConfig) { c.Endpoints[0].Prices[0].Price = -1 }},
+		{"metered model without a price", "must price cloud/small", func(c *NativeLLMConfig) {
+			c.Endpoints[0].Prices = c.Endpoints[0].Prices[:1]
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := ok
-			c.Endpoints = map[string]LLMEndpointConfig{"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 0}}}
+			c.Endpoints = cloud()
 			tc.edit(&c)
 			if err := c.check(llmEndpoints()); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want a refusal naming %q", err, tc.want)
@@ -563,8 +567,8 @@ func TestLLMConfigCheck(t *testing.T) {
 // A language-model native costs what the model behind it does: the canonical natives their bound
 // model's price, a generated model's natives its own, and an unbound native nothing.
 func TestLLMNativePrices(t *testing.T) {
-	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", JSON: "cloud/small", Decide: "cloud/small", Endpoints: map[string]LLMEndpointConfig{
-		"cloud": {Key: "k", Prices: map[string]int64{"big": 20, "small": 3}}}}}
+	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", JSON: "cloud/small", Decide: "cloud/small", Endpoints: []LLMEndpointConfig{
+		{Name: "cloud", Key: "k", Prices: []LLMPrice{{"big", 20}, {"small", 3}}}}}}
 	for name, want := range map[string]int64{
 		"llm/chat": 20, "llm/json": 3, "llm/decide": 3, "llm/embed": 0,
 		"llm/cloud/big/chat": 20, "llm/cloud/big/json": 20, "llm/cloud/big/decide": 20, "llm/cloud/small/chat": 3, "llm/local/vec/embed": 0,
@@ -582,14 +586,14 @@ func TestJSONSchemaKinds(t *testing.T) {
 		X float64 `json:"x" doc:"d"`
 	}
 	type probe struct {
-		S    string           `json:"s" doc:"a string" enum:"a,b"`
-		N    int64            `json:"n" doc:"d"`
-		B    bool             `json:"b" doc:"d"`
-		L    []string         `json:"l" doc:"d"`
-		M    map[string]inner `json:"m" doc:"d"`
-		In   inner            `json:"in" doc:"d"`
-		Ask  string           `json:"ask" doc:"d" default:"-"`
-		Skip string           `json:"-"`
+		S    string   `json:"s" doc:"a string" enum:"a,b"`
+		N    int64    `json:"n" doc:"d"`
+		B    bool     `json:"b" doc:"d"`
+		L    []string `json:"l" doc:"d"`
+		E    []inner  `json:"e" doc:"d"`
+		In   inner    `json:"in" doc:"d"`
+		Ask  string   `json:"ask" doc:"d" default:"-"`
+		Skip string   `json:"-"`
 	}
 	got, err := jsonSchema("probe", probe{S: "a", N: 7})
 	if err != nil {
@@ -610,8 +614,8 @@ func TestJSONSchemaKinds(t *testing.T) {
 		"n": `{"default":7,"description":"d","type":"integer"}`,
 		"b": `{"default":false,"description":"d","type":"boolean"}`,
 		"l": `{"default":[],"description":"d","items":{"type":"string"},"type":"array"}`,
-		// A map entry is the author's, so its fields carry no default.
-		"m":   `{"additionalProperties":{"additionalProperties":false,"properties":{"x":{"description":"d","type":"number"}},"type":"object"},"default":{},"description":"d","properties":{},"type":"object"}`,
+		// A list entry is the author's, so its fields carry no default.
+		"e":   `{"default":[],"description":"d","items":{"additionalProperties":false,"properties":{"x":{"description":"d","type":"number"}},"type":"object"},"type":"array"}`,
 		"in":  `{"additionalProperties":false,"description":"d","properties":{"x":{"default":0,"description":"d","type":"number"}},"type":"object"}`,
 		"ask": `{"description":"d","type":"string"}`,
 	}
@@ -636,8 +640,9 @@ func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
 		"unsupported": struct {
 			C chan int `json:"c" doc:"d"`
 		}{},
-		"map key": struct {
-			M map[int]string `json:"m" doc:"d"`
+		// Named entries are a list of objects carrying the name, as in every action schema.
+		"map": struct {
+			M map[string]string `json:"m" doc:"d"`
 		}{},
 		// A pointer says null, which a setting never means: absent keeps the default.
 		"pointer": struct {

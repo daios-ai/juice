@@ -431,10 +431,10 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
-		"up":    `{"protocol":"openai","url":"` + up.URL + `","models":{"c":{"id":"c1","kind":"chat"},"e":{"id":"e1","kind":"embed"}}}`,
-		"down":  `{"protocol":"openai","url":"` + down.URL + `","models":{"c":{"id":"c2","kind":"chat"},"e":{"id":"e2","kind":"embed"}}}`,
-		"cloud": `{"protocol":"anthropic","url":"https://x","key_required":true,"models":{"c":{"id":"c3","kind":"chat"}}}`,
-		"empty": `{"protocol":"openai","url":"https://y","key_required":true,"models":{}}`,
+		"up":    `{"protocol":"openai","url":"` + up.URL + `","models":[{"name":"c","id":"c1","kind":"chat"},{"name":"e","id":"e1","kind":"embed"}]}`,
+		"down":  `{"protocol":"openai","url":"` + down.URL + `","models":[{"name":"c","id":"c2","kind":"chat"},{"name":"e","id":"e2","kind":"embed"}]}`,
+		"cloud": `{"protocol":"anthropic","url":"https://x","key_required":true,"models":[{"name":"c","id":"c3","kind":"chat"}]}`,
+		"empty": `{"protocol":"openai","url":"https://y","key_required":true,"models":[]}`,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)

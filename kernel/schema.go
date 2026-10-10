@@ -58,7 +58,7 @@ var typeKeys = map[string]map[string]bool{
 	"integer": {"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true},
 	"number":  {"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true},
 	"boolean": {},
-	"array":   {"items": true, "minItems": true, "maxItems": true, "uniqueItems": true},
+	"array":   {"items": true, "minItems": true, "maxItems": true},
 	"object":  {"properties": true, "required": true, "additionalProperties": true},
 }
 
@@ -300,11 +300,17 @@ func (n *normalizer) typed(s map[string]any, path string, depth int, top bool) (
 		n.note(path, "const folded into a one-value enum")
 	}
 	raw, has := s["type"]
-	if !has {
-		_, hasProps := s["properties"]
-		if !top && !hasProps {
-			return nil, ErrSchemaViolation.Wrapf("%s: type is required", path)
+	if _, hasProps := s["properties"]; !has && !top && !hasProps {
+		// No type and nothing but annotations is `{}`, a leaf for any JSON value (D4); a limit
+		// without a type would hold for some types and not others.
+		for k := range s {
+			if !annotationKeys[k] {
+				return nil, ErrSchemaViolation.Wrapf("%s: type is required beside %q", path, k)
+			}
 		}
+		return s, checkAnnotations(s, path)
+	}
+	if !has {
 		s["type"] = "object"
 		raw = "object"
 	}
@@ -332,7 +338,23 @@ func (n *normalizer) typed(s map[string]any, path string, depth int, top bool) (
 	}
 	switch t {
 	case "string":
-		return s, checkString(s, path)
+		if err := checkString(s, path); err != nil {
+			return nil, err
+		}
+		// A value listed twice would be chosen two ways; listing it once admits the same values.
+		if enum, ok := s["enum"].([]any); ok {
+			var once []any
+			for _, e := range enum {
+				if !slices.Contains(once, e) {
+					once = append(once, e)
+				}
+			}
+			if len(once) < len(enum) {
+				s["enum"] = once
+				n.note(path, "repeated enum values listed once")
+			}
+		}
+		return s, nil
 	case "integer", "number":
 		return s, checkNumber(s, path)
 	case "array":
@@ -351,11 +373,9 @@ func checkAnnotations(s map[string]any, path string) error {
 			}
 		}
 	}
-	for _, k := range []string{"deprecated", "uniqueItems"} {
-		if v, ok := s[k]; ok {
-			if _, isBool := v.(bool); !isBool {
-				return ErrSchemaViolation.Wrapf("%s: %s must be true or false", path, k)
-			}
+	if v, ok := s["deprecated"]; ok {
+		if _, isBool := v.(bool); !isBool {
+			return ErrSchemaViolation.Wrapf("%s: deprecated must be true or false", path)
 		}
 	}
 	if v, ok := s["examples"]; ok {
@@ -479,7 +499,7 @@ func (n *normalizer) object(s map[string]any, path string, depth int) (map[strin
 	switch ap := s["additionalProperties"].(type) {
 	case nil:
 		if _, present := s["additionalProperties"]; present {
-			return nil, ErrSchemaViolation.Wrapf("%s: additionalProperties must be false or a schema", path)
+			return nil, ErrSchemaViolation.Wrapf("%s: additionalProperties must be false", path)
 		}
 		// Declared properties close an object, as they always have here; saying so is what strict
 		// decoders require. No declaration is an open object.
@@ -493,30 +513,24 @@ func (n *normalizer) object(s map[string]any, path string, depth int) (map[strin
 			}
 			delete(s, "additionalProperties")
 		}
-	case map[string]any:
-		out, err := n.node(ap, path+".additionalProperties", depth+1, false)
-		if err != nil {
-			return nil, err
-		}
-		s["additionalProperties"] = out
 	default:
-		return nil, ErrSchemaViolation.Wrapf("%s: additionalProperties must be false or a schema", path)
+		// A schema here is a map, whose entries the writer names: no form lists its fields and
+		// strict tool calling refuses it. Named entries are a list of objects carrying the name.
+		return nil, ErrSchemaViolation.Wrapf("%s: additionalProperties must be false: named entries are a list of objects, each carrying its name", path)
+	}
+	// Declared properties close an object (above), so an open one declares none.
+	if _, closed := s["additionalProperties"]; !closed {
+		delete(s, "properties")
+		return s, nil
 	}
 	// A closed object requiring a name it does not declare admits no value at all.
-	if ap, isBool := s["additionalProperties"].(bool); isBool && !ap {
-		names, _ := s["required"].([]any)
-		for _, name := range names {
-			if _, declared := props[name.(string)]; !declared {
-				return nil, ErrSchemaViolation.Wrapf("%s: required names %q, which is not a declared property", path, name)
-			}
+	names, _ := s["required"].([]any)
+	for _, name := range names {
+		if _, declared := props[name.(string)]; !declared {
+			return nil, ErrSchemaViolation.Wrapf("%s: required names %q, which is not a declared property", path, name)
 		}
 	}
-	_, closed := s["additionalProperties"]
-	if len(props) > 0 || closed {
-		s["properties"] = props
-	} else {
-		delete(s, "properties")
-	}
+	s["properties"] = props
 	return s, nil
 }
 
@@ -588,12 +602,8 @@ func checkAnnotationValues(s map[string]any, path string) error {
 			return err
 		}
 	}
-	for _, k := range []string{"items", "additionalProperties"} {
-		if child, ok := s[k].(map[string]any); ok {
-			if err := checkAnnotationValues(child, path+"."+k); err != nil {
-				return err
-			}
-		}
+	if items, ok := s["items"].(map[string]any); ok {
+		return checkAnnotationValues(items, path+".items")
 	}
 	return nil
 }
@@ -771,9 +781,10 @@ func validateObject(schema, obj map[string]any, path string) error {
 			}
 		}
 	}
-	// A key nothing declares: additionalProperties decides — false refuses it, a schema checks it.
-	// Without the keyword, declared properties close the object and none leaves it open.
-	extra, hasExtra := schema["additionalProperties"]
+	// A key nothing declares: declared properties or additionalProperties false close the object,
+	// and an object declaring neither is open.
+	_, closed := schema["additionalProperties"]
+	closed = closed || len(props) > 0
 	keys := make([]string, 0, len(obj))
 	for k := range obj {
 		keys = append(keys, k)
@@ -783,19 +794,8 @@ func validateObject(schema, obj map[string]any, path string) error {
 		if _, declared := props[k]; declared || reqSet[k] {
 			continue
 		}
-		switch ap := extra.(type) {
-		case map[string]any:
-			if err := validateValue(ap, obj[k], fieldPath(path, k)); err != nil {
-				return err
-			}
-		case bool:
-			if !ap {
-				return ErrSchemaViolation.Wrapf("field %s: undeclared key %q", path, k)
-			}
-		default:
-			if !hasExtra && len(props) > 0 {
-				return ErrSchemaViolation.Wrapf("field %s: undeclared key %q", path, k)
-			}
+		if closed {
+			return ErrSchemaViolation.Wrapf("field %s: undeclared key %q", path, k)
 		}
 	}
 	return nil
@@ -809,19 +809,9 @@ func validateArray(schema map[string]any, arr []any, path string) error {
 		return ErrSchemaViolation.Wrapf("field %s: allows at most %v items", path, max)
 	}
 	items, _ := schema["items"].(map[string]any)
-	seen := map[string]bool{}
-	unique, _ := schema["uniqueItems"].(bool)
 	for i, elem := range arr {
-		at := fmt.Sprintf("%s[%d]", path, i)
-		if err := validateValue(items, elem, at); err != nil {
+		if err := validateValue(items, elem, fmt.Sprintf("%s[%d]", path, i)); err != nil {
 			return err
-		}
-		if unique {
-			b, _ := CanonicalJSON(elem)
-			if seen[string(b)] {
-				return ErrSchemaViolation.Wrapf("field %s: duplicates an earlier item", at)
-			}
-			seen[string(b)] = true
 		}
 	}
 	return nil

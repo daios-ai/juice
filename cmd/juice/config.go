@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,28 +26,48 @@ import (
 // being a file of $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this
 // kernel keeps about an endpoint: its key, and what each of its models costs a caller.
 type NativeLLMConfig struct {
-	Chat      string                       `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from $JUICE_HOME/llm/; empty leaves it unbound."`
-	JSON      string                       `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Decide    string                       `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Embed     string                       `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
-	Endpoints map[string]LLMEndpointConfig `json:"endpoints" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
+	Chat      string              `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from $JUICE_HOME/llm/; empty leaves it unbound."`
+	JSON      string              `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
+	Decide    string              `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
+	Embed     string              `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
+	Endpoints []LLMEndpointConfig `json:"endpoints" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
 }
 
 // LLMEndpointConfig is one endpoint's key and its models' prices.
 type LLMEndpointConfig struct {
-	Key    string           `json:"key,omitempty" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
-	Prices map[string]int64 `json:"prices,omitempty" doc:"Price of a call, in base units, per model name. A metered endpoint must state every model's, 0 included."`
+	Name   string     `json:"name" doc:"The endpoint: the name of its file in $JUICE_HOME/llm/, without .json."`
+	Key    string     `json:"key,omitempty" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
+	Prices []LLMPrice `json:"prices,omitempty" doc:"What a call to each model costs. A metered endpoint must state every model's, 0 included."`
+}
+
+// LLMPrice is what a call to one model of an endpoint costs a caller.
+type LLMPrice struct {
+	Model string `json:"model" doc:"The model's name in the endpoint file."`
+	Price int64  `json:"price" doc:"Price of a call, in base units."`
+}
+
+// endpoint is what this kernel keeps about the endpoint named name; none is the zero value.
+func (c NativeLLMConfig) endpoint(name string) LLMEndpointConfig {
+	i := slices.IndexFunc(c.Endpoints, func(e LLMEndpointConfig) bool { return e.Name == name })
+	if i < 0 {
+		return LLMEndpointConfig{}
+	}
+	return c.Endpoints[i]
 }
 
 // price is what a call to the model ref (<endpoint>/<model>) costs; an unbound or unpriced one is 0.
 func (c NativeLLMConfig) price(ref string) int64 {
 	endpoint, model, _ := strings.Cut(ref, "/")
-	return c.Endpoints[endpoint].Prices[model]
+	prices := c.endpoint(endpoint).Prices
+	if i := slices.IndexFunc(prices, func(p LLMPrice) bool { return p.Model == model }); i >= 0 {
+		return prices[i].Price
+	}
+	return 0
 }
 
 // check refuses, naming the key, a configuration that cannot mean what it says (D17): a binding to
 // a model no endpoint file holds, to one of the wrong kind, or to one whose endpoint lacks its key;
-// settings for an endpoint or model that does not exist; a negative price; and a metered model —
+// settings for an endpoint or model that does not exist, or for one twice; a negative price; and a metered model —
 // one of an endpoint holding its required key — whose price is stated nowhere, since at price 0 any
 // caller would spend the operator's bill without bound.
 func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
@@ -58,33 +79,44 @@ func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
 			continue
 		}
 		endpoint, name, _ := strings.Cut(b.ref, "/")
-		model, ok := eps[endpoint].Models[name]
+		model, ok := eps[endpoint].Model(name)
 		switch {
 		case !ok:
 			return fmt.Errorf("native.llm.%s names %q, which no endpoint file in %s holds", b.key, b.ref, llmDir())
 		case model.Kind != b.kind:
 			return fmt.Errorf("native.llm.%s names %q, a %s model; it takes a %s model", b.key, b.ref, model.Kind, b.kind)
-		case eps[endpoint].KeyRequired && c.Endpoints[endpoint].Key == "":
-			return fmt.Errorf("native.llm.%s names %q, whose endpoint needs native.llm.endpoints.%s.key", b.key, b.ref, endpoint)
+		case eps[endpoint].KeyRequired && c.endpoint(endpoint).Key == "":
+			return fmt.Errorf("native.llm.%s names %q, whose endpoint needs its key under native.llm.endpoints", b.key, b.ref)
 		}
 	}
-	for endpoint, ec := range c.Endpoints {
-		ep, ok := eps[endpoint]
-		if !ok {
-			return fmt.Errorf("native.llm.endpoints.%s names no endpoint file in %s", endpoint, llmDir())
+	listed := map[string]bool{}
+	for _, ec := range c.Endpoints {
+		ep, ok := eps[ec.Name]
+		switch {
+		case !ok:
+			return fmt.Errorf("native.llm.endpoints names %q, which is no endpoint file in %s", ec.Name, llmDir())
+		case listed[ec.Name]:
+			return fmt.Errorf("native.llm.endpoints names %q twice", ec.Name)
 		}
-		for name, price := range ec.Prices {
-			if _, ok := ep.Models[name]; !ok {
-				return fmt.Errorf("native.llm.endpoints.%s.prices.%s names no model of that endpoint", endpoint, name)
+		listed[ec.Name] = true
+		priced := map[string]bool{}
+		for _, p := range ec.Prices {
+			ref := ec.Name + "/" + p.Model
+			if _, ok := ep.Model(p.Model); !ok {
+				return fmt.Errorf("native.llm.endpoints prices %s, which no endpoint file holds", ref)
 			}
-			if price < 0 {
-				return fmt.Errorf("native.llm.endpoints.%s.prices.%s must not be negative", endpoint, name)
+			if priced[p.Model] {
+				return fmt.Errorf("native.llm.endpoints prices %s twice", ref)
 			}
+			if p.Price < 0 {
+				return fmt.Errorf("native.llm.endpoints: the price of %s must not be negative", ref)
+			}
+			priced[p.Model] = true
 		}
 		if ep.KeyRequired && ec.Key != "" {
-			for name := range ep.Models {
-				if _, ok := ec.Prices[name]; !ok {
-					return fmt.Errorf("native.llm.endpoints.%s.prices.%s is required: the endpoint is metered, so each of its models states its price, 0 included", endpoint, name)
+			for _, m := range ep.Models {
+				if !priced[m.Name] {
+					return fmt.Errorf("native.llm.endpoints must price %s/%s: the endpoint is metered, so each of its models states its price, 0 included", ec.Name, m.Name)
 				}
 			}
 		}
@@ -237,7 +269,7 @@ func DefaultServerConfig() ServerConfig {
 		Schema: "../../schemas/config.schema.json", // kernels/<world>/config.json → schemas/
 		Native: NativeConfig{
 			LLM: NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic",
-				Endpoints: map[string]LLMEndpointConfig{}},
+				Endpoints: []LLMEndpointConfig{}},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
@@ -604,8 +636,9 @@ func writeSchemas() error {
 // validation: the decoders' own validators keep every rule across fields. A property's description
 // is its field's doc tag, its allowed values the enum tag, and its default the value v holds there
 // — every setting of v states one, zero included, unless tagged default:"-" (a value first boot
-// asks for or mints). Inside a map or list entry there is no default: an entry is the author's,
-// and its schema is built from no template. A field with no json or doc tag, or a kind outside
+// asks for or mints). Inside a list entry there is no default: an entry is the author's, and its
+// schema is built from no template. Named entries are a list of objects carrying the name, never a
+// map, so these files hold to the same subset as every action. A field with no json or doc tag, or a kind outside
 // these, is an error rather than a silent gap, so a setting added without a description cannot ship.
 func jsonSchema(title string, v any) (map[string]any, error) {
 	raw, err := schemaOf(reflect.ValueOf(v), true)
@@ -622,7 +655,7 @@ func jsonSchema(title string, v any) (map[string]any, error) {
 }
 
 // schemaOf describes v's type; template says whether v holds defaults, as a configuration does and
-// a map or list entry does not.
+// a list entry does not.
 func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 	t := v.Type()
 	switch t.Kind() {
@@ -635,18 +668,12 @@ func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 		return map[string]any{"type": "integer"}, nil
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}, nil
-	case reflect.Slice, reflect.Map:
+	case reflect.Slice:
 		elem, err := schemaOf(reflect.Zero(t.Elem()), false)
 		if err != nil {
 			return nil, err
 		}
-		if t.Kind() == reflect.Slice {
-			return map[string]any{"type": "array", "items": elem}, nil
-		}
-		if t.Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("%s: a map key must be a string", t)
-		}
-		return map[string]any{"type": "object", "additionalProperties": elem}, nil
+		return map[string]any{"type": "array", "items": elem}, nil
 	case reflect.Struct:
 		props := map[string]any{}
 		for i := 0; i < t.NumField(); i++ {
@@ -675,8 +702,6 @@ func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 				prop["default"] = fv.Interface()
 				if fv.Kind() == reflect.Slice && fv.IsNil() {
 					prop["default"] = []any{} // Go writes a nil list as null, which no list is
-				} else if fv.Kind() == reflect.Map && fv.IsNil() {
-					prop["default"] = map[string]any{}
 				}
 			}
 			props[key] = prop

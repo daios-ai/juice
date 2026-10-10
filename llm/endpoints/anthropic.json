@@ -3,5 +3,5 @@
   "protocol": "anthropic",
   "url": "https://api.anthropic.com/v1",
   "key_required": true,
-  "models": {}
+  "models": []
 }

@@ -2,5 +2,5 @@
   "$schema": "../schemas/llm-endpoint.schema.json",
   "protocol": "openai",
   "url": "http://localhost:1234/v1",
-  "models": {}
+  "models": []
 }

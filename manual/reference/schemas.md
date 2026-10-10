@@ -57,7 +57,9 @@ such as `send-draft` for `mail/send-draft`. Give them a proper title with
 ## What a schema may contain
 
 The top level of both schemas is always an object: an action takes named
-arguments and returns named results. Every field inside has a type.
+arguments and returns named results. Every field inside has a type, or is `{}`
+with at most a title, description, default or examples, which accepts any JSON
+value.
 
 | Type | Keywords it accepts |
 |---|---|
@@ -65,8 +67,8 @@ arguments and returns named results. Every field inside has a type.
 | `string` | `enum` (a list of strings), `format`, `minLength`, `maxLength`, `pattern` |
 | `integer`, `number` | `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf` |
 | `boolean` | — |
-| `array` | `items` (required), `minItems`, `maxItems`, `uniqueItems` |
-| `object` | `properties`, `required`, `additionalProperties` |
+| `array` | `items` (required), `minItems`, `maxItems` |
+| `object` | `properties`, `required`, `additionalProperties` (only `false`) |
 
 - **A choice** is a string with an `enum`: `{"type": "string", "enum": ["c", "f"]}`.
   It is the only kind of choice a schema offers.
@@ -78,8 +80,11 @@ arguments and returns named results. Every field inside has a type.
   have been rounded.
 - **An object with declared properties is closed**: a key it does not declare is
   refused, and the stored schema says so with `"additionalProperties": false`.
-  An object with no declared properties accepts any keys, and one whose
-  `additionalProperties` is a schema accepts any key whose value matches it.
+  An object with no declared properties accepts any keys and any values.
+  Entries whose names the caller chooses are a list of objects, each carrying
+  its name: `[{"name": "env", "value": "prod"}]`, not `{"env": "prod"}`.
+- **Leaving an optional field out is not the same as sending it empty**: `{}`,
+  `{"note": ""}` and `{"note": null}` are three different arguments.
 - **`format`** describes a string, such as `date-time` or `email`, and is not
   checked.
 - **`multipleOf`** is checked exactly as written in decimal: `0.3` is a multiple
@@ -102,6 +107,7 @@ and stores the form above, so every action reads alike:
 |---|---|
 | `"nullable": true` (OpenAPI 3.0) | `"type": [T, "null"]` |
 | `"const": "x"` on a string | `"enum": ["x"]` |
+| a value listed twice in an `enum` | the value listed once |
 | `"$ref": "#/$defs/X"` | the definition, written in place |
 | `"example": x` | `"examples": [x]` |
 | an object with properties | the same, with `"additionalProperties": false` |
@@ -128,7 +134,8 @@ action, with an error naming where it is:
   `"minLength": 2` beside a reference requiring 5;
 - an `enum` of numbers, a `const` that is not a string, or a `const` whose
   value is not in the field's `enum`;
-- a field with no `type`;
+- a field with a limit, such as `minLength`, but no `type`;
+- `uniqueItems`, and `additionalProperties` given as a schema;
 - `not`, `if`/`then`/`else`, `dependentRequired`, `dependentSchemas`,
   `patternProperties`, `propertyNames`, `prefixItems`, `contains` and the
   `unevaluated` keywords;
@@ -160,9 +167,9 @@ schema with `action update` and enable it again.
     "days":  {"type": "integer", "minimum": 1, "maximum": 7, "default": 3,
               "description": "Days ahead"},
     "units": {"type": ["string", "null"], "enum": ["c", "f", null],
-              "description": "Temperature units; empty means the city's own"}
+              "description": "Temperature units; null means the city's own"}
   },
-  "required": ["city"],
+  "required": ["city", "units"],
   "additionalProperties": false
 }
 ```
