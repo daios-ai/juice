@@ -22,55 +22,40 @@ import (
 )
 
 // NativeLLMConfig binds the language-model natives (D17). Chat, JSON, Decide and Embed each name the
-// model llm/chat, llm/json, llm/decide and llm/embed call, as <endpoint>/<model> — an endpoint
-// being a file of $JUICE_HOME/llm/ — and "" leaves that native unbound. Endpoints holds what this
-// kernel keeps about an endpoint: its key, and what each of its models costs a caller.
+// model llm/chat, llm/json, llm/decide and llm/embed call, as <endpoint>/<model>, and "" leaves
+// that native unbound. Endpoints are the providers this kernel knows, each with its key and models.
 type NativeLLMConfig struct {
-	Chat      string              `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from $JUICE_HOME/llm/; empty leaves it unbound."`
-	JSON      string              `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Decide    string              `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Embed     string              `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
-	Endpoints []LLMEndpointConfig `json:"endpoints" doc:"Per endpoint file: its key and its models' prices. No command-line flag."`
+	Chat      string         `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from endpoints; empty leaves it unbound."`
+	JSON      string         `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
+	Decide    string         `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
+	Embed     string         `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
+	Endpoints []llm.Endpoint `json:"endpoints" doc:"The language-model providers this kernel knows, each switched on or off, with its key and its models' prices. No command-line flag."`
 }
 
-// LLMEndpointConfig is one endpoint's key and its models' prices.
-type LLMEndpointConfig struct {
-	Name   string     `json:"name" doc:"The endpoint: the name of its file in $JUICE_HOME/llm/, without .json."`
-	Key    string     `json:"key,omitempty" doc:"The provider's API key. An endpoint that requires one is used only once it is set."`
-	Prices []LLMPrice `json:"prices,omitempty" doc:"What a call to each model costs. A metered endpoint must state every model's, 0 included."`
-}
-
-// LLMPrice is what a call to one model of an endpoint costs a caller.
-type LLMPrice struct {
-	Model string `json:"model" doc:"The model's name in the endpoint file."`
-	Price int64  `json:"price" doc:"Price of a call, in base units."`
-}
-
-// endpoint is what this kernel keeps about the endpoint named name; none is the zero value.
-func (c NativeLLMConfig) endpoint(name string) LLMEndpointConfig {
-	i := slices.IndexFunc(c.Endpoints, func(e LLMEndpointConfig) bool { return e.Name == name })
+// model finds the model ref (<endpoint>/<model>) and its endpoint.
+func (c NativeLLMConfig) model(ref string) (llm.Endpoint, llm.Model, bool) {
+	endpoint, name, _ := strings.Cut(ref, "/")
+	i := slices.IndexFunc(c.Endpoints, func(e llm.Endpoint) bool { return e.Name == endpoint })
 	if i < 0 {
-		return LLMEndpointConfig{}
+		return llm.Endpoint{}, llm.Model{}, false
 	}
-	return c.Endpoints[i]
+	m, ok := c.Endpoints[i].Model(name)
+	return c.Endpoints[i], m, ok
 }
 
-// price is what a call to the model ref (<endpoint>/<model>) costs; an unbound or unpriced one is 0.
+// price is what a call to the model ref costs; an unbound one is 0.
 func (c NativeLLMConfig) price(ref string) int64 {
-	endpoint, model, _ := strings.Cut(ref, "/")
-	prices := c.endpoint(endpoint).Prices
-	if i := slices.IndexFunc(prices, func(p LLMPrice) bool { return p.Model == model }); i >= 0 {
-		return prices[i].Price
-	}
-	return 0
+	_, m, _ := c.model(ref)
+	return m.Price
 }
 
-// check refuses, naming the key, a configuration that cannot mean what it says (D17): a binding to
-// a model no endpoint file holds, to one of the wrong kind, or to one whose endpoint lacks its key;
-// settings for an endpoint or model that does not exist, or for one twice; a negative price; and a metered model —
-// one of an endpoint holding its required key — whose price is stated nowhere, since at price 0 any
-// caller would spend the operator's bill without bound.
-func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
+// check refuses, naming the key, a configuration that cannot mean what it says (D17): endpoints the
+// schema admits but llm.ValidateEndpoints does not, and a binding to a model no endpoint holds, to
+// one whose endpoint is switched off, or to one of the wrong kind.
+func (c NativeLLMConfig) check() error {
+	if err := llm.ValidateEndpoints(c.Endpoints); err != nil {
+		return fmt.Errorf("native.llm.endpoints: %w", err)
+	}
 	for _, b := range []struct{ key, ref, kind string }{
 		{"chat", c.Chat, llm.KindChat}, {"json", c.JSON, llm.KindChat}, {"decide", c.Decide, llm.KindChat},
 		{"embed", c.Embed, llm.KindEmbed},
@@ -78,47 +63,14 @@ func (c NativeLLMConfig) check(eps map[string]llm.Endpoint) error {
 		if b.ref == "" {
 			continue
 		}
-		endpoint, name, _ := strings.Cut(b.ref, "/")
-		model, ok := eps[endpoint].Model(name)
+		ep, model, ok := c.model(b.ref)
 		switch {
 		case !ok:
-			return fmt.Errorf("native.llm.%s names %q, which no endpoint file in %s holds", b.key, b.ref, llmDir())
+			return fmt.Errorf("native.llm.%s names %q, which is no model in native.llm.endpoints", b.key, b.ref)
+		case !ep.Enabled:
+			return fmt.Errorf("native.llm.%s names %q, whose endpoint %s is not enabled", b.key, b.ref, ep.Name)
 		case model.Kind != b.kind:
 			return fmt.Errorf("native.llm.%s names %q, a %s model; it takes a %s model", b.key, b.ref, model.Kind, b.kind)
-		case eps[endpoint].KeyRequired && c.endpoint(endpoint).Key == "":
-			return fmt.Errorf("native.llm.%s names %q, whose endpoint needs its key under native.llm.endpoints", b.key, b.ref)
-		}
-	}
-	listed := map[string]bool{}
-	for _, ec := range c.Endpoints {
-		ep, ok := eps[ec.Name]
-		switch {
-		case !ok:
-			return fmt.Errorf("native.llm.endpoints names %q, which is no endpoint file in %s", ec.Name, llmDir())
-		case listed[ec.Name]:
-			return fmt.Errorf("native.llm.endpoints names %q twice", ec.Name)
-		}
-		listed[ec.Name] = true
-		priced := map[string]bool{}
-		for _, p := range ec.Prices {
-			ref := ec.Name + "/" + p.Model
-			if _, ok := ep.Model(p.Model); !ok {
-				return fmt.Errorf("native.llm.endpoints prices %s, which no endpoint file holds", ref)
-			}
-			if priced[p.Model] {
-				return fmt.Errorf("native.llm.endpoints prices %s twice", ref)
-			}
-			if p.Price < 0 {
-				return fmt.Errorf("native.llm.endpoints: the price of %s must not be negative", ref)
-			}
-			priced[p.Model] = true
-		}
-		if ep.KeyRequired && ec.Key != "" {
-			for _, m := range ep.Models {
-				if !priced[m.Name] {
-					return fmt.Errorf("native.llm.endpoints must price %s/%s: the endpoint is metered, so each of its models states its price, 0 included", ec.Name, m.Name)
-				}
-			}
 		}
 	}
 	return nil
@@ -269,7 +221,7 @@ func DefaultServerConfig() ServerConfig {
 		Schema: "../../schemas/config.schema.json", // kernels/<world>/config.json → schemas/
 		Native: NativeConfig{
 			LLM: NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic",
-				Endpoints: []LLMEndpointConfig{}},
+				Endpoints: llm.Presets()},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
@@ -299,24 +251,49 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
-// LoadConfig reads the JSON config file at path onto the defaults. Missing fields keep their
-// default; an absent file returns os.ErrNotExist, which is a first boot and nothing else, since
-// first boot is this file's only writer. An unknown field is refused rather than ignored: a
-// misspelled key reads exactly like one never written, and the setting the operator meant to
-// change silently keeps its default.
+// LoadConfig reads the JSON config file at path. The file is held to the schema serve publishes
+// for it, so a setting of the wrong shape, a null and an unknown key are each refused naming the
+// setting — an unknown key because a misspelled one reads exactly like one never written. It is
+// then laid over the defaults: a setting it omits keeps its default. An absent file returns
+// os.ErrNotExist, which is a first boot and nothing else, since first boot is its only writer.
 func LoadConfig(path string) (ServerConfig, error) {
 	cfg := DefaultServerConfig()
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err
 	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
+	var file, defaults any
+	if err := json.Unmarshal(raw, &file); err != nil {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
-	return cfg, nil
+	schema, err := jsonSchema("config.json", cfg)
+	if err != nil {
+		return cfg, err
+	}
+	if err := kernel.ValidateInput(schema, file); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
+	}
+	b, _ := json.Marshal(cfg)
+	_ = json.Unmarshal(b, &defaults)
+	merged, _ := json.Marshal(mergePatch(defaults, file))
+	var out ServerConfig
+	return out, json.Unmarshal(merged, &out)
+}
+
+// mergePatch lays patch over base as a JSON Merge Patch does (RFC 7396): objects merge key by key
+// and anything else, a list included, replaces — so a list in the file never inherits fields from
+// the default entry at its position, which decoding onto the defaults would. The schema has
+// refused every null, so none reaches it.
+func mergePatch(base, patch any) any {
+	b, isObject := base.(map[string]any)
+	p, patchIsObject := patch.(map[string]any)
+	if !isObject || !patchIsObject {
+		return patch
+	}
+	for k, v := range p {
+		b[k] = mergePatch(b[k], v)
+	}
+	return b
 }
 
 // applyEnvOverrides applies the spec-documented runtime overrides (§14). Everything
@@ -556,10 +533,6 @@ func worldsDir() string { return filepath.Join(juiceHome(), "worlds") }
 // schemasDir is where this installation keeps the JSON Schemas of the files an operator writes.
 func schemasDir() string { return filepath.Join(juiceHome(), "schemas") }
 
-// llmDir is where this installation keeps its language-model endpoint files, installed and owned
-// as worlds are (D17).
-func llmDir() string { return filepath.Join(juiceHome(), "llm") }
-
 // exists reports whether a path is there, which for a kernel's database is the whole of "has this
 // kernel been created".
 func exists(path string) bool {
@@ -588,8 +561,8 @@ func kernelsHere() []string {
 // ---- Schemas ----
 
 // writeSchemas writes into schemasDir the JSON Schema of each file an operator writes — a kernel's
-// config.json, a world file, a language-model endpoint file — so an editor completes, explains and
-// checks their keys as they are typed. They are rewritten on every serve, since a schema describes
+// config.json and a world file — so an editor completes, explains and checks their keys as they are
+// typed, and the kernel holds config.json to its own at boot. They are rewritten on every serve, since a schema describes
 // the binary that wrote it; each is written beside its name and renamed into place, so an editor
 // never reads half of one.
 func writeSchemas() error {
@@ -600,9 +573,8 @@ func writeSchemas() error {
 		title string
 		v     any
 	}{
-		"config":       {"A Juice kernel's config.json", DefaultServerConfig()},
-		"world":        {"A Juice world file", rail.World{}},
-		"llm-endpoint": {"A Juice language-model endpoint file", llm.Endpoint{}},
+		"config": {"A Juice kernel's config.json", DefaultServerConfig()},
+		"world":  {"A Juice world file", rail.World{}},
 	} {
 		schema, err := jsonSchema(file.title, file.v)
 		if err != nil {
@@ -637,7 +609,7 @@ func writeSchemas() error {
 // is its field's doc tag, its allowed values the enum tag, and its default the value v holds there
 // — every setting of v states one, zero included, unless tagged default:"-" (a value first boot
 // asks for or mints). Inside a list entry there is no default: an entry is the author's, and its
-// schema is built from no template. Named entries are a list of objects carrying the name, never a
+// schema is built from no template, so each of its fields is required unless tagged omitempty. Named entries are a list of objects carrying the name, never a
 // map, so these files hold to the same subset as every action. A field with no json or doc tag, or a kind outside
 // these, is an error rather than a silent gap, so a setting added without a description cannot ship.
 func jsonSchema(title string, v any) (map[string]any, error) {
@@ -676,14 +648,18 @@ func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 		return map[string]any{"type": "array", "items": elem}, nil
 	case reflect.Struct:
 		props := map[string]any{}
+		var required []string
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
 			if !f.IsExported() {
 				continue
 			}
-			key, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			key, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
 			if key == "-" {
 				continue
+			}
+			if !template && opts != "omitempty" {
+				required = append(required, key) // an entry has no defaults to fall back on
 			}
 			doc := f.Tag.Get("doc")
 			if key == "" || doc == "" {
@@ -706,7 +682,11 @@ func schemaOf(v reflect.Value, template bool) (map[string]any, error) {
 			}
 			props[key] = prop
 		}
-		return map[string]any{"type": "object", "properties": props, "additionalProperties": false}, nil
+		s := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
+		if len(required) > 0 {
+			s["required"] = required
+		}
+		return s, nil
 	}
 	return nil, fmt.Errorf("%s: no JSON Schema for this kind", t)
 }

@@ -22,7 +22,6 @@ import (
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
-	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/rail"
 	"github.com/go-chi/chi/v5"
@@ -206,11 +205,7 @@ func runServer(name string) error {
 	if err := rail.Install(worldsDir(), rail.Worlds()); err != nil {
 		return fmt.Errorf("worlds: %w", err)
 	}
-	// The language-model endpoints are files beside the worlds, installed and owned alike (D17).
-	if err := rail.Install(llmDir(), llm.Shipped()); err != nil {
-		return fmt.Errorf("llm endpoints: %w", err)
-	}
-	// Their schemas, and config.json's, describe this binary, so they are rewritten every serve.
+	// Their schema, and config.json's, describe this binary, so they are rewritten every serve.
 	if err := writeSchemas(); err != nil {
 		return fmt.Errorf("schemas: %w", err)
 	}

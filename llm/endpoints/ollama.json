@@ -1,9 +1,0 @@
-{
-  "$schema": "../schemas/llm-endpoint.schema.json",
-  "protocol": "openai",
-  "url": "http://localhost:11434/v1",
-  "models": [
-    {"name": "gemma", "id": "gemma4:26b", "kind": "chat"},
-    {"name": "nomic", "id": "nomic-embed-text", "kind": "embed"}
-  ]
-}

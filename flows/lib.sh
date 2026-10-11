@@ -64,12 +64,12 @@ new_dir() { mktemp -d -p "$_RUNROOT"; }
 # ---------------------------------------------------------------------------
 # write_config db [key=value ...]  — config.json next to db. The CLI dials the real bound address
 # via --server (see the wrappers below). log_format is json so `server.ready` is machine-readable.
-# Keys: fee_bps import_bps script_timeout_ms kernel_handle. `seed=` is not one of them: a meeting
+# Keys: fee_bps import_bps script_timeout_ms kernel_handle; llm=<json> is native.llm whole. `seed=` is not one of them: a meeting
 # point belongs to the world (D23), and seed_world below writes it into this kernel's world file.
 write_config() {
     local db="$1"; shift
     local fee_bps=0 script_timeout_ms=10000 kernel_handle="$KERNEL_NAME" remote_retry_interval_seconds=60 discovery_interval_seconds=300
-    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs="" metrics_listen_addr=""
+    local lottery=0 lottery_max=5000000 credit_limit=100000 import_bps=500 fed_listen_addrs="" metrics_listen_addr="" native=""
     local a
     for a in "$@"; do case "$a" in
         fee_bps=*)                       fee_bps=${a#*=} ;;
@@ -83,6 +83,7 @@ write_config() {
         import_bps=*)                    import_bps=${a#*=} ;;
         fed_listen_addrs=*)              fed_listen_addrs=${a#*=} ;;
         metrics_listen_addr=*)           metrics_listen_addr=${a#*=} ;;
+        llm=*)                           native="\"native\": {\"llm\": ${a#*=}},"  ;;
     esac; done
     # Whatever first boot minted stays minted: read it back before the file is replaced.
     local prev_key=""
@@ -96,7 +97,7 @@ except Exception:
     local fl_json="[]"
     [ -n "$fed_listen_addrs" ] && fl_json="[\"$fed_listen_addrs\"]"
     cat > "$(dirname "$db")/config.json" <<EOF
-{
+{ $native
   "script_timeout_ms": $script_timeout_ms,
   "script_memory_bytes": 67108864,
   "fee_bps": $fee_bps,

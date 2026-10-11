@@ -1,7 +1,0 @@
-{
-  "$schema": "../schemas/llm-endpoint.schema.json",
-  "protocol": "openai",
-  "url": "https://openrouter.ai/api/v1",
-  "key_required": true,
-  "models": []
-}

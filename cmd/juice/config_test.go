@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -141,6 +142,52 @@ func TestLoadConfig_UnknownKeyIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "wolrd") {
 		t.Errorf("the refusal must name the key: %v", err)
+	}
+}
+
+// config.json is held to the schema serve writes for it, each refusal naming the setting, and is
+// laid over the defaults so that a list replaces the default one rather than borrowing from it.
+func TestLoadConfig_HoldsTheFileToItsSchema(t *testing.T) {
+	load := func(body string) (ServerConfig, error) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return LoadConfig(path)
+	}
+	entry := `{"name":"mine","enabled":true,"protocol":"openai","url":"http://h/v1","models":[%s]}`
+	for name, tc := range map[string]struct{ body, want string }{
+		"a model without its price":  {`{"native":{"llm":{"endpoints":[` + fmt.Sprintf(entry, `{"name":"m","id":"x","kind":"chat"}`) + `]}}}`, `field native.llm.endpoints[0].models[0].price: required field missing`},
+		"the old object shape":       {`{"native":{"llm":{"endpoints":{"anthropic":{"key":"k"}}}}}`, "field native.llm.endpoints: expected array, got an object"},
+		"a null":                     {`{"lottery":null}`, "field lottery: must not be null"},
+		"an endpoint without switch": {`{"native":{"llm":{"endpoints":[{"name":"e","protocol":"openai","url":"u","models":[]}]}}}`, "enabled: required field missing"},
+	} {
+		if _, err := load(tc.body); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want a refusal saying %q", name, err, tc.want)
+		}
+	}
+	// Without the key, the shipped providers apply.
+	cfg, err := load(`{"fee_bps":100}`)
+	if err != nil || !reflect.DeepEqual(cfg.Native.LLM.Endpoints, llm.Presets()) || cfg.FeeBPS != 100 {
+		t.Errorf("a file without endpoints: %v %+v", err, cfg.Native.LLM.Endpoints)
+	}
+	// A list replaces the default one whole: the file's one entry omits key and max_tokens, and the
+	// preset at its position (ollama) gives it neither its models nor anything else.
+	cfg, err = load(`{"native":{"llm":{"endpoints":[` + fmt.Sprintf(entry, `{"name":"m","id":"x","kind":"chat","price":2}`) + `]}}}`)
+	want := []llm.Endpoint{{Name: "mine", Enabled: true, Protocol: "openai", URL: "http://h/v1", Models: []llm.Model{{Name: "m", ID: "x", Kind: "chat", Price: 2}}}}
+	if err != nil || !reflect.DeepEqual(cfg.Native.LLM.Endpoints, want) {
+		t.Errorf("a file's endpoints = %+v, %v; want exactly %+v", cfg.Native.LLM.Endpoints, err, want)
+	}
+}
+
+// A list in the file replaces the default whole: its entry never borrows a field the default entry
+// at its position has, as Go's decoder would by reusing that entry.
+func TestMergePatchReplacesLists(t *testing.T) {
+	base := map[string]any{"a": float64(1), "l": []any{map[string]any{"name": "preset", "key": "secret"}}}
+	patch := map[string]any{"l": []any{map[string]any{"name": "mine"}}}
+	want := map[string]any{"a": float64(1), "l": []any{map[string]any{"name": "mine"}}}
+	if got := mergePatch(base, patch); !reflect.DeepEqual(got, want) {
+		t.Errorf("mergePatch = %v, want %v", got, want)
 	}
 }
 
@@ -505,59 +552,45 @@ func TestNoFlagsLeavesTheConfigurationAlone(t *testing.T) {
 	}
 }
 
-// llmEndpoints is a pair of endpoint files as Load reads them: one local and free, one metered.
-func llmEndpoints() map[string]llm.Endpoint {
-	return map[string]llm.Endpoint{
-		"local": {Protocol: llm.ProtocolOpenAI, URL: "http://localhost:1/v1", Models: []llm.Model{
+// llmEndpoints is a pair of endpoints: one local and free, one metered.
+func llmEndpoints() []llm.Endpoint {
+	return []llm.Endpoint{
+		{Name: "local", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: "http://localhost:1/v1", Models: []llm.Model{
 			{Name: "chat", ID: "c", Kind: llm.KindChat}, {Name: "vec", ID: "v", Kind: llm.KindEmbed}}},
-		"cloud": {Protocol: llm.ProtocolAnthropic, URL: "https://x/v1", KeyRequired: true, Models: []llm.Model{
-			{Name: "big", ID: "b", Kind: llm.KindChat}, {Name: "small", ID: "s", Kind: llm.KindChat}}},
+		{Name: "cloud", Enabled: true, Protocol: llm.ProtocolAnthropic, URL: "https://x/v1", Key: "k", Models: []llm.Model{
+			{Name: "big", ID: "b", Kind: llm.KindChat, Price: 20}, {Name: "small", ID: "s", Kind: llm.KindChat, Price: 3}}},
 	}
 }
 
 // A configuration that cannot mean what it says is refused before anything is served, naming the
-// key to correct (D17); one that can is accepted, a metered endpoint stating every model's price.
+// key to correct (D17).
 func TestLLMConfigCheck(t *testing.T) {
-	cloud := func() []LLMEndpointConfig {
-		return []LLMEndpointConfig{{Name: "cloud", Key: "k", Prices: []LLMPrice{{"big", 20}, {"small", 0}}}}
-	}
-	ok := NativeLLMConfig{Chat: "cloud/big", Decide: "local/chat", Embed: "local/vec", Endpoints: cloud()}
-	if err := ok.check(llmEndpoints()); err != nil {
+	ok := NativeLLMConfig{Chat: "cloud/big", Decide: "local/chat", Embed: "local/vec", Endpoints: llmEndpoints()}
+	if err := ok.check(); err != nil {
 		t.Fatalf("a sound configuration was refused: %v", err)
 	}
-	if err := (NativeLLMConfig{}).check(llmEndpoints()); err != nil {
+	if err := (NativeLLMConfig{}).check(); err != nil {
 		t.Fatalf("an unbound configuration was refused: %v", err)
 	}
 	for _, tc := range []struct {
 		name, want string
 		edit       func(*NativeLLMConfig)
 	}{
-		{"unknown model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/none" }},
+		{"unknown model", `native.llm.chat names "local/none", which is no model`, func(c *NativeLLMConfig) { c.Chat = "local/none" }},
 		{"unknown endpoint", "native.llm.decide", func(c *NativeLLMConfig) { c.Decide = "nowhere/chat" }},
 		{"chat bound to an embed model", "native.llm.chat", func(c *NativeLLMConfig) { c.Chat = "local/vec" }},
 		{"embed bound to a chat model", "native.llm.embed", func(c *NativeLLMConfig) { c.Embed = "local/chat" }},
 		{"json bound to an embed model", "native.llm.json", func(c *NativeLLMConfig) { c.JSON = "local/vec" }},
-		{"bound endpoint lacks its key", `"cloud/big", whose endpoint needs its key`, func(c *NativeLLMConfig) { c.Endpoints[0].Key = "" }},
-		{"settings for no endpoint", `names "ghost", which is no endpoint file`, func(c *NativeLLMConfig) {
-			c.Endpoints = append(c.Endpoints, LLMEndpointConfig{Name: "ghost"})
-		}},
-		{"an endpoint twice", `names "cloud" twice`, func(c *NativeLLMConfig) { c.Endpoints = append(c.Endpoints, c.Endpoints[0]) }},
-		{"price for no model", "prices cloud/huge, which no endpoint file holds", func(c *NativeLLMConfig) {
-			c.Endpoints[0].Prices = append(c.Endpoints[0].Prices, LLMPrice{"huge", 1})
-		}},
-		{"a model priced twice", "prices cloud/big twice", func(c *NativeLLMConfig) {
-			c.Endpoints[0].Prices = append(c.Endpoints[0].Prices, LLMPrice{"big", 1})
-		}},
-		{"negative price", "the price of cloud/big must not be negative", func(c *NativeLLMConfig) { c.Endpoints[0].Prices[0].Price = -1 }},
-		{"metered model without a price", "must price cloud/small", func(c *NativeLLMConfig) {
-			c.Endpoints[0].Prices = c.Endpoints[0].Prices[:1]
+		{"bound endpoint switched off", "whose endpoint cloud is not enabled", func(c *NativeLLMConfig) { c.Endpoints[1].Enabled = false }},
+		{"an endpoint twice", "native.llm.endpoints: endpoint cloud is listed twice", func(c *NativeLLMConfig) {
+			c.Endpoints = append(c.Endpoints, c.Endpoints[1])
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := ok
-			c.Endpoints = cloud()
+			c.Endpoints = llmEndpoints()
 			tc.edit(&c)
-			if err := c.check(llmEndpoints()); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := c.check(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want a refusal naming %q", err, tc.want)
 			}
 		})
@@ -567,8 +600,7 @@ func TestLLMConfigCheck(t *testing.T) {
 // A language-model native costs what the model behind it does: the canonical natives their bound
 // model's price, a generated model's natives its own, and an unbound native nothing.
 func TestLLMNativePrices(t *testing.T) {
-	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", JSON: "cloud/small", Decide: "cloud/small", Endpoints: []LLMEndpointConfig{
-		{Name: "cloud", Key: "k", Prices: []LLMPrice{{"big", 20}, {"small", 3}}}}}}
+	c := NativeConfig{LLM: NativeLLMConfig{Chat: "cloud/big", JSON: "cloud/small", Decide: "cloud/small", Endpoints: llmEndpoints()}}
 	for name, want := range map[string]int64{
 		"llm/chat": 20, "llm/json": 3, "llm/decide": 3, "llm/embed": 0,
 		"llm/cloud/big/chat": 20, "llm/cloud/big/json": 20, "llm/cloud/big/decide": 20, "llm/cloud/small/chat": 3, "llm/local/vec/embed": 0,
@@ -614,8 +646,8 @@ func TestJSONSchemaKinds(t *testing.T) {
 		"n": `{"default":7,"description":"d","type":"integer"}`,
 		"b": `{"default":false,"description":"d","type":"boolean"}`,
 		"l": `{"default":[],"description":"d","items":{"type":"string"},"type":"array"}`,
-		// A list entry is the author's, so its fields carry no default.
-		"e":   `{"default":[],"description":"d","items":{"additionalProperties":false,"properties":{"x":{"description":"d","type":"number"}},"type":"object"},"type":"array"}`,
+		// A list entry is the author's, so its fields carry no default and must each be given.
+		"e":   `{"default":[],"description":"d","items":{"additionalProperties":false,"properties":{"x":{"description":"d","type":"number"}},"required":["x"],"type":"object"},"type":"array"}`,
 		"in":  `{"additionalProperties":false,"description":"d","properties":{"x":{"default":0,"description":"d","type":"number"}},"type":"object"}`,
 		"ask": `{"description":"d","type":"string"}`,
 	}
@@ -660,9 +692,8 @@ func TestJSONSchemaRefusesWhatItCannotDescribe(t *testing.T) {
 }
 
 // Each file an operator writes gets a schema in $JUICE_HOME/schemas/, and Juice's own files are
-// valid under it: the config.json first boot writes and every shipped world and
-// endpoint file. Each names its schema in $schema, which the strict decoders accept and which is
-// no setting, so it has no flag.
+// valid under it: the config.json first boot writes and every shipped world. Each names its schema
+// in $schema, which the decoders accept and which is no setting, so it has no flag.
 func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("JUICE_HOME", home)
@@ -703,17 +734,14 @@ func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
 		t.Error("$schema became a flag")
 	}
 
-	for name, files := range map[string]fs.FS{"world": rail.Worlds(), "llm-endpoint": llm.Shipped()} {
-		s := schema(name)
-		entries, _ := fs.ReadDir(files, ".")
-		for _, e := range entries {
-			raw, _ := fs.ReadFile(files, e.Name())
-			valid(name+" "+e.Name(), s, raw)
-		}
+	entries, _ := fs.ReadDir(rail.Worlds(), ".")
+	for _, e := range entries {
+		raw, _ := fs.ReadFile(rail.Worlds(), e.Name())
+		valid("world "+e.Name(), schema("world"), raw)
 	}
 
 	// Each schema is in the kernel's canonical subset (D4), as a form reads it.
-	for _, name := range []string{"config", "world", "llm-endpoint"} {
+	for _, name := range []string{"config", "world"} {
 		s := schema(name)
 		delete(s, "$schema") // the one keyword a schema file carries that a schema node does not
 		if err := kernel.ValidateSchema(name, s); err != nil {
@@ -742,13 +770,10 @@ func TestOperatorFilesValidateAgainstTheirSchemas(t *testing.T) {
 	if strings.Contains(string(raw), "null") {
 		t.Errorf("the first-boot config.json holds a null:\n%s", raw)
 	}
-	// A file written before every value was explicit holds null for four keys; it still loads,
-	// each keeping its default.
-	old := filepath.Join(t.TempDir(), "config.json")
-	os.WriteFile(old, []byte(`{"lottery": null, "lottery_max": null, "credit_limit": null, "fed_listen_addrs": null}`), 0o600)
-	if cfg, err := LoadConfig(old); err != nil {
-		t.Errorf("an older config.json with nulls: %v", err)
-	} else if econ, _ := cfg.Economy(); econ != kernel.DefaultEconomy() {
-		t.Errorf("an older config.json with nulls gave %+v", econ)
+	// An endpoint entry has no defaults, so each of its fields is required but the two it may omit.
+	llmItems := schema("config")["properties"].(map[string]any)["native"].(map[string]any)["properties"].(map[string]any)["llm"].(map[string]any)["properties"].(map[string]any)["endpoints"].(map[string]any)["items"].(map[string]any)
+	modelItems := llmItems["properties"].(map[string]any)["models"].(map[string]any)["items"].(map[string]any)
+	if got, _ := json.Marshal([]any{llmItems["required"], modelItems["required"]}); string(got) != `[["name","enabled","protocol","url","models"],["name","id","kind","price"]]` {
+		t.Errorf("required entry fields = %s", got)
 	}
 }

@@ -1,7 +1,0 @@
-{
-  "$schema": "../schemas/llm-endpoint.schema.json",
-  "protocol": "openai",
-  "url": "https://api.openai.com/v1",
-  "key_required": true,
-  "models": []
-}

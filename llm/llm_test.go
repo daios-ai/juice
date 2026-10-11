@@ -5,11 +5,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +42,7 @@ func fakeEndpoint(t *testing.T, replies map[string][]string) (*httptest.Server, 
 }
 
 func client(protocol, url, key string, model Model) *Client {
-	return &Client{Endpoint: Endpoint{Protocol: protocol, URL: url}, Model: model, Key: key}
+	return &Client{Endpoint: Endpoint{Protocol: protocol, URL: url, Key: key}, Model: model}
 }
 
 var user = []kernel.ChatMessage{{Role: "system", Content: "be brief"}, {Role: "user", Content: "ping"}}
@@ -57,69 +54,53 @@ func TestClientTimeoutGenerous(t *testing.T) {
 	}
 }
 
-// Every endpoint file this build ships loads as written, so a fresh installation boots.
-func TestShippedEndpointsLoad(t *testing.T) {
-	dir := t.TempDir()
-	err := fs.WalkDir(Shipped(), ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+// The providers a new kernel is written with are valid, and the local one backs the default
+// bindings (ollama/gemma for chat, ollama/nomic for embeddings).
+func TestPresets(t *testing.T) {
+	eps := Presets()
+	if err := ValidateEndpoints(eps); err != nil {
+		t.Fatalf("presets: %v", err)
+	}
+	gemma, _ := eps[0].Model("gemma")
+	nomic, _ := eps[0].Model("nomic")
+	if eps[0].Name != "ollama" || !eps[0].Enabled || gemma.Kind != KindChat || nomic.Kind != KindEmbed {
+		t.Errorf("the default bindings' endpoint is not as configuration expects: %+v", eps[0])
+	}
+	for _, e := range eps[1:] {
+		if e.Enabled || len(e.Models) != 0 {
+			t.Errorf("%s: a preset other than the local one is listed disabled and without models", e.Name)
 		}
-		body, err := fs.ReadFile(Shipped(), path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filepath.Join(dir, path), body, 0o600)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	eps, err := Load(dir)
-	if err != nil {
-		t.Fatalf("shipped endpoints do not load: %v", err)
-	}
-	ollama := eps["ollama"]
-	gemma, _ := ollama.Model("gemma")
-	nomic, _ := ollama.Model("nomic")
-	if gemma.Kind != KindChat || nomic.Kind != KindEmbed || ollama.KeyRequired {
-		t.Errorf("the default bindings' endpoint is not as configuration expects: %+v", ollama)
-	}
-	if !eps["anthropic"].KeyRequired || eps["anthropic"].Protocol != ProtocolAnthropic {
-		t.Errorf("anthropic endpoint = %+v", eps["anthropic"])
 	}
 }
 
-// An endpoint file that would silently mean something else is refused, naming the file.
-func TestLoadRefuses(t *testing.T) {
-	for name, body := range map[string]string{
-		"unknown key":       `{"protocol":"openai","url":"u","modles":[]}`,
-		"unknown protocol":  `{"protocol":"grpc","url":"u"}`,
-		"no url":            `{"protocol":"openai"}`,
-		"model without id":  `{"protocol":"openai","url":"u","models":[{"name":"m","kind":"chat"}]}`,
-		"unknown kind":      `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"rerank"}]}`,
-		"anthropic embed":   `{"protocol":"anthropic","url":"u","models":[{"name":"m","id":"x","kind":"embed"}]}`,
-		"model name shape":  `{"protocol":"openai","url":"u","models":[{"name":"Big/One","id":"x","kind":"chat"}]}`,
-		"negative cap":      `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat","max_tokens":-1}]}`,
-		"two documents":     `{"protocol":"openai","url":"u"} {}`,
-		"model name twice":  `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat"},{"name":"m","id":"y","kind":"chat"}]}`,
-		"not json":          `protocol: openai`,
-		"unknown model key": `{"protocol":"openai","url":"u","models":[{"name":"m","id":"x","kind":"chat","temp":1}]}`,
+// What the configuration's schema cannot state is refused, naming the entry.
+func TestValidateEndpointsRefuses(t *testing.T) {
+	ok := func() []Endpoint {
+		return []Endpoint{{Name: "e", Protocol: ProtocolOpenAI, URL: "u", Models: []Model{{Name: "m", ID: "x", Kind: KindChat}}}}
+	}
+	for name, tc := range map[string]struct {
+		edit func([]Endpoint) []Endpoint
+		want string
+	}{
+		"endpoint name shape": {func(e []Endpoint) []Endpoint { e[0].Name = "Big One"; return e }, `endpoint name "Big One"`},
+		"endpoint twice":      {func(e []Endpoint) []Endpoint { return append(e, e[0]) }, "endpoint e is listed twice"},
+		"no url":              {func(e []Endpoint) []Endpoint { e[0].URL = ""; return e }, "endpoint e has no url"},
+		"model name shape":    {func(e []Endpoint) []Endpoint { e[0].Models[0].Name = "a/b"; return e }, `model name "a/b" of endpoint e`},
+		"model twice":         {func(e []Endpoint) []Endpoint { e[0].Models = append(e[0].Models, e[0].Models[0]); return e }, "model e/m is listed twice"},
+		"no id":               {func(e []Endpoint) []Endpoint { e[0].Models[0].ID = ""; return e }, "model e/m has no id"},
+		"negative price":      {func(e []Endpoint) []Endpoint { e[0].Models[0].Price = -1; return e }, "model e/m has a negative price"},
+		"negative max_tokens": {func(e []Endpoint) []Endpoint { e[0].Models[0].MaxTokens = -1; return e }, "model e/m has a negative max_tokens"},
+		"anthropic embed": {func(e []Endpoint) []Endpoint {
+			e[0].Protocol, e[0].Models[0].Kind = ProtocolAnthropic, KindEmbed
+			return e
+		}, "the anthropic protocol does not serve"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "e.json"), []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "e.json") {
-				t.Fatalf("got %v, want a refusal naming the file", err)
-			}
-		})
+		if err := ValidateEndpoints(tc.edit(ok())); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v, want a refusal saying %q", name, err, tc.want)
+		}
 	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "Bad Name.json"), []byte(`{"protocol":"openai","url":"u"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); err == nil {
-		t.Error("an endpoint name that cannot be an action segment was accepted")
+	if err := ValidateEndpoints(ok()); err != nil {
+		t.Errorf("a sound endpoint was refused: %v", err)
 	}
 }
 
@@ -325,7 +306,7 @@ func TestAnthropicDecide(t *testing.T) {
 // Probe proves an endpoint answers and accepts the key, under the protocol's headers.
 func TestProbe(t *testing.T) {
 	srv, got := fakeEndpoint(t, map[string][]string{"/v1/models": {`{"data":[]}`}})
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: srv.URL + "/v1"}, "ak"); err != nil {
+	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: srv.URL + "/v1", Key: "ak"}); err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
 	if (*got)[0].header.Get("x-api-key") != "ak" {
@@ -333,7 +314,7 @@ func TestProbe(t *testing.T) {
 	}
 	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer refused.Close()
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolOpenAI, URL: refused.URL}, "bad"); err == nil {
+	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolOpenAI, URL: refused.URL, Key: "bad"}); err == nil {
 		t.Error("a refused key probed as reachable")
 	}
 }
@@ -358,7 +339,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
 	}))
 	defer moved.Close()
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: moved.URL}, "ak"); err == nil || reached {
+	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: moved.URL, Key: "ak"}); err == nil || reached {
 		t.Errorf("the probe followed a redirect: err %v, reached %v", err, reached)
 	}
 }

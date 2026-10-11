@@ -310,7 +310,7 @@ machinery. Suspended work survives restarts.
 Lookup searches descriptions lexically and semantically and returns ranked candidates
 with schemas and all-in prices — including actions discovered on other kernels. With a
 language model configured (a local Ollama by default; any provider through
-`~/.juice/llm/` and `native.llm` in config), `sys/llm/decide` picks one
+`native.llm` in config), `sys/llm/decide` picks one
 action from typed candidates and proposes valid arguments **without executing
 anything**, so planning and spending stay separate decisions. The rest of the stdlib
 (`sys/time`, `sys/random`, `sys/web`, `sys/llm/chat`, `sys/llm/json`, `sys/llm/embed`,

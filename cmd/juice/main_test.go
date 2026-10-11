@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/llm"
 	"github.com/daios-ai/juice/log"
 	"github.com/spf13/cobra"
 )
@@ -418,39 +419,32 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 // key generates none, one that is down keeps its natives — binds the canonical natives to what the
 // configuration names, and reports the bound embedder's identity and whether its endpoint answered.
 func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("JUICE_HOME", home)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	defer up.Close()
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close() // a closed port: the endpoint does not answer
-	dir := filepath.Join(home, "llm")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
+	chatEmbed := func(n string) []llm.Model {
+		return []llm.Model{{Name: "c", ID: "c" + n, Kind: llm.KindChat}, {Name: "e", ID: "e" + n, Kind: llm.KindEmbed}}
 	}
-	for name, body := range map[string]string{
-		"up":    `{"protocol":"openai","url":"` + up.URL + `","models":[{"name":"c","id":"c1","kind":"chat"},{"name":"e","id":"e1","kind":"embed"}]}`,
-		"down":  `{"protocol":"openai","url":"` + down.URL + `","models":[{"name":"c","id":"c2","kind":"chat"},{"name":"e","id":"e2","kind":"embed"}]}`,
-		"cloud": `{"protocol":"anthropic","url":"https://x","key_required":true,"models":[{"name":"c","id":"c3","kind":"chat"}]}`,
-		"empty": `{"protocol":"openai","url":"https://y","key_required":true,"models":[]}`,
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	eps := []llm.Endpoint{
+		{Name: "up", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: up.URL, Models: chatEmbed("1")},
+		{Name: "down", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: down.URL, Models: chatEmbed("2")},
+		{Name: "off", Protocol: llm.ProtocolAnthropic, URL: "https://x", Models: []llm.Model{{Name: "c", ID: "c3", Kind: llm.KindChat}}},
+		{Name: "empty", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: "https://y", Models: []llm.Model{}},
 	}
 	logger, err := log.New(log.Config{Level: "error"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", JSON: "up/c", Decide: "down/c", Embed: "up/e"}, logger)
+	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", JSON: "up/c", Decide: "down/c", Embed: "up/e", Endpoints: eps}, logger)
 	if err != nil {
 		t.Fatalf("openLLM: %v", err)
 	}
 	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"down/c", "up/c"}) {
-		t.Errorf("chat models = %v; want the reachable and the down endpoint's, not the keyless one's", got)
+		t.Errorf("chat models = %v; want the reachable and the down endpoint's, not the disabled one's", got)
 	}
 	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"down/e", "up/e"}) {
 		t.Errorf("embedding models = %v", got)
@@ -463,14 +457,14 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		t.Errorf("embedder identity %q reachable %v", identity, reachable)
 	}
 
-	if _, _, reachable, _ = openLLM(NativeLLMConfig{Embed: "down/e"}, logger); reachable {
+	if _, _, reachable, _ = openLLM(NativeLLMConfig{Embed: "down/e", Endpoints: eps}, logger); reachable {
 		t.Error("an embedder whose endpoint does not answer was reported reachable")
 	}
-	models, identity, _, err = openLLM(NativeLLMConfig{}, logger)
+	models, identity, _, err = openLLM(NativeLLMConfig{Endpoints: eps}, logger)
 	if err != nil || models.Chat != nil || models.JSON != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
 		t.Errorf("an unbound configuration bound something: %+v %q %v", models, identity, err)
 	}
-	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "cloud/c"}, logger); err == nil {
-		t.Error("a binding to an endpoint lacking its key was accepted")
+	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "off/c", Endpoints: eps}, logger); err == nil {
+		t.Error("a binding to a disabled endpoint was accepted")
 	}
 }

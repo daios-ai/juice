@@ -16,8 +16,8 @@ to configure a value. The file contains the credential-encryption key and is
 stored with mode 0600.
 
 Every setting is described in `~/.juice/schemas/config.schema.json`, which the
-kernel rewrites each time it starts; world files and language-model endpoint
-files have `world.schema.json` and `llm-endpoint.schema.json` beside it. A file
+kernel rewrites each time it starts; world files have `world.schema.json`
+beside it. A file
 that names its schema in its first line is completed and checked by your editor
 as you type:
 
@@ -27,8 +27,8 @@ as you type:
 ```
 
 Files Juice writes already carry that line. To add it to an older
-`config.json`, use the line above; in a world or endpoint file, use
-`"../schemas/world.schema.json"` or `"../schemas/llm-endpoint.schema.json"`.
+`config.json`, use the line above; in a world file, use
+`"../schemas/world.schema.json"`.
 The schema helps you write the file; the kernel still checks it when it
 starts.
 
@@ -107,27 +107,14 @@ and funding duties.
 | `credentials_key` | generated at first boot | the key sealing upstream credentials. A value that is not a 32-byte key refuses the boot |
 | `native.<name>` | see below | per-action price and settings for the standard library |
 
-The language models a kernel can use are described by files in `~/.juice/llm/`,
-one per provider, which Juice writes on first use and never overwrites. Each
-names how the provider is spoken to (`openai` or `anthropic`), its address,
-whether it needs a key, and the models you use there, each under a short name
-of your own:
-
-```json
-{
-  "protocol": "anthropic",
-  "url": "https://api.anthropic.com/v1",
-  "key_required": true,
-  "models": [
-    {"name": "opus", "id": "claude-opus-5-5", "kind": "chat", "max_tokens": 4096}
-  ]
-}
-```
-
-`native.llm` says which model `sys/llm/chat`, `sys/llm/json`, `sys/llm/decide`
-and `sys/llm/embed` use, as `<file>/<model>` — by default `ollama/gemma` for the
-first three and `ollama/nomic` for embeddings, a local Ollama — and holds each
-provider's key and each model's price:
+`native.llm` holds the language-model providers this kernel can use, and says
+which model `sys/llm/chat`, `sys/llm/json`, `sys/llm/decide` and
+`sys/llm/embed` call, as `<endpoint>/<model>`. A new kernel's file lists every
+provider Juice knows: a local Ollama, switched on with the two models the
+defaults use (`ollama/gemma` for the first three, `ollama/nomic` for
+embeddings), and the others switched off with no models. To use one, switch it
+on, give its key, and add the models you want, each under a short name of your
+own and with the price a call costs your callers:
 
 ```json
 "llm": {
@@ -136,15 +123,21 @@ provider's key and each model's price:
   "decide": "anthropic/opus",
   "embed": "ollama/nomic",
   "endpoints": [
-    {"name": "anthropic", "key": "sk-ant-…", "prices": [{"model": "opus", "price": 20000}]}
+    {"name": "anthropic", "enabled": true, "protocol": "anthropic",
+     "url": "https://api.anthropic.com/v1", "key": "sk-ant-…",
+     "models": [{"name": "opus", "id": "claude-opus-5-5", "kind": "chat",
+                 "max_tokens": 4096, "price": 20000}]},
+    …
   ]
 }
 ```
 
-A provider that needs a key is used only once its key is here, and then every
-one of its models must have a price, 0 included, since each call costs you
-money. The keys have no command-line flag. A provider that is down when the
-kernel starts is noted in the log, and calls to it fail until it is back.
+A provider switched off creates no actions and is never contacted. Every model
+states its price, `0` included. A model a binding names must belong to a
+provider that is switched on, and be of the right kind. The kernel refuses to
+start otherwise, naming the setting. A provider that is down, or refuses its
+key, is noted in the log when the kernel starts, and calls to it fail until
+that is fixed. The keys have no command-line flag.
 `native.lookup.default_limit` defaults to `10`. The compilation action defaults
 to a price of `5` base units through `native.tinygo.price`; other built-in
 actions default to zero.
