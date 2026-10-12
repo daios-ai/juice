@@ -50,7 +50,7 @@ type Host interface {
 	ResolvePrincipal(ctx context.Context, ref string) (kernel.Principal, error)
 	ActionRecord(ctx context.Context, a *kernel.Action) *kernel.ActionRecord
 	DiscoveredRecord(ctx context.Context, d *kernel.DiscoveryDoc) *kernel.ActionRecord
-	CreateTask(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.Principal) (*kernel.Task, error)
+	CreateTask(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller kernel.Principal, requesterID string) (*kernel.Task, error)
 }
 
 // Deps carries the adapters the stdlib natives need from cmd/juice. A nil adapter is a

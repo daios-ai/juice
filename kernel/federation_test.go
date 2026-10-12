@@ -4203,12 +4203,12 @@ func TestARemoteIDEqualToALocalIDMatchesNothing(t *testing.T) {
 	// A task addressed to alice is not the impostor's to complete, nor the empty principal's.
 	_, parent := setupOrphanTrace(t, st, bob.ID, bob.ID, bob.ID)
 	target := setupAction(t, st, bob.ID, "target-collide", 0)
-	task, err := k.CreateTask(ctx, parent.ID, target.ID, nil, kernel.User(alice.ID))
+	task, err := k.CreateTask(ctx, parent.ID, target.ID, nil, kernel.User(alice.ID), approvedCreatorOf(t, st, parent.ID, kernel.User(alice.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, scope := range []kernel.Principal{impostor, {}} {
-		if _, err := k.CompleteTaskFederated(ctx, scope, task.ID, json.RawMessage(`{}`), "", alice.ID, false); err == nil {
+		if _, err := k.CompleteTaskFederated(ctx, scope, task.ID, json.RawMessage(`{}`), ""); err == nil {
 			t.Errorf("%+v completed alice's task", scope)
 		}
 	}

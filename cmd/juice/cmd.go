@@ -521,7 +521,10 @@ func init() {
 	userCmd := group("user", "Manage your account")
 	userCmd.AddCommand(userCreateCmd(), userMeCmd(), userUpdateCmd(), userTransferCmd(), userLedgerCmd(),
 		userConnectCmd(), userDisconnectCmd(), userBlockchainAddressCmd(), userDepositCmd(),
-		userWithdrawCmd(), userWithdrawalsCmd())
+		userWithdrawCmd(), userWithdrawalsCmd(), userRequestersCmd(),
+		userRequesterCmd("approve", "Show a requester's tasks to you, now and from now on"),
+		userRequesterCmd("revoke", "Withhold a requester's tasks again until you approve it"),
+		userRequesterCmd("block", "Decline a requester's waiting tasks and refuse its next ones"))
 	rootCmd.AddCommand(userCmd)
 }
 
@@ -890,6 +893,35 @@ func userWithdrawCmd() *cobra.Command {
 
 // userWithdrawalsCmd lists what the caller has sent out and where each stands. A verb that reads
 // and a verb that moves money are two words, never one word with and without an argument.
+// userRequestersCmd lists who has addressed tasks to you, and your decision on each (U52). A task from
+// a requester you have not approved is withheld; this list is where you see who asks.
+func userRequestersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "requesters",
+		Short: "List who has addressed tasks to you",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return cli.emit("GET", "/v1/me/requesters", nil, output{human: list(
+				column{"REQUESTER", text("requester")},
+				column{"STATUS", text("status")},
+				column{"SINCE", text("since")},
+			)})
+		},
+	}
+}
+
+// userRequesterCmd is one decision on a requester, named by address.
+func userRequesterCmd(verb, short string) *cobra.Command {
+	return &cobra.Command{
+		Use:   verb + " USER@KERNEL",
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cli.emit("POST", "/v1/me/requesters/"+url.PathEscape(args[0])+"/"+verb, nil, output{})
+		},
+	}
+}
+
 func userWithdrawalsCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{

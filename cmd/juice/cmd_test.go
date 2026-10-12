@@ -1215,6 +1215,17 @@ func TestCLIListPaginationFlags(t *testing.T) {
 	}
 }
 
+// approveRequester has the user holding tok approve the requester at address, as a required caller
+// must before a task from anyone else reaches them (U52).
+func approveRequester(t *testing.T, srv *httptest.Server, tok, address string) {
+	t.Helper()
+	r := httpDo(t, srv, "POST", "/v1/me/requesters/"+address+"/approve", nil, tok)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("approve %s: %d", address, r.StatusCode)
+	}
+}
+
 func TestServeGetTask(t *testing.T) {
 	backend := newTaskBackend(t)
 	srv, k, db := newTestHTTPServerFull(t)
@@ -1260,6 +1271,11 @@ func TestServeGetTask(t *testing.T) {
 		assertActionRef(t, got["action"])
 	}
 
+	// Withheld from the required caller until they approve its requester.
+	if r := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, callerTok); r.StatusCode != http.StatusNotFound {
+		t.Errorf("caller GET before approving: %d, want 404", r.StatusCode)
+	}
+	approveRequester(t, srv, callerTok, "gs-tasks-owner@k")
 	r2 := httpDo(t, srv, "GET", "/v1/tasks/"+sid, nil, callerTok)
 	if r2.StatusCode != http.StatusOK {
 		r2.Body.Close()
@@ -1295,6 +1311,7 @@ func TestServeCancelTask(t *testing.T) {
 	if r := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/cancel", nil, strangerTok); r.StatusCode != http.StatusForbidden {
 		t.Errorf("a stranger's decline: %d, want 403", r.StatusCode)
 	}
+	approveRequester(t, srv, callerTok, "cancel-owner@k")
 	r := httpDo(t, srv, "POST", "/v1/tasks/"+sid[:8]+"/cancel", nil, callerTok)
 	var got map[string]any
 	decodeResponse(t, r, &got)
@@ -1387,6 +1404,7 @@ func TestServeCompleteTask(t *testing.T) {
 	decodeResponse(t, taskResp, &task)
 	sid := task["id"].(string)
 
+	approveRequester(t, srv, callerTok, "cs2-owner@k")
 	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/complete", map[string]any{
 		"args": map[string]any{"from_caller": "B"},
 	}, callerTok)

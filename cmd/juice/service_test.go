@@ -553,6 +553,9 @@ func TestGetTask_Enriched(t *testing.T) {
 	}
 	// The required caller is not the owner, yet must still see the owner_handle — the resolver
 	// is unauthorized, so a non-owner viewer of the task gets the owner without a process-read.
+	if _, err := k.SetRequester(ctx, hookID, "svc-gs@k", kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
 	asHook, err := getTask(k, ctx, hookID, view.ID)
 	if err != nil {
 		t.Fatalf("getTask as required caller: %v", err)

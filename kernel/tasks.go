@@ -200,9 +200,16 @@ func (k *Kernel) recoverTrace(ctx context.Context, _ *log.Logger, trace *Trace, 
 // CreateTask creates a new waiting task. The task records a future Call that a designated caller can resume.
 // The creating authority is derived from Trace(traceID).action_owner_id (implicit for in-execution creation).
 // For external creation (POST /v1/tasks) the service layer must enforce precondition-4 before calling this.
-func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller Principal) (*Task, error) {
+//
+// requesterID is who the task acts for (D6): the session user, the executing action's owner, or a
+// native's caller, recorded by the boundary that creates it. Its completion runs as the requester, so
+// the required caller lends nothing, and a transfer's value is reserved from the requester here.
+func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, partialArgs json.RawMessage, caller Principal, requesterID string) (*Task, error) {
 	if traceID == "" {
 		return nil, ErrInvalidInput.Wrap("trace_id is required")
+	}
+	if _, err := k.requireActiveUser(ctx, requesterID); err != nil {
+		return nil, err
 	}
 	parent, err := k.store.ReadTrace(ctx, traceID)
 	if err != nil {
@@ -247,6 +254,12 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 	if partial == nil {
 		partialArgs = json.RawMessage("{}")
 	}
+	// A transfer's value is the requester's, fixed now from partial_args and reserved with the task
+	// (D18); a value the completer could still choose is refused here.
+	eff, err := k.prepareTransferEffect(ctx, User(requesterID), action, partial)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	task := &Task{
 		ID:                   uuid.New().String(),
@@ -257,8 +270,12 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 		ActionID:             actionID,
 		PartialArgs:          partialArgs,
 		Price:                action.Price,
+		RequesterUserID:      requesterID,
 		Status:               TaskWaiting,
 		CreatedAt:            now,
+	}
+	if eff != nil {
+		task.Value, task.ValueTo, task.ValuePeer = eff.Amount, eff.Dest, eff.Peer
 	}
 	// A funding boundary (§16 Price Snapshot Pattern): the price is parked now and may settle long
 	// after import_bps changes, so the rate is frozen alongside it. Proxies only.
@@ -279,7 +296,7 @@ func (k *Kernel) CreateTask(ctx context.Context, traceID, actionID string, parti
 // CreateTaskByRef is CreateTask for a creator that names the action and the required caller by
 // address, here or on a peer, as a script and the HTTP surface both do. It answers with the task as
 // delivered, which is how every surface reads one.
-func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requiredCaller string, partialArgs json.RawMessage) (*TaskEntry, error) {
+func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requiredCaller, requesterID string, partialArgs json.RawMessage) (*TaskEntry, error) {
 	action, err := k.ResolveAction(ctx, actionRef)
 	if err != nil {
 		return nil, err
@@ -288,24 +305,41 @@ func (k *Kernel) CreateTaskByRef(ctx context.Context, traceID, actionRef, requir
 	if err != nil {
 		return nil, err
 	}
-	task, err := k.CreateTask(ctx, traceID, action.ID, partialArgs, caller)
+	task, err := k.CreateTask(ctx, traceID, action.ID, partialArgs, caller, requesterID)
 	if err != nil {
 		return nil, err
 	}
 	return k.store.ReadMailbox(ctx, task.ID)
 }
 
-// ReadTask returns a mailbox entry (D4) if the caller may read it: the party it is addressed to, the
-// owner of the process that funds it, or the superuser (D6).
+// ReadTask returns a mailbox entry (D4) if the caller may read it: the owner of the process that
+// funds it, the superuser, or the party it is addressed to once that party accepts its requester
+// (D6, U52) — before then the party sees only who asks, in its requesters.
 func (k *Kernel) ReadTask(ctx context.Context, callerID, taskID string) (*TaskEntry, error) {
 	e, err := k.store.ReadMailbox(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	if callerID == "" || !e.RequiredCaller.IsUser(callerID) && callerID != e.OwnerUserID && !k.IsSuperuser(ctx, callerID) {
+	if callerID != "" && (callerID == e.OwnerUserID || k.IsSuperuser(ctx, callerID)) {
+		return e, nil
+	}
+	if callerID == "" || !e.RequiredCaller.IsUser(callerID) {
 		return nil, ErrUnauthorized.Wrap("read permission denied")
 	}
+	if !k.accepts(ctx, callerID, e) {
+		return nil, ErrNotFound.Wrap("task not found")
+	}
 	return e, nil
+}
+
+// accepts reports whether the user a task is addressed to sees it: their own, from a requester they
+// approved, or made before requesters were recorded.
+func (k *Kernel) accepts(ctx context.Context, userID string, e *TaskEntry) bool {
+	if e.Requester.UserID == "" || e.Requester.Same(e.RequiredCaller) {
+		return true
+	}
+	status, err := k.store.RequesterStatus(ctx, userID, e.Requester)
+	return err == nil && status == RequesterApproved
 }
 
 // ListTasks returns the mailbox entries visible to the caller, wherever each task is held.
@@ -328,15 +362,82 @@ func (k *Kernel) CancelTask(ctx context.Context, callerID, taskID string) (*Task
 	if e.Status != TaskWaiting {
 		return nil, ErrInvalidState.Wrap("task is not waiting")
 	}
-	if e.HolderKey != k.SelfKey(ctx) {
-		_, err = k.sendTask(ctx, callerID, e, "cancel", nil)
-	} else {
-		err = k.CancelTaskHeld(ctx, User(callerID), e.ID)
-	}
-	if err != nil {
+	if err := k.decline(ctx, callerID, e); err != nil {
 		return nil, err
 	}
 	return k.store.ReadMailbox(ctx, e.ID)
+}
+
+// decline declines a waiting entry for callerID where the task is held: here, or on its holder over
+// P8. It takes the entry as read, so a blocked requester's tasks are declined without the read gate
+// ever showing them to their addressee.
+func (k *Kernel) decline(ctx context.Context, callerID string, e *TaskEntry) error {
+	if e.HolderKey != k.SelfKey(ctx) {
+		_, err := k.sendTask(ctx, callerID, e, "cancel", nil)
+		return err
+	}
+	return k.CancelTaskHeld(ctx, User(callerID), e.ID)
+}
+
+// ListRequesters lists the principals that have addressed tasks to userID, and its decision on each.
+func (k *Kernel) ListRequesters(ctx context.Context, userID string) ([]*Requester, error) {
+	if _, err := k.requireActiveUser(ctx, userID); err != nil {
+		return nil, err
+	}
+	return k.store.ListRequesters(ctx, userID)
+}
+
+// SetRequester records userID's decision on the requester at address (U52): approved shows its
+// tasks, pending withholds them again, and blocked declines every waiting one and refuses the next.
+func (k *Kernel) SetRequester(ctx context.Context, userID, address, status string) (*Requester, error) {
+	if _, err := k.requireActiveUser(ctx, userID); err != nil {
+		return nil, err
+	}
+	p, err := k.requesterAt(ctx, userID, address)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case p.UserID == "":
+		return nil, ErrInvalidInput.Wrapf("%s is a kernel; a requester is a user", address)
+	case p.Same(User(userID)):
+		return nil, ErrInvalidInput.Wrap("your own tasks reach you without a decision")
+	}
+	r, err := k.store.SetRequester(ctx, userID, p, status)
+	if err != nil || status != RequesterBlocked {
+		return r, err
+	}
+	held, err := k.store.ListHeldFrom(ctx, userID, p)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range held {
+		if err := k.decline(ctx, userID, e); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
+}
+
+// requesterAt is the principal an address names for userID's decision: a requester already listed
+// for them, matched by its kernel and the handle the list shows, so deciding on a peer's user needs
+// neither the peer nor its current handle; anyone else is resolved, to be decided on before they
+// write.
+func (k *Kernel) requesterAt(ctx context.Context, userID, address string) (Principal, error) {
+	if a, err := ParseAddress(address); err == nil && a.Name == "" {
+		if kr, err := k.ResolveKernel(ctx, a.Kernel); err == nil {
+			listed, err := k.store.ListRequesters(ctx, userID)
+			if err != nil {
+				return Principal{}, err
+			}
+			for _, r := range listed {
+				if r.Handle == a.Handle && (r.Kernel == kr.Key || kr.Local && r.Kernel == "") {
+					return r.Principal, nil
+				}
+			}
+		}
+	}
+	return k.ResolvePrincipal(ctx, address)
 }
 
 // CancelTaskHeld declines a waiting task this kernel holds, for its required caller — a peer when
@@ -386,7 +487,7 @@ func (k *Kernel) CompleteTask(ctx context.Context, callerID, taskID string, inpu
 	if e.HolderKey != k.SelfKey(ctx) {
 		return k.sendTask(ctx, callerID, e, "complete", input)
 	}
-	return k.completeTask(ctx, User(callerID), taskID, input, "", "", peerCompleter{})
+	return k.completeTask(ctx, User(callerID), taskID, input, "", "")
 }
 
 // CompleteTaskInTrace resumes a task from inside a running execution — a WASM juice.task_complete or
@@ -398,23 +499,16 @@ func (k *Kernel) CompleteTaskInTrace(ctx context.Context, callerID, traceID, tas
 	if traceID == "" {
 		return nil, ErrUnauthorized.Wrap("in-execution completion requires an authorizing trace")
 	}
-	return k.completeTask(ctx, User(callerID), taskID, input, "", traceID, peerCompleter{})
+	return k.completeTask(ctx, User(callerID), taskID, input, "", traceID)
 }
 
 // CompleteTaskFederated resumes a task on behalf of a peer, threading the inbound cross-kernel
 // idempotency record (§13) so the commit that settles the call completes that record atomically —
 // including a settlement that only happens later, via the remote-dispatch retry loop. Mirrors
 // RunFederated, which does the same for an inbound call. scope is the principal the task is
-// addressed to, already matched to the signed request (P8); forUserID is who on the peer completed.
-func (k *Kernel) CompleteTaskFederated(ctx context.Context, scope Principal, taskID string, input json.RawMessage, idempotencyRecordID, forUserID string, superuser bool) (*TaskReply, error) {
-	return k.completeTask(ctx, scope, taskID, input, idempotencyRecordID, "", peerCompleter{UserID: forUserID, Superuser: superuser})
-}
-
-// peerCompleter is who on the peer completed a task, as its home kernel signed it (P8): the user's
-// stable id there, or its operator for a kernel-addressed task. Zero for a local completion.
-type peerCompleter struct {
-	UserID    string
-	Superuser bool
+// addressed to, already matched to the signed request (P8).
+func (k *Kernel) CompleteTaskFederated(ctx context.Context, scope Principal, taskID string, input json.RawMessage, idempotencyRecordID string) (*TaskReply, error) {
+	return k.completeTask(ctx, scope, taskID, input, idempotencyRecordID, "")
 }
 
 // TaskRequiredCaller returns who a task is parked for, for the federation completion path to match
@@ -427,9 +521,10 @@ func (k *Kernel) TaskRequiredCaller(ctx context.Context, taskID string) (Princip
 	return task.RequiredCaller(), nil
 }
 
-func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string, completer peerCompleter) (*TaskReply, error) {
-	callerAcct, err := k.requireCaller(ctx, caller)
-	if err != nil {
+// completeTask resumes a task for its required caller, who supplies the missing input and lends
+// nothing: the call runs as the task's requester, with the price and value reserved at creation (D6).
+func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID string, input json.RawMessage, idempotencyRecordID, authorizingTraceID string) (*TaskReply, error) {
+	if _, err := k.requireCaller(ctx, caller); err != nil {
 		return nil, err
 	}
 	task, err := k.store.ReadTask(ctx, taskID)
@@ -505,12 +600,8 @@ func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID stri
 		args[key] = v
 	}
 
-	// Value transfer (D18): a Task whose action bears the transfer effect delivers value on completion,
-	// to a beneficiary here or on another kernel. Stage it over the merged args so BeginTaskCall locks
-	// the value from the completer's own balance atomic with claiming the task — the completer funds the
-	// value, the task's execution price stays creator-parked. A peer completer is refused (its account
-	// holds nothing), and a non-transfer task stages nothing.
-	eff, err := k.prepareTransferEffect(ctx, caller, action, args)
+	// The call acts for the requester, whose value was reserved at creation and rides the trace.
+	requester, err := k.requireActiveUser(ctx, task.RequesterUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -524,23 +615,9 @@ func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID stri
 		CreatedAt:     time.Now().UTC(),
 	}
 	taskTrace.setTarget(action.Owner())
-	// The completer as a principal (D15): a user here; on a peer, a user attested by its home kernel
-	// and already matched to the task's addressing — the handle the task was made for — or its
-	// operator completing a kernel-addressed task, that kernel's `sys`; else the peer kernel itself.
-	done := caller
-	switch {
-	case caller.Local() || completer.UserID == "":
-	case task.RequiredCallerUserID == completer.UserID:
-		done.UserID, done.Handle = completer.UserID, task.RequiredCallerHandle
-	case completer.Superuser:
-		done.UserID, done.Handle = completer.UserID, SuperuserHandle
-	default:
-		done.UserID = completer.UserID
-	}
+	done := User(task.RequesterUserID)
 	taskTrace.setCaller(done)
-	if eff != nil {
-		eff.stage(taskTrace)
-	}
+	taskTrace.Value, taskTrace.ValueTo, taskTrace.ValuePeer = task.Value, task.ValueTo, task.ValuePeer
 	// Same as a root call (kernel.go): the inbound record rides on the trace so any settlement
 	// releases it, for every action kind rather than only remote proxies — and it is where the
 	// receipt reads the request it answers (P4), so the trace's dispatch record stays free for the
@@ -563,7 +640,7 @@ func (k *Kernel) completeTask(ctx context.Context, caller Principal, taskID stri
 		if task.ImportBPS != nil {
 			ibps = *task.ImportBPS
 		}
-		if err := k.prepareDispatch(ctx, taskTrace, action, args, taskID, task.Price, ibps, callerAcct); err != nil {
+		if err := k.prepareDispatch(ctx, taskTrace, action, args, taskID, task.Price, ibps, requester); err != nil {
 			return nil, err
 		}
 	}

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/store"
 	"github.com/google/uuid"
 )
@@ -46,7 +48,8 @@ func setupWasmAction(t *testing.T, st kernel.Store, ownerID, name, inputSchemaJS
 	return a
 }
 
-// setupTask creates a task in the store directly (bypassing kernel auth).
+// setupTask creates a task in the store directly (bypassing kernel auth), requested by its creator
+// and approved by its required caller, as a task they complete is.
 func setupTask(t *testing.T, st kernel.Store, parentTraceID, actionID, requiredCallerID string, partialArgs json.RawMessage) *kernel.Task {
 	t.Helper()
 	if len(partialArgs) == 0 {
@@ -55,6 +58,7 @@ func setupTask(t *testing.T, st kernel.Store, parentTraceID, actionID, requiredC
 	task := &kernel.Task{
 		ID:                   uuid.New().String(),
 		ParentTraceID:        &parentTraceID,
+		RequesterUserID:      approvedCreatorOf(t, st, parentTraceID, kernel.User(requiredCallerID)),
 		RequiredCallerUserID: requiredCallerID,
 		ActionID:             actionID,
 		PartialArgs:          partialArgs,
@@ -78,7 +82,7 @@ func TestTaskCreateReturnsWaitingTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -105,7 +109,7 @@ func TestTaskCompleteMergesArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"from_partial":"A","shared":"partial-val"}`)
-	task, err := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -134,7 +138,7 @@ func TestTaskCompleteInputValidatedAgainstInputSchema(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -158,7 +162,7 @@ func TestTaskCompleteWrongCallerReturnsErrUnauthorized(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(rightCaller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(rightCaller.ID), approvedCreatorOf(t, st, trID, kernel.User(rightCaller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -185,7 +189,7 @@ func TestCompleteTaskInTraceIsTraceConfined(t *testing.T) {
 
 	// A task in VICTIM's process, addressed to mallory.
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
-	task, err := k.CreateTask(ctx, victimTrace.ID, action.ID, nil, kernel.User(mallory.ID))
+	task, err := k.CreateTask(ctx, victimTrace.ID, action.ID, nil, kernel.User(mallory.ID), approvedCreatorOf(t, st, victimTrace.ID, kernel.User(mallory.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -218,7 +222,7 @@ func TestTaskCompleteRunningOrDoneReturnsErrInvalidState(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -249,7 +253,7 @@ func TestTaskCompleteSetsDoneOnExecutionFailure(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -280,7 +284,7 @@ func TestTaskTxIDRecordedAtomicallyWithStatusDone(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -315,7 +319,7 @@ func TestTaskCompletionTraceParentTraceID(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	parentTraceID := orphan.ID
 
-	task, err := k.CreateTask(ctx, parentTraceID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, parentTraceID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, parentTraceID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -342,7 +346,7 @@ func TestCanListTaskProcessOwnerSeesOwnTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -373,7 +377,7 @@ func TestCanListTaskRequiredCallerSeesTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -405,7 +409,7 @@ func TestCanListTaskUnrelatedUserDenied(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -433,7 +437,7 @@ func TestCanReadTaskSameRulesAsCanListTask(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -464,7 +468,7 @@ func TestBootstrapResetsRunningTasksToWaiting(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, _ := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, _ := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 
 	// Manually claim the task via BeginTaskCall to simulate a crash mid-execution (task running, no tx).
 	taskTrace := &kernel.Trace{
@@ -505,7 +509,7 @@ func TestWaitingTaskOnClosedProcessIsNonCompletable(t *testing.T) {
 	p, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -576,7 +580,7 @@ func TestTaskCompletionTraceCrossProcessParentRef(t *testing.T) {
 	_, orphan := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	foreignTraceID := orphan.ID
 
-	task, err := k.CreateTask(ctx, foreignTraceID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, foreignTraceID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, foreignTraceID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -605,7 +609,7 @@ func TestMergeArgsInputKeysOverwritePartialArgs(t *testing.T) {
 	trID := tr.ID
 
 	partialArgs := json.RawMessage(`{"key":"from-partial","other":"base"}`)
-	task, _ := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID))
+	task, _ := k.CreateTask(ctx, trID, action.ID, partialArgs, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 
 	// input's "key" should win over partial's "key"
 	input := json.RawMessage(`{"key":"from-input"}`)
@@ -636,7 +640,7 @@ func TestTaskCompleteRejectsOverrideOfBoundKeyAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -673,7 +677,7 @@ func TestTaskCompleteAllowsDisjointInputAllBound(t *testing.T) {
 		`{"type":"object","properties":{"x":{"type":"string"}}}`, 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`{"x":"creator-fixed"}`), kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -703,7 +707,7 @@ func TestTaskCompleteGrossEqualsTaskPriceAcrossPriceChange(t *testing.T) {
 
 	// Fund a root trace with the action's price (100) and snapshot task.price = 100 at creation.
 	_, tr := beginTestRun(t, st, owner.ID, action)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -753,7 +757,7 @@ func TestCreateTaskTraceAuthority(t *testing.T) {
 	parentTraceID := orphan.ID
 
 	// Any caller can create a task; service layer enforces trace authority. Kernel just checks action/process.
-	task, err := k.CreateTask(ctx, parentTraceID, nextAction.ID, nil, kernel.User(nextUser.ID))
+	task, err := k.CreateTask(ctx, parentTraceID, nextAction.ID, nil, kernel.User(nextUser.ID), approvedCreatorOf(t, st, parentTraceID, kernel.User(nextUser.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask with trace authority: %v", err)
 	}
@@ -792,7 +796,7 @@ func TestCreateTaskTraceAuthorityWrongProcess(t *testing.T) {
 	p1TraceID := reply.TraceID
 
 	// p1 is now closed; CreateTask using p1's trace must fail with ErrInvalidState.
-	_, err = k.CreateTask(ctx, p1TraceID, nextAction.ID, nil, kernel.User(nextUser.ID))
+	_, err = k.CreateTask(ctx, p1TraceID, nextAction.ID, nil, kernel.User(nextUser.ID), approvedCreatorOf(t, st, p1TraceID, kernel.User(nextUser.ID)))
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("expected ErrInvalidState for closed-process trace, got %v", err)
 	}
@@ -809,7 +813,7 @@ func TestCreateTaskRejectsNonObjectPartialArgs(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	_, err := k.CreateTask(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.User(caller.ID))
+	_, err := k.CreateTask(ctx, trID, action.ID, json.RawMessage(`"not-an-object"`), kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for non-object partial_args, got %v", err)
 	}
@@ -828,7 +832,7 @@ func TestNullPartialArgsMeanNothingFilledIn(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "null-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`null`), kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, json.RawMessage(`null`), kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask(null): %v", err)
 	}
@@ -860,7 +864,7 @@ func TestCreateTaskEmptyTraceIDReturnsErrInvalidInput(t *testing.T) {
 	caller := setupUser(t, st, "nil-pt-caller", 0)
 	action := setupLocalAction(t, st, owner.ID, "nil-pt-action", 0)
 
-	_, err := k.CreateTask(ctx, "", action.ID, nil, kernel.User(caller.ID))
+	_, err := k.CreateTask(ctx, "", action.ID, nil, kernel.User(caller.ID), caller.ID)
 	if !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("expected ErrInvalidInput for empty traceID, got %v", err)
 	}
@@ -898,7 +902,7 @@ func TestCreateTaskChecksCreatorNotRequiredCaller(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
 	// canCall(customer, action) is false (private, non-owner) — the OLD rule rejected this.
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(customer.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask parking a private action for a non-owner: %v", err)
 	}
@@ -929,7 +933,7 @@ func TestCreateTaskRejectedWhenCreatorCannotCall(t *testing.T) {
 	// The required caller is the action owner, who could call it: irrelevant under the binding rule.
 	_, tr := setupOrphanTrace(t, st, creator.ID, creator.ID, creator.ID)
 
-	_, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(actionOwner.ID))
+	_, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(actionOwner.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(actionOwner.ID)))
 	if !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("expected ErrUnauthorized when the creator cannot call the action, got %v", err)
 	}
@@ -948,7 +952,7 @@ func TestTaskCompletionIgnoresVisibilityNarrowing(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "narrow-action", "", 0) // public
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(customer.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -981,7 +985,7 @@ func TestTaskCompletionResetsOnDeactivatedAction(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "deact-action", "", 0)
 
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(customer.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(customer.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1032,7 +1036,7 @@ func setupTaskWithCompletionTrace(t *testing.T, st kernel.Store, k *kernel.Kerne
 		t.Fatalf("setupTaskWithCompletionTrace: BeginRun: %v", err)
 	}
 	ptID := root.ID
-	task, err := k.CreateTask(ctx, ptID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, ptID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, ptID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("setupTaskWithCompletionTrace: CreateTask: %v", err)
 	}
@@ -1294,7 +1298,7 @@ func TestTaskCompleteRemoteProxyPersistsIdempotencyKey(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1349,7 +1353,7 @@ func TestTaskCompleteRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, root := beginTestRun(t, st, procOwner.ID, priced)
-	task, err := k.CreateTask(ctx, root.ID, remoteAct.ID, nil, kernel.User(completer.ID))
+	task, err := k.CreateTask(ctx, root.ID, remoteAct.ID, nil, kernel.User(completer.ID), approvedCreatorOf(t, st, root.ID, kernel.User(completer.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1723,7 +1727,7 @@ func TestParentFailureLeavesRunningTaskAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, root := beginTestRun(t, st, caller.ID, parentAct)
-	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID))
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID), approvedCreatorOf(t, st, root.ID, kernel.User(completer.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -1818,7 +1822,7 @@ func TestFundingRefusesSettledTraceAtAnyPrice(t *testing.T) {
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free subcall on a settled trace: want ErrInvalidState, got %v", err)
 	}
-	if _, err := k.CreateTask(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.User(owner.ID)); !errors.Is(err, kernel.ErrInvalidState) {
+	if _, err := k.CreateTask(ctx, root.ID, free.ID, json.RawMessage(`{}`), kernel.User(owner.ID), approvedCreatorOf(t, st, root.ID, kernel.User(owner.ID))); !errors.Is(err, kernel.ErrInvalidState) {
 		t.Errorf("a free task on a settled trace: want ErrInvalidState, got %v", err)
 	}
 	if traces, _ := st.ListTraces(ctx, p.ID); len(traces) != 1 {
@@ -1867,7 +1871,7 @@ func TestEndProcessRefusesToCloseOverACallStartedMeanwhile(t *testing.T) {
 	act := setupLocalAction(t, st, owner.ID, "epr-act", price)
 	taskAct := setupLocalAction(t, st, owner.ID, "epr-task", 40)
 	p, root := beginTestRun(t, st, owner.ID, act)
-	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID))
+	task, err := k.CreateTask(ctx, root.ID, taskAct.ID, json.RawMessage(`{}`), kernel.User(completer.ID), approvedCreatorOf(t, st, root.ID, kernel.User(completer.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2186,7 +2190,7 @@ func TestTaskCompleteRemoteProxyTimeoutLeavesTaskRunning(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, remoteAction.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2220,7 +2224,7 @@ func TestTaskCompleteSuspendedCallerRejectedBeforeMutation(t *testing.T) {
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 	trID := tr.ID
 
-	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, trID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, trID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2255,7 +2259,7 @@ func TestCompleteTaskClaimFailureIsMarkedAndStillInvalidState(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "claim-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2299,7 +2303,7 @@ func TestCompleteTaskRejectionIsNotAClaimFailure(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "rej-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2337,7 +2341,7 @@ func TestParkInvariantViolationIsNotAClaimFailure(t *testing.T) {
 	if err := db.ExecForTest(ctx, `UPDATE traces SET available=100 WHERE id=?`, tr.ID); err != nil {
 		t.Fatalf("fund trace: %v", err)
 	}
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2443,7 +2447,7 @@ func TestCompleteTaskReportsACommittedWasmTimeout(t *testing.T) {
 	action := setupWasmAction(t, st, owner.ID, "to-action", "", 0)
 	_, tr := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
 
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -2511,7 +2515,7 @@ func TestCreateTaskHealsLegacyProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	task, err := k.CreateTask(ctx, root.ID, a.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, root.ID, a.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, root.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask against a legacy proxy: %v", err)
 	}
@@ -2556,7 +2560,7 @@ func TestTaskSettlementPostsToLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, tr := beginTestRun(t, st, payer.ID, action)
-	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(worker.ID))
+	task, err := k.CreateTask(ctx, tr.ID, action.ID, nil, kernel.User(worker.ID), approvedCreatorOf(t, st, tr.ID, kernel.User(worker.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2579,7 +2583,7 @@ func TestDeclineReturnsTheParkOnce(t *testing.T) {
 	stranger := setupUser(t, st, "decline-stranger", 0)
 	target := setupLocalAction(t, st, owner.ID, "decline-target", 30)
 	p, root := beginTestRun(t, st, owner.ID, setupLocalAction(t, st, owner.ID, "decline-root", 100))
-	task, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID))
+	task, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, root.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2611,7 +2615,7 @@ func TestDeclineReturnsTheParkOnce(t *testing.T) {
 	}
 
 	// The process owner may decline too.
-	own, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID))
+	own, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(caller.ID), approvedCreatorOf(t, st, root.ID, kernel.User(caller.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2643,7 +2647,7 @@ func TestTaskReadsOneRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, root := setupOrphanTrace(t, st, owner.ID, owner.ID, owner.ID)
-	task, err := k.CreateTask(ctx, root.ID, target.ID, json.RawMessage(`{"a":1}`), kernel.User(owner.ID))
+	task, err := k.CreateTask(ctx, root.ID, target.ID, json.RawMessage(`{"a":1}`), kernel.User(owner.ID), approvedCreatorOf(t, st, root.ID, kernel.User(owner.ID)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2716,4 +2720,181 @@ func knownTestPeer(t *testing.T, k *kernel.Kernel) string {
 		t.Fatal(err)
 	}
 	return key
+}
+
+// transferTaskFixture is a kernel with the transfer native, its requester alice (1000), the party a
+// task is addressed to, bob (500), the beneficiary carol (0), and an open trace of alice's.
+func transferTaskFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *kernel.Action, *kernel.Trace, [3]*kernel.Account) {
+	t.Helper()
+	st := newTestStore(t)
+	cfg := testConfig()
+	cfg.FeeRecipientID = setupSys(t, nil, st).ID
+	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard()})
+	native.Register(k, []native.Spec{native.Transfer()})
+	tr := setupAction(t, st, cfg.FeeRecipientID, "transfer", 0)
+	tr.Effect, tr.Visibility = "transfer", kernel.VisibilityLocal
+	if err := st.UpdateAction(context.Background(), tr); err != nil {
+		t.Fatal(err)
+	}
+	alice, bob, carol := setupUser(t, st, "alice", 1000), setupUser(t, st, "bob", 500), setupUser(t, st, "carol", 0)
+	_, root := setupOrphanTrace(t, st, alice.ID, alice.ID, alice.ID)
+	return k, st, tr, root, [3]*kernel.Account{alice, bob, carol}
+}
+
+// A task on a transfer is its requester's payment (D6, D18): the value is reserved from the requester
+// when the task is made, the completion pays it to the beneficiary as the requester's call, and the
+// completer — who only answers — is charged nothing, signs nothing, and is no party to it. A decline
+// returns the value; a value the requester cannot cover is refused at creation.
+func TestATransferTaskIsPaidByItsRequester(t *testing.T) {
+	k, st, transfer, root, users := transferTaskFixture(t)
+	alice, bob, carol := users[0], users[1], users[2]
+	ctx := context.Background()
+	balance := func(id string) (int64, int64) {
+		t.Helper()
+		u, err := st.ReadUser(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.Available, u.Locked
+	}
+	pay := func(amount int64) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"target":"carol@%s","amount":%d}`, kernel.TestOwnName, amount))
+	}
+
+	if _, err := k.CreateTask(ctx, root.ID, transfer.ID, pay(5000), kernel.User(bob.ID), alice.ID); !errors.Is(err, kernel.ErrInsufficientFunds) {
+		t.Fatalf("a value the requester cannot cover: %v, want ErrInsufficientFunds", err)
+	}
+	task, err := k.CreateTask(ctx, root.ID, transfer.ID, pay(300), kernel.User(bob.ID), alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balance(alice.ID); a != 700 || l != 300 {
+		t.Fatalf("after creating the task alice holds %d available, %d locked; want 700 and 300", a, l)
+	}
+	if _, err := k.SetRequester(ctx, bob.ID, "alice@"+kernel.TestOwnName, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.CompleteTask(ctx, bob.ID, task.ID, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if a, l := balance(bob.ID); a != 500 || l != 0 {
+		t.Errorf("the completer moved to %d available, %d locked; want 500 and 0", a, l)
+	}
+	if a, l := balance(alice.ID); a != 700 || l != 0 {
+		t.Errorf("alice holds %d available, %d locked after paying; want 700 and 0", a, l)
+	}
+	if a, _ := balance(carol.ID); a != 300 {
+		t.Errorf("carol received %d, want 300", a)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tx.CallerUserID != alice.ID || tx.CallerKernel != "" {
+		t.Errorf("the completion's caller is %q on %q, want its requester", tx.CallerUserID, tx.CallerKernel)
+	}
+	if _, err := k.ReadTransaction(ctx, bob.ID, tx.ID); err == nil {
+		t.Error("the completer read a transaction it is no party to")
+	}
+
+	declined, err := k.CreateTask(ctx, root.ID, transfer.ID, pay(100), kernel.User(bob.ID), alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.CancelTask(ctx, bob.ID, declined.ID); err != nil {
+		t.Fatalf("decline: %v", err)
+	}
+	if a, l := balance(alice.ID); a != 700 || l != 0 {
+		t.Errorf("a declined task left alice %d available, %d locked; want its value back, 700 and 0", a, l)
+	}
+}
+
+// A user decides who may address tasks to them (U52): a task from anyone else is withheld until they
+// approve its requester, who is listed pending meanwhile; revoking withholds again and keeps the
+// requester listed; blocking declines every waiting task and refuses the next. A task addressed to
+// its own requester needs no approval.
+func TestTheAddresseeDecidesWhoMayAddressTasks(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	alice, bob := setupUser(t, st, "alice", 0), setupUser(t, st, "bob", 0)
+	target := setupAction(t, st, alice.ID, "consent-target", 0)
+	_, root := setupOrphanTrace(t, st, alice.ID, alice.ID, alice.ID)
+	aliceAt := "alice@" + kernel.TestOwnName
+	sees := func(id string) bool {
+		t.Helper()
+		_, err := k.ReadTask(ctx, bob.ID, id)
+		listed, lerr := k.ListTasks(ctx, bob.ID, kernel.TaskFilter{})
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		inList := false
+		for _, e := range listed {
+			inList = inList || e.ID == id
+		}
+		if (err == nil) != inList {
+			t.Fatalf("read and list disagree about %s: read %v, listed %v", id, err, inList)
+		}
+		return inList
+	}
+	status := func() string {
+		t.Helper()
+		rs, err := k.ListRequesters(ctx, bob.ID)
+		if err != nil || len(rs) != 1 || rs[0].UserID != alice.ID {
+			t.Fatalf("bob's requesters = %+v, %v; want alice alone", rs, err)
+		}
+		return rs[0].Status
+	}
+
+	// The market path: bob's action, run by carol, parks a task for bob himself. Bob owns no part of
+	// carol's process, yet sees the task at once — it is his own.
+	carol := setupUser(t, st, "carol", 0)
+	_, carols := setupOrphanTrace(t, st, carol.ID, bob.ID, carol.ID)
+	own, err := k.CreateTask(ctx, carols.ID, setupAction(t, st, bob.ID, "bob-step", 0).ID, nil, kernel.User(bob.ID), bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sees(own.ID) {
+		t.Error("a task addressed to its own requester was withheld")
+	}
+	if rs, _ := k.ListRequesters(ctx, bob.ID); len(rs) != 0 {
+		t.Errorf("a self-addressed task recorded a requester: %+v", rs)
+	}
+	// Nobody decides on themselves, so no decision can refuse their own tasks.
+	if _, err := k.SetRequester(ctx, bob.ID, "bob@"+kernel.TestOwnName, kernel.RequesterBlocked); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("bob blocked himself: %v", err)
+	}
+
+	first, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(bob.ID), alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sees(first.ID) || status() != kernel.RequesterPending {
+		t.Fatalf("an unapproved requester's task reached bob, or alice is %q", status())
+	}
+	if _, err := k.SetRequester(ctx, bob.ID, aliceAt, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
+	if !sees(first.ID) {
+		t.Fatal("approving alice did not show her task")
+	}
+	if _, err := k.SetRequester(ctx, bob.ID, aliceAt, kernel.RequesterPending); err != nil {
+		t.Fatal(err)
+	}
+	if sees(first.ID) || status() != kernel.RequesterPending {
+		t.Fatalf("revoking left the task visible, or alice is %q", status())
+	}
+	if _, err := k.SetRequester(ctx, bob.ID, aliceAt, kernel.RequesterBlocked); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.ReadTask(ctx, first.ID); got.Status != kernel.TaskCancelled {
+		t.Errorf("blocking left alice's waiting task %q, want cancelled", got.Status)
+	}
+	if _, err := k.CreateTask(ctx, root.ID, target.ID, nil, kernel.User(bob.ID), alice.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a blocked requester made a task: %v", err)
+	}
+	if status() != kernel.RequesterBlocked {
+		t.Errorf("alice is %q, want blocked", status())
+	}
 }

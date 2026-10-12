@@ -904,6 +904,8 @@ func registerRoutes(r chi.Router, srv *server, passwordLimit func(http.Handler) 
 		// Current user.
 		r.Get("/v1/me", srv.getMe)
 		r.With(passwordLimit).Put("/v1/me", srv.putMe)
+		r.Get("/v1/me/requesters", srv.getRequesters)
+		r.Post("/v1/me/requesters/{address}/{verb}", srv.postRequester)
 
 		// Peer-to-peer credit transfer and the caller's own ledger (§12). Not superuser:
 		// the caller moves their own funds, gated by authMiddleware alone.
@@ -1613,6 +1615,18 @@ func (s *server) postCall(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) getMe(w http.ResponseWriter, r *http.Request) {
 	view, err := getMe(s.kernel, r.Context(), callerFrom(r))
+	writeOr(w, view, err)
+}
+
+// getRequesters lists who has addressed tasks to the caller, and the caller's decision on each (U52).
+func (s *server) getRequesters(w http.ResponseWriter, r *http.Request) {
+	views, err := listRequesters(s.kernel, r.Context(), callerFrom(r))
+	writeOr(w, views, err)
+}
+
+// postRequester approves, revokes or blocks one requester, named by address.
+func (s *server) postRequester(w http.ResponseWriter, r *http.Request) {
+	view, err := setRequester(s.kernel, r.Context(), callerFrom(r), chi.URLParam(r, "address"), chi.URLParam(r, "verb"))
 	writeOr(w, view, err)
 }
 

@@ -175,6 +175,7 @@ func TestFlow_WebhookCompleteTask(t *testing.T) {
 	taskID := task["id"].(string)
 
 	// Webhook system completes the task.
+	approveRequester(t, srv, webhookTok, "wh-owner@k")
 	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+taskID+"/complete", map[string]any{
 		"args": map[string]any{"payment_confirmed": true},
 	}, webhookTok)
@@ -189,8 +190,12 @@ func TestFlow_WebhookCompleteTask(t *testing.T) {
 		t.Fatal("expected tx_id in webhook complete reply")
 	}
 
-	// Transaction must reflect webhook as caller (role law).
-	txResp := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, webhookTok)
+	// The completion acts for the task's requester, never the webhook that supplied the event (D6):
+	// the requester is its caller, and the webhook is no party to it.
+	if r := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, webhookTok); r.StatusCode == http.StatusOK {
+		t.Error("the webhook read a transaction it is no party to")
+	}
+	txResp := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, ownerTok)
 	if txResp.StatusCode != http.StatusOK {
 		txResp.Body.Close()
 		t.Fatalf("get tx: expected 200, got %d", txResp.StatusCode)
@@ -200,8 +205,8 @@ func TestFlow_WebhookCompleteTask(t *testing.T) {
 		Caller string `json:"caller"`
 	}
 	decodeResponse(t, txResp, &tx)
-	if tx.Caller != "wh-webhook-sys@k" {
-		t.Errorf("tx caller: got %s, want wh-webhook-sys@k (webhook)", tx.Caller)
+	if tx.Caller != "wh-owner@k" {
+		t.Errorf("tx caller: got %s, want wh-owner@k (the requester)", tx.Caller)
 	}
 	if tx.Status != kernel.TxSuccess {
 		t.Errorf("tx status: got %s, want success", tx.Status)
@@ -413,6 +418,7 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 	taskID := task["id"].(string)
 
 	// C completes the task.
+	approveRequester(t, srv, cTok, "3p-owner@k")
 	complResp := httpDo(t, srv, "POST", "/v1/tasks/"+taskID+"/complete",
 		map[string]any{"args": map[string]any{}}, cTok)
 	if complResp.StatusCode != http.StatusOK {
@@ -428,8 +434,12 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		t.Fatal("expected tx_id in complete-task reply")
 	}
 
-	// All three parties can read the transaction.
-	for _, tok := range []string{pTok, cTok, aTok} {
+	// The completion's parties are its payer and caller, both the task's requester, and the action's
+	// owner (D6). The required caller supplied input and lent nothing, so it is no party.
+	if r := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, cTok); r.StatusCode == http.StatusOK {
+		t.Error("the completer read a transaction it is no party to")
+	}
+	for _, tok := range []string{pTok, aTok} {
 		r := httpDo(t, srv, "GET", "/v1/transactions/"+txID, nil, tok)
 		if r.StatusCode != http.StatusOK {
 			r.Body.Close()
@@ -441,8 +451,8 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		if tx["owner"] != "3p-owner@k" {
 			t.Errorf("tx.owner: got %v, want 3p-owner@k", tx["owner"])
 		}
-		if tx["caller"] != "3p-caller@k" {
-			t.Errorf("tx.caller: got %v, want 3p-caller@k", tx["caller"])
+		if tx["caller"] != "3p-owner@k" {
+			t.Errorf("tx.caller: got %v, want 3p-owner@k, the requester", tx["caller"])
 		}
 		if tx["target"] != "3p-provider@k" {
 			t.Errorf("tx.target: got %v, want 3p-provider@k", tx["target"])

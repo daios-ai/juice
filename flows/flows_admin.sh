@@ -226,7 +226,11 @@ flow_message() {
     task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"Please review doc"}')" task_id)
     assert_nonempty "message.task_created" "$task_id"
 
-    # bob sees the task and completes it.
+    # bob sees who asks, and nothing else, until he approves alice (U52); then the task and completes it.
+    assert_not_contains "message.withheld_until_approved" "$task_id" "$(jj "$db" "$hb" task list)"
+    assert_contains "message.requester_pending" '"alice@k"' "$(jj "$db" "$hb" user requesters)"
+    assert_not_contains "message.requester_shows_no_content" "Please review doc" "$(jj "$db" "$hb" user requesters)"
+    j "$db" "$hb" user approve alice@k >/dev/null
     assert_contains "message.bob_sees_task" "$task_id" "$(jj "$db" "$hb" task list)"
     assert_json "message.task_waiting" "$(jj "$db" "$hb" task show "$task_id")" status waiting
     local ctx; ctx=$(strfield "$(jj "$db" "$hb" task complete "$task_id" '{}')" tx_id)
@@ -248,6 +252,43 @@ flow_message() {
     # Missing 'to' and unknown recipient are both rejected.
     assert_fails "message.missing_to_rejected" "to\|required\|invalid" -- j "$db" "$ha" run sys@k/message '{"message":"hi"}'
     assert_fails "message.unknown_recipient_rejected" "not found\|invalid\|unknown" -- j "$db" "$ha" run sys@k/message '{"to":"nobody@k","message":"hi"}'
+}
+
+# flow_task_consent — a user decides who may address tasks to them (U52). A task from someone they have
+# not approved is withheld, and they see only who asks; approving shows it, revoking withholds it again
+# and keeps the requester listed, and blocking declines what waits and refuses what comes next. A task
+# addressed to its own requester needs no approval.
+flow_task_consent() {
+    echo "=== FLOW task_consent ==="
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "task_consent.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice
+    make_user "$db" "$hs" "$hb" bob
+    _msg() { resultf "$(jj "$db" "$ha" run sys@k/message "{\"to\":\"$1\",\"message\":\"$2\"}")" task_id; }
+    _sees() { jj "$db" "$hb" task list | grep -q -- "$1" && echo yes || echo no; }
+    _status() { jj "$db" "$hb" user requesters | python3 -c 'import sys,json;print(next((r["status"] for r in json.load(sys.stdin) if r["requester"]=="alice@k"),""))'; }
+
+    local own; own=$(_msg alice@k "a note to self")
+    assert_contains "task_consent.self_addressed_visible" "$own" "$(jj "$db" "$ha" task list)"
+
+    local first; first=$(_msg bob@k "first")
+    assert_eq "task_consent.withheld" no "$(_sees "$first")"
+    assert_eq "task_consent.pending" pending "$(_status)"
+    assert_fails "task_consent.unreadable_before_approval" "not found\|no task" -- j "$db" "$hb" task show "$first"
+
+    j "$db" "$hb" user approve alice@k >/dev/null
+    assert_eq "task_consent.approved" approved "$(_status)"
+    assert_eq "task_consent.approve_shows" yes "$(_sees "$first")"
+
+    j "$db" "$hb" user revoke alice@k >/dev/null
+    assert_eq "task_consent.revoked_listed_pending" pending "$(_status)"
+    assert_eq "task_consent.revoke_withholds" no "$(_sees "$first")"
+
+    j "$db" "$hb" user block alice@k >/dev/null
+    assert_eq "task_consent.blocked" blocked "$(_status)"
+    assert_json "task_consent.block_declines_waiting" "$(jj "$db" "$ha" task show "$first")" status cancelled
+    assert_fails "task_consent.blocked_refused" "does not accept" -- j "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"again"}'
+    assert_fails "task_consent.unknown_decision" "approve, revoke or block\|unknown command" -- j "$db" "$hb" user forgive alice@k
 }
 
 flow_native_orphan_purge() {

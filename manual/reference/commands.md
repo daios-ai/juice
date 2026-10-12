@@ -98,6 +98,10 @@ those values without an interactive prompt.
 | `juice user disconnect [SELECTOR]` | revoke it; `--account KEY` removes the whole upstream account |
 | `juice user transfer RECIPIENT AMOUNT` | send money to a user of this kernel or another; `--external-key` makes a repeat move nothing ([Funds](../money/funds.html)) |
 | `juice user ledger` | deposits, withdrawals, transfers, delivered value, and settlement postings |
+| `juice user requesters` | who has addressed tasks to you, and your decision on each ([Consent](../calling/consent-and-tasks.html)) |
+| `juice user approve USER@KERNEL` | show that user's tasks to you |
+| `juice user revoke USER@KERNEL` | hide them again until you approve |
+| `juice user block USER@KERNEL` | decline their waiting tasks and refuse new ones |
 | `juice user blockchain-address ADDRESS` | register the blockchain address you pay from and are paid at; asks for a signature by that address and for your password ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
 | `juice user deposit` | where to send money, and whether you are registered ([Deposits and withdrawals](../money/deposits-and-withdrawals.html)) |
 | `juice user withdraw AMOUNT` | take money out ([Taking money out](../money/deposits-and-withdrawals.html#taking-money-out)) |

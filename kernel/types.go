@@ -226,7 +226,14 @@ type Task struct {
 	// ImportBPS freezes the origin fee this Task was funded under: CreateTask parks Price and the
 	// Task may settle long after import_bps changes (§16 Price Snapshot Pattern). Remote-proxy tasks
 	// only; nil = parked before 041, settling from live config as before.
-	ImportBPS         *int64     `json:"import_bps,omitempty"`
+	ImportBPS *int64 `json:"import_bps,omitempty"`
+	// RequesterUserID is who the task acts for (D6): the user, action owner or native's caller that
+	// created it, always a user here. The completion call runs as this principal, never as the
+	// completer. Value, ValueTo and ValuePeer are its transfer value, reserved from it at creation.
+	RequesterUserID   string     `json:"requester_user_id,omitempty"`
+	Value             int64      `json:"value,omitempty"`
+	ValueTo           string     `json:"value_to,omitempty"`
+	ValuePeer         string     `json:"value_peer,omitempty"`
 	Status            TaskStatus `json:"status"`
 	TxID              *string    `json:"tx_id,omitempty"`
 	CompletionTraceID *string    `json:"completion_trace_id,omitempty"`
@@ -241,14 +248,18 @@ type TaskNotice struct {
 	Status   TaskStatus `json:"status"`
 	// UserID is the addressed principal's stable id on the receiving kernel, absent when the task is
 	// addressed to that kernel itself, which its operator answers for.
-	UserID       string          `json:"user_id,omitempty"`
-	PartialArgs  json.RawMessage `json:"partial_args"`
-	AllowedInput map[string]any  `json:"allowed_input,omitempty"`
-	Price        int64           `json:"price"`
-	TxID         string          `json:"tx_id,omitempty"`
-	Outcome      TxStatus        `json:"outcome,omitempty"`
-	Result       json.RawMessage `json:"result,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
+	UserID string `json:"user_id,omitempty"`
+	// RequesterID and RequesterHandle are who the task acts for, on its holder: the one local id a
+	// notice carries, since the addressee approves requesters by stable principal (U52).
+	RequesterID     string          `json:"requester_id,omitempty"`
+	RequesterHandle string          `json:"requester_handle,omitempty"`
+	PartialArgs     json.RawMessage `json:"partial_args"`
+	AllowedInput    map[string]any  `json:"allowed_input,omitempty"`
+	Price           int64           `json:"price"`
+	TxID            string          `json:"tx_id,omitempty"`
+	Outcome         TxStatus        `json:"outcome,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
 	// The target and the creating action, kept on the holder's own entry and withheld from a peer.
 	ActionID    string `json:"action_id,omitempty"`
 	CreatedByID string `json:"created_by_id,omitempty"`
@@ -266,9 +277,25 @@ type TaskEntry struct {
 	TaskNotice
 	HolderKey      string
 	RequiredCaller Principal
-	OwnerUserID    string // the process owner; empty for a task held by a peer
+	Requester      Principal // RequesterID on the holder's kernel
+	OwnerUserID    string    // the process owner; empty for a task held by a peer
 	ProcessID      string
 }
+
+// Requester is one principal's standing with a user of this kernel who has been addressed tasks by
+// it (U52): pending from first contact, then approved or blocked by that user.
+type Requester struct {
+	Principal
+	Status    string
+	CreatedAt time.Time
+}
+
+// The standings a requester may have.
+const (
+	RequesterPending  = "pending"
+	RequesterApproved = "approved"
+	RequesterBlocked  = "blocked"
+)
 
 // OutgoingNotice is a notice owed to the peer holding the task's addressee.
 type OutgoingNotice struct {

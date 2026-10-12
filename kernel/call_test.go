@@ -1996,7 +1996,7 @@ func TestHostTaskCompleteIsTraceConfined(t *testing.T) {
 	_, victimTrace := setupOrphanTrace(t, st, victim.ID, victim.ID, victim.ID)
 	exec := &taskCompleteHostExec{}
 	k := newTestKernelWithScripts(st, exec)
-	task, err := k.CreateTask(ctx, victimTrace.ID, target.ID, nil, kernel.User(mallory.ID))
+	task, err := k.CreateTask(ctx, victimTrace.ID, target.ID, nil, kernel.User(mallory.ID), approvedCreatorOf(t, st, victimTrace.ID, kernel.User(mallory.ID)))
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}

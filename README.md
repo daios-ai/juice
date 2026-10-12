@@ -287,10 +287,13 @@ consent to request. See [docs/oauth.md](docs/oauth.md).
 ## Wait for a human or a webhook
 
 An action can park a **task**: a prepaid continuation addressed to one named party.
-The money is already reserved, so completing it needs no further funds:
+The money is already reserved and the call runs as its creator, so completing it
+costs nothing and acts in nobody's name but the creator's. A party first approves
+who may address it:
 
 ```bash
 ./juice run sys@work/message '{"to":"bob@work","message":"approve the order?"}'
+./juice user approve alice@work      # bob accepts tasks from alice
 ./juice task list                    # bob sees work addressed to him
 ./juice task complete <task-id> '{}'
 ./juice process list                 # a parked task keeps its process open

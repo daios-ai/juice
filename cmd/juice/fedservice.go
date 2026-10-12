@@ -454,7 +454,7 @@ func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 	// completion — here, or later via the remote-dispatch retry loop — releases the lock atomically
 	// with the transaction and the receipt that replaces it (§5, §13). The service layer therefore
 	// disposes of the lock only in the cases where NO commit will ever happen.
-	reply, err := k.CompleteTaskFederated(ctx, scope, taskID, rawInput, rec.ID, forUserID, userSuperuser)
+	reply, err := k.CompleteTaskFederated(ctx, scope, taskID, rawInput, rec.ID)
 	if err != nil {
 		// Disposition follows CompleteTask's outcome contract (§10) — never a re-read of the task's
 		// status, which cannot distinguish these three cases:

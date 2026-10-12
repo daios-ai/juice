@@ -87,9 +87,8 @@ func (e *TransferEffect) stage(t *Trace) {
 // other than C, not suspended. One on another kernel is resolved to its stable id by user resolve,
 // which also exchanges the two kernels' proven vaults (P11); where the world has addresses, a kernel
 // that has proven none is refused, since the payment would have nowhere to go. A peer caller is
-// refused: its account holds nothing to fund a value (D14), and a peer completing a parked task is the
-// one path by which it could otherwise reach an effect-bearing action, since completion re-checks
-// liveness but not visibility (§4 binding rule).
+// refused: its account holds nothing to fund a value (D14). A task stages its value here at creation,
+// for its requester, never at completion (D6).
 func (k *Kernel) prepareTransferEffect(ctx context.Context, caller Principal, a *Action, args map[string]any) (*TransferEffect, error) {
 	fn := k.actionValue(a)
 	if fn == nil {
@@ -1228,7 +1227,21 @@ func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *Sign
 	if addressee == "" {
 		addressee = k.cfg.FeeRecipientID
 	}
-	return k.store.RecordTaskNotice(ctx, holderKey, addressee, &n)
+	if err := k.store.RecordTaskNotice(ctx, holderKey, addressee, &n); err != nil || n.Status != TaskWaiting {
+		return err
+	}
+	// A task from a requester its addressee blocked is declined at once, on its holder (U52). The
+	// notice is recorded either way, and withheld; a decline that fails fails the notice, which the
+	// holder then keeps owed and tells again, so the decline is retried until it lands.
+	status, err := k.store.RequesterStatus(ctx, addressee, Principal{Kernel: holderKey, UserID: n.RequesterID})
+	if err != nil || status != RequesterBlocked {
+		return err
+	}
+	e, err := k.store.ReadMailbox(ctx, n.ID)
+	if err != nil {
+		return err
+	}
+	return k.decline(ctx, addressee, e)
 }
 
 // ---- Peer operations ----

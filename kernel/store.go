@@ -412,6 +412,13 @@ type Store interface {
 	ReadMailbox(ctx context.Context, id string) (*TaskEntry, error)
 	// RecordTaskNotice delivers a peer's notice to the addressee here, kept iff newer (P8).
 	RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID string, n *TaskNotice) error
+	// RequesterStatus is userID's standing for p ("" when p never addressed them); SetRequester
+	// records a decision; ListRequesters lists every requester that has addressed userID; and
+	// ListHeldFrom the waiting entries p addressed to userID (U52).
+	RequesterStatus(ctx context.Context, userID string, p Principal) (string, error)
+	SetRequester(ctx context.Context, userID string, p Principal, status string) (*Requester, error)
+	ListRequesters(ctx context.Context, userID string) ([]*Requester, error)
+	ListHeldFrom(ctx context.Context, userID string, p Principal) ([]*TaskEntry, error)
 	// RedeliverTasks gives every task this kernel funds that has no mailbox entry yet its first one.
 	RedeliverTasks(ctx context.Context) error
 	// ListUndeliveredTasks returns notices owed to peers, never tried first, then least recently failed;

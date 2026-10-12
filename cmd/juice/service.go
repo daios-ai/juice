@@ -28,14 +28,17 @@ import (
 // parked on someone who may be offline (§13); its age is the task's created_at.
 type taskWithAction struct {
 	kernel.TaskNotice
-	UserID         string `json:"user_id,omitempty"`       // shadow-dropped: the required caller names the party
-	ActionID       string `json:"action_id,omitempty"`     // shadow-dropped: the address below names it
-	CreatedByID    string `json:"created_by_id,omitempty"` // shadow-dropped: likewise
-	Action         string `json:"action,omitempty"`
-	CreatedBy      string `json:"created_by,omitempty"` // the creating action's address
-	Owner          string `json:"owner"`                // process owner (payer), or the kernel holding the task
-	RequiredCaller string `json:"required_caller,omitempty"`
-	WaitingOnPeer  bool   `json:"waiting_on_peer,omitempty"`
+	UserID          string `json:"user_id,omitempty"`          // shadow-dropped: the required caller names the party
+	RequesterID     string `json:"requester_id,omitempty"`     // shadow-dropped: the requester below names it
+	RequesterHandle string `json:"requester_handle,omitempty"` // shadow-dropped: likewise
+	ActionID        string `json:"action_id,omitempty"`        // shadow-dropped: the address below names it
+	CreatedByID     string `json:"created_by_id,omitempty"`    // shadow-dropped: likewise
+	Action          string `json:"action,omitempty"`
+	CreatedBy       string `json:"created_by,omitempty"` // the creating action's address
+	Owner           string `json:"owner"`                // process owner (payer), or the kernel holding the task
+	RequiredCaller  string `json:"required_caller,omitempty"`
+	Requester       string `json:"requester,omitempty"` // who the task acts for (D6)
+	WaitingOnPeer   bool   `json:"waiting_on_peer,omitempty"`
 }
 
 // processView enriches a process with its owner's address and awaiting-receipt state and age (§13): a
@@ -122,6 +125,9 @@ type httpView struct {
 func enrichTask(k *kernel.Kernel, ctx context.Context, e *kernel.TaskEntry, names *kernel.Names) *taskWithAction {
 	v := &taskWithAction{TaskNotice: e.TaskNotice, RequiredCaller: names.Address(ctx, e.RequiredCaller),
 		Owner: k.KernelName(ctx, e.HolderKey)}
+	if e.Requester.UserID != "" {
+		v.Requester = names.Address(ctx, e.Requester)
+	}
 	if e.ActionID != "" {
 		action, _ := k.ReadAction(ctx, e.ActionID)
 		v.Action, v.CreatedBy = names.Action(ctx, action), k.ActionAddressByID(ctx, e.CreatedByID)
@@ -808,7 +814,9 @@ func createTask(k *kernel.Kernel, ctx context.Context, callerID string, p create
 			return nil, err
 		}
 	}
-	task, err := k.CreateTaskByRef(ctx, p.TraceID, p.ActionRef, p.RequiredCaller, p.PartialArgs)
+	// The task acts for whoever creates it: the session user, or the action owner a capability
+	// stands for (D6).
+	task, err := k.CreateTaskByRef(ctx, p.TraceID, p.ActionRef, p.RequiredCaller, callerID, p.PartialArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -844,6 +852,51 @@ func getTask(k *kernel.Kernel, ctx context.Context, callerID, id string) (*taskW
 		return nil, err
 	}
 	return enrichTask(k, ctx, task, k.NewNames()), nil
+}
+
+// ---- Requesters (U52) ----
+
+// requesterView is one principal that has addressed tasks to the caller: who, by address, and the
+// caller's decision. Nothing the requester wrote is shown.
+type requesterView struct {
+	Requester string    `json:"requester"`
+	Status    string    `json:"status"`
+	Since     time.Time `json:"since"`
+}
+
+func viewRequester(ctx context.Context, r *kernel.Requester, names *kernel.Names) requesterView {
+	return requesterView{Requester: names.Address(ctx, r.Principal), Status: r.Status, Since: r.CreatedAt}
+}
+
+func listRequesters(k *kernel.Kernel, ctx context.Context, callerID string) ([]requesterView, error) {
+	rs, err := k.ListRequesters(ctx, callerID)
+	if err != nil {
+		return nil, err
+	}
+	names := k.NewNames()
+	views := make([]requesterView, len(rs))
+	for i, r := range rs {
+		views[i] = viewRequester(ctx, r, names)
+	}
+	return views, nil
+}
+
+// requesterVerbs are the decisions a user takes on a requester, as their routes and commands name them.
+var requesterVerbs = map[string]string{
+	"approve": kernel.RequesterApproved, "revoke": kernel.RequesterPending, "block": kernel.RequesterBlocked,
+}
+
+func setRequester(k *kernel.Kernel, ctx context.Context, callerID, address, verb string) (*requesterView, error) {
+	status, ok := requesterVerbs[verb]
+	if !ok {
+		return nil, kernel.ErrNotFound.Wrapf("no requester decision %q: approve, revoke or block", verb)
+	}
+	r, err := k.SetRequester(ctx, callerID, address, status)
+	if err != nil {
+		return nil, err
+	}
+	v := viewRequester(ctx, r, k.NewNames())
+	return &v, nil
 }
 
 // ---- Transaction operations ----

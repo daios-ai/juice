@@ -722,8 +722,15 @@ flow_fed_task_complete() {
     assert_nonempty "fed_task_complete.task_parked" "$first"
     assert_contains "fed_task_complete.waiting_on_peer" "waiting_on_peer" "$(jj "$FED_DBR" "$FED_HR" task list)"
 
-    # Alice names no kernel: her own list is where the task arrives.
+    # Alice names no kernel: her own list is where the task arrives — once she approves who asks.
+    # Until then she sees only the requester, pending, and nothing it wrote (U52).
     _lists() { jj "$FED_DBL" "$ha" task list | grep -q -- "$1" && echo yes || echo no; }
+    _asks() { jj "$FED_DBL" "$ha" user requesters | grep -q '"sys@kernel-r"' && echo yes || echo no; }
+    await_eq "fed_task_complete.requester_pending" yes _asks
+    assert_contains "fed_task_complete.pending" '"pending"' "$(jj "$FED_DBL" "$ha" user requesters)"
+    assert_not_contains "fed_task_complete.requester_shows_no_content" "approve the shipment" "$(jj "$FED_DBL" "$ha" user requesters)"
+    assert_eq "fed_task_complete.withheld_until_approved" no "$(_lists "$first")"
+    j "$FED_DBL" "$ha" user approve sys@kernel-r >/dev/null
     await_eq "fed_task_complete.delivered" yes _lists "$second"
     local listed; listed=$(jj "$FED_DBL" "$ha" task list)
     assert_contains "fed_task_complete.lists_first" "$first" "$listed"

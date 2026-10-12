@@ -4043,6 +4043,7 @@ func TestServeEveryIDPositionTakesAPrefix(t *testing.T) {
 	decodeResponse(t, httpDo(t, srv, "POST", "/v1/tasks", map[string]any{
 		"trace_id": traceID, "action": actionID, "required_caller": "pre-caller@k", "partial_args": map[string]any{},
 	}, ownerTok), &task)
+	approveRequester(t, srv, callerTok, "pre-owner@k")
 	taskID, _ := task["id"].(string)
 	if taskID == "" {
 		t.Fatalf("task without id: %v", task)

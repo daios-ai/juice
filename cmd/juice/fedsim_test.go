@@ -1647,6 +1647,16 @@ func TestSimTaskReachesItsRecipient(t *testing.T) {
 	second := holder.messageTo(t, ana.ID, "alice@"+home.key)
 	holder.k.RevealPending(ctx) // the telling worker's pass
 
+	// Delivered, but withheld from alice until she approves ana, who is all she sees meanwhile (U52).
+	if open, _ := home.k.ListTasks(ctx, alice.ID, kernel.TaskFilter{}); len(open) != 0 {
+		t.Fatalf("alice sees %d tasks from a requester she never approved", len(open))
+	}
+	if rs, _ := home.k.ListRequesters(ctx, alice.ID); len(rs) != 1 || rs[0].Kernel != holder.key || rs[0].UserID != ana.ID || rs[0].Status != kernel.RequesterPending {
+		t.Fatalf("alice's requesters = %+v; want ana on the holder, pending", rs)
+	}
+	if _, err := home.k.SetRequester(ctx, alice.ID, "ana@"+holder.key, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
 	open, err := home.k.ListTasks(ctx, alice.ID, kernel.TaskFilter{})
 	if err != nil || len(open) != 2 {
 		net.dump()
@@ -1686,6 +1696,88 @@ func TestSimTaskReachesItsRecipient(t *testing.T) {
 	}
 }
 
+// TestSimATaskAcrossKernelsLendsNothingAndCanBeBlocked: a task held on one kernel for a user of
+// another acts for its requester there (D6, U52). ana's task pays carol when alice answers it, from
+// ana's balance reserved at creation, and alice, completing from her own kernel, pays nothing. When
+// alice blocks ana, a task of ana's already delivered is declined on its holder, and so is one whose
+// notice arrives after, the decline retried with the notice when it first fails. alice's decisions
+// on ana use the principal her list holds and never ask ana's kernel.
+func TestSimATaskAcrossKernelsLendsNothingAndCanBeBlocked(t *testing.T) {
+	net := newSimNet(t)
+	holder := net.addNode("holder", defaultSimConfig())
+	home := net.addNode("home", defaultSimConfig())
+	ana, carol := holder.user(t, "ana", 1000), holder.user(t, "carol", 0)
+	alice := home.user(t, "alice", 200)
+	ctx := context.Background()
+	trace := setupTraceForProcess(t, holder.db, setupProcessHTTP(t, holder.db, ana.ID, 0).ID)
+	pay := func(amount int) string {
+		t.Helper()
+		e, err := holder.k.CreateTaskByRef(ctx, trace, "sys@"+testOwnName+"/transfer", "alice@"+home.key, ana.ID,
+			json.RawMessage(fmt.Sprintf(`{"target":"carol@%s","amount":%d}`, testOwnName, amount)))
+		if err != nil {
+			t.Fatalf("park a transfer task: %v", err)
+		}
+		return e.ID
+	}
+	holderStatus := func(id string) kernel.TaskStatus {
+		t.Helper()
+		task, err := holder.db.ReadTask(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task.Status
+	}
+
+	paid := pay(300)
+	holder.k.RevealPending(ctx)
+	if _, err := home.k.SetRequester(ctx, alice.ID, "ana@"+holder.key, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := home.k.CompleteTask(ctx, alice.ID, paid, json.RawMessage(`{}`)); err != nil {
+		net.dump()
+		t.Fatalf("alice completes ana's transfer task: %v", err)
+	}
+	if got := holder.balance(t, carol.ID); got != 300 {
+		t.Errorf("carol received %d, want 300", got)
+	}
+	if got := holder.balance(t, ana.ID); got != 700 {
+		t.Errorf("ana holds %d, want 700: the value is hers", got)
+	}
+	if got := home.balance(t, alice.ID); got != 200 {
+		t.Errorf("alice holds %d, want 200: answering costs nothing", got)
+	}
+
+	// A resolve from alice's kernel to ana's would be refused; no decision makes one.
+	net.arm(home.key, holder.key, verbResolve, faultRefuseBeforeDispatch, 1)
+	if _, err := home.k.SetRequester(ctx, alice.ID, "ana@"+holder.key, kernel.RequesterPending); err != nil {
+		t.Fatalf("revoke without asking ana's kernel: %v", err)
+	}
+	delivered := pay(50)
+	holder.k.RevealPending(ctx)
+	if _, err := home.k.SetRequester(ctx, alice.ID, "ana@"+holder.key, kernel.RequesterBlocked); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	if got := holderStatus(delivered); got != kernel.TaskCancelled {
+		t.Errorf("blocking left ana's delivered task %q on its holder, want cancelled", got)
+	}
+	// The first decline of a task arriving from a blocked requester is lost; the notice stays owed,
+	// and the holder's next telling carries the decline through.
+	net.arm(home.key, holder.key, verbTask, faultRefuseBeforeDispatch, 1)
+	later := pay(50)
+	holder.k.RevealPending(ctx)
+	net.assertFired(t, faultRefuseBeforeDispatch, 1) // the task decline's, and no resolve's
+	if got := holderStatus(later); got != kernel.TaskWaiting {
+		t.Fatalf("after the lost decline the task is %q on its holder, want still waiting", got)
+	}
+	holder.k.RevealPending(ctx)
+	if got := holderStatus(later); got != kernel.TaskCancelled {
+		t.Errorf("a task arriving from a blocked requester is %q on its holder, want cancelled once the notice is told again", got)
+	}
+	if got := holder.balance(t, ana.ID); got != 700 {
+		t.Errorf("ana holds %d after both declines, want her values back, 700", got)
+	}
+}
+
 // TestSimTaskNoticeIsToldUntilAcknowledged: a notice whose answer is lost is told again, and the
 // repeat is acknowledged without a second entry; a holder this kernel has suspended delivers
 // nothing until it is unsuspended (U37).
@@ -1713,6 +1805,9 @@ func TestSimTaskNoticeIsToldUntilAcknowledged(t *testing.T) {
 		return len(got)
 	}
 
+	if _, err := home.k.SetRequester(ctx, alice.ID, "ana@"+holder.key, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
 	if err := home.k.SuspendKernel(ctx, home.sysID, holder.key); err != nil {
 		t.Fatal(err)
 	}
@@ -1750,6 +1845,9 @@ func TestSimRestartDeliversTasksMadeBeforeTheMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	node.restart(t)
+	if _, err := node.k.SetRequester(ctx, bob.ID, "ana@"+testOwnName, kernel.RequesterApproved); err != nil {
+		t.Fatal(err)
+	}
 	if e, err := node.k.ReadTask(ctx, bob.ID, id); err != nil || e.Status != kernel.TaskWaiting {
 		t.Errorf("after restart: %+v %v; want the waiting task delivered", e, err)
 	}

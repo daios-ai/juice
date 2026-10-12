@@ -58,7 +58,7 @@ func parkTaskForPeerUser(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey, 
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), parkTaskAction(t, k), json.RawMessage(`{}`), kernel.Principal{Kernel: peerKey, UserID: remoteUserID})
+	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), parkTaskAction(t, k), json.RawMessage(`{}`), kernel.Principal{Kernel: peerKey, UserID: remoteUserID}, sys.ID)
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -361,7 +361,8 @@ func TestFedTask_CompleteSettlesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("expected a tx_id, got %v", body)
 	}
 
-	// The task is done, and the completion transaction obeys the role law: the peer is the caller.
+	// The task is done, and the completion transaction obeys the role law: the caller is the task's
+	// requester, sys here, never the peer that completed it (D6).
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	task, err := k.ReadTask(ctx, sys.ID, taskID)
@@ -375,8 +376,8 @@ func TestFedTask_CompleteSettlesAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadTransaction: %v", err)
 	}
-	if tx.CallerKernel != keyA || tx.CallerUserID != "" {
-		t.Errorf("expected the peer kernel as caller, got kernel=%q user=%q", tx.CallerKernel, tx.CallerUserID)
+	if tx.CallerKernel != "" || tx.CallerUserID != sys.ID {
+		t.Errorf("expected the requester as caller, got kernel=%q user=%q", tx.CallerKernel, tx.CallerUserID)
 	}
 
 	// A replay with the same idempotency key returns the stored result, re-executing nothing.
@@ -413,7 +414,7 @@ func TestFedTask_PeerCompletesLocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := setupProcessHTTP(t, db, sys.ID, 0)
-	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.Principal{Kernel: keyA})
+	task, err := k.CreateTask(ctx, setupTraceForProcess(t, db, p.ID), actionID, json.RawMessage(`{}`), kernel.Principal{Kernel: keyA}, sys.ID)
 	if err != nil {
 		t.Fatalf("CreateTask parking a local action for a peer: %v", err)
 	}
@@ -430,7 +431,7 @@ func TestFedTask_PeerCompletesLocalAction(t *testing.T) {
 // The notice a peer is told must carry the request and nothing about the requester. This asserts on
 // the serialized JSON rather than the struct, because the defect it guards against was reusing a
 // type whose fields leaked. A local user identity crossing a kernel boundary is what P8 withholds.
-func TestFedTask_NoticeDisclosesRequestNotRequester(t *testing.T) {
+func TestFedTask_NoticeDisclosesRequestAndRequesterOnly(t *testing.T) {
 	srv, k, db := newTestHTTPServerFull(t)
 	defer srv.Close()
 
@@ -463,9 +464,16 @@ func TestFedTask_NoticeDisclosesRequestNotRequester(t *testing.T) {
 			t.Errorf("notice leaks %q: %s", leak, got)
 		}
 	}
-	// The process owner's handle must not appear under any key at all.
-	if strings.Contains(got, "sys") {
-		t.Errorf("notice leaks a local handle: %s", got)
+	// Who made the request travels, as a call's caller does (U41), so the addressee can decide on
+	// it (U52): its stable id and handle, and no other local name — the process owner's handle
+	// appears under no other key.
+	if n.Notice.RequesterID == "" || n.Notice.RequesterHandle != "sys" {
+		t.Errorf("notice must carry its requester: %+v", n.Notice)
+	}
+	bare := n.Notice
+	bare.RequesterID, bare.RequesterHandle = "", ""
+	if rest, _ := json.Marshal(bare); strings.Contains(string(rest), "sys") {
+		t.Errorf("notice leaks a local handle beyond its requester: %s", rest)
 	}
 }
 

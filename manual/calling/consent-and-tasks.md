@@ -106,10 +106,10 @@ before using the action with your upstream account again.
 ## Completing work addressed to you
 
 A **task** is a future action call awaiting input from a named party. Its
-creator reserves the execution price when setting it up, so you do not pay
-that price when completing it. An action that delivers value or calls a remote
-kernel can still require the immediate caller's separate value or stake funds.
-Use `task list` and `task show` to inspect the work addressed to you:
+creator reserves the price, and any money the action sends, when setting it
+up. The call runs as the creator when you complete it, so completing a task
+never spends your money or acts in your name. Use `task list` and `task show`
+to inspect the work addressed to you:
 
 ```console
 $ juice task list
@@ -131,11 +131,13 @@ $ juice task show b75366d19c2e
   created_by: sys@acme/message
   owner: alice@acme
   required_caller: bob@acme
+  requester: alice@acme
 ```
 
 The `created_by` field identifies the action that created the task, while
 `action` identifies the service that will execute when you complete it.
-`owner` names the process owner funding the work. The `revision` increases
+`owner` names the process owner funding the work, and `requester` the user it
+acts for. The `revision` increases
 whenever the task changes. Read `partial_args` for the information already
 supplied and `allowed_input` for the schema of the remaining input:
 
@@ -164,16 +166,30 @@ process that set it aside:
 $ juice task cancel b75366d19c2e
 ```
 
+## Who may address you
+
+The first task from someone you have not approved is not shown to you. You see
+only who is asking, and nothing they wrote:
+
+```console
+$ juice user requesters
+REQUESTER     STATUS   SINCE
+alice@acme    pending  2026-10-12T09:14:02Z
+$ juice user approve alice@acme
+```
+
+Once you approve someone, their tasks appear in `task list`, the ones already
+waiting included. `juice user revoke` hides them again and keeps the requester
+in the list, so you can approve them later. `juice user block` declines every
+task of theirs that is waiting and refuses their next ones. Tasks you address
+to yourself need no approval.
+
 ## Work from another kernel
 
 A task addressed to you by a user of another kernel arrives in the same list,
-and you answer it with the same commands. Its `owner` is the kernel that holds
+once you approve its requester, and you answer it with the same commands. Its `owner` is the kernel that holds
 it: that kernel withholds who funds the work and which actions are involved,
 and sends only the request, its input requirements and its state. Your kernel
 signs your completion or decline with your stable account ID, and the holder
 checks it against the task before acting. Its reply updates your list before
 the command returns.
-
-A task that transfers money, such as one calling `sys/transfer`, cannot be
-completed from another kernel. Completion would run as the account representing
-your kernel there, and that account holds no funds to pay the transfer.

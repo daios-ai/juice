@@ -82,11 +82,16 @@ For tasks created as part of normal execution, use the WebAssembly host or HTTP
 callback. Both already identify the executing trace and its budget.
 
 At creation, the kernel reserves the target action's current execution price.
-Completion uses that reservation even if the price later changes. Separate
-value or remote-ticket requirements still belong to the immediate caller.
+Completion uses that reservation even if the price later changes. The task acts
+for its requester: you at the command line, or the action owner when an action
+creates it. Completion runs as the requester, so a task on `sys/transfer` pays
+from the requester's balance, and the amount is reserved when the task is
+created; the completer only supplies what is missing.
 
 The required party must be named and resolvable. Only that party can complete
-the task; the operator has no override. Visibility is checked against the
+the task; the operator has no override. The party sees the task once it
+approves you, unless it is addressed to you yourself; one that has blocked you
+refuses the task. Visibility is checked against the
 creator when the target is bound, allowing you to reserve a private helper for
 completion by someone else.
 

@@ -849,7 +849,12 @@ func (s *story) actTasks() error {
 	if len(ids) == 0 {
 		return nil
 	}
-	s.n.MustWork("task.recipient_sees_it", k1, "ben", "task", "list")
+	// A task from someone ben never approved is withheld; he sees only who asks until he approves (U52).
+	listed, _ := k1.Run("ben", "--json", "task", "list")
+	s.n.Check("task.withheld_until_approved", !strings.Contains(listed, ids[0]), "ben saw a task from a requester he never approved")
+	s.n.MustWork("task.requester_approved", k1, "ben", "user", "approve", k1.At("ana"))
+	listed, _ = k1.Run("ben", "--json", "task", "list")
+	s.n.Check("task.recipient_sees_it", strings.Contains(listed, ids[0]), "approving ana did not show her task")
 
 	// A task belongs to the party it was parked for, and anyone else completing it is taking the
 	// funds it holds. This is asked of a task that is still waiting: on one already completed the
@@ -888,6 +893,18 @@ func (s *story) tasksAcrossKernels() error {
 	if !s.n.Check("task.remote_parked", len(remote) == 2, "sys/message did not park two tasks for a user of another kernel") {
 		return nil
 	}
+	// Delivered, the tasks are withheld until gus approves ana, the one thing he sees meanwhile (U52).
+	asked := false
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(time.Second) {
+		if out, _ := k4.Run("gus", "--json", "user", "requesters"); strings.Contains(out, "ana@") {
+			asked = true
+			break
+		}
+	}
+	if !s.n.Check("task.remote_requester_pending", asked, "the requester never reached the addressee's requesters") {
+		return nil
+	}
+	s.n.MustWork("task.remote_requester_approved", k4, "gus", "user", "approve", k1.At("ana"))
 	delivered := false
 	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(time.Second) {
 		out, _ := k4.Run("gus", "--json", "task", "list")

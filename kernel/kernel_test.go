@@ -159,6 +159,35 @@ func mustGenerateKey() ed25519.PrivateKey {
 	return priv
 }
 
+// creatorOf is who creates a task parked on traceID in a test: the owner of the process it funds,
+// as the session that would create it there (D6).
+func creatorOf(t testing.TB, st kernel.Store, traceID string) string {
+	t.Helper()
+	tr, err := st.ReadTrace(context.Background(), traceID)
+	if err != nil {
+		t.Fatalf("creatorOf: %v", err)
+	}
+	p, err := st.ReadProcess(context.Background(), tr.ProcessID)
+	if err != nil {
+		t.Fatalf("creatorOf: %v", err)
+	}
+	return p.OwnerUserID
+}
+
+// approvedCreatorOf is creatorOf for a test about completing the task: its required caller, when a
+// user here, has approved the creator, as they must before they see it (U52). Tests of approval
+// itself use creatorOf.
+func approvedCreatorOf(t testing.TB, st kernel.Store, traceID string, caller kernel.Principal) string {
+	t.Helper()
+	creator := creatorOf(t, st, traceID)
+	if caller.Local() && caller.UserID != creator {
+		if _, err := st.SetRequester(context.Background(), caller.UserID, kernel.User(creator), kernel.RequesterApproved); err != nil {
+			t.Fatalf("approvedCreatorOf: %v", err)
+		}
+	}
+	return creator
+}
+
 func setupUser(t *testing.T, st kernel.Store, handle string, balance int64) *kernel.Account {
 	t.Helper()
 	hash, err := kernel.HashPassword("password")

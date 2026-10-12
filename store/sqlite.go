@@ -1167,11 +1167,13 @@ func (s *DB) BeginTaskCall(ctx context.Context, taskID string, t *kernel.Trace) 
 				return err
 			}
 		}
-		// The completer C funds its own stakes — the delivered value, and a lottery ticket when the
-		// completion reaches a remote action — atomic with claiming the task; the task's execution
-		// price stays creator-parked above.
-		if err = lockStakes(ctx, tx, t); err != nil {
-			return err
+		// The caller is the task's requester (D6), whose value has been reserved since creation and
+		// now rides the completion trace; the claim locks only its ticket, when the completion reaches
+		// a remote action.
+		if t.Ticket > 0 {
+			if err = lockReserveTx(ctx, tx, t.CallerUserID, t.Ticket); err != nil {
+				return err
+			}
 		}
 		// Insert the completion trace first so the FK on tasks.completion_trace_id is satisfied.
 		if err = insertTraceTx(ctx, tx, t, parentTraceID, price); err != nil {
@@ -1381,7 +1383,7 @@ WHERE parent_trace_id IN (SELECT id FROM sub)
 	if err != nil {
 		return 0, dbErr(err, "cancel task subtree: sum prices")
 	}
-	if _, err = reviseTasks(ctx, tx, ", status='cancelled'", `status='waiting' AND parent_trace_id IN (
+	if err = cancelWaitingTasks(ctx, tx, `status='waiting' AND parent_trace_id IN (
 WITH RECURSIVE sub(id) AS (
     SELECT ? AS id
     UNION ALL
@@ -1854,7 +1856,7 @@ func (s *DB) EndProcess(ctx context.Context, processID string) error {
 				return err2
 			}
 		}
-		if _, err = reviseTasks(ctx, tx, ", status='cancelled'",
+		if err = cancelWaitingTasks(ctx, tx,
 			`id IN (SELECT s.id FROM tasks s JOIN traces t ON s.parent_trace_id=t.id WHERE t.process_id=? AND s.status='waiting')`,
 			processID); err != nil {
 			return err
@@ -2096,14 +2098,35 @@ func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
 				return err
 			}
 		}
+		// A user here who blocked the requester refuses its task, in the commit that would make it, so
+		// no task slips in beside a block (U52); a task addressed to its own requester is never refused.
+		if task.RequiredCallerKernel == "" && task.RequesterUserID != "" && task.RequesterUserID != task.RequiredCallerUserID {
+			var blocked int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM requesters WHERE user_id=? AND requester_kernel=''
+			    AND requester_user_id=? AND status='blocked'`, task.RequiredCallerUserID, task.RequesterUserID).Scan(&blocked); err != nil {
+				return dbErr(err, "create task: read requester")
+			}
+			if blocked > 0 {
+				return kernel.ErrUnauthorized.Wrap("the required caller does not accept tasks from you")
+			}
+		}
+		// The value a transfer task delivers is reserved from its requester now, beside the price (D6):
+		// whoever completes it later lends nothing.
+		if task.Value > 0 {
+			if err := lockReserveTx(ctx, tx, task.RequesterUserID, task.Value); err != nil {
+				return err
+			}
+		}
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_kernel,
 			                    required_caller_handle,action_id,
-			                    partial_args,price,import_bps,status,created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			                    partial_args,price,import_bps,status,created_at,
+			                    requester_user_id,value,value_to,value_peer)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			task.ID, task.ParentTraceID, task.RequiredCallerUserID, task.RequiredCallerKernel,
 			task.RequiredCallerHandle, task.ActionID, rawJSONStr(task.PartialArgs),
 			task.Price, task.ImportBPS, string(task.Status), timeToStr(task.CreatedAt),
+			nullStr(task.RequesterUserID), task.Value, nullStr(task.ValueTo), task.ValuePeer,
 		)
 		if err != nil {
 			return dbErr(err, "create task: insert")
@@ -2113,7 +2136,7 @@ func (s *DB) CreateTask(ctx context.Context, task *kernel.Task) error {
 	})
 }
 
-const taskCols = `id,parent_trace_id,required_caller_user_id,required_caller_kernel,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at`
+const taskCols = `id,parent_trace_id,required_caller_user_id,required_caller_kernel,required_caller_handle,action_id,partial_args,price,import_bps,status,tx_id,completion_trace_id,created_at,COALESCE(requester_user_id,''),value,COALESCE(value_to,''),value_peer`
 
 func scanTask(scanFn func(...any) error) (*kernel.Task, error) {
 	task := &kernel.Task{}
@@ -2121,7 +2144,8 @@ func scanTask(scanFn func(...any) error) (*kernel.Task, error) {
 	var createdAt, partialArgs, status string
 	var importBPS sql.NullInt64
 	if err := scanFn(&task.ID, &parentTraceID, &task.RequiredCallerUserID, &task.RequiredCallerKernel, &task.RequiredCallerHandle,
-		&task.ActionID, &partialArgs, &task.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt); err != nil {
+		&task.ActionID, &partialArgs, &task.Price, &importBPS, &status, &txID, &completionTraceID, &createdAt,
+		&task.RequesterUserID, &task.Value, &task.ValueTo, &task.ValuePeer); err != nil {
 		return nil, err
 	}
 	if importBPS.Valid {
@@ -2165,7 +2189,7 @@ func (s *DB) CancelTask(ctx context.Context, id string) error {
 		if err != nil {
 			return dbErr(err, "cancel task: read")
 		}
-		if _, err := reviseTasks(ctx, tx, ", status='cancelled'", "id=? AND status='waiting'", id); err != nil {
+		if err := cancelWaitingTasks(ctx, tx, "id=? AND status='waiting'", id); err != nil {
 			return err
 		}
 		// The park leaves the trace that made it; like any refund to a task's computation it lands
@@ -2178,6 +2202,32 @@ func (s *DB) CancelTask(ctx context.Context, id string) error {
 		}
 		return s.closeProcessTx(ctx, tx, processID)
 	})
+}
+
+// cancelWaitingTasks cancels the waiting tasks where selects, returning each one's reserved value to
+// its requester in the same commit; the callers return the parked prices, which differ by path.
+func cancelWaitingTasks(ctx context.Context, tx *sql.Tx, where string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, `SELECT requester_user_id, value FROM tasks WHERE value>0 AND `+where, args...)
+	if err != nil {
+		return dbErr(err, "cancel tasks: read values")
+	}
+	type hold struct {
+		requester string
+		value     int64
+	}
+	holds, err := queryList(rows, "cancel tasks: read values", func(scan func(...any) error) (h hold, err error) {
+		return h, scan(&h.requester, &h.value)
+	})
+	if err != nil {
+		return err
+	}
+	for _, h := range holds {
+		if err := releaseTransferValue(ctx, tx, h.requester, h.value, h.requester); err != nil {
+			return err
+		}
+	}
+	_, err = reviseTasks(ctx, tx, ", status='cancelled'", where, args...)
+	return err
 }
 
 // reviseTasks is the one writer of a task's state: every change bumps the task's revision and
@@ -2213,15 +2263,18 @@ SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_u
        s.required_caller_handle, s.partial_args, s.price, COALESCE(s.tx_id,''), s.created_at, s.action_id,
        COALESCE(a.input_schema,''), COALESCE(t.action_id,''), COALESCE(p.owner_user_id,''), COALESCE(t.process_id,''),
        COALESCE(x.status,''), COALESCE(x.reply_json,''),
-       COALESCE((SELECT value FROM config WHERE key='signing_public_key'),'')
+       COALESCE((SELECT value FROM config WHERE key='signing_public_key'),''),
+       COALESCE(s.requester_user_id,''), COALESCE(r.handle,'')
   FROM tasks s
+  LEFT JOIN accounts r ON r.id=s.requester_user_id
   LEFT JOIN actions a ON a.id=s.action_id
   LEFT JOIN traces t ON t.id=s.parent_trace_id
   LEFT JOIN processes p ON p.id=t.process_id
   LEFT JOIN transactions x ON x.id=s.tx_id
  WHERE s.id=?`, id).Scan(&e.ID, &e.Revision, &status, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID,
 		&e.RequiredCaller.Handle, &partial, &e.Price, &e.TxID, &createdAt, &e.ActionID,
-		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &e.HolderKey)
+		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &e.HolderKey,
+		&e.RequesterID, &e.RequesterHandle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("task not found")
 	}
@@ -2230,6 +2283,7 @@ SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_u
 	}
 	e.Status, e.Outcome = kernel.TaskStatus(status), kernel.TxStatus(outcome)
 	e.PartialArgs, e.CreatedAt = strToRawJSON(partial), strToTime(createdAt)
+	e.Requester = kernel.Principal{UserID: e.RequesterID, Handle: e.RequesterHandle}
 	if reply != "" {
 		e.Result = json.RawMessage(reply)
 	}
@@ -2242,6 +2296,8 @@ SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_u
 }
 
 // upsertMailbox is the one writer of the mailbox: an entry is kept iff it is newer than the one held.
+// It is also where first contact is recorded: a task reaching a user here from anyone but that user
+// makes its requester pending for them, unless they have already decided (U52).
 func upsertMailbox(ctx context.Context, tx *sql.Tx, e *kernel.TaskEntry) error {
 	notice, err := json.Marshal(e.TaskNotice)
 	if err != nil {
@@ -2249,26 +2305,41 @@ func upsertMailbox(ctx context.Context, tx *sql.Tx, e *kernel.TaskEntry) error {
 	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO mailbox (holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,
-                     owner_user_id,process_id,status,revision,notice_json,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                     owner_user_id,process_id,status,revision,notice_json,created_at,
+                     requester_kernel,requester_user_id,requester_handle)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(holder_key,id) DO UPDATE SET status=excluded.status, revision=excluded.revision, notice_json=excluded.notice_json
  WHERE excluded.revision > mailbox.revision`,
 		e.HolderKey, e.ID, e.RequiredCaller.Kernel, e.RequiredCaller.UserID, e.RequiredCaller.Handle,
-		nullStr(e.OwnerUserID), nullStr(e.ProcessID), string(e.Status), e.Revision, string(notice), timeToStr(e.CreatedAt))
-	return dbErr(err, "deliver task")
+		nullStr(e.OwnerUserID), nullStr(e.ProcessID), string(e.Status), e.Revision, string(notice), timeToStr(e.CreatedAt),
+		e.Requester.Kernel, e.Requester.UserID, e.Requester.Handle)
+	if err != nil || !e.RequiredCaller.Local() || e.Requester.UserID == "" || e.Requester.Same(e.RequiredCaller) {
+		return dbErr(err, "deliver task")
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO requesters (user_id,requester_kernel,requester_user_id,requester_handle,status,created_at)
+VALUES (?,?,?,?,'pending',?)`,
+		e.RequiredCaller.UserID, e.Requester.Kernel, e.Requester.UserID, e.Requester.Handle, timeToStr(time.Now().UTC()))
+	return dbErr(err, "record requester")
 }
 
-const mailboxCols = `holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json`
+const mailboxCols = `holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json,requester_kernel,requester_user_id,requester_handle`
 
 func scanMailbox(scan func(...any) error) (*kernel.TaskEntry, error) {
 	e := &kernel.TaskEntry{}
 	var notice string
 	if err := scan(&e.HolderKey, &e.ID, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID, &e.RequiredCaller.Handle,
-		&e.OwnerUserID, &e.ProcessID, &notice); err != nil {
+		&e.OwnerUserID, &e.ProcessID, &notice, &e.Requester.Kernel, &e.Requester.UserID, &e.Requester.Handle); err != nil {
 		return nil, err
 	}
 	return e, json.Unmarshal([]byte(notice), &e.TaskNotice)
 }
+
+// approvedBy is the condition, over a mailbox row, that its addressee may see it (U52): the task is
+// their own, or from a requester they approved; one made before requesters were recorded is shown.
+const approvedBy = `(mailbox.requester_user_id='' OR (mailbox.requester_kernel=mailbox.required_caller_kernel AND mailbox.requester_user_id=mailbox.required_caller_user_id)
+  OR EXISTS (SELECT 1 FROM requesters r WHERE r.user_id=mailbox.required_caller_user_id AND r.requester_kernel=mailbox.requester_kernel
+             AND r.requester_user_id=mailbox.requester_user_id AND r.status='approved'))`
 
 func (s *DB) ListMailbox(ctx context.Context, f kernel.TaskFilter) ([]*kernel.TaskEntry, error) {
 	if f.Limit <= 0 {
@@ -2277,7 +2348,7 @@ func (s *DB) ListMailbox(ctx context.Context, f kernel.TaskFilter) ([]*kernel.Ta
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+mailboxCols+`
 		 FROM mailbox
-		 WHERE ((required_caller_kernel='' AND required_caller_user_id=?) OR owner_user_id=? OR ?)
+		 WHERE ((required_caller_kernel='' AND required_caller_user_id=? AND `+approvedBy+`) OR owner_user_id=? OR ?)
 		   AND (?='' OR process_id=?)
 		   AND (?='' OR status=?)
 		   AND (? OR ?<>'' OR status IN ('waiting','running'))`+idPrefixClause+`
@@ -2324,8 +2395,64 @@ func (s *DB) RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID s
 			return kernel.ErrNotFound.Wrap("the task names no user of this kernel")
 		}
 		return upsertMailbox(ctx, tx, &kernel.TaskEntry{TaskNotice: *n, HolderKey: holderKey,
-			RequiredCaller: kernel.User(requiredCallerID)})
+			RequiredCaller: kernel.User(requiredCallerID),
+			Requester:      kernel.Principal{Kernel: holderKey, UserID: n.RequesterID, Handle: n.RequesterHandle}})
 	})
+}
+
+// ---- Requesters ----
+
+func (s *DB) RequesterStatus(ctx context.Context, userID string, p kernel.Principal) (string, error) {
+	var status string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM requesters WHERE user_id=? AND requester_kernel=? AND requester_user_id=?`,
+		userID, p.Kernel, p.UserID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return status, dbErr(err, "read requester")
+}
+
+// SetRequester records userID's decision on p, whether or not p has addressed them yet: a user may
+// block a principal before it ever writes.
+func (s *DB) SetRequester(ctx context.Context, userID string, p kernel.Principal, status string) (*kernel.Requester, error) {
+	r := &kernel.Requester{Principal: p, Status: status}
+	var created string
+	err := s.db.QueryRowContext(ctx, `
+INSERT INTO requesters (user_id,requester_kernel,requester_user_id,requester_handle,status,created_at)
+VALUES (?,?,?,?,?,?)
+ON CONFLICT(user_id,requester_kernel,requester_user_id) DO UPDATE SET status=excluded.status
+RETURNING created_at`,
+		userID, p.Kernel, p.UserID, p.Handle, status, timeToStr(time.Now().UTC())).Scan(&created)
+	r.CreatedAt = strToTime(created)
+	return r, dbErr(err, "set requester")
+}
+
+func (s *DB) ListRequesters(ctx context.Context, userID string) ([]*kernel.Requester, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT requester_kernel, requester_user_id, requester_handle, status, created_at
+		   FROM requesters WHERE user_id=? ORDER BY created_at DESC, requester_user_id`, userID)
+	if err != nil {
+		return nil, dbErr(err, "list requesters")
+	}
+	return queryList(rows, "list requesters", func(scan func(...any) error) (*kernel.Requester, error) {
+		r := &kernel.Requester{}
+		var created string
+		err := scan(&r.Kernel, &r.UserID, &r.Handle, &r.Status, &created)
+		r.CreatedAt = strToTime(created)
+		return r, err
+	})
+}
+
+func (s *DB) ListHeldFrom(ctx context.Context, userID string, p kernel.Principal) ([]*kernel.TaskEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+mailboxCols+` FROM mailbox
+		  WHERE required_caller_kernel='' AND required_caller_user_id=? AND requester_kernel=? AND requester_user_id=?
+		    AND status='waiting'`, userID, p.Kernel, p.UserID)
+	if err != nil {
+		return nil, dbErr(err, "list held tasks")
+	}
+	return queryList(rows, "list held tasks", scanMailbox)
 }
 
 // RedeliverTasks gives every task this kernel holds that has no mailbox entry its first one: the
@@ -2478,14 +2605,11 @@ SELECT COUNT(*) FROM transactions WHERE trace_id IN (SELECT id FROM sub)`,
 		if _, err = reviseTasks(ctx, tx, ", status='waiting', completion_trace_id=NULL", "id=? AND status='running'", taskID); err != nil {
 			return err
 		}
-		// The claim locked the completer's stake and transfer value on their own account; the trace
-		// that records them is about to go, so they are released here, by the helpers every failed
-		// settlement uses. Then the empty completion trace goes, at any price.
+		// The claim locked the requester's ticket; the trace that records it is about to go, so it is
+		// released here. The task's value stays reserved for it, as it was before the claim. Then the
+		// empty completion trace goes, at any price.
 		if completionTraceID != nil {
 			if err = releaseStake(ctx, tx, *completionTraceID); err != nil {
-				return err
-			}
-			if err = refundTransferEffect(ctx, tx, *completionTraceID); err != nil {
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, `DELETE FROM traces WHERE id=?`, *completionTraceID); err != nil {

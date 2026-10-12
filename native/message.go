@@ -52,7 +52,8 @@ func executeMessage(ctx context.Context, args map[string]any, callerID, parentTr
 
 	partialArgs, _ := json.Marshal(map[string]any{"message": msg})
 
-	task, err := k.CreateTask(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient)
+	// The message is its sender's: a native acts for whoever calls it (D6).
+	task, err := k.CreateTask(ctx, parentTraceID, sink.ID, json.RawMessage(partialArgs), recipient, callerID)
 	if err != nil {
 		return nil, err
 	}

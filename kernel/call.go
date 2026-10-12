@@ -1080,7 +1080,7 @@ func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJ
 
 // TaskCreate names the onward action and required caller by address, exactly like juice.call.
 func (h *kernelHostFunctions) TaskCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error) {
-	task, err := h.kernel.CreateTaskByRef(ctx, h.traceID, action, requiredCaller, json.RawMessage(partialArgs))
+	task, err := h.kernel.CreateTaskByRef(ctx, h.traceID, action, requiredCaller, h.targetID, json.RawMessage(partialArgs))
 	if err != nil {
 		return "", err
 	}

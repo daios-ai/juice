@@ -3380,16 +3380,22 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 	}
 }
 
-// TestReparkReleasesTheCompletersReserves: claiming a task locks the completer's ticket stake and
-// transfer value on their own account; re-parking deletes the trace that recorded them, so it
-// releases them first — and deletes the completion trace at any price, zero included.
-func TestReparkReleasesTheCompletersReserves(t *testing.T) {
+// A task's value is its requester's, reserved when the task is made (D6): the claim adds only the
+// ticket of a remote completion, and a re-park returns that ticket while the value stays reserved for
+// the waiting task. The completer's balance is touched at no point.
+func TestReparkReturnsTheTicketAndKeepsTheValue(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	owner := newUser("rp-owner", 100)
 	_ = db.CreateUser(ctx, owner)
 	completer := newUser("rp-completer", 50)
 	_ = db.CreateUser(ctx, completer)
+	payee := newUser("rp-payee", 0)
+	_ = db.CreateUser(ctx, payee)
+	locked := func(id string) (int64, int64) {
+		u, _ := db.ReadUser(ctx, id)
+		return u.Available, u.Locked
+	}
 	for _, price := range []int64{40, 0} {
 		act := newAction(owner.ID, fmt.Sprintf("rp-act-%d", price), price, true)
 		_ = db.CreateAction(ctx, act)
@@ -3398,31 +3404,46 @@ func TestReparkReleasesTheCompletersReserves(t *testing.T) {
 		if err := db.BeginRun(ctx, p, root, owner.ID, price, 0, 0); err != nil {
 			t.Fatal(err)
 		}
+		availBefore, lockedBefore := locked(owner.ID)
 		ptID := root.ID
 		task := &kernel.Task{ID: uuid.New().String(), ParentTraceID: &ptID, RequiredCallerUserID: completer.ID, ActionID: act.ID,
+			RequesterUserID: owner.ID, Value: 5, ValueTo: payee.ID,
 			Price: price, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()}
 		if err := db.CreateTask(ctx, task); err != nil {
 			t.Fatal(err)
 		}
-		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: act.ID, CallerUserID: completer.ID,
-			Ticket: 7, Value: 5, ValueTo: owner.ID, CreatedAt: time.Now().UTC()}
+		if a, l := locked(owner.ID); a != availBefore-5 || l != lockedBefore+5 {
+			t.Fatalf("price %d: creating the task reserved %d from the requester, want 5", price, l-lockedBefore)
+		}
+		ct := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, ActionID: act.ID, CallerUserID: owner.ID,
+			Ticket: 7, Value: 5, ValueTo: payee.ID, CreatedAt: time.Now().UTC()}
 		if err := db.BeginTaskCall(ctx, task.ID, ct); err != nil {
 			t.Fatal(err)
 		}
-		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 12 {
-			t.Fatalf("fixture: the claim locked %d on the completer, want 12", u.Locked)
+		if _, l := locked(owner.ID); l != lockedBefore+12 {
+			t.Fatalf("price %d: the claim holds %d on the requester, want the value and the ticket, 12", price, l-lockedBefore)
 		}
 		if err := db.ResetTaskAndRepark(ctx, task.ID); err != nil {
 			t.Fatalf("ResetTaskAndRepark at price %d: %v", price, err)
 		}
-		if u, _ := db.ReadUser(ctx, completer.ID); u.Locked != 0 || u.Available != 50 {
-			t.Errorf("price %d: completer available=%d locked=%d after re-park, want 50 and 0: reserves released", price, u.Available, u.Locked)
+		if a, l := locked(owner.ID); a != availBefore-5 || l != lockedBefore+5 {
+			t.Errorf("price %d: after re-park the requester holds %d, want the value alone, 5", price, l-lockedBefore)
+		}
+		if a, l := locked(completer.ID); a != 50 || l != 0 {
+			t.Errorf("price %d: the completer moved to available=%d locked=%d", price, a, l)
 		}
 		if tr, _ := db.ReadTrace(ctx, ct.ID); tr != nil {
 			t.Errorf("price %d: the empty completion trace survived the re-park", price)
 		}
 		if s, _ := db.ReadTask(ctx, task.ID); s.Status != kernel.TaskWaiting {
 			t.Errorf("price %d: task %q, want waiting", price, s.Status)
+		}
+		// Declining returns the value to the requester.
+		if err := db.CancelTask(ctx, task.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, l := locked(owner.ID); l != lockedBefore {
+			t.Errorf("price %d: a declined task kept %d of its requester's value", price, l-lockedBefore)
 		}
 	}
 }
@@ -4677,8 +4698,8 @@ func TestMigration053RenamesInPlace(t *testing.T) {
 	}
 }
 
-// TestMigration055RenamesTasksInPlace: a step is a task, renamed and not redefined. A waiting row
-// comes through under the new table, and a trace's own record of the task it completes keeps its
+// TestMigration055RenamesTasksInPlace: a step is a task, renamed and not redefined. A row comes
+// through under the new table (a finished one, since 060 refuses an outstanding task), and a trace's own record of the task it completes keeps its
 // value under the new key, since a retried completion reads it back (D19).
 func TestMigration055RenamesTasksInPlace(t *testing.T) {
 	now := timeToStr(time.Now().UTC())
@@ -4689,7 +4710,7 @@ func TestMigration055RenamesTasksInPlace(t *testing.T) {
 			 VALUES ('t1','p1','u1',0,0,'{"step_id":"s1","mp":5}','` + now + `')`,
 			`INSERT INTO actions (id,owner_user_id,name,kind,created_at,updated_at) VALUES ('a1','u1','x','wasm','` + now + `','` + now + `')`,
 			`INSERT INTO steps (id,parent_trace_id,required_caller_user_id,action_id,status,created_at)
-			 VALUES ('s1','t1','u1','a1','waiting','` + now + `')`,
+			 VALUES ('s1','t1','u1','a1','cancelled','` + now + `')`,
 		} {
 			if _, err := raw.Exec(q); err != nil {
 				t.Fatalf("seed: %v", err)
@@ -4698,8 +4719,8 @@ func TestMigration055RenamesTasksInPlace(t *testing.T) {
 	})
 	db := openAt(t, path)
 	ctx := context.Background()
-	if task, err := db.ReadTask(ctx, "s1"); err != nil || task.Status != kernel.TaskWaiting {
-		t.Fatalf("the waiting row must come through as a task: %+v, %v", task, err)
+	if task, err := db.ReadTask(ctx, "s1"); err != nil || task.Status != kernel.TaskCancelled {
+		t.Fatalf("the row must come through as a task: %+v, %v", task, err)
 	}
 	var dispatch string
 	if err := db.db.QueryRowContext(ctx, `SELECT dispatch_json FROM traces WHERE id='t1'`).Scan(&dispatch); err != nil {
@@ -5517,9 +5538,9 @@ func TestMigration059NamesPartiesAsPrincipals(t *testing.T) {
 			`INSERT INTO actions (id,owner_user_id,remote_owner_id,name,kind,remote_action_id,created_at,updated_at) VALUES ('ap2','pk','r-bob','carol/greet','remote_proxy','r-greet2','` + now + `','9999-01-01T00:00:00Z')`,
 			`INSERT INTO actions (id,owner_user_id,name,kind,created_at,updated_at) VALUES ('a1','u2','greet','wasm','` + now + `','` + now + `')`,
 			`INSERT INTO actions (id,owner_user_id,name,kind,deleted_at,created_at,updated_at) VALUES ('a0','u2','greet','wasm','` + now + `','` + now + `','` + now + `')`,
-			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,status,created_at) VALUES ('s1','t2','pk','r-carol','carol','a1','waiting','` + now + `')`,
-			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s2','t2','pk','a1','waiting','` + now + `')`,
-			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s3','t2','u1','a1','waiting','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,required_caller_remote_id,required_caller_handle,action_id,status,created_at) VALUES ('s1','t2','pk','r-carol','carol','a1','cancelled','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s2','t2','pk','a1','cancelled','` + now + `')`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,created_at) VALUES ('s3','t2','u1','a1','cancelled','` + now + `')`,
 			`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,created_at) VALUES ('ir1','k1','pk','` + now + `')`,
 			`INSERT INTO idempotency_records (id,idempotency_key,counterparty_user_id,created_at) VALUES ('ir2','k2','tomb','` + now + `')`,
 		}, extra...) {
@@ -5628,5 +5649,86 @@ func TestReadProxyByNameReadsTheNewestUnderAHandle(t *testing.T) {
 	got, err := db.ReadProxyByName(ctx, peer, "dave", "sum")
 	if err != nil || got.ID != ids[1] {
 		t.Fatalf("read %v (err %v), want the newer copy %s", got, err, ids[1])
+	}
+}
+
+// Migration 060 refuses while a task is outstanding — waiting, or running with no transaction,
+// which startup turns back to waiting — since such a task would complete under the old role law,
+// with no value reserved and no requester to act for. A finished task is no obstacle.
+func TestMigration060RefusesAnOutstandingTask(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		txID   any
+		refuse bool
+	}{
+		{"waiting", nil, true},
+		{"running", nil, true},
+		{"done", "tx-1", false},
+		{"cancelled", nil, false},
+	} {
+		path := filepath.Join(t.TempDir(), "juice.db")
+		db := openAt(t, path)
+		ctx := context.Background()
+		owner := newUser("m60-owner", 0)
+		_ = db.CreateUser(ctx, owner)
+		act := newAction(owner.ID, "m60-act", 0, true)
+		_ = db.CreateAction(ctx, act)
+		p := newProcess(owner.ID)
+		root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerUserID: owner.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+		if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{
+			`PRAGMA foreign_keys=OFF`,
+			`INSERT INTO tasks (id,parent_trace_id,required_caller_user_id,action_id,status,tx_id,created_at) VALUES ('m60',?,?,?,?,?,'2026-01-01T00:00:00Z')`,
+			`DELETE FROM schema_migrations WHERE version='060_requesters'`,
+			// 060 runs again from the top: its guard is its first statement, so the columns it would
+			// add next are never reached on a refusal.
+		} {
+			args := []any{}
+			if strings.HasPrefix(q, "INSERT") {
+				args = []any{root.ID, owner.ID, act.ID, tc.status, tc.txID}
+			}
+			if _, err := db.db.Exec(q, args...); err != nil {
+				t.Fatalf("%s: %s: %v", tc.status, q, err)
+			}
+		}
+		db.Close()
+		_, err := Open(path)
+		if refused := err != nil && strings.Contains(err.Error(), "complete or decline every task"); refused != tc.refuse {
+			t.Errorf("a %s task: migration error %v, want refused=%v", tc.status, err, tc.refuse)
+		}
+	}
+}
+
+// A blocked requester's task is refused in the commit that would create it, so none is made beside a
+// block (U52); a task addressed to its own requester is never refused, whatever a row says.
+func TestCreateTaskRefusesABlockedRequester(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	alice, bob := newUser("crb-alice", 0), newUser("crb-bob", 0)
+	_ = db.CreateUser(ctx, alice)
+	_ = db.CreateUser(ctx, bob)
+	act := newAction(alice.ID, "crb-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+	p := newProcess(alice.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: alice.ID, CallerUserID: alice.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, alice.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	task := func(requester, addressee string) error {
+		return db.CreateTask(ctx, &kernel.Task{ID: uuid.New().String(), ParentTraceID: &root.ID, RequiredCallerUserID: addressee,
+			RequesterUserID: requester, ActionID: act.ID, PartialArgs: json.RawMessage(`{}`), Status: kernel.TaskWaiting, CreatedAt: time.Now().UTC()})
+	}
+	for _, block := range []struct{ user, requester string }{{bob.ID, alice.ID}, {alice.ID, alice.ID}} {
+		if _, err := db.SetRequester(ctx, block.user, kernel.User(block.requester), kernel.RequesterBlocked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := task(alice.ID, bob.ID); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a blocked requester's task: %v, want ErrUnauthorized", err)
+	}
+	if err := task(alice.ID, alice.ID); err != nil {
+		t.Errorf("a self-addressed task was refused: %v", err)
 	}
 }

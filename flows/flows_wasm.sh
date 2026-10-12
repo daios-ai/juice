@@ -75,6 +75,7 @@ flow_task_success() {
 
     # alice → bob message creates a waiting task (next_action=sys/sink, price 0).
     local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"review"}')" task_id)
+    j "$db" "$hb" user approve alice@k >/dev/null
     assert_nonempty "task_success.create_returns_id" "$task_id"
     assert_json "task_success.status_waiting" "$(jj "$db" "$ha" task show "$task_id")" status waiting
 
@@ -101,6 +102,7 @@ flow_task_failure() {
     make_user "$db" "$hs" "$hc" carol
 
     # Completing an already-done task → ErrInvalidState.
+    j "$db" "$hb" user approve alice@k >/dev/null
     local s1; s1=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"first"}')" task_id)
     jj "$db" "$hb" task complete "$s1" '{}' >/dev/null 2>&1
     assert_fails "task_failure.double_complete_rejected" "invalid.state\|already\|not.*waiting" -- j "$db" "$hb" task complete "$s1" '{}'
@@ -118,6 +120,7 @@ flow_task_restart() {
     make_user "$db" "$hs" "$hb" bob
 
     local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"restart"}')" task_id)
+    j "$db" "$hb" user approve alice@k >/dev/null
     assert_json "task_restart.initial_waiting" "$(jj "$db" "$ha" task show "$task_id")" status waiting
 
     # Inject a crashed 'running' task (ClaimTask succeeded, CompleteTask never did) while the
