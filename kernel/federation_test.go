@@ -2599,6 +2599,10 @@ func TestRecordKernelContact(t *testing.T) {
 		t.Fatalf("SuspendKernel: %v", err)
 	}
 	before, _ := st.ReadKernel(ctx, key)
+	// The store keeps the later of two contacts by comparing julianday() values, which SQLite
+	// computes in whole milliseconds; a second contact within the first one's millisecond is not
+	// later and is rightly kept out. Wait that millisecond out so this contact is a later one.
+	time.Sleep(2 * time.Millisecond)
 	if err := k.RecordKernelContact(ctx, key, true); err != nil {
 		t.Fatalf("suspended contact: %v", err)
 	}
