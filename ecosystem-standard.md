@@ -183,6 +183,16 @@ Registration is by adapter. An OpenAPI document installed with `action import` i
 gets identity-preserving reconciliation across upgrades. A service that is not representable that
 way is registered by ordinary action creation. Neither is a requirement of being a service.
 
+Once registered, a service shows up on the kernel as an **application**: a set of actions that
+share a name prefix, `owner@kernel/<name>/...`. The kernel keeps no record of the grouping. The
+only rule is that `owner@kernel/<name>` resolves to `owner@kernel/<name>/index` (U50); the rest is
+convention. The index we recommend is a free action that explains the application: its description
+says what it is for, and its output says how to use it and which actions to call, so an agent can
+read it and go from there. When an OpenAPI document has an operation keyed `index`, the import
+makes it the index. An owner may instead make the index the application's main action, or a
+composite that calls the others and charges one price. Programs must not depend on any of these
+forms, and must not expect the index to list the members; the members are found by their prefix.
+
 **The interface** is a client like any other. It reads the same logins, shows which one is in use,
 and checks `/health` before it trusts. A port number is a default, never an identity: an interface
 that dials a port without checking will talk to whichever kernel holds it.

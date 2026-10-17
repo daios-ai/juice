@@ -68,10 +68,23 @@ to its owner, a `local` action to users of its kernel, and a `public` action to
 callers across the network. Activity is a separate setting: an inactive action
 cannot be called, regardless of its visibility.
 
-An **application** is a collection of actions imported from one OpenAPI document
-under a common name. Each operation becomes an ordinary action. An operation
-named `index` can provide the application's entry point through the reference
-convention above.
+An **application** is a set of actions sharing a name prefix, such as
+`bob@acme/mail/send` and `bob@acme/mail/search`. Actions may be created
+individually or imported from an OpenAPI document.
+
+If no action matches `bob@acme/mail` exactly, the reference resolves to
+`bob@acme/mail/index`. The index is an ordinary action: it may describe the
+application and its available operations, provide its main function, or compose
+other actions for one advertised price. A descriptive index can be free, with
+output that guides an agent to the appropriate actions. Each action, including
+the index, has its own price, transaction history, and ratings.
+
+For an agent, this resembles the tools exposed by a Model Context Protocol
+(MCP) server: descriptions and schemas explain which operations are available
+and how to call them. MCP provides a [`tools/list` discovery method](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
+In Juice, the shared prefix groups the actions, and the index provides an
+entry point through the ordinary action interface. Calling it follows the
+same execution, payment, and rating rules as any other action.
 
 ## Calls and their records
 
