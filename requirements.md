@@ -2,6 +2,7 @@
 
 Version: 0.16
 Codename: `juice`
+Copyright (C) 2026 Pedro A. Ortega <pedro.ortega@gmail.com>
 
 INSTRUCTIONS FOR EDITING THIS FILE:
 - Four classes; **one owner per fact** — state each fact once at its owning entry, cross-reference by id (U/G/P/D), never restate.
