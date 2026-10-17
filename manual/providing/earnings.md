@@ -132,7 +132,8 @@ recorded assessments. Current statistics reset when the title, description,
 price, schemas, or source changes. Historical transactions and ratings remain
 available.
 
-Only a call's payer may rate it, once, and executing action code has no rating
+Only a call's caller may rate it, once: a user rates the action they ran, and you
+rate each call your action made. Executing action code has no rating
 authority. This does not make ratings proof of quality: an account holder can
 buy and rate its own action, subject to the usual fees. Remote evidence adds a
 check that the reported trade is linked to the other kernel's record. See

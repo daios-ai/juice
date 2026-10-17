@@ -40,10 +40,20 @@ flow_contractor_subcall() {
     local cid; cid=$(publish "$db" "$ha" contractor --kind wasm --source "$dir/contractor.wasm" --price "$(units 50)" --description "contractor")
 
     # carol funds the process with 50; the whole budget flows to bob via the sub-call.
-    assert_nonempty "contractor_subcall.call_succeeds" "$(strfield "$(jj "$db" "$hc" run alice@k/contractor '{}')" tx_id)"
+    local out tx_id; out=$(jj "$db" "$hc" run alice@k/contractor '{}'); tx_id=$(strfield "$out" tx_id)
+    assert_nonempty "contractor_subcall.call_succeeds" "$tx_id"
     assert_jnum "contractor_subcall.caller_spent"  "$(jj "$db" "$hc" user me)" available 0
     assert_jnum "contractor_subcall.alice_untouched" "$(jj "$db" "$ha" user me)" available 0
     assert_jnum "contractor_subcall.bob_credited"  "$(jj "$db" "$hb" user me)" available 50
+
+    # Each call is rated by the one who requested it (U14): alice chose and bought bob's sub-call
+    # out of her budget, carol bought alice's action. Neither rates the other's purchase.
+    local inner; inner=$(inner_tx "$db" "$hc" "$(strfield "$out" trace_id)")
+    assert_nonempty "contractor_subcall.inner_tx" "$inner"
+    assert_contains "contractor_subcall.composer_rates_inner" "rated" "$(j "$db" "$ha" tx rate "$inner" 1)"
+    assert_fails "contractor_subcall.user_cannot_rate_inner" "unauthorized\|caller\|permission" -- j "$db" "$hc" tx rate "$inner" 1
+    assert_contains "contractor_subcall.user_rates_outer" "rated" "$(j "$db" "$hc" tx rate "$tx_id" 1)"
+    assert_fails "contractor_subcall.composer_cannot_rate_outer" "unauthorized\|caller\|permission" -- j "$db" "$ha" tx rate "$tx_id" 1
 }
 
 flow_contractor_failure() {
@@ -193,7 +203,7 @@ flow_rating() {
 
     # Duplicate rating and non-buyer rating are both rejected.
     assert_fails "rating.duplicate_rejected"  "invalid.input\|already" -- j "$db" "$hb" tx rate "$tx_id" 0
-    assert_fails "rating.non_buyer_rejected"   "unauthorized\|buyer\|permission" -- j "$db" "$ha" tx rate "$tx_id" 1
+    assert_fails "rating.non_caller_rejected"  "unauthorized\|caller\|permission" -- j "$db" "$ha" tx rate "$tx_id" 1
 }
 
 # flow_tinygo_compile — sys/tinygo/compile end-to-end with REAL TinyGo. Opt-in via

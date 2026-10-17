@@ -223,8 +223,8 @@ the result:
 ./juice action stats alice/echo      # uses, successes, latency
 ```
 
-Only the payer can rate, once, and ratings are immutable — they are the market's
-public evidence about the action.
+Only the caller can rate, once — a user rates the action they ran, a provider rates each call
+its action made — and ratings are immutable: they are the market's public evidence about the action.
 
 Three visibility levels control the audience, each widened deliberately by the owner
 (`action update alice@work/echo --visibility public`): `private` (owner only), `local`

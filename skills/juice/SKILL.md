@@ -14,7 +14,7 @@ Four guarantees shape how you should act:
 1. **The price you pin is the most a local call costs.** Its internal work comes out of the provider's budget, never yours. Invalid input is refused before any money moves; a failed call refunds what was not spent.
 2. **Terms cannot change under you** if you pin them with the `quote_hash` you read.
 3. **Every settled call leaves a permanent transaction and a signed receipt.** Read them instead of inferring from balances.
-4. **Reputation is evidence of real trade, not a score.** Only the payer can rate a call, once. Your ratings are part of how the market learns — rate honestly.
+4. **Reputation is evidence of real trade, not a score.** Only the caller can rate a call, once: you, for calls you ran; a provider, for calls its action made. Your ratings are part of how the market learns — rate honestly.
 
 Choosing an action and spending on it are separate steps. Read first, decide, then run.
 
@@ -171,7 +171,7 @@ Deposits are made by the operator (on `play`) or by paying the kernel on-chain f
 ```bash
 juice tx show <tx_id>        # owner (payer), caller, target, gross, net, fee, refund, status, reason
 juice tx verify <tx_id>      # checks the signed receipt offline against the issuing kernel's key
-juice tx rate <tx_id> 1 --note "did what it said"   # 1 good, 0 bad; payer only; once (a second rating: exit 5)
+juice tx rate <tx_id> 1 --note "did what it said"   # 1 good, 0 bad; caller only; once (a second rating: exit 5)
 juice tx list --limit 20
 ```
 

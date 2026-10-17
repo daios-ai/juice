@@ -2820,7 +2820,9 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := k.RunFederated(ctx, peer, a, map[string]any{}, rec.ID, kernel.BuyerTerms{})
+	// The peer names its buyer's user id, and nothing stops it naming the seller's own: the caller
+	// is on the peer whatever id it carries, so the seller still cannot rate the call it served.
+	reply, err := k.RunFederated(ctx, peer, a, map[string]any{}, rec.ID, kernel.BuyerTerms{CallerUserID: provider.ID})
 	if err != nil {
 		t.Fatalf("RunFederated: %v", err)
 	}

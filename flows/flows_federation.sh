@@ -1061,6 +1061,9 @@ print(next((t['id'] for t in json.load(sys.stdin) if t.get('parent_trace_id') ==
     assert_nonempty "compose_child.inner_tx_recorded" "$inner"
     assert_nonempty "compose_child.inner_receipt" "$(strfield "$(jj "$FED_DBL" "$hc" tx show "$inner")" remote_receipt_hash)"
     assert_contains "compose_child.inner_receipt_verifies" "valid" "$(j "$FED_DBL" "$hc" tx verify "$inner")"
+    # The inner purchase was alice's, so alice rates it (U14); carol, who funded the process, cannot.
+    assert_contains "compose_child.composer_rates_inner" "rated" "$(j "$FED_DBL" "$ha" tx rate "$inner" 1)"
+    assert_fails "compose_child.user_cannot_rate_inner" "unauthorized\|caller\|permission" -- j "$FED_DBL" "$hc" tx rate "$inner" 1
 
     assert_jnum "compose_child.buyer_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
     assert_jnum "compose_child.seller_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0

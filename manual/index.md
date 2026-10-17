@@ -90,12 +90,20 @@ The receipt can be verified against the issuing kernel's signing key without
 contacting that kernel. Money movements and their records are committed
 together, so the account history accompanies the movement of funds.
 
-The payer can rate a completed call once, with an optional note. Ratings do not
-alter the payment. When evidence of a trade is shared between kernels, it
-supports the rating without exposing the payer's identity or the call's inputs
-and outputs. This gives participants a record of experience with a service,
-while preserving the distinction between evidence of a trade and an assurance
-of quality.
+Before a call runs, the kernel verifies its terms: who the parties are, what
+the interface is, what it costs, and that the consents exist. It does not verify
+what the service will do. The services Juice composes are opaque, change at
+will, and act in the world, where no program can check them. Instead every call
+is a bounded trial: the buyer cannot lose more than what was shown before the
+call, the price and, for a remote call, its stake. Afterwards the caller rates
+the result once, with an optional note. A user rates the action they ran; a
+provider rates each call its own action made. Ratings do not alter the payment. Shared between kernels as signed evidence of real trade,
+without the caller's identity or the call's inputs and outputs, they are how
+participants learn whom to trust. A system such as Ethereum makes execution
+verifiable: its code is public and every node re-runs it, so no operator need be
+trusted, but nothing judges whether the code did what the user wanted. Juice
+verifies the terms and lets the caller judge the result: trust is earned after
+the call, not settled before it.
 
 ## Worlds
 

@@ -2873,9 +2873,9 @@ func (k *Kernel) toTransactionView(ctx context.Context, tx *Transaction) *Transa
 	return v
 }
 
-// RateTransaction submits a rating for a completed transaction.
-// Only the direct buyer (the process owner who paid) may rate.
-// Ratings are stored in a separate ratings table; the transaction row is never modified.
+// RateTransaction submits a rating for a completed transaction. The immediate caller rates (D2
+// role law): a user for the action they ran, a provider for each call its action made. Ratings are
+// stored in a separate ratings table; the transaction row is never modified.
 func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rating float64, note *string) (*Rating, error) {
 	if err := validRating(rating, note); err != nil {
 		return nil, err
@@ -2890,24 +2890,10 @@ func (k *Kernel) RateTransaction(ctx context.Context, callerID, txID string, rat
 	if tx == nil {
 		return nil, ErrNotFound.Wrap("transaction not found")
 	}
-	// Only the direct buyer (process owner) may rate.
-	if callerID != tx.OwnerUserID {
-		return nil, ErrUnauthorized.Wrap("only the direct buyer may rate a transaction")
-	}
-	// On a call served to a peer the seller funds its own work, so it owns the process and would
-	// otherwise be rating itself (§6 role law). The payer is abroad and rates its own proxy
-	// transaction at home. The shape is a ROOT trace answering an inbound record: a task a peer
-	// completes here is never a root, so it stays the local payer's. Read from the trace, not from
-	// the caller's account — retention purges a peer's key from its account row, and a gate keyed on
-	// it would reopen for exactly the transactions old enough to have outlived their peer.
-	if tx.ParentTraceID == "" {
-		tr, terr := k.store.ReadTrace(ctx, tx.TraceID)
-		if terr != nil {
-			return nil, terr
-		}
-		if tr != nil && tr.IdempotencyRecordID != nil {
-			return nil, ErrUnauthorized.Wrap("a call served to a peer is rated by its payer, on the kernel that paid")
-		}
+	// The process owner funds the call but did not choose or see what a sub-call bought; the caller
+	// did. A call served to a peer has a peer caller, so it is rated at home, on the proxy transaction.
+	if !tx.Caller().IsUser(callerID) {
+		return nil, ErrUnauthorized.Wrap("only the caller may rate a transaction")
 	}
 	// ratings.rated_tx_id UNIQUE rejects a duplicate atomically with the same ErrInvalidInput (§11);
 	// a read-then-write pre-check could only race it.

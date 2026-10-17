@@ -177,8 +177,8 @@ RATING  WHEN                  FROM   NOTE
 good    2026-09-14T12:05:17Z  local  did what it said
 ```
 
-Ratings present the payer's assessment of a completed call, including an optional
-note and the date, without naming the payer. `local` identifies ratings recorded
+Ratings present the caller's assessment of a completed call, including an optional
+note and the date, without naming the caller. `local` identifies ratings recorded
 here; `peer` identifies trade-backed ratings from other kernels, including for
 remote actions. The call counts and mean execution time appear on `action show`.
 

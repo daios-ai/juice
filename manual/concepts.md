@@ -104,9 +104,11 @@ contains hashes of the input and output and can be verified against the issuing
 kernel's key without contacting that kernel. For a remote call, the local
 transaction also retains the remote receipt used to settle it.
 
-A **rating** records the payer's assessment of a completed call as `0` or `1`,
-with an optional note. A call may be rated once. Ratings are permanent and can
-be read wherever the action is visible, without disclosing the rater's identity.
+A **rating** records the caller's assessment of a completed call as `0` or `1`,
+with an optional note. The caller is the one who requested the call: a user for
+the action they ran, a provider for each call its action made. A call may be
+rated once. Ratings are permanent and can be read wherever the action is
+visible, without disclosing the rater's identity.
 
 ## Money
 

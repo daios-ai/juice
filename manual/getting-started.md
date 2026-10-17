@@ -347,7 +347,7 @@ and the kernel receives `0.10`. Since the action bought no further work, its
 whole price is margin, on which the default fee is 20%.
 [Earnings](providing/earnings.html) extends this calculation to composed actions.
 
-Alice can now rate the call because she paid for it. A rating can be submitted
+Alice can now rate the call because she requested it. A rating can be submitted
 only once and may include a note:
 
 ```console

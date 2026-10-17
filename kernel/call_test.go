@@ -1046,6 +1046,59 @@ func TestProcessFundedSubCallSpendsSameProcess(t *testing.T) {
 	}
 }
 
+// TestTheCallerRatesEachCallItMade: the one who requested a call rates it (U14). carol funds
+// alice's outer action, whose code buys bob's inner action; alice chose and paid for that sub-call
+// out of her budget and saw its output, carol did neither. So alice rates the inner call and carol
+// the outer, and neither rates the other's.
+func TestTheCallerRatesEachCallItMade(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	alice := setupUser(t, st, "alice", 0)
+	bob := setupUser(t, st, "bob", 0)
+	carol := setupUser(t, st, "carol", 1000)
+
+	inner := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: bob.ID, Name: "inner",
+		Kind: kernel.KindWasm, Source: "inner", Active: true, Visibility: kernel.VisibilityPublic, Price: 100,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, inner)
+	outer := &kernel.Action{
+		ID: uuid.New().String(), OwnerUserID: alice.ID, Name: "outer",
+		Kind: kernel.KindWasm, Source: "outer", Active: true, Visibility: kernel.VisibilityPublic, Price: 150,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_ = st.CreateAction(ctx, outer)
+
+	k := newTestKernelWithScripts(st, &subcallExec{targetUser: "bob", targetAction: "inner"})
+	_, tr := beginTestRun(t, st, carol.ID, outer)
+	reply, err := k.TestCall(ctx, kernel.TestCallRequest{
+		CallerID: carol.ID, ExistingTraceID: tr.ID, TargetUserID: alice.ID, ActionName: "outer", Args: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+	innerTxs, err := st.ListTransactions(ctx, kernel.TxFilter{TargetUserID: bob.ID})
+	if err != nil || len(innerTxs) != 1 {
+		t.Fatalf("inner transactions: %d, %v", len(innerTxs), err)
+	}
+	innerTx := innerTxs[0].ID
+
+	if _, err := k.RateTransaction(ctx, carol.ID, innerTx, 1, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("the process owner rating a sub-call it did not request: want ErrUnauthorized, got %v", err)
+	}
+	if _, err := k.RateTransaction(ctx, alice.ID, innerTx, 0, nil); err != nil {
+		t.Errorf("the composer rating the call its action made: %v", err)
+	}
+	if _, err := k.RateTransaction(ctx, alice.ID, reply.TxID, 1, nil); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("the provider rating the call made to it: want ErrUnauthorized, got %v", err)
+	}
+	if _, err := k.RateTransaction(ctx, carol.ID, reply.TxID, 1, nil); err != nil {
+		t.Errorf("the user rating the action they ran: %v", err)
+	}
+}
+
 func TestProcessFundedSubCallInsufficientFundsFails(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

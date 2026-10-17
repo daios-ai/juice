@@ -140,8 +140,8 @@ A receipt signed before buyer and request binding was introduced reports
 
 ## Rating
 
-The payer may submit one assessment of a completed call. Use its transaction
-identifier to associate the rating with the work you purchased:
+The caller may submit one assessment of a completed call. Use its transaction
+identifier to associate the rating with the work you requested:
 
 ```console
 $ juice tx rate 116fd3a64b0e 1 --note "did what it said"
@@ -158,7 +158,7 @@ $ juice tx rate 116fd3a64b0e 1 --note "did what it said"
 The rating is `1` for a positive assessment or `0` for a negative one. A note
 may add context, up to 1024 bytes. Once submitted, the rating cannot be changed
 or withdrawn and has no effect on the payment. Readers who can see the action
-can also see its ratings, without the payer's identity:
+can also see its ratings, without the caller's identity:
 
 ```console
 $ juice action ratings bob@acme/echo
