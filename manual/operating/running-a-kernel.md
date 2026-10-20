@@ -11,6 +11,25 @@ and external payments. This chapter covers creation, funding, maintenance, and
 network participation. Routine supervision is covered in
 [Operator duties](duties.html).
 
+## Installation options
+
+The installer uses the latest release by default. To install a specific release,
+pass its tag after `sh -s --`:
+
+```console
+$ curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
+```
+
+Replace `VERSION` with a release tag. Add `--no-modify-path` to leave your shell
+profile unchanged; the installer prints the search-path setting to apply yourself.
+By default, the command is installed in `~/.juice/bin`.
+
+`JUICE_HOME` selects a different installation root and must be an absolute path.
+With a custom root, the installer leaves your profile unchanged and prints the
+`PATH` and `JUICE_HOME` settings needed for subsequent commands. Every Juice
+command reads `JUICE_HOME` afresh, so keep it set when using that installation.
+See [Environment variables](../reference/config.html#environment-variables).
+
 ## Starting one
 
 ```console

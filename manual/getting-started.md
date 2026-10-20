@@ -26,20 +26,10 @@ Use this command to install:
 $ curl -fsSL https://juiceos.org/install.sh | sh
 ```
 
-This puts everything under the `~/.juice` directory and adds `~/.juice/bin`,
-which holds the `juice` command, to your search path.
-
-Options go after `sh -s --`:
-
-```console
-$ curl -fsSL https://juiceos.org/install.sh | sh -s -- VERSION
-```
-
-A release tag pins a version, `--no-modify-path` leaves your shell profile alone,
-and `JUICE_HOME` moves the installation somewhere else entirely. The installer then
-writes nothing to your profile: the choice is yours to set, since every `juice` command reads
-it afresh.
-
+The installer places Juice under `~/.juice` and updates your shell profile so
+it can find the command. Open a new terminal if the installer asks you to.
+For a specific release or a custom installation, see
+[Installation options](operating/running-a-kernel.html#installation-options).
 
 ## Start a kernel
 
@@ -76,8 +66,6 @@ sys recovery phrase (write this down; it is shown only once and cannot be recove
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
-INF action.registered_native name=lookup
-INF action.native_enabled name=lookup
 …
 INF client.self_registered kernel=acme outcome=added
 INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
@@ -94,9 +82,8 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 The kernel remains running in this terminal. Open a second terminal for the
 client commands that follow, leaving the first available for server output.
 
-First boot installs the standard actions, which is what the `action.` lines
-report, and creates the superuser account, `sys`. It also gives the operator access to account
-records and administrative commands.
+First boot installs the standard actions and creates the superuser account,
+`sys`, which gives the operator access to account records and administrative commands.
 
 ## The client already knows the kernel
 
@@ -121,9 +108,7 @@ Recovery phrase (write this down; it is shown only once and cannot be recovered)
 Press Enter once you have written it down:
   address: alice@acme
   available: 0.00 fUSD
-  description:
-  id: 5b984930-…
-  locked: 0.00 fUSD
+  …
 ```
 
 Save Alice's recovery phrase as you did the superuser's. Juice has no email
@@ -144,11 +129,8 @@ confirm its identity and initial balance:
 $ juice user me
   address: alice@acme
   available: 0.00 fUSD
-  connections: []
-  connectors: []
-  description:
-  id: 5b984930-…
   locked: 0.00 fUSD
+  …
 ```
 
 You can check execution before adding funds by calling `sys/time`, one of the
@@ -163,9 +145,7 @@ sys@acme/time costs 0.00 fUSD. Run it? [y/N] y
     "unix": 1789398336
   }
   tx_id: ed7c98e8a412
-  trace_id: 7f5bd164-…
-  receipt_id: 13382701-…
-  process_id: 8816e98e3421
+  …
   charge: 0.00 fUSD
 ```
 
@@ -188,8 +168,7 @@ sys@acme
 $ juice admin user deposit alice@acme 10 --ref demo-payment-1
 Credit 10.00 fUSD to alice@acme, acting as sys@acme? This cannot be undone. [y/N] y
   amount: 10.00 fUSD
-  reason:
-  created_at: 2026-09-14T15:05:37Z
+  …
   operator: sys@acme
   from: sys@acme
   to: alice@acme
@@ -234,18 +213,13 @@ As Bob, register the endpoint with a title, a description, a price of
 $ juice action create echo --title "Echo a message" --kind http --source https://httpbin.org/post \
     --price 0.5 --description "Echo a message back to the caller" \
     --input-schema '{"type":"object","properties":{"msg":{"type":"string","description":"text to echo"}},"required":["msg"]}'
-  id: 6a9e04ce-…
-  name: echo
-  title: Echo a message
-  kind: http
+  …
   active: false
   visibility: private
   price: 0.50 fUSD
-  description: Echo a message back to the caller
   …
   action: bob@acme/echo
   …
-  quote_hash: 1f8ec43b…
 ```
 
 Registration creates an inactive, private action. Enable it to allow execution,
@@ -304,9 +278,7 @@ bob@acme/echo costs 0.50 fUSD. Run it? [y/N] y
     …
   }
   tx_id: e989c5e1d21a
-  trace_id: 709b18e0-…
-  receipt_id: d2b67088-…
-  process_id: 5027b6df639a
+  …
   charge: 0.50 fUSD
 ```
 
@@ -332,9 +304,7 @@ $ juice tx show e989c5e1d21a
   net: 0.40 fUSD
   fee: 0.10 fUSD
   refund: 0.00 fUSD
-  reason:
-  started_at: 2026-09-14T15:05:54Z
-  ended_at: 2026-09-14T15:05:54Z
+  …
   rating: null
   owner: alice@acme
   caller: alice@acme
@@ -347,19 +317,28 @@ and the kernel receives `0.10`. Since the action bought no further work, its
 whole price is margin, on which the default fee is 20%.
 [Earnings](providing/earnings.html) extends this calculation to composed actions.
 
+Verify the signed receipt using the `tx_id` returned by your call:
+
+```console
+$ juice tx verify e989c5e1d21a
+  …
+  valid: true
+  …
+```
+
+This checks the receipt's signature and recorded charge, not whether the service
+gave the result you wanted. [Records, receipts and ratings](calling/records.html)
+explains the transaction fields and verification checks in detail.
+
 Alice can now rate the call because she requested it. A rating can be submitted
 only once and may include a note:
 
 ```console
 $ juice tx rate e989c5e1d21a 1 --note "did what it said"
-  id: c84133a1-…
-  rated_tx_id: e989c5e1-…
-  rated_receipt_id: d2b67088-…
+  …
   rating: 1
   note: did what it said
-  rated_receipt_hash: 21b9b76b70bcc212…
-  created_at: 2026-09-14T15:06:11Z
-  signature: Tl8Nz00hxO5v…
+  …
 $ juice action ratings bob@acme/echo
 RATING  WHEN                  FROM   NOTE
 good    2026-09-14T15:06:11Z  local  did what it said
