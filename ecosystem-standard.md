@@ -193,6 +193,16 @@ makes it the index. An owner may instead make the index the application's main a
 composite that calls the others and charges one price. Programs must not depend on any of these
 forms, and must not expect the index to list the members; the members are found by their prefix.
 
+An application that relays several conversations to one agent sets `thread_id` in the task's
+`partial_args`: a string the application chooses, one per conversation. The receiving action
+declares `thread_id` in its input schema; `sys/sink` accepts any object, while `sys/message`
+cannot carry it. An agent groups tasks by requester, `created_by` and `thread_id`. Without a
+`thread_id`, tasks from a requester who is also the owner form one conversation per `created_by`,
+and every other task is a conversation of its own. A task from another kernel arrives without
+`created_by`, so there the key is requester and `thread_id`. The kernel attests the requester, so
+a `thread_id` is trusted only within one requester, and one application cannot join another's
+conversations.
+
 **The interface** is a client like any other. It reads the same logins, shows which one is in use,
 and checks `/health` before it trusts. A port number is a default, never an identity: an interface
 that dials a port without checking will talk to whichever kernel holds it.
