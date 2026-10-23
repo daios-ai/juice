@@ -28,12 +28,12 @@ keeps clusters apart from users. Only the terms are ours.
 $JUICE_HOME/
   bin/                   the family's executables, where the installer puts them
   worlds/<world>.json    one network's definition: its money, and the servers to meet it through
-  schemas/               the JSON Schema of config.json and world files, rewritten every serve
+  schemas/               one JSON Schema per configuration file and for world files, rewritten at every start
   kernels/<world>/       one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected
   client/credentials/    one file per login, named handle@kernel, 0600, holding its tokens
-  agents/<name>/         one agent: its configuration, persona, knowledge, memory, conversations
+  agents/<name>/         one agent: its configuration, persona, knowledge, memory, conversations, serve.lock
   services/<name>/       one installed service: its executable state and private configuration
   ui/                    the interface's own state
 ```
@@ -49,7 +49,22 @@ never removes an agent's memory, a service's state, or the interface's history. 
 directory holding no state at all: the programs are replaceable, so an installer overwrites them
 and a person deletes them without losing anything.
 
-## 3. Kernels
+## 3. Configuration
+
+Every component is configured by one `config.json` in its own directory. The component writes the
+file's JSON Schema to `schemas/<component>.schema.json` at every start, and the file's first key,
+`$schema`, names it, so an editor completes the keys and marks a mistake as it is typed. The schema
+describes every setting and states its default, in the schema subset `requirements.md` D4 defines.
+The defaults are one value in the program, from which the schema is generated, so schema, file and
+program cannot disagree; the only settings without a default are those first start asks for or
+creates. A key left out of the file takes its default: the file is laid over the defaults as a JSON
+Merge Patch (RFC 7396), an object merging key by key and a list replacing the whole default list;
+`null` is refused. First start writes every key with its default, so every setting is visible in
+the file. That pins the defaults of the release that wrote it: a later release's new default
+reaches a file that omits the key and not one that lists the old value. A file with a key the
+schema does not know, or a value it refuses, stops the start, naming the key.
+
+## 4. Kernels
 
 `juice kernel serve <world>` serves `kernels/<world>/`. The world is a file in `worlds/`, named by
 that file: the name may hold letters, digits, dot, dash and underscore, up to 64 characters, and may
@@ -86,7 +101,7 @@ Removing a kernel is not a lifecycle verb. Its directory holds a ledger, a signi
 key and possibly unsettled obligations, so it is archived or destroyed deliberately by the operator,
 never as a step in switching kernels.
 
-## 4. Client records
+## 5. Client records
 
 `client/config.json`:
 
@@ -145,7 +160,7 @@ lock on that file. `config.json` is written by temp file and rename. A session i
 `juice` command line or by writing those two files. Executables go to `$JUICE_HOME/bin`, which is
 where the installer puts them and where a component looks for a sibling program.
 
-## 5. Releasing a credential
+## 6. Releasing a credential
 
 The kernel listens on plain HTTP on its own machine, as Ollama, Jupyter, MySQL and PostgreSQL over
 TCP do. A client sends a stored credential only to the address recorded for that login's kernel, and
@@ -163,13 +178,14 @@ token.
 A login is two ordinary local names with an `@` between them, because it becomes a file under
 `credentials/` and a name free to hold a separator would address something else.
 
-## 6. Components
+## 7. Components
 
 **Agents** are users. An agent holds its own principal on every kernel it works on, created and
 funded like any other, and never the operator's. It names its login explicitly. Its persona,
 knowledge, memory, conversations and tasks live under `agents/<name>/` and survive any kernel it
-used; what it remembers about a kernel is keyed by the tuple in §4, so a stale memory is detectable
-rather than silently wrong.
+used; what it remembers about a kernel is keyed by the tuple in §5, so a stale memory is detectable
+rather than silently wrong. One daemon serves an agent's home, enforced by `serve.lock` in that
+home exactly as for a kernel (§4).
 
 **Services** are ordinary HTTP servers, installed once under `services/<name>/` and listening on a
 port of their own. Installation and registration are separate acts: a service is installed once, and
@@ -207,7 +223,7 @@ conversations.
 and checks `/health` before it trusts. A port number is a default, never an identity: an interface
 that dials a port without checking will talk to whichever kernel holds it.
 
-## 7. Migration
+## 8. Migration
 
 A kernel made before kernels were named, at `$JUICE_HOME/kernel/`, moves to `kernels/<name>/` on the
 first boot after the upgrade. It is one rename: both paths are under one root, so the move either
