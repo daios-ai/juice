@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -437,6 +438,10 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		model("downc", down.URL, llm.KindChat, true), model("downe", down.URL, llm.KindEmbed, true),
 		model("off", "https://x", llm.KindChat, false),
 	}
+	// The same address and key under the other protocol is probed apart: its headers differ.
+	other := model("upa", up.URL, llm.KindChat, true)
+	other.Protocol = llm.ProtocolAnthropic
+	ms = append(ms, other)
 	logger, err := log.New(log.Config{Level: "error"})
 	if err != nil {
 		t.Fatal(err)
@@ -446,10 +451,10 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openLLM: %v", err)
 	}
-	if probes.Load() != 1 {
-		t.Errorf("two models on one provider probed it %d times, want once", probes.Load())
+	if probes.Load() != 2 {
+		t.Errorf("one provider's two openai models and one anthropic model probed it %d times, want twice", probes.Load())
 	}
-	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"downc", "upc"}) {
+	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"downc", "upa", "upc"}) {
 		t.Errorf("chat models = %v; want the reachable and the down provider's, not the disabled one", got)
 	}
 	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"downe", "upe"}) {
@@ -459,7 +464,7 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		models.Embedder != models.Embedders["upe"] {
 		t.Error("the canonical natives are not bound to the configured models")
 	}
-	if identity != up.URL+"|upe-id" || !reachable {
+	if identity != fmt.Sprintf("%q %q", up.URL, "upe-id") || !reachable {
 		t.Errorf("embedder identity %q reachable %v", identity, reachable)
 	}
 

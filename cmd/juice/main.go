@@ -478,7 +478,9 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 	}
 	models := native.LLM{Chats: map[string]native.ChatModel{}, Embedders: map[string]kernel.Embedder{}}
 	reachable := map[string]bool{}
-	probed := map[string]error{}
+	// A probe's outcome depends on where it goes, with which key, and under which protocol's headers.
+	type provider struct{ protocol, url, key string }
+	probed := map[provider]error{}
 	for _, m := range cfg.Models {
 		if !m.Enabled {
 			continue
@@ -489,11 +491,11 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 		} else {
 			models.Chats[m.Name] = c
 		}
-		provider := m.URL + "|" + m.Key
-		err, seen := probed[provider]
+		p := provider{m.Protocol, m.URL, m.Key}
+		err, seen := probed[p]
 		if !seen {
 			err = llm.Probe(context.Background(), m)
-			probed[provider] = err
+			probed[p] = err
 		}
 		if err != nil {
 			logger.Warn("llm.model_unreachable", "model", m.Name, "error", err.Error())
@@ -509,9 +511,10 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 	if cfg.Embed == "" {
 		return models, "", false, nil
 	}
-	// The vectors depend on the model, not on the name the operator gave it.
+	// The vectors depend on the model, not on the name the operator gave it; each part is quoted so
+	// no address and id can spell another pair's identity.
 	m, _ := cfg.model(cfg.Embed)
-	return models, m.URL + "|" + m.ID, reachable[m.Name], nil
+	return models, fmt.Sprintf("%q %q", m.URL, m.ID), reachable[m.Name], nil
 }
 
 // promptPassword reads a password from the terminal without echo. It is a
