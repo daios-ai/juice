@@ -403,7 +403,7 @@ kernel/      Core objects and operational semantics
 store/       SQLite persistence (migrations, WAL)
 fed/         Federation transport (libp2p)
 script/      WebAssembly execution (wazero)
-llm/         Language-model endpoints and their two protocol adaptors
+llm/         Language models and their two protocol adaptors
 native/      The sys stdlib actions
 log/         Structured logging
 ```

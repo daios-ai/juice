@@ -63,7 +63,7 @@ its own addresses, for example `["/ip4/0.0.0.0/tcp/31314", "/ip4/0.0.0.0/udp/313
 
 Each kernel configuration key is also an option of `juice kernel serve`, written as the
 key with underscores replaced by dashes, and a nested key as a path:
-`--listen-addr :4141`, `--fee-bps 500`, `--native.llm.chat ollama/gemma`.
+`--listen-addr :4141`, `--fee-bps 500`, `--native.llm.chat gemma`.
 An option given on the command line applies to that run only and is not written
 to the file. On a first boot, where there is no file yet, what you pass is
 written as the new kernel's configuration. The one key with no option is
@@ -107,37 +107,63 @@ and funding duties.
 | `credentials_key` | generated at first boot | the key sealing upstream credentials. A value that is not a 32-byte key refuses the boot |
 | `native.<name>` | see below | per-action price and settings for the standard library |
 
-`native.llm` holds the language-model providers this kernel can use, and says
-which model `sys/llm/chat`, `sys/llm/json`, `sys/llm/decide` and
-`sys/llm/embed` call, as `<endpoint>/<model>`. A new kernel's file lists every
-provider Juice knows: a local Ollama, switched on with the two models the
-defaults use (`ollama/gemma` for the first three, `ollama/nomic` for
-embeddings), and the others switched off with no models. To use one, switch it
-on, give its key, and add the models you want, each under a short name of your
-own and with the price a call costs your callers:
+`native.llm` lists the language models this kernel uses. Each entry in `models`
+is one model, with everything needed to call it: the provider's protocol, its
+address and key, and the provider's id for the model. The entry's `name` is
+your own, and the rest of the configuration refers to the model by it. A new
+kernel's file holds two models on a local Ollama:
 
 ```json
 "llm": {
-  "chat": "anthropic/opus",
-  "json": "anthropic/opus",
-  "decide": "anthropic/opus",
-  "embed": "ollama/nomic",
-  "endpoints": [
-    {"name": "anthropic", "enabled": true, "protocol": "anthropic",
-     "url": "https://api.anthropic.com/v1", "key": "sk-ant-…",
-     "models": [{"name": "opus", "id": "claude-opus-5-5", "kind": "chat",
-                 "max_tokens": 4096, "price": 20000}]},
-    …
+  "chat": "gemma",
+  "json": "gemma",
+  "decide": "gemma",
+  "embed": "nomic",
+  "models": [
+    {"name": "gemma", "enabled": true, "protocol": "openai",
+     "url": "http://localhost:11434/v1", "id": "gemma4:26b", "kind": "chat", "price": 0},
+    {"name": "nomic", "enabled": true, "protocol": "openai",
+     "url": "http://localhost:11434/v1", "id": "nomic-embed-text", "kind": "embed", "price": 0}
   ]
 }
 ```
 
-A provider switched off creates no actions and is never contacted. Every model
-states its price, `0` included. A model a binding names must belong to a
-provider that is switched on, and be of the right kind. The kernel refuses to
-start otherwise, naming the setting. A provider that is down, or refuses its
-key, is noted in the log when the kernel starts, and calls to it fail until
-that is fixed. The keys have no command-line flag.
+`chat`, `json` and `decide` name the model that `sys/llm/chat`, `sys/llm/json`
+and `sys/llm/decide` call. `embed` names the model for `sys/llm/embed` and for
+search. To make another model the main one, add its entry and name it in those
+settings. For Anthropic's Sonnet:
+
+```json
+{"name": "sonnet", "enabled": true, "protocol": "anthropic",
+ "url": "https://api.anthropic.com/v1", "key": "sk-ant-api…",
+ "id": "claude-sonnet-5", "kind": "chat", "price": 0}
+```
+
+`kind` is `chat` or `embed`. `price` is what a call costs your callers, `0`
+included. `max_tokens` is optional and caps a reply; Anthropic requires a cap,
+so 4096 applies when none is given. Two models from one provider each repeat its
+address and key.
+
+| Provider | `protocol` | `url` |
+|---|---|---|
+| Ollama | `openai` | `http://localhost:11434/v1` |
+| LM Studio | `openai` | `http://localhost:1234/v1` |
+| Anthropic | `anthropic` | `https://api.anthropic.com/v1` |
+| OpenAI | `openai` | `https://api.openai.com/v1` |
+| Gemini | `openai` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Mistral | `openai` | `https://api.mistral.ai/v1` |
+| DeepSeek | `openai` | `https://api.deepseek.com` |
+| Groq | `openai` | `https://api.groq.com/openai/v1` |
+| xAI | `openai` | `https://api.x.ai/v1` |
+| Together | `openai` | `https://api.together.ai/v1` |
+| OpenRouter | `openai` | `https://openrouter.ai/api/v1` |
+
+A model switched off with `"enabled": false` creates no actions and is never
+contacted. The kernel refuses to start if a setting names a model that is not
+listed, is switched off, or is of the wrong kind, and says which setting. A
+provider that is down, or refuses its key, is noted in the log when the kernel
+starts, and calls to it fail until that is fixed. The model list has no
+command-line option, so keys never appear on a command line.
 `native.lookup.default_limit` defaults to `10`. The compilation action defaults
 to a price of `5` base units through `native.tinygo.price`; other built-in
 actions default to zero.

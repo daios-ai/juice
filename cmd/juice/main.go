@@ -381,7 +381,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 		return nil, nil, nil, nil, nil, nil, err
 	}
 	cfg.Network = world.Network()
-	// Only now are the model endpoints probed: a kernel offered another network has dialled nothing.
+	// Only now are the models' providers probed: a kernel offered another network has dialled nothing.
 	models, embedModel, embedReachable, err := openLLM(globalCfg.Native.LLM, logger)
 	if err != nil {
 		db.Close()
@@ -466,36 +466,41 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 }
 
 // openLLM refuses a configuration that cannot mean what it says, and builds a client for every
-// model of every enabled endpoint: each model is its own natives, and the ones the configuration binds back llm/chat, llm/json, llm/decide and
-// llm/embed (D17).
-// Each endpoint with models is probed once and the outcome logged. The probe is a diagnostic — an
-// endpoint that is down keeps its natives and their ids, and its calls fail until it is back — and
-// decides only whether this boot embeds what lacks a vector. It returns the models, and the bound
-// embedding model's identity and whether its endpoint answered.
+// enabled model: each model is its own natives, and the ones the configuration binds back llm/chat,
+// llm/json, llm/decide and llm/embed (D17).
+// Each provider is probed once, however many models it holds, and the outcome logged. The probe is
+// a diagnostic — a model whose provider is down keeps its natives and their ids, and its calls fail
+// until it is back — and decides only whether this boot embeds what lacks a vector. It returns the
+// models, and the bound embedding model's identity and whether its provider answered.
 func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool, error) {
 	if err := cfg.check(); err != nil {
 		return native.LLM{}, "", false, err
 	}
 	models := native.LLM{Chats: map[string]native.ChatModel{}, Embedders: map[string]kernel.Embedder{}}
 	reachable := map[string]bool{}
-	for _, ep := range cfg.Endpoints {
-		if !ep.Enabled || len(ep.Models) == 0 {
+	probed := map[string]error{}
+	for _, m := range cfg.Models {
+		if !m.Enabled {
 			continue
 		}
-		for _, model := range ep.Models {
-			c := &llm.Client{Endpoint: ep, Model: model}
-			if model.Kind == llm.KindEmbed {
-				models.Embedders[ep.Name+"/"+model.Name] = c
-			} else {
-				models.Chats[ep.Name+"/"+model.Name] = c
-			}
+		c := &llm.Client{Model: m}
+		if m.Kind == llm.KindEmbed {
+			models.Embedders[m.Name] = c
+		} else {
+			models.Chats[m.Name] = c
 		}
-		if err := llm.Probe(context.Background(), ep); err != nil {
-			logger.Warn("llm.endpoint_unreachable", "endpoint", ep.Name, "error", err.Error())
+		provider := m.URL + "|" + m.Key
+		err, seen := probed[provider]
+		if !seen {
+			err = llm.Probe(context.Background(), m)
+			probed[provider] = err
+		}
+		if err != nil {
+			logger.Warn("llm.model_unreachable", "model", m.Name, "error", err.Error())
 			continue
 		}
-		reachable[ep.Name] = true
-		logger.Info("llm.endpoint_reachable", "endpoint", ep.Name)
+		reachable[m.Name] = true
+		logger.Info("llm.model_reachable", "model", m.Name)
 	}
 	// Map lookups of an interface type, so an unbound native holds a nil interface, never a nil
 	// pointer that would read as configured.
@@ -504,8 +509,9 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 	if cfg.Embed == "" {
 		return models, "", false, nil
 	}
-	ep, model, _ := cfg.model(cfg.Embed)
-	return models, cfg.Embed + "|" + ep.URL + "|" + model.ID, reachable[ep.Name], nil
+	// The vectors depend on the model, not on the name the operator gave it.
+	m, _ := cfg.model(cfg.Embed)
+	return models, m.URL + "|" + m.ID, reachable[m.Name], nil
 }
 
 // promptPassword reads a password from the terminal without echo. It is a

@@ -26,9 +26,9 @@ keeps clusters apart from users. Only the terms are ours.
 
 ```
 $JUICE_HOME/
-  bin/                   the family's executables, where the installer puts them
+  bin/                   the family's executables, where the installer puts them and runs each one's setup
   worlds/<world>.json    one network's definition: its money, and the servers to meet it through
-  schemas/               one JSON Schema per configuration file and for world files, rewritten at every start
+  schemas/               one JSON Schema per configuration file and for world files, rewritten by setup
   kernels/<world>/       one kernel: juice.db, config.json, the rail key and its records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected
@@ -51,9 +51,8 @@ and a person deletes them without losing anything.
 
 ## 3. Configuration
 
-Every component is configured by one `config.json` in its own directory. The component writes the
-file's JSON Schema to `schemas/<component>.schema.json` at every start, and the file's first key,
-`$schema`, names it, so an editor completes the keys and marks a mistake as it is typed. The schema
+Every component is configured by one `config.json` in its own directory. The file's JSON Schema is
+`schemas/<component>.schema.json`, and the file's first key, `$schema`, names it, so an editor completes the keys and marks a mistake as it is typed. The schema
 describes every setting and states its default, in the schema subset `requirements.md` D4 defines.
 The defaults are one value in the program, from which the schema is generated, so schema, file and
 program cannot disagree; the only settings without a default are those first start asks for or
@@ -64,12 +63,23 @@ the file. That pins the defaults of the release that wrote it: a later release's
 reaches a file that omits the key and not one that lists the old value. A file with a key the
 schema does not know, or a value it refuses, stops the start, naming the key.
 
+A component writes three kinds of file outside its own directory. Its schemas are generated from
+the binary and are never edited. They belong to that version and are rewritten whenever it is set
+up. Shipped defaults, such as the worlds, are written once if absent. After that they are the
+operator's, and an upgrade never overwrites them. Configuration and client records are written by
+the component's own workflows, such as first boot and registration, and never by an upgrade.
+
+A component that writes schemas or shipped defaults has a `setup` command, hidden from its help,
+that writes the schemas and the missing defaults. The installer runs it after placing the binary,
+and the component runs it at every start. After a successful installation, `schemas/` holds the
+installed binary's schemas. For the kernel the command is `juice kernel setup`.
+
 ## 4. Kernels
 
 `juice kernel serve <world>` serves `kernels/<world>/`. The world is a file in `worlds/`, named by
 that file: the name may hold letters, digits, dot, dash and underscore, up to 64 characters, and may
-not begin with a dot. The worlds this installation's binary ships are written into `worlds/` the
-first time it serves and never overwritten, so an operator's edit — their own node, their own
+not begin with a dot. The worlds this installation's binary ships are written into `worlds/` by
+setup and never overwritten, so an operator's edit — their own node, their own
 meeting point — outlives an upgrade, and a network this build does not ship is a file they add.
 `juice kernel worlds` lists them, the shipped ones included before anything has served, so a
 program can offer the choice before the first boot.

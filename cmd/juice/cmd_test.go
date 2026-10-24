@@ -217,6 +217,23 @@ func mountTestServer(t *testing.T, k *kernel.Kernel) *httptest.Server {
 	return ts
 }
 
+// keepRootTree removes, when the test ends, whatever executing the root added to the tree: cobra's
+// own help and completion commands, which the tests that walk it for this program's own text must
+// not meet.
+func keepRootTree(t *testing.T) {
+	own := map[*cobra.Command]bool{}
+	for _, c := range rootCmd.Commands() {
+		own[c] = true
+	}
+	t.Cleanup(func() {
+		for _, c := range rootCmd.Commands() {
+			if !own[c] {
+				rootCmd.RemoveCommand(c)
+			}
+		}
+	})
+}
+
 func execTestCmd(t *testing.T, cmd *cobra.Command, args ...string) (string, error) {
 	t.Helper()
 	resetClient() // one client per command, as rootCmd's PersistentPreRun gives a real invocation
@@ -2786,8 +2803,8 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 	clientSide := map[string]bool{
 		"juice kernel": true, "juice kernel add": true, "juice kernel list": true,
 		"juice kernel health": true, "juice kernel forget": true, "juice kernel serve": true,
-		"juice kernel worlds": true,
-		"juice auth":          true, "juice auth login": true, "juice auth use": true,
+		"juice kernel worlds": true, "juice kernel setup": true,
+		"juice auth": true, "juice auth login": true, "juice auth use": true,
 		"juice auth list": true, "juice auth logout": true, "juice auth recover": true,
 		"juice user create": true,
 	}
@@ -2821,19 +2838,7 @@ func TestAsIsRefusedWhereItMeansNothing(t *testing.T) {
 // through cobra, since a group that lacks a run function shows help whatever its Args say: a stray
 // word is refused by name, and the group alone still answers with its help.
 func TestAGroupRefusesAnUnknownVerb(t *testing.T) {
-	// Executing the root adds cobra's own help and completion commands to the tree; the tests that
-	// walk it for this program's own text must not meet them.
-	own := map[*cobra.Command]bool{}
-	for _, c := range rootCmd.Commands() {
-		own[c] = true
-	}
-	t.Cleanup(func() {
-		for _, c := range rootCmd.Commands() {
-			if !own[c] {
-				rootCmd.RemoveCommand(c)
-			}
-		}
-	})
+	keepRootTree(t)
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
 		if c.Name() == "help" || c.Name() == "completion" {

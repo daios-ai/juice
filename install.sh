@@ -153,6 +153,9 @@ main() {
 	[ -f "$tmp/juice" ] || die "$asset does not contain a juice binary"
 	mkdir -p "$bin_dir"
 	put_binary "$tmp/juice" "$exe"
+	# The schemas describe the binary just placed, and the shipped worlds are installed beside them, so
+	# both are present before any kernel is served (ecosystem standard §3).
+	"$exe" kernel setup || die "could not set up $juice_home"
 
 	# The binary is only usable if the shell finds it, so its directory goes in the profile. A home
 	# other than the default was set by whoever ran the installer, for the process that ran it;

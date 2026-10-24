@@ -69,7 +69,7 @@ type ChatModel interface {
 	kernel.DecideChatter
 }
 
-// LLM is the language models the natives reach (D17): every generated model by <endpoint>/<model>,
+// LLM is the language models the natives reach (D17): every generated model by its name,
 // each its own natives, and the models configuration binds llm/chat, llm/json, llm/decide and
 // llm/embed to — nil where a native is unbound.
 type LLM struct {
@@ -98,7 +98,7 @@ func All(d Deps) []Spec {
 }
 
 // llmName is a language-model native's name: llm/<verb> for the one configuration binds, or
-// llm/<endpoint>/<model>/<verb> for one generated model (D17).
+// llm/<name>/<verb> for one generated model (D17).
 func llmName(model, verb string) string {
 	if model == "" {
 		return "llm/" + verb

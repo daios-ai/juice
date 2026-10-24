@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package llm reaches language models. An endpoint is data — an entry of a kernel's config.json
-// naming its wire protocol, its URL and the models the kernel uses there (D17) — and a protocol is code: one adaptor for
+// Package llm reaches language models. A model is data — an entry of a kernel's config.json naming
+// its provider's wire protocol, URL and key and the provider's id for it (D17) — and a protocol is code: one adaptor for
 // the OpenAI-compatible API, which nearly every provider and local runner speaks, and one for
 // Anthropic's Messages API, the one major API that differs.
 package llm
@@ -22,7 +22,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 )
 
-// The wire protocols an endpoint may name, and the kinds of model it may hold.
+// The wire protocols a model's provider may speak, and the kinds of model.
 const (
 	ProtocolOpenAI    = "openai"
 	ProtocolAnthropic = "anthropic"
@@ -33,115 +33,73 @@ const (
 // anthropicMaxTokens is the output cap sent when a model names none: Anthropic requires one.
 const anthropicMaxTokens = 4096
 
-// Endpoint is one language-model provider as a kernel's config.json holds it (D17): how it is
-// spoken to, where, with which key, and the models this kernel uses there, each with its price. A
-// model carries a short name of the operator's, since its own id may carry characters an action
-// name cannot (gemma4:26b, vendor/model). A disabled endpoint creates nothing and is never dialed.
-type Endpoint struct {
-	Name     string  `json:"name" doc:"Your short name for the provider, used in bindings and action names: lowercase, at most 32 characters."`
-	Enabled  bool    `json:"enabled" doc:"This kernel uses the provider: its models become actions, and each boot checks that it answers."`
-	Protocol string  `json:"protocol" enum:"openai,anthropic" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
-	URL      string  `json:"url" doc:"The API's base address, e.g. https://api.openai.com/v1."`
-	Key      string  `json:"key,omitempty" doc:"The provider's API key, if it needs one."`
-	Models   []Model `json:"models" doc:"The models this kernel uses here."`
-}
-
-// Model is one model of an endpoint: the provider's id for it, what it is for, its output cap (0
-// leaves the provider's own, except on Anthropic, which requires one), and what a call costs.
+// Model is one language model as a kernel's config.json holds it (D17): complete in itself — how
+// its provider is spoken to, where, with which key, the provider's id for it, what it is for, its
+// output cap (0 leaves the provider's own, except on Anthropic, which requires one), and what a
+// call costs. Its name is the operator's, since the id may carry characters an action name cannot
+// (gemma4:26b, vendor/model). A disabled model creates nothing and is never dialed.
 type Model struct {
 	Name      string `json:"name" doc:"Your short name for the model, used in bindings and action names: lowercase, at most 32 characters."`
-	ID        string `json:"id" doc:"The provider's own name for the model, e.g. gemma4:26b or claude-opus-5-5."`
+	Enabled   bool   `json:"enabled" doc:"This kernel uses the model: it becomes actions, and each boot checks that its provider answers."`
+	Protocol  string `json:"protocol" enum:"openai,anthropic" doc:"How the provider is spoken to: openai (the OpenAI-compatible API) or anthropic (Anthropic's Messages API)."`
+	URL       string `json:"url" doc:"The provider's API base address, e.g. https://api.openai.com/v1."`
+	Key       string `json:"key,omitempty" doc:"The provider's API key, if it needs one."`
+	ID        string `json:"id" doc:"The provider's own name for the model, e.g. gemma4:26b or claude-sonnet-5."`
 	Kind      string `json:"kind" enum:"chat,embed" doc:"chat (backs chat, json and decide) or embed (backs embeddings; not on anthropic)."`
 	MaxTokens int    `json:"max_tokens,omitempty" doc:"Most tokens a reply may hold; 0 leaves the provider's own, except anthropic, which uses 4096."`
 	Price     int64  `json:"price" doc:"What a call costs its caller, in base units."`
 }
 
-// Presets are the providers this build knows, written into a new kernel's config.json: the local
-// Ollama enabled with the two models the default bindings name, the rest listed without models and
-// disabled, so turning one on is its key and a model.
-func Presets() []Endpoint {
-	ep := func(name, protocol, url string) Endpoint {
-		return Endpoint{Name: name, Protocol: protocol, URL: url, Models: []Model{}}
-	}
-	ollama := ep("ollama", ProtocolOpenAI, "http://localhost:11434/v1")
-	ollama.Enabled = true
-	ollama.Models = []Model{{Name: "gemma", ID: "gemma4:26b", Kind: KindChat}, {Name: "nomic", ID: "nomic-embed-text", Kind: KindEmbed}}
-	return []Endpoint{ollama,
-		ep("lmstudio", ProtocolOpenAI, "http://localhost:1234/v1"),
-		ep("anthropic", ProtocolAnthropic, "https://api.anthropic.com/v1"),
-		ep("openai", ProtocolOpenAI, "https://api.openai.com/v1"),
-		ep("gemini", ProtocolOpenAI, "https://generativelanguage.googleapis.com/v1beta/openai"),
-		ep("mistral", ProtocolOpenAI, "https://api.mistral.ai/v1"),
-		ep("deepseek", ProtocolOpenAI, "https://api.deepseek.com"),
-		ep("groq", ProtocolOpenAI, "https://api.groq.com/openai/v1"),
-		ep("xai", ProtocolOpenAI, "https://api.x.ai/v1"),
-		ep("together", ProtocolOpenAI, "https://api.together.ai/v1"),
-		ep("openrouter", ProtocolOpenAI, "https://openrouter.ai/api/v1"),
+// Presets are the models written into a new kernel's config.json: the two the default bindings
+// name, on the local Ollama.
+func Presets() []Model {
+	const ollama = "http://localhost:11434/v1"
+	return []Model{
+		{Name: "gemma", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "gemma4:26b", Kind: KindChat},
+		{Name: "nomic", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "nomic-embed-text", Kind: KindEmbed},
 	}
 }
 
-// nameRe is what an endpoint or model name may be: one short segment of an action name
-// (llm/<endpoint>/<model>/chat), never shaped like an id or a key.
+// nameRe is what a model name may be: one short segment of an action name (llm/<name>/chat), never
+// shaped like an id or a key.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 
-// ValidateEndpoints refuses, naming the entry, what the configuration's schema cannot state: names
-// an action can carry, each used once, an address and a model id to send, no negative price or
-// cap, and no embedding model where the protocol has none. Protocol and kind are the schema's enums.
-func ValidateEndpoints(eps []Endpoint) error {
-	shape := "must be lowercase letters, digits, '.', '_' or '-', at most 32"
+// ValidateModels refuses, naming the entry, what the configuration's schema cannot state: names an
+// action can carry, each used once, an address and a model id to send, no negative price or cap,
+// and no embedding model where the protocol has none. Protocol and kind are the schema's enums.
+func ValidateModels(ms []Model) error {
 	names := map[string]bool{}
-	for _, e := range eps {
+	for _, m := range ms {
 		switch {
-		case !nameRe.MatchString(e.Name):
-			return fmt.Errorf("endpoint name %q %s", e.Name, shape)
-		case names[e.Name]:
-			return fmt.Errorf("endpoint %s is listed twice", e.Name)
-		case e.URL == "":
-			return fmt.Errorf("endpoint %s has no url", e.Name)
+		case !nameRe.MatchString(m.Name):
+			return fmt.Errorf("model name %q must be lowercase letters, digits, '.', '_' or '-', at most 32", m.Name)
+		case names[m.Name]:
+			return fmt.Errorf("model %s is listed twice", m.Name)
+		case m.URL == "":
+			return fmt.Errorf("model %s has no url", m.Name)
+		case m.ID == "":
+			return fmt.Errorf("model %s has no id", m.Name)
+		case m.Price < 0:
+			return fmt.Errorf("model %s has a negative price", m.Name)
+		case m.MaxTokens < 0:
+			return fmt.Errorf("model %s has a negative max_tokens", m.Name)
+		case m.Kind == KindEmbed && m.Protocol == ProtocolAnthropic:
+			return fmt.Errorf("model %s is an embedding model, which the anthropic protocol does not serve", m.Name)
 		}
-		names[e.Name] = true
-		models := map[string]bool{}
-		for _, m := range e.Models {
-			ref := e.Name + "/" + m.Name
-			switch {
-			case !nameRe.MatchString(m.Name):
-				return fmt.Errorf("model name %q of endpoint %s %s", m.Name, e.Name, shape)
-			case models[m.Name]:
-				return fmt.Errorf("model %s is listed twice", ref)
-			case m.ID == "":
-				return fmt.Errorf("model %s has no id", ref)
-			case m.Price < 0:
-				return fmt.Errorf("model %s has a negative price", ref)
-			case m.MaxTokens < 0:
-				return fmt.Errorf("model %s has a negative max_tokens", ref)
-			case m.Kind == KindEmbed && e.Protocol == ProtocolAnthropic:
-				return fmt.Errorf("model %s is an embedding model, which the anthropic protocol does not serve", ref)
-			}
-			models[m.Name] = true
-		}
+		names[m.Name] = true
 	}
 	return nil
 }
 
-// Model returns the model of e named name.
-func (e Endpoint) Model(name string) (Model, bool) {
-	i := slices.IndexFunc(e.Models, func(m Model) bool { return m.Name == name })
-	if i < 0 {
-		return Model{}, false
-	}
-	return e.Models[i], true
-}
-
-// Client is one model on one endpoint. It is every capability the llm natives and the kernel ask of
+// Client is one model. It is every capability the llm natives and the kernel ask of
 // a model; which it is used for is decided by the model's kind.
 type Client struct {
-	Endpoint Endpoint
-	Model    Model
+	Model Model
 }
 
 // httpClient's timeout accommodates a large local model generating a long completion. It follows
 // no redirect: a redirect would carry the key, and on a 307 or 308 the prompt, to wherever it
-// points, and an endpoint's address is the operator's to write as the final one. The redirect
+// points, and a provider's address is the operator's to write as the final one. The redirect
 // response itself is returned, and refused as any reply other than 200 is.
 var httpClient = &http.Client{
 	Timeout:       300 * time.Second,
@@ -160,16 +118,16 @@ func (c *Client) do(ctx context.Context, method, path string, payload, out any) 
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.Endpoint.URL, "/")+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.Model.URL, "/")+path, body)
 	if err != nil {
 		return kernel.ErrInternal.Wrapf("build request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.Endpoint.Protocol == ProtocolAnthropic {
-		req.Header.Set("x-api-key", c.Endpoint.Key)
+	if c.Model.Protocol == ProtocolAnthropic {
+		req.Header.Set("x-api-key", c.Model.Key)
 		req.Header.Set("anthropic-version", "2023-06-01")
-	} else if c.Endpoint.Key != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Endpoint.Key)
+	} else if c.Model.Key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Model.Key)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -177,7 +135,7 @@ func (c *Client) do(ctx context.Context, method, path string, payload, out any) 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return kernel.ErrInternal.Wrapf("endpoint returned status %d", resp.StatusCode)
+		return kernel.ErrInternal.Wrapf("provider returned status %d", resp.StatusCode)
 	}
 	if out == nil {
 		return nil
@@ -197,12 +155,12 @@ func (c *Client) do(ctx context.Context, method, path string, payload, out any) 
 	return nil
 }
 
-// Probe lists an endpoint's models. It is a diagnostic logged at boot: it proves the endpoint
-// answers and accepts the key, not that a model works, so it creates and removes nothing.
-func Probe(ctx context.Context, ep Endpoint) error {
+// Probe lists the models of m's provider. It is a diagnostic logged at boot: it proves the provider
+// answers and accepts the key, not that the model works, so it creates and removes nothing.
+func Probe(ctx context.Context, m Model) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return (&Client{Endpoint: ep}).do(ctx, http.MethodGet, "/models", nil, nil)
+	return (&Client{Model: m}).do(ctx, http.MethodGet, "/models", nil, nil)
 }
 
 // ---- requests and replies, per protocol ----
@@ -242,7 +200,7 @@ func (c *Client) request(messages []kernel.ChatMessage) map[string]any {
 	var system []string
 	msgs := make([]wireMsg, 0, len(messages))
 	for _, m := range messages {
-		if c.Endpoint.Protocol == ProtocolAnthropic && m.Role == "system" {
+		if c.Model.Protocol == ProtocolAnthropic && m.Role == "system" {
 			system = append(system, m.Content)
 			continue
 		}
@@ -254,7 +212,7 @@ func (c *Client) request(messages []kernel.ChatMessage) map[string]any {
 	}
 	if c.Model.MaxTokens > 0 {
 		req["max_tokens"] = c.Model.MaxTokens
-	} else if c.Endpoint.Protocol == ProtocolAnthropic {
+	} else if c.Model.Protocol == ProtocolAnthropic {
 		req["max_tokens"] = anthropicMaxTokens
 	}
 	return req
@@ -263,7 +221,7 @@ func (c *Client) request(messages []kernel.ChatMessage) map[string]any {
 // complete asks for one reply, constrained to schema when one is given, and returns its text.
 func (c *Client) complete(ctx context.Context, messages []kernel.ChatMessage, schema map[string]any) (string, error) {
 	req := c.request(messages)
-	if c.Endpoint.Protocol == ProtocolAnthropic {
+	if c.Model.Protocol == ProtocolAnthropic {
 		if schema != nil {
 			req["output_config"] = map[string]any{"format": map[string]any{"type": "json_schema", "schema": structuredSubset(schema)}}
 		}
@@ -307,7 +265,7 @@ func (c *Client) selectTool(ctx context.Context, messages []kernel.ChatMessage, 
 		if params == nil {
 			params = map[string]any{"type": "object"}
 		}
-		if c.Endpoint.Protocol == ProtocolAnthropic {
+		if c.Model.Protocol == ProtocolAnthropic {
 			defs = append(defs, map[string]any{"name": names[i], "description": t.Description, "input_schema": params})
 		} else {
 			defs = append(defs, map[string]any{"type": "function", "function": map[string]any{
@@ -315,7 +273,7 @@ func (c *Client) selectTool(ctx context.Context, messages []kernel.ChatMessage, 
 		}
 	}
 	req["tools"] = defs
-	if c.Endpoint.Protocol == ProtocolAnthropic {
+	if c.Model.Protocol == ProtocolAnthropic {
 		req["tool_choice"] = map[string]any{"type": "auto"}
 		var out anthropicReply
 		if err := c.do(ctx, http.MethodPost, "/messages", req, &out); err != nil {

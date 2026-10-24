@@ -39,8 +39,8 @@ func kernelServeCmd() *cobra.Command {
 		Long: "Start this installation's kernel on the network WORLD, or create it if this is its " +
 			"first boot.\n\n" +
 			"A world is a file in ~/.juice/worlds/ describing one network: the money it uses and the " +
-			"servers to meet it through. The worlds this build ships are written there the first time " +
-			"you serve, and yours to edit; adding a file adds a network. One installation runs one " +
+			"servers to meet it through. The worlds this build ships are written there when Juice is " +
+			"installed, and yours to edit; adding a file adds a network. One installation runs one " +
 			"kernel per world, in ~/.juice/kernels/WORLD/.\n\n" +
 			"A first boot fixes what a kernel cannot revise — the network it serves, the name it calls " +
 			"itself on that network, and its signing key — and asks for whatever its configuration does " +
@@ -64,6 +64,34 @@ func kernelServeCmd() *cobra.Command {
 	return cmd
 }
 
+// setup writes the installation files this binary owns: the worlds it ships, once each, so what a
+// kernel serves is a file the operator can read and edit and an upgrade never rewrites one they
+// changed; and the schemas of config.json and the world files, every time, since they describe this
+// binary. The installer runs it after placing the binary, and serve before loading the world.
+func setup() error {
+	if err := rail.Install(worldsDir(), rail.Worlds()); err != nil {
+		return fmt.Errorf("worlds: %w", err)
+	}
+	if err := writeSchemas(); err != nil {
+		return fmt.Errorf("schemas: %w", err)
+	}
+	return nil
+}
+
+// kernelSetupCmd runs setup. Installers call it, not people, so it is hidden from help.
+func kernelSetupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "setup",
+		Short: "Write the schemas and the shipped worlds into this installation",
+		Long: "Write this binary's schemas into ~/.juice/schemas/ and the worlds it ships into " +
+			"~/.juice/worlds/, keeping any world file already there. The installer runs it after " +
+			"placing the binary, and kernel serve runs it at every start. It creates no kernel.",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE:   func(_ *cobra.Command, _ []string) error { return setup() },
+	}
+}
+
 // kernelWorldsCmd lists the worlds `kernel serve` would read: the files in the installation's worlds
 // directory, and the worlds this build ships that are not written there yet, which a serve writes
 // before reading one. It reads and writes nothing, so a program choosing a world for a kernel that
@@ -75,7 +103,7 @@ func kernelWorldsCmd() *cobra.Command {
 		Use:   "worlds",
 		Short: "List the worlds this installation can serve",
 		Long: "List the worlds `kernel serve` accepts: the files in ~/.juice/worlds/ and the worlds " +
-			"this build ships, which are written there the first time you serve. Each row gives the " +
+			"this build ships, which are written there when Juice is installed. Each row gives the " +
 			"world's money and description; a file that cannot be served shows the error serve would give.",
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -198,16 +226,10 @@ func runServer(name string) error {
 		return err
 	}
 	worldName = name
-	// Every installation keeps its own copy of the worlds this build ships, so what a kernel serves
-	// is a file the operator can read and edit, and an upgrade never rewrites one they changed.
-	// It runs before the world is looked up, so an operator who mistypes still gets a directory
-	// holding every world they could have meant (D23).
-	if err := rail.Install(worldsDir(), rail.Worlds()); err != nil {
-		return fmt.Errorf("worlds: %w", err)
-	}
-	// Their schema, and config.json's, describe this binary, so they are rewritten every serve.
-	if err := writeSchemas(); err != nil {
-		return fmt.Errorf("schemas: %w", err)
+	// Before the world is looked up, so an operator who mistypes still gets a directory holding
+	// every world they could have meant (D23).
+	if err := setup(); err != nil {
+		return err
 	}
 	world, err := rail.Load(worldsDir(), name)
 	if err != nil {

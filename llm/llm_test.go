@@ -42,7 +42,8 @@ func fakeEndpoint(t *testing.T, replies map[string][]string) (*httptest.Server, 
 }
 
 func client(protocol, url, key string, model Model) *Client {
-	return &Client{Endpoint: Endpoint{Protocol: protocol, URL: url, Key: key}, Model: model}
+	model.Protocol, model.URL, model.Key = protocol, url, key
+	return &Client{Model: model}
 }
 
 var user = []kernel.ChatMessage{{Role: "system", Content: "be brief"}, {Role: "user", Content: "ping"}}
@@ -54,53 +55,45 @@ func TestClientTimeoutGenerous(t *testing.T) {
 	}
 }
 
-// The providers a new kernel is written with are valid, and the local one backs the default
-// bindings (ollama/gemma for chat, ollama/nomic for embeddings).
+// The models a new kernel is written with are valid and back the default bindings (gemma for chat,
+// nomic for embeddings).
 func TestPresets(t *testing.T) {
-	eps := Presets()
-	if err := ValidateEndpoints(eps); err != nil {
+	ms := Presets()
+	if err := ValidateModels(ms); err != nil {
 		t.Fatalf("presets: %v", err)
 	}
-	gemma, _ := eps[0].Model("gemma")
-	nomic, _ := eps[0].Model("nomic")
-	if eps[0].Name != "ollama" || !eps[0].Enabled || gemma.Kind != KindChat || nomic.Kind != KindEmbed {
-		t.Errorf("the default bindings' endpoint is not as configuration expects: %+v", eps[0])
-	}
-	for _, e := range eps[1:] {
-		if e.Enabled || len(e.Models) != 0 {
-			t.Errorf("%s: a preset other than the local one is listed disabled and without models", e.Name)
-		}
+	if len(ms) != 2 || ms[0].Name != "gemma" || ms[0].Kind != KindChat || ms[1].Name != "nomic" ||
+		ms[1].Kind != KindEmbed || !ms[0].Enabled || !ms[1].Enabled {
+		t.Errorf("the default bindings' models are not as configuration expects: %+v", ms)
 	}
 }
 
 // What the configuration's schema cannot state is refused, naming the entry.
-func TestValidateEndpointsRefuses(t *testing.T) {
-	ok := func() []Endpoint {
-		return []Endpoint{{Name: "e", Protocol: ProtocolOpenAI, URL: "u", Models: []Model{{Name: "m", ID: "x", Kind: KindChat}}}}
+func TestValidateModelsRefuses(t *testing.T) {
+	ok := func() []Model {
+		return []Model{{Name: "m", Protocol: ProtocolOpenAI, URL: "u", ID: "x", Kind: KindChat}}
 	}
 	for name, tc := range map[string]struct {
-		edit func([]Endpoint) []Endpoint
+		edit func([]Model) []Model
 		want string
 	}{
-		"endpoint name shape": {func(e []Endpoint) []Endpoint { e[0].Name = "Big One"; return e }, `endpoint name "Big One"`},
-		"endpoint twice":      {func(e []Endpoint) []Endpoint { return append(e, e[0]) }, "endpoint e is listed twice"},
-		"no url":              {func(e []Endpoint) []Endpoint { e[0].URL = ""; return e }, "endpoint e has no url"},
-		"model name shape":    {func(e []Endpoint) []Endpoint { e[0].Models[0].Name = "a/b"; return e }, `model name "a/b" of endpoint e`},
-		"model twice":         {func(e []Endpoint) []Endpoint { e[0].Models = append(e[0].Models, e[0].Models[0]); return e }, "model e/m is listed twice"},
-		"no id":               {func(e []Endpoint) []Endpoint { e[0].Models[0].ID = ""; return e }, "model e/m has no id"},
-		"negative price":      {func(e []Endpoint) []Endpoint { e[0].Models[0].Price = -1; return e }, "model e/m has a negative price"},
-		"negative max_tokens": {func(e []Endpoint) []Endpoint { e[0].Models[0].MaxTokens = -1; return e }, "model e/m has a negative max_tokens"},
-		"anthropic embed": {func(e []Endpoint) []Endpoint {
-			e[0].Protocol, e[0].Models[0].Kind = ProtocolAnthropic, KindEmbed
-			return e
+		"name shape":          {func(m []Model) []Model { m[0].Name = "a/b"; return m }, `model name "a/b"`},
+		"twice":               {func(m []Model) []Model { return append(m, m[0]) }, "model m is listed twice"},
+		"no url":              {func(m []Model) []Model { m[0].URL = ""; return m }, "model m has no url"},
+		"no id":               {func(m []Model) []Model { m[0].ID = ""; return m }, "model m has no id"},
+		"negative price":      {func(m []Model) []Model { m[0].Price = -1; return m }, "model m has a negative price"},
+		"negative max_tokens": {func(m []Model) []Model { m[0].MaxTokens = -1; return m }, "model m has a negative max_tokens"},
+		"anthropic embed": {func(m []Model) []Model {
+			m[0].Protocol, m[0].Kind = ProtocolAnthropic, KindEmbed
+			return m
 		}, "the anthropic protocol does not serve"},
 	} {
-		if err := ValidateEndpoints(tc.edit(ok())); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if err := ValidateModels(tc.edit(ok())); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: got %v, want a refusal saying %q", name, err, tc.want)
 		}
 	}
-	if err := ValidateEndpoints(ok()); err != nil {
-		t.Errorf("a sound endpoint was refused: %v", err)
+	if err := ValidateModels(ok()); err != nil {
+		t.Errorf("a sound model was refused: %v", err)
 	}
 }
 
@@ -306,7 +299,7 @@ func TestAnthropicDecide(t *testing.T) {
 // Probe proves an endpoint answers and accepts the key, under the protocol's headers.
 func TestProbe(t *testing.T) {
 	srv, got := fakeEndpoint(t, map[string][]string{"/v1/models": {`{"data":[]}`}})
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: srv.URL + "/v1", Key: "ak"}); err != nil {
+	if err := Probe(context.Background(), Model{Protocol: ProtocolAnthropic, URL: srv.URL + "/v1", Key: "ak"}); err != nil {
 		t.Fatalf("Probe: %v", err)
 	}
 	if (*got)[0].header.Get("x-api-key") != "ak" {
@@ -314,7 +307,7 @@ func TestProbe(t *testing.T) {
 	}
 	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 	defer refused.Close()
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolOpenAI, URL: refused.URL, Key: "bad"}); err == nil {
+	if err := Probe(context.Background(), Model{Protocol: ProtocolOpenAI, URL: refused.URL, Key: "bad"}); err == nil {
 		t.Error("a refused key probed as reachable")
 	}
 }
@@ -339,7 +332,7 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusFound)
 	}))
 	defer moved.Close()
-	if err := Probe(context.Background(), Endpoint{Protocol: ProtocolAnthropic, URL: moved.URL, Key: "ak"}); err == nil || reached {
+	if err := Probe(context.Background(), Model{Protocol: ProtocolAnthropic, URL: moved.URL, Key: "ak"}); err == nil || reached {
 		t.Errorf("the probe followed a redirect: err %v, reached %v", err, reached)
 	}
 }

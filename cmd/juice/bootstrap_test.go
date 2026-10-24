@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -732,6 +733,61 @@ func TestFirstBootRefusalWritesNothing(t *testing.T) {
 // file serve would refuse, by its name or by what it says, is listed with serve's error and nothing
 // else, so a program choosing a world can tell it apart; a worlds directory that cannot be read is
 // an error, never a listing with the operator's files missing.
+// TestKernelSetupWritesTheInstallationFiles: setup, which the installer runs, leaves the schemas
+// and the shipped worlds and creates no kernel and no client records. Run again, as every serve
+// does, it restores the schemas and keeps an operator's edited world.
+func TestKernelSetupWritesTheInstallationFiles(t *testing.T) {
+	root := testHome(t)
+	if !kernelSetupCmd().Hidden {
+		t.Error("kernel setup is for installers and must be hidden from help")
+	}
+	// The exact command install.sh runs, through registration and argument parsing.
+	keepRootTree(t)
+	if out, err := execTestCmd(t, rootCmd, "kernel", "setup"); err != nil {
+		t.Fatalf("juice kernel setup: %v %s", err, out)
+	}
+	schema := filepath.Join(root, "schemas", "config.schema.json")
+	generated, err := os.ReadFile(schema)
+	if err != nil {
+		t.Fatalf("no config schema after setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "schemas", "world.schema.json")); err != nil {
+		t.Errorf("no world schema after setup: %v", err)
+	}
+	shipped, err := fs.ReadDir(rail.Worlds(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range shipped {
+		if _, err := os.Stat(filepath.Join(root, "worlds", e.Name())); err != nil {
+			t.Errorf("shipped world %s not written: %v", e.Name(), err)
+		}
+	}
+	for _, d := range []string{"kernels", "client"} {
+		if _, err := os.Stat(filepath.Join(root, d)); !os.IsNotExist(err) {
+			t.Errorf("setup created %s/", d)
+		}
+	}
+
+	edited := []byte(`{"rail":"manual","decimals":6,"symbol":"fUSD","description":"my own words","seeds":[]}`)
+	world := filepath.Join(root, "worlds", "play.json")
+	if err := os.WriteFile(world, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(schema, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(world); string(got) != string(edited) {
+		t.Errorf("setup overwrote an edited world: %s", got)
+	}
+	if got, _ := os.ReadFile(schema); string(got) != string(generated) {
+		t.Error("setup did not restore the generated schema")
+	}
+}
+
 func TestKernelWorldsListsWhatServeReads(t *testing.T) {
 	root := testHome(t)
 	dir := filepath.Join(root, "worlds")

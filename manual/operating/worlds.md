@@ -11,7 +11,7 @@ settle, and where it first meets peers. Its JSON file lives in
 `$JUICE_HOME/worlds/`, or `~/.juice/worlds/` with the default installation root.
 The filename without `.json` is the world's name.
 
-The worlds Juice comes with are installed on the first `kernel serve` and are never
+The worlds Juice comes with are installed with Juice and are never
 overwritten. You can edit their connection settings or add a file for a network
 of your own. Restart the kernel to apply changes. An unknown field causes
 startup to fail. `juice kernel worlds` lists every world here, the shipped ones

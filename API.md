@@ -231,7 +231,7 @@ Native actions registered at bootstrap, owned by `sys`, `local` — callable by 
 | `llm/json` | model's | The object a caller's schema describes, from a language model the operator chose, checked against the schema |
 | `llm/embed` | model's | Text embedding, in the Embeddings shape |
 | `llm/decide` | model's | Action selection; returns chosen action and args without executing |
-| `llm/<endpoint>/<model>/chat`, `/json`, `/decide`, `/embed` | model's | The same, for one model of one enabled endpoint, generated per model by kind (D17) |
+| `llm/<name>/chat`, `/json`, `/decide`, `/embed` | model's | The same, for one enabled model, generated per model by kind (D17) |
 | `time` | 0 | Current time |
 | `sink` | 0 | Universal no-op task target |
 | `message` | 0 | Message a user by creating a task they acknowledge |

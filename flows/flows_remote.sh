@@ -130,35 +130,37 @@ flow_chat() {
     assert_fails "chat.missing_messages_rejected" "messages\|required\|schema" -- j "$db" "$ha" run sys@k/llm/chat '{}'
 }
 
-# --- Language-model endpoints (D17) ---
-# The endpoints in config.json decide what exists: a model on an endpoint that answers is its own
-# natives and backs llm/chat; one on an endpoint that is down keeps its natives; one on a disabled
-# endpoint generates none, and binding llm/chat to it refuses the boot, naming the setting. llm/chat answers text in the Chat Completions shape and
-# llm/json the value its schema admits — one action per output kind, so llm/chat refuses a request
-# for structured output.
-flow_llm_endpoints() {
-    echo "=== FLOW llm_endpoints ==="
+# --- Language models (D17) ---
+# The models in config.json decide what exists: an enabled model whose provider answers is its own
+# natives and backs llm/chat; one whose provider is down keeps its natives; a disabled one generates
+# none, and binding llm/chat to it refuses the boot, naming the setting. llm/chat answers text in the
+# Chat Completions shape and llm/json the value its schema admits — one action per output kind, so
+# llm/chat refuses a request for structured output.
+flow_llm_models() {
+    echo "=== FLOW llm_models ==="
     local dir db hs port down llm; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys)
     port=$(backend_port); down=$(backend_port)
     start_llm_backend "$port"
-    # The providers are config.json's own (D17): one answering, one down, one switched off.
-    llm=$(printf '{"chat":"ollama/gemma","json":"ollama/gemma","decide":"ollama/gemma","embed":"ollama/nomic","endpoints":[
-      {"name":"ollama","enabled":true,"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":[{"name":"gemma","id":"g","kind":"chat","price":0},{"name":"nomic","id":"n","kind":"embed","price":0}]},
-      {"name":"down","enabled":true,"protocol":"openai","url":"http://127.0.0.1:%s/v1","models":[{"name":"m","id":"x","kind":"chat","price":0}]},
-      {"name":"cloud","enabled":false,"protocol":"anthropic","url":"http://127.0.0.1:%s/v1","models":[{"name":"m","id":"x","kind":"chat","price":5}]}]}' "$port" "$down" "$port")
+    # The models are config.json's own (D17): two on a provider that answers, one on a provider
+    # that is down, one switched off.
+    llm=$(printf '{"chat":"gemma","json":"gemma","decide":"gemma","embed":"nomic","models":[
+      {"name":"gemma","enabled":true,"protocol":"openai","url":"http://127.0.0.1:%s/v1","id":"g","kind":"chat","price":0},
+      {"name":"nomic","enabled":true,"protocol":"openai","url":"http://127.0.0.1:%s/v1","id":"n","kind":"embed","price":0},
+      {"name":"m","enabled":true,"protocol":"openai","url":"http://127.0.0.1:%s/v1","id":"x","kind":"chat","price":0},
+      {"name":"cloud","enabled":false,"protocol":"anthropic","url":"http://127.0.0.1:%s/v1","id":"x","kind":"chat","price":5}]}' "$port" "$port" "$down" "$port")
     start_server "$db" "$hs" "llm=$llm" || { fail "llm.boot" "server did not start"; return; }
     know "$db" "$hs"
     j "$db" "$hs" auth login sys@$KERNEL_NAME --password sys-pass >/dev/null 2>&1
 
     local acts; acts=$(jj "$db" "$hs" action list)
-    assert_eq "llm.model_generated"      yes "$(has_action "$acts" llm/ollama/gemma/chat)"
-    assert_eq "llm.decide_generated"     yes "$(has_action "$acts" llm/ollama/gemma/decide)"
-    assert_eq "llm.embed_generated"      yes "$(has_action "$acts" llm/ollama/nomic/embed)"
-    assert_eq "llm.down_endpoint_kept"   yes "$(has_action "$acts" llm/down/m/chat)"
-    assert_eq "llm.disabled_none"        no  "$(has_action "$acts" llm/cloud/m/chat)"
+    assert_eq "llm.model_generated"      yes "$(has_action "$acts" llm/gemma/chat)"
+    assert_eq "llm.decide_generated"     yes "$(has_action "$acts" llm/gemma/decide)"
+    assert_eq "llm.embed_generated"      yes "$(has_action "$acts" llm/nomic/embed)"
+    assert_eq "llm.down_model_kept"      yes "$(has_action "$acts" llm/m/chat)"
+    assert_eq "llm.disabled_none"        no  "$(has_action "$acts" llm/cloud/chat)"
     assert_eq "llm.json_registered"      yes "$(has_action "$acts" llm/json)"
-    assert_eq "llm.json_generated"       yes "$(has_action "$acts" llm/ollama/gemma/json)"
-    assert_eq "llm.down_logged" yes "$(grep -q '"msg":"llm.endpoint_unreachable".*"endpoint":"down"' "$(server_log "$db")" && echo yes || echo no)"
+    assert_eq "llm.json_generated"       yes "$(has_action "$acts" llm/gemma/json)"
+    assert_eq "llm.down_logged" yes "$(grep -q '"msg":"llm.model_unreachable".*"model":"m"' "$(server_log "$db")" && echo yes || echo no)"
 
     local content; content=$(jj "$db" "$hs" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hi"}]}' |
         python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["choices"][0]["message"]["content"])' 2>/dev/null)
@@ -170,14 +172,14 @@ flow_llm_endpoints() {
     local refuses='{"messages":[{"role":"user","content":"hi"}],"schema":{"type":"object","properties":{"y":{"type":"string","description":"y"}},"required":["y"]}}'
     assert_fails "llm.json_reply_refused" "execution\|schema" -- j "$db" "$hs" run sys@k/llm/json "$refuses"
     assert_fails "llm.chat_is_text_only" 'undeclared key "response_format"' -- j "$db" "$hs" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema"}}'
-    assert_fails "llm.down_endpoint_call_fails" "execution\|failed" -- j "$db" "$hs" run sys@k/llm/down/m/chat '{"messages":[{"role":"user","content":"hi"}]}'
+    assert_fails "llm.down_model_call_fails" "execution\|failed" -- j "$db" "$hs" run sys@k/llm/m/chat '{"messages":[{"role":"user","content":"hi"}]}'
 
-    # A binding to the disabled endpoint is a configuration that cannot mean what it says.
+    # A binding to the disabled model is a configuration that cannot mean what it says.
     local root="$dir/refused"; mkdir -p "$root/kernels/play"
-    printf '{"kernel_handle":"acme","native":{"llm":%s}}' "${llm/\"chat\":\"ollama\/gemma\"/\"chat\":\"cloud\/m\"}" >"$root/kernels/play/config.json"
+    printf '{"kernel_handle":"acme","native":{"llm":%s}}' "${llm/\"chat\":\"gemma\"/\"chat\":\"cloud\"}" >"$root/kernels/play/config.json"
     local out; out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" timeout 30 "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 \
         --fed-listen-addrs /ip4/127.0.0.1/tcp/0 2>&1)
-    assert_contains "llm.disabled_binding_refused" 'native.llm.chat names "cloud/m", whose endpoint cloud is not enabled' "$out"
+    assert_contains "llm.disabled_binding_refused" 'native.llm.chat names "cloud", which is not enabled' "$out"
 }
 
 # --- OpenAPI ---

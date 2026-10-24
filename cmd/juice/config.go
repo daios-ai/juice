@@ -22,39 +22,37 @@ import (
 )
 
 // NativeLLMConfig binds the language-model natives (D17). Chat, JSON, Decide and Embed each name the
-// model llm/chat, llm/json, llm/decide and llm/embed call, as <endpoint>/<model>, and "" leaves
-// that native unbound. Endpoints are the providers this kernel knows, each with its key and models.
+// entry of Models that llm/chat, llm/json, llm/decide and llm/embed call, and "" leaves that native
+// unbound. Each entry of Models is one model, complete with its provider's address and key.
 type NativeLLMConfig struct {
-	Chat      string         `json:"chat" doc:"The model llm/chat calls, as <endpoint>/<model> from endpoints; empty leaves it unbound."`
-	JSON      string         `json:"json" doc:"The model llm/json calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Decide    string         `json:"decide" doc:"The model llm/decide calls, as <endpoint>/<model>; a chat model; empty leaves it unbound."`
-	Embed     string         `json:"embed" doc:"The model llm/embed and search call, as <endpoint>/<model>; an embedding model; empty leaves it unbound."`
-	Endpoints []llm.Endpoint `json:"endpoints" doc:"The language-model providers this kernel knows, each switched on or off, with its key and its models' prices. No command-line flag."`
+	Chat   string      `json:"chat" doc:"The model llm/chat calls, by its name in models; empty leaves it unbound."`
+	JSON   string      `json:"json" doc:"The model llm/json calls, by its name in models; a chat model; empty leaves it unbound."`
+	Decide string      `json:"decide" doc:"The model llm/decide calls, by its name in models; a chat model; empty leaves it unbound."`
+	Embed  string      `json:"embed" doc:"The model llm/embed and search call, by its name in models; an embedding model; empty leaves it unbound."`
+	Models []llm.Model `json:"models" doc:"The language models this kernel uses, each with its provider's address and key and its price. No command-line flag."`
 }
 
-// model finds the model ref (<endpoint>/<model>) and its endpoint.
-func (c NativeLLMConfig) model(ref string) (llm.Endpoint, llm.Model, bool) {
-	endpoint, name, _ := strings.Cut(ref, "/")
-	i := slices.IndexFunc(c.Endpoints, func(e llm.Endpoint) bool { return e.Name == endpoint })
+// model finds the entry named name.
+func (c NativeLLMConfig) model(name string) (llm.Model, bool) {
+	i := slices.IndexFunc(c.Models, func(m llm.Model) bool { return m.Name == name })
 	if i < 0 {
-		return llm.Endpoint{}, llm.Model{}, false
+		return llm.Model{}, false
 	}
-	m, ok := c.Endpoints[i].Model(name)
-	return c.Endpoints[i], m, ok
+	return c.Models[i], true
 }
 
-// price is what a call to the model ref costs; an unbound one is 0.
-func (c NativeLLMConfig) price(ref string) int64 {
-	_, m, _ := c.model(ref)
+// price is what a call to the model named name costs; an unbound one is 0.
+func (c NativeLLMConfig) price(name string) int64 {
+	m, _ := c.model(name)
 	return m.Price
 }
 
-// check refuses, naming the key, a configuration that cannot mean what it says (D17): endpoints the
-// schema admits but llm.ValidateEndpoints does not, and a binding to a model no endpoint holds, to
-// one whose endpoint is switched off, or to one of the wrong kind.
+// check refuses, naming the key, a configuration that cannot mean what it says (D17): models the
+// schema admits but llm.ValidateModels does not, and a binding to no model, to a disabled one, or
+// to one of the wrong kind.
 func (c NativeLLMConfig) check() error {
-	if err := llm.ValidateEndpoints(c.Endpoints); err != nil {
-		return fmt.Errorf("native.llm.endpoints: %w", err)
+	if err := llm.ValidateModels(c.Models); err != nil {
+		return fmt.Errorf("native.llm.models: %w", err)
 	}
 	for _, b := range []struct{ key, ref, kind string }{
 		{"chat", c.Chat, llm.KindChat}, {"json", c.JSON, llm.KindChat}, {"decide", c.Decide, llm.KindChat},
@@ -63,12 +61,12 @@ func (c NativeLLMConfig) check() error {
 		if b.ref == "" {
 			continue
 		}
-		ep, model, ok := c.model(b.ref)
+		model, ok := c.model(b.ref)
 		switch {
 		case !ok:
-			return fmt.Errorf("native.llm.%s names %q, which is no model in native.llm.endpoints", b.key, b.ref)
-		case !ep.Enabled:
-			return fmt.Errorf("native.llm.%s names %q, whose endpoint %s is not enabled", b.key, b.ref, ep.Name)
+			return fmt.Errorf("native.llm.%s names %q, which is no model in native.llm.models", b.key, b.ref)
+		case !model.Enabled:
+			return fmt.Errorf("native.llm.%s names %q, which is not enabled", b.key, b.ref)
 		case model.Kind != b.kind:
 			return fmt.Errorf("native.llm.%s names %q, a %s model; it takes a %s model", b.key, b.ref, model.Kind, b.kind)
 		}
@@ -138,7 +136,7 @@ func (c NativeConfig) PriceOf(name string) int64 {
 	case "tinygo/compile":
 		return c.TinyGo.Price
 	}
-	// A generated model's natives, llm/<endpoint>/<model>/<verb>, cost what the model does.
+	// A generated model's natives, llm/<name>/<verb>, cost what the model does.
 	if rest, ok := strings.CutPrefix(name, "llm/"); ok {
 		return c.LLM.price(path.Dir(rest))
 	}
@@ -220,8 +218,8 @@ func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		Schema: "../../schemas/config.schema.json", // kernels/<world>/config.json → schemas/
 		Native: NativeConfig{
-			LLM: NativeLLMConfig{Chat: "ollama/gemma", JSON: "ollama/gemma", Decide: "ollama/gemma", Embed: "ollama/nomic",
-				Endpoints: llm.Presets()},
+			LLM: NativeLLMConfig{Chat: "gemma", JSON: "gemma", Decide: "gemma", Embed: "nomic",
+				Models: llm.Presets()},
 			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
 			Web:    NativeWebConfig{Price: 0},
 			TinyGo: NativePriceConfig{Price: 5},
@@ -344,10 +342,10 @@ var (
 // defaults, because `into` starts as the shipped configuration.
 func bindConfigFlags(fs *pflag.FlagSet, into *ServerConfig) {
 	configFields(into, func(name string, f reflect.Value) {
-		// The credentials key and the language-model endpoints' keys have no flag: a process's
+		// The credentials key and the language models' keys have no flag: a process's
 		// command line is readable by every user of the machine. The credentials key is read from
 		// the file, or from JUICE_CREDENTIALS_KEY for a run that must not write it down.
-		if name == "credentials-key" || name == "native.llm.endpoints" {
+		if name == "credentials-key" || name == "native.llm.models" {
 			return
 		}
 		usage := "sets " + strings.ReplaceAll(name, "-", "_") + " for this run"

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -415,56 +416,61 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	}
 }
 
-// openLLM generates a model's natives from configuration alone — an endpoint lacking its required
-// key generates none, one that is down keeps its natives — binds the canonical natives to what the
-// configuration names, and reports the bound embedder's identity and whether its endpoint answered.
+// openLLM generates a model's natives from configuration alone — a disabled model generates none,
+// one whose provider is down keeps its natives — probes each provider once however many models it
+// holds, binds the canonical natives to what the configuration names, and reports the bound
+// embedder's identity and whether its provider answered.
 func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
+	var probes atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	defer up.Close()
 	down := httptest.NewServer(http.NotFoundHandler())
-	down.Close() // a closed port: the endpoint does not answer
-	chatEmbed := func(n string) []llm.Model {
-		return []llm.Model{{Name: "c", ID: "c" + n, Kind: llm.KindChat}, {Name: "e", ID: "e" + n, Kind: llm.KindEmbed}}
+	down.Close() // a closed port: the provider does not answer
+	model := func(name, url, kind string, enabled bool) llm.Model {
+		return llm.Model{Name: name, Enabled: enabled, Protocol: llm.ProtocolOpenAI, URL: url, ID: name + "-id", Kind: kind}
 	}
-	eps := []llm.Endpoint{
-		{Name: "up", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: up.URL, Models: chatEmbed("1")},
-		{Name: "down", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: down.URL, Models: chatEmbed("2")},
-		{Name: "off", Protocol: llm.ProtocolAnthropic, URL: "https://x", Models: []llm.Model{{Name: "c", ID: "c3", Kind: llm.KindChat}}},
-		{Name: "empty", Enabled: true, Protocol: llm.ProtocolOpenAI, URL: "https://y", Models: []llm.Model{}},
+	ms := []llm.Model{
+		model("upc", up.URL, llm.KindChat, true), model("upe", up.URL, llm.KindEmbed, true),
+		model("downc", down.URL, llm.KindChat, true), model("downe", down.URL, llm.KindEmbed, true),
+		model("off", "https://x", llm.KindChat, false),
 	}
 	logger, err := log.New(log.Config{Level: "error"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "up/c", JSON: "up/c", Decide: "down/c", Embed: "up/e", Endpoints: eps}, logger)
+	models, identity, reachable, err := openLLM(NativeLLMConfig{Chat: "upc", JSON: "upc", Decide: "downc", Embed: "upe", Models: ms}, logger)
 	if err != nil {
 		t.Fatalf("openLLM: %v", err)
 	}
-	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"down/c", "up/c"}) {
-		t.Errorf("chat models = %v; want the reachable and the down endpoint's, not the disabled one's", got)
+	if probes.Load() != 1 {
+		t.Errorf("two models on one provider probed it %d times, want once", probes.Load())
 	}
-	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"down/e", "up/e"}) {
+	if got := slices.Sorted(maps.Keys(models.Chats)); !slices.Equal(got, []string{"downc", "upc"}) {
+		t.Errorf("chat models = %v; want the reachable and the down provider's, not the disabled one", got)
+	}
+	if got := slices.Sorted(maps.Keys(models.Embedders)); !slices.Equal(got, []string{"downe", "upe"}) {
 		t.Errorf("embedding models = %v", got)
 	}
-	if models.Chat != models.Chats["up/c"] || models.JSON != models.Chats["up/c"] || models.Decide != models.Chats["down/c"] ||
-		models.Embedder != models.Embedders["up/e"] {
+	if models.Chat != models.Chats["upc"] || models.JSON != models.Chats["upc"] || models.Decide != models.Chats["downc"] ||
+		models.Embedder != models.Embedders["upe"] {
 		t.Error("the canonical natives are not bound to the configured models")
 	}
-	if identity != "up/e|"+up.URL+"|e1" || !reachable {
+	if identity != up.URL+"|upe-id" || !reachable {
 		t.Errorf("embedder identity %q reachable %v", identity, reachable)
 	}
 
-	if _, _, reachable, _ = openLLM(NativeLLMConfig{Embed: "down/e", Endpoints: eps}, logger); reachable {
-		t.Error("an embedder whose endpoint does not answer was reported reachable")
+	if _, _, reachable, _ = openLLM(NativeLLMConfig{Embed: "downe", Models: ms}, logger); reachable {
+		t.Error("an embedder whose provider does not answer was reported reachable")
 	}
-	models, identity, _, err = openLLM(NativeLLMConfig{Endpoints: eps}, logger)
+	models, identity, _, err = openLLM(NativeLLMConfig{Models: ms}, logger)
 	if err != nil || models.Chat != nil || models.JSON != nil || models.Decide != nil || models.Embedder != nil || identity != "" {
 		t.Errorf("an unbound configuration bound something: %+v %q %v", models, identity, err)
 	}
-	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "off/c", Endpoints: eps}, logger); err == nil {
-		t.Error("a binding to a disabled endpoint was accepted")
+	if _, _, _, err := openLLM(NativeLLMConfig{Chat: "off", Models: ms}, logger); err == nil {
+		t.Error("a binding to a disabled model was accepted")
 	}
 }

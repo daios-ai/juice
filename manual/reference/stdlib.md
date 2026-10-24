@@ -50,8 +50,8 @@ action's contract says exactly what it returns.
 **`sys/llm/embed`** — `{input}` → `{data: [{index, embedding}]}`, the shape of
 the OpenAI Embeddings API, for one string.
 
-Every model of an enabled endpoint in the configuration also has these actions of its own,
-`sys/llm/<endpoint>/<model>/chat`, `/json` and `/decide` for a chat model and `/embed`
+Every enabled model in the configuration also has these actions of its own,
+`sys/llm/<name>/chat`, `/json` and `/decide` for a chat model and `/embed`
 for an embedding model, so you can call a particular model directly.
 
 **`sys/llm/decide`** — `{messages, actions}` → `{action, args, message?}`
