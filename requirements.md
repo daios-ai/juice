@@ -1,6 +1,6 @@
 # Juice: user stories, product constraints, and design decisions
 
-Version: 0.17
+Version: 0.18
 Codename: `juice`
 Copyright (C) 2026 Pedro A. Ortega <pedro.ortega@gmail.com>
 
