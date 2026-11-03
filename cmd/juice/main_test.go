@@ -479,3 +479,51 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		t.Error("a binding to a disabled model was accepted")
 	}
 }
+
+// The restart note names the kernel a command spoke to when it runs an older release than this
+// binary, and only to a person: both streams must be terminals, since `juice … | jq` leaves stderr
+// on one.
+func TestRestartNote(t *testing.T) {
+	served := "v0.17.2"
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Server", "juice-kernel/"+served)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	read := func() *client {
+		c := &client{}
+		if err := c.call(t.Context(), "GET", "/v1/me", nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := read()
+	if c.served != "v0.17.2" {
+		t.Fatalf("served = %q, want the build in the Server header", c.served)
+	}
+	want := "note: stub runs juice v0.17.2; this binary is v0.17.4. Restart it under the upgrade procedure."
+	if got := restartNote(c, "v0.17.4", true, true); got != want {
+		t.Errorf("note = %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		name           string
+		binary         string
+		stdout, stderr bool
+	}{
+		{"same release", "v0.17.2", true, true},
+		{"older binary", "v0.17.1", true, true},
+		{"dev binary", "dev", true, true},
+		{"piped stdout", "v0.17.4", false, true},
+		{"piped stderr", "v0.17.4", true, false},
+	} {
+		if got := restartNote(c, tc.binary, tc.stdout, tc.stderr); got != "" {
+			t.Errorf("%s: note %q", tc.name, got)
+		}
+	}
+	served = "v0.17.2-3-gabc"
+	if got := restartNote(read(), "v0.17.4", true, true); got != "" {
+		t.Errorf("a kernel between releases: note %q", got)
+	}
+	if got := restartNote(&client{}, "v0.17.4", true, true); got != "" {
+		t.Errorf("no reply read: note %q", got)
+	}
+}

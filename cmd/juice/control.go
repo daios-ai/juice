@@ -5,12 +5,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -332,9 +336,13 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	econ := s.kernel.Economy()
 	exposure, _ := s.kernel.Exposure(ctx, callerFrom(r))
 	out := map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
+		"version": version,
 		"lottery": econ.Lottery, "lottery_max": econ.LotteryMax,
 		"credit_limit": econ.CreditLimit, "exposure": exposure,
 		"fee_bps": econ.FeeBPS, "remote_bps": econ.RemoteBPS, "import_bps": econ.ImportBPS}
+	if s.release != nil {
+		out["latest_release"] = s.release.Latest()
+	}
 	// The rail position: what is held, what is promised elsewhere, and whether the books still add
 	// up (D23). An operator reads this before believing any other number here.
 	if rep, err := s.kernel.RailInspect(ctx, callerFrom(r)); err == nil {
@@ -353,6 +361,110 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// releasesLatestURL is the page install.sh resolves when no version is named. It answers with a
+// redirect to the newest release's tag, so the check trusts nothing the installer does not.
+const releasesLatestURL = "https://github.com/daios-ai/juice/releases/latest"
+
+// releaseCheckTimeout bounds one read of the releases page. It is the check's own, so a discovery
+// pass that used up its deadline cannot make the page look unreachable.
+const releaseCheckTimeout = 10 * time.Second
+
+// releaseCheck tells the operator that a newer release exists (U44, P3). It reads and reports;
+// installing stays the installer's job and restarting the operator's, since an upgrade is a
+// coordinated cutover. It holds only the newest tag read: a restart reads it again.
+type releaseCheck struct {
+	url        string
+	allowLocal bool
+	mu         sync.Mutex
+	latest     string // the newest tag read; empty before the first successful read
+	logged     string // the newest tag already logged, so one release is logged once
+}
+
+// Latest is the newest release read, empty before the first successful read.
+func (c *releaseCheck) Latest() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.latest
+}
+
+// check reads the newest release and logs it when it is newer than the running build. A failed read
+// keeps the last tag: the page being unreachable says nothing about which release is newest.
+func (c *releaseCheck) check(ctx context.Context, logger *log.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, releaseCheckTimeout)
+	defer cancel()
+	tag, err := latestRelease(ctx, c.url, c.allowLocal)
+	if err != nil {
+		logger.Debug("release.check_failed", "error", err.Error())
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.latest = tag
+	if newerThan(tag, version) && tag != c.logged {
+		c.logged = tag
+		logger.Warn("release.available", "version", version, "latest", tag)
+	}
+}
+
+// latestRelease reads the tag the releases page redirects to. The redirect is read, not followed:
+// its Location names the tag, and nothing else on the page is needed.
+func latestRelease(ctx context.Context, url string, allowLocal bool) (string, error) {
+	hc := newHTTPClient(releaseCheckTimeout, allowLocal)
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return "", err
+	}
+	// The client is made for this one request, so its connection is closed rather than kept idle in
+	// a pool nothing will reuse.
+	req.Close = true
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	tag := loc[strings.LastIndex(loc, "/")+1:]
+	if _, _, _, ok := releaseVersion(tag); !ok {
+		return "", fmt.Errorf("the releases page named no release (status %d)", resp.StatusCode)
+	}
+	return tag, nil
+}
+
+// releaseVersion reads a release tag, vMAJOR.MINOR.PATCH. Anything else — a dev build, a build
+// between tags, a pre-release — is not a release, and is never compared.
+func releaseVersion(s string) (major, minor, patch int, ok bool) {
+	parts := strings.Split(strings.TrimPrefix(s, "v"), ".")
+	if !strings.HasPrefix(s, "v") || len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	var n [3]int
+	for i, p := range parts {
+		v, err := strconv.Atoi(p)
+		if err != nil || v < 0 || strconv.Itoa(v) != p {
+			return 0, 0, 0, false
+		}
+		n[i] = v
+	}
+	return n[0], n[1], n[2], true
+}
+
+// newerThan reports whether release a is newer than release b; false when either is not a release.
+func newerThan(a, b string) bool {
+	a1, a2, a3, okA := releaseVersion(a)
+	b1, b2, b3, okB := releaseVersion(b)
+	if !okA || !okB {
+		return false
+	}
+	if a1 != b1 {
+		return a1 > b1
+	}
+	if a2 != b2 {
+		return a2 > b2
+	}
+	return a3 > b3
 }
 
 // writeOr writes v as JSON on success, or the error otherwise.

@@ -142,6 +142,8 @@ func identityCmd() *cobra.Command {
 				var out struct {
 					Handle            string   `json:"handle"`
 					PublicKey         string   `json:"public_key"`
+					Version           string   `json:"version"`
+					LatestRelease     *string  `json:"latest_release"`
 					About             string   `json:"about"`
 					Addrs             []string `json:"addrs"`
 					Network           string   `json:"network"`
@@ -184,6 +186,19 @@ func identityCmd() *cobra.Command {
 				}
 				fmt.Printf("Handle:     %s\n", out.Handle)
 				fmt.Printf("Public key: %s\n", out.PublicKey)
+				fmt.Printf("Version:    %s\n", out.Version)
+				// The newest release, present only while the kernel checks for one; empty until its
+				// first read of the releases page succeeds.
+				if out.LatestRelease != nil {
+					latest := *out.LatestRelease
+					if latest == "" {
+						latest = "unknown"
+					}
+					fmt.Printf("Latest:     %s\n", latest)
+					if newerThan(latest, out.Version) {
+						fmt.Println("NOTE: a newer release is available; upgrade with the installer, then restart under the upgrade procedure")
+					}
+				}
 				if out.About != "" {
 					fmt.Printf("About:      %s\n", out.About)
 				}

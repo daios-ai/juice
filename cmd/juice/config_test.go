@@ -98,6 +98,10 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.MaxInboundPeers != 64 || cfg.RelaySlots != 128 {
 		t.Errorf("connection limits default = %d inbound peers, %d relay slots; want 64, 128", cfg.MaxInboundPeers, cfg.RelaySlots)
 	}
+	// A kernel reports a newer release unless its operator turns the check off (U44).
+	if !cfg.CheckUpdates {
+		t.Error("CheckUpdates should default to true")
+	}
 }
 
 // LoadConfig never creates: first boot is the only writer of config.json, so an absent file is a

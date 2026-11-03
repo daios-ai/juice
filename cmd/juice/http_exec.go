@@ -225,9 +225,15 @@ func origin(u *url.URL) string {
 // doHTTP executes one HTTP request and returns (body, statusCode, error).
 // Enforces a 10 MiB response size limit.
 func doHTTP(ctx context.Context, method, rawURL string, headers map[string]string, body io.Reader, timeout time.Duration, allowLocal bool) ([]byte, int, error) {
+	respBody, status, _, err := doHTTPH(ctx, method, rawURL, headers, body, timeout, allowLocal)
+	return respBody, status, err
+}
+
+// doHTTPH is doHTTP that also returns the response's headers, nil when no response arrived.
+func doHTTPH(ctx context.Context, method, rawURL string, headers map[string]string, body io.Reader, timeout time.Duration, allowLocal bool) ([]byte, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
-		return nil, 0, kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
+		return nil, 0, nil, kernel.ErrInvalidInput.Wrapf("invalid URL: %v", err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -236,7 +242,7 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 	if err != nil {
 		// The dialed URL stays out of the message (it becomes the signed receipt's reason, §6) but
 		// rides as the cause, which client.go's isTimeoutErr needs.
-		return nil, 0, kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
+		return nil, 0, nil, kernel.ErrExecutionFailed.Wrap("upstream request failed").Because(err)
 	}
 	defer resp.Body.Close()
 	// One byte past the bound is enough to know the reply is over it. Truncating instead would
@@ -244,12 +250,12 @@ func doHTTP(ctx context.Context, method, rawURL string, headers map[string]strin
 	// is held to, wherever it came from (D12).
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, kernel.MaxReplyBytes+1))
 	if err != nil {
-		return nil, resp.StatusCode, kernel.ErrExecutionFailed.Wrap("could not read response body")
+		return nil, resp.StatusCode, resp.Header, kernel.ErrExecutionFailed.Wrap("could not read response body")
 	}
 	if len(respBody) > kernel.MaxReplyBytes {
-		return nil, resp.StatusCode, kernel.ErrExecutionFailed.Wrapf("the upstream reply exceeds the %d MiB an action may return", kernel.MaxReplyBytes>>20)
+		return nil, resp.StatusCode, resp.Header, kernel.ErrExecutionFailed.Wrapf("the upstream reply exceeds the %d MiB an action may return", kernel.MaxReplyBytes>>20)
 	}
-	return respBody, resp.StatusCode, nil
+	return respBody, resp.StatusCode, resp.Header, nil
 }
 
 // Trace-scoped composition capability headers (§9): the token and the base URL the endpoint

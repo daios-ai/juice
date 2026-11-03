@@ -113,7 +113,8 @@ except Exception:
   "fed_listen_addrs": $fl_json,
   "metrics_listen_addr": "$metrics_listen_addr",
   "remote_retry_interval_seconds": $remote_retry_interval_seconds,
-  "discovery_interval_seconds": $discovery_interval_seconds
+  "discovery_interval_seconds": $discovery_interval_seconds,
+  "check_updates": false
 }
 EOF
     # The credentials key is minted once, at first boot, and seals every stored credential. Rewriting

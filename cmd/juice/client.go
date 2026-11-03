@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/daios-ai/juice/fed"
 	"github.com/daios-ai/juice/kernel"
 )
 
@@ -46,6 +47,9 @@ type client struct {
 	err      error       // why there is no usable login, answered where one is needed
 	named    bool        // a login was named, so err is a refusal rather than "no login given"
 	banners  map[string]*serverHealth
+	// served is the build the kernel last answered with, from its Server header (D12's agent
+	// string); empty when no reply carried one.
+	served string
 }
 
 // cli is this invocation's client. main replaces it before any command body runs; it resolves
@@ -218,7 +222,10 @@ func (c *client) do(ctx context.Context, method, path string, body, out any, ret
 	if tokErr == nil {
 		headers["Authorization"] = "Bearer " + tok
 	}
-	respBody, status, err := doHTTP(ctx, method, c.base+path, headers, rdr, 0, true)
+	respBody, status, hdr, err := doHTTPH(ctx, method, c.base+path, headers, rdr, 0, true)
+	if v, ok := strings.CutPrefix(hdr.Get("Server"), fed.AgentPrefix); ok {
+		c.served = v
+	}
 	if err != nil && status == 0 {
 		// The server was reachable but too slow (e.g. a slow upstream during OAuth consent) vs.
 		// genuinely down — report each accurately rather than always blaming a missing server.

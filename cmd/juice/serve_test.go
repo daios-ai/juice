@@ -80,6 +80,7 @@ func mountFullRouter(srv *server) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
+	r.Use(serverHeader)
 	r.Post("/v1/auth/token", srv.postToken)
 	r.Post("/v1/auth/authorize", srv.postAuthorize)
 	r.Post("/v1/auth/refresh", srv.postRefresh)
@@ -4135,5 +4136,21 @@ func TestHoldHomeWritesThePID(t *testing.T) {
 	release()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("the lock is still held after release: %v", err)
+	}
+}
+
+// Every reply names the build that answered, in the agent string peers read (D12), so a client can
+// tell that the kernel it reached runs an older build than itself.
+func TestEveryReplyNamesTheBuild(t *testing.T) {
+	ts, _ := newTestHTTPServer(t)
+	for _, path := range []string{"/health", "/v1/actions"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got, want := resp.Header.Get("Server"), "juice-kernel/"+version; got != want {
+			t.Errorf("%s: Server = %q, want %q", path, got, want)
+		}
 	}
 }

@@ -97,6 +97,7 @@ and funding duties.
 | `remote_retry_interval_seconds` | `60` | how often parked cross-kernel calls are retried and sellers are told their draw outcomes |
 | `discovery_interval_seconds` | `300` | how often peers are enumerated and catalogues exchanged |
 | `peer_retention_days` | `90` | how long an idle peer's cached data is kept. Non-positive disables purging |
+| `check_updates` | `true` | report a newer release in `admin kernel show` and the log |
 
 ## Execution
 

@@ -176,6 +176,7 @@ type ServerConfig struct {
 	MaxInboundPeers            int64        `json:"max_inbound_peers" doc:"Connections from other kernels accepted at once; 0 or less uses the default."`
 	RelaySlots                 int64        `json:"relay_slots" doc:"Kernels behind NAT this one relays for at once; 0 or less uses the default."`
 	MetricsListenAddr          string       `json:"metrics_listen_addr" doc:"Address /metrics is served on, host:port; empty serves none."`
+	CheckUpdates               bool         `json:"check_updates" doc:"Read the newest release from the releases page after each discovery pass and report it in admin kernel show and the log; false reads nothing."`
 }
 
 // remoteRetryInterval is how often the running server re-drives pending remote-proxy calls so a
@@ -246,6 +247,7 @@ func DefaultServerConfig() ServerConfig {
 		MaxInboundPeers:            fed.DefaultMaxInboundPeers,
 		RelaySlots:                 fed.DefaultRelaySlots,
 		FedListenAddrs:             []string{},
+		CheckUpdates:               true,
 	}
 }
 

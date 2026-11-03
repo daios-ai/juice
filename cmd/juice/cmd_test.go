@@ -3283,3 +3283,29 @@ func TestEveryCommandAMessageNamesExists(t *testing.T) {
 		t.Fatal("no command named anywhere: the scan read nothing")
 	}
 }
+
+// admin kernel show writes the running build, and the newest release while the kernel checks for
+// one: unknown before its first read, a note when it is newer, and no line when it does not check.
+func TestAdminKernelShowWritesTheRelease(t *testing.T) {
+	body := map[string]any{"handle": "acme", "public_key": "KEY", "version": "v0.17.2"}
+	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) })
+	show := func() string {
+		return captureStdout(t, func() error { _, err := execTestCmd(t, identityCmd()); return err })
+	}
+	out := show()
+	if !strings.Contains(out, "Version:    v0.17.2") || strings.Contains(out, "Latest:") {
+		t.Errorf("without a check:\n%s", out)
+	}
+	body["latest_release"] = ""
+	if out := show(); !strings.Contains(out, "Latest:     unknown") || strings.Contains(out, "NOTE:") {
+		t.Errorf("before the first read:\n%s", out)
+	}
+	body["latest_release"] = "v0.17.2"
+	if out := show(); !strings.Contains(out, "Latest:     v0.17.2") || strings.Contains(out, "NOTE:") {
+		t.Errorf("up to date:\n%s", out)
+	}
+	body["latest_release"] = "v0.17.4"
+	if out := show(); !strings.Contains(out, "Latest:     v0.17.4") || !strings.Contains(out, "NOTE: a newer release is available") {
+		t.Errorf("behind:\n%s", out)
+	}
+}

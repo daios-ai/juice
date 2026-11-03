@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 )
 
 // bootSuperuser first-boots @sys on env.k, marks it the configured superuser, and returns a
@@ -243,5 +245,149 @@ func TestListsBuiltOutsideTheStoreAreArrays(t *testing.T) {
 	}
 	if strings.Contains(string(body), `"addrs":null`) {
 		t.Errorf("addrs answered null with no transport: %s", body)
+	}
+}
+
+// releasesPage answers like the releases page: a redirect naming the newest tag, or, with an empty
+// tag, a page that names none.
+func releasesPage(t *testing.T, tag *string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if *tag == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Location", "https://github.com/daios-ai/juice/releases/tag/"+*tag)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The newest release is the tag the releases page redirects to, read without following it; a page
+// naming none, an unreachable page and a spent deadline are each an error, never a release.
+func TestLatestReleaseReadsTheRedirect(t *testing.T) {
+	tag := "v0.17.4"
+	page := releasesPage(t, &tag)
+	got, err := latestRelease(context.Background(), page.URL, true)
+	if err != nil || got != "v0.17.4" {
+		t.Fatalf("latestRelease = %q, %v; want v0.17.4", got, err)
+	}
+	tag = ""
+	if got, err := latestRelease(context.Background(), page.URL, true); err == nil {
+		t.Errorf("a page naming no release answered %q", got)
+	}
+	tag = "v0.17.4"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got, err := latestRelease(ctx, page.URL, true); err == nil {
+		t.Errorf("a spent deadline answered %q", got)
+	}
+	page.Close()
+	if got, err := latestRelease(context.Background(), page.URL, true); err == nil {
+		t.Errorf("an unreachable page answered %q", got)
+	}
+}
+
+func TestReleaseVersionAcceptsOnlyReleases(t *testing.T) {
+	for _, s := range []string{"v0.17.4", "v1.0.0", "v10.20.30"} {
+		if _, _, _, ok := releaseVersion(s); !ok {
+			t.Errorf("%q refused", s)
+		}
+	}
+	for _, s := range []string{"dev", "", "v0.17.4-3-gabc", "v0.17.4-dirty", "v0.17.4-rc1", "0.17.4", "v0.17", "v0.17.4.1", "v0.017.4", "v-1.0.0"} {
+		if _, _, _, ok := releaseVersion(s); ok {
+			t.Errorf("%q accepted as a release", s)
+		}
+	}
+}
+
+func TestNewerThan(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"v0.17.4", "v0.17.2", true},
+		{"v0.18.0", "v0.17.9", true},
+		{"v1.0.0", "v0.99.99", true},
+		{"v0.17.10", "v0.17.9", true},
+		{"v0.17.2", "v0.17.2", false},
+		{"v0.17.2", "v0.17.4", false},
+		{"v0.17.4", "dev", false},
+		{"dev", "v0.17.4", false},
+		{"v0.17.4", "v0.17.2-3-gabc", false},
+	} {
+		if got := newerThan(c.a, c.b); got != c.want {
+			t.Errorf("newerThan(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// A newer release is logged once per tag; an unreachable page keeps the tag last read and logs no
+// warning.
+func TestReleaseCheckLogsEachNewerTagOnce(t *testing.T) {
+	orig := version
+	version = "v0.17.2"
+	t.Cleanup(func() { version = orig })
+	tag := "v0.17.4"
+	page := releasesPage(t, &tag)
+	c := &releaseCheck{url: page.URL, allowLocal: true}
+	out := captureStderr(t, func() {
+		logger, err := log.New(log.Config{Level: "info", Format: "json"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.check(context.Background(), logger)
+		c.check(context.Background(), logger)
+		tag = "v0.17.5"
+		c.check(context.Background(), logger)
+		page.Close()
+		c.check(context.Background(), logger)
+	})
+	if n := strings.Count(out, "release.available"); n != 2 {
+		t.Errorf("release.available logged %d times, want once per tag (2):\n%s", n, out)
+	}
+	if !strings.Contains(out, `"latest":"v0.17.5"`) {
+		t.Errorf("the second tag was not logged:\n%s", out)
+	}
+	if strings.Contains(out, "check_failed") {
+		t.Errorf("an unreachable page was logged at info or above:\n%s", out)
+	}
+	if got := c.Latest(); got != "v0.17.5" {
+		t.Errorf("Latest = %q after an unreachable page, want the last tag read", got)
+	}
+}
+
+// admin kernel show carries the running build always, and the newest release only while the
+// kernel checks for one.
+func TestIdentityCarriesVersionAndLatestRelease(t *testing.T) {
+	env := newTestEnv(t)
+	suTok := bootSuperuser(t, env)
+	read := func() map[string]any {
+		body, status := tcpDo(t, suTok, "GET", "/v1/admin/kernel", nil)
+		if status != http.StatusOK {
+			t.Fatalf("identity: status %d: %s", status, body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	out := read()
+	if out["version"] != version {
+		t.Errorf("version = %v, want %q", out["version"], version)
+	}
+	if _, ok := out["latest_release"]; ok {
+		t.Errorf("latest_release present with no check: %v", out)
+	}
+	checking := httptest.NewServer(mountFullRouter(&server{kernel: env.k, log: log.Discard(),
+		release: &releaseCheck{latest: "v0.17.4"}}))
+	t.Cleanup(checking.Close)
+	orig := flagServer
+	flagServer = checking.URL
+	t.Cleanup(func() { flagServer = orig })
+	if got := read()["latest_release"]; got != "v0.17.4" {
+		t.Errorf("latest_release = %v, want v0.17.4", got)
 	}
 }

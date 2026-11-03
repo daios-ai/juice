@@ -238,6 +238,9 @@ func main() {
 	// ExecuteC returns the command that actually ran/failed, so usage (when shown) is that
 	// command's, not the root's.
 	cmd, err := rootCmd.ExecuteC()
+	if note := restartNote(cli, version, term.IsTerminal(int(os.Stdout.Fd())), term.IsTerminal(int(os.Stderr.Fd()))); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
 	if err != nil {
 		if !enteredCommand {
 			err = inputError(cmd, err)
@@ -252,6 +255,23 @@ func main() {
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// restartNote is the line telling a person at a terminal that the kernel this command spoke to runs
+// an older release than this binary: installing a release replaces the file, and the kernel keeps
+// the old build until its operator restarts it under the upgrade procedure (P3). Empty when either
+// build is not a release, the kernel is not older, or either stream is not a terminal: a piped
+// stdout usually leaves stderr on the terminal, and a script reading it has nobody to tell.
+func restartNote(c *client, binary string, stdoutTTY, stderrTTY bool) string {
+	if c == nil || !stdoutTTY || !stderrTTY || !newerThan(binary, c.served) {
+		return ""
+	}
+	name := c.base
+	if c.atHome() {
+		name = c.login.Kernel
+	}
+	return fmt.Sprintf("note: %s runs juice %s; this binary is %s. Restart it under the upgrade procedure.",
+		name, c.served, binary)
 }
 
 // ANSI colors for terminal error output; applied only when useColor reports a color-capable

@@ -22,6 +22,8 @@ funds, configured rates, and exposure to remote trade:
 $ juice admin kernel show
 Handle:     acme
 Public key: fdlMi64P…
+Version:    v0.17.2
+Latest:     v0.17.2
 Network:    play
 Operator:   earned=0.710005 fUSD paying-out=4.20 fUSD unclaimed=0.00 fUSD held-for-gas=0.00 fUSD
 Solvency:   user-balances=10.00 fUSD money-in=10.00 fUSD difference=0.00 fUSD

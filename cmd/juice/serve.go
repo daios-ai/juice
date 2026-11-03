@@ -331,10 +331,14 @@ func runServer(name string) error {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(requestIDMiddleware)
+	r.Use(serverHeader)
 	r.Use(loggingMiddleware(logger))
 	r.Use(maxBytesMiddleware) // request body limit (path-aware; see maxBytesMiddleware)
 
 	srv := &server{kernel: k, log: logger}
+	if _, _, _, ok := releaseVersion(version); ok && globalCfg.CheckUpdates {
+		srv.release = &releaseCheck{url: releasesLatestURL, allowLocal: globalCfg.AllowLocalSources}
+	}
 	if httpExec.auth != nil {
 		srv.oauth = newGrantBroker(httpExec.auth)
 	}
@@ -442,6 +446,10 @@ func runServer(name string) error {
 			accumulate: k.AccumulateGossip,
 			contact:    recordContact,
 		}, logger)
+		// After the pass and under its own deadline, so a pass that ran long cannot starve it.
+		if srv.release != nil {
+			srv.release.check(c, logger)
+		}
 	})
 
 	// Drive external money (D23): re-present everything still open, observe payments in, close any
@@ -813,6 +821,9 @@ type server struct {
 	log    *log.Logger
 	fed    fedClient    // federation transport (§13); nil until runServer starts it
 	oauth  *grantBroker // delegated-OAuth consent broker (§8); nil when no credentials box
+	// release reads the newest release (U44); nil when check_updates is off or this build is not a
+	// release, which has nothing to compare.
+	release *releaseCheck
 }
 
 // fedClient is the outbound half of the libp2p transport the admin handlers need. *fed.Transport
@@ -1069,6 +1080,15 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 		ctx := log.WithRequestID(r.Context(), id)
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// serverHeader names the build that answered on every reply, in the agent string peers already
+// read (D12), so a client can tell that the kernel it reached runs an older build than itself.
+func serverHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", fed.AgentPrefix+version)
+		next.ServeHTTP(w, r)
 	})
 }
 

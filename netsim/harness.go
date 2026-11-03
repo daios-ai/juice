@@ -354,6 +354,7 @@ func writeKernelConfig(path string, o bootOpts) error {
 		"allow_local_sources": true, "kernel_handle": o.Handle,
 		"remote_retry_interval_seconds": o.RetrySeconds,
 		"discovery_interval_seconds":    2,
+		"check_updates":                 false,
 	} {
 		cfg[key] = val
 	}
