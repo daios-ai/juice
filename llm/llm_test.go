@@ -5,13 +5,18 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 )
 
 // seen is one request a fake endpoint received.
@@ -246,7 +251,7 @@ func TestAnthropicChat(t *testing.T) {
 	if r.header.Get("x-api-key") != "ak" || r.header.Get("anthropic-version") == "" || r.header.Get("Authorization") != "" {
 		t.Errorf("headers = %v", r.header)
 	}
-	if r.body["system"] != "be brief" || len(r.body["messages"].([]any)) != 1 || r.body["max_tokens"] != float64(anthropicMaxTokens) {
+	if blockText(r.body["system"]) != "be brief" || len(r.body["messages"].([]any)) != 1 || r.body["max_tokens"] != float64(anthropicMaxTokens) {
 		t.Errorf("body = %v", r.body)
 	}
 }
@@ -293,6 +298,149 @@ func TestAnthropicDecide(t *testing.T) {
 	tool := b["tools"].([]any)[0].(map[string]any)
 	if b["tool_choice"].(map[string]any)["type"] != "auto" || tool["name"] != "bob_k_echo_1" || tool["input_schema"] == nil {
 		t.Errorf("body = %v", b)
+	}
+}
+
+// blockText is the text of one marked block, "" for anything else.
+func blockText(v any) string {
+	blocks, ok := v.([]any)
+	if !ok || len(blocks) != 1 {
+		return ""
+	}
+	b := blocks[0].(map[string]any)
+	if b["type"] != "text" || !reflect.DeepEqual(b["cache_control"], map[string]any{"type": "ephemeral"}) {
+		return ""
+	}
+	return b["text"].(string)
+}
+
+// Anthropic caches only up to a marker: on the system prompt, the next-to-last message and the last,
+// and nowhere else. An earlier message stays a string.
+func TestAnthropicMarksThePromptForCaching(t *testing.T) {
+	srv, got := fakeEndpoint(t, map[string][]string{"/messages": {`{"content":[]}`, `{"content":[]}`, `{"content":[]}`}})
+	c := client(ProtocolAnthropic, srv.URL, "ak", Model{ID: "claude"})
+	_, err := c.Chat(context.Background(), []kernel.ChatMessage{{Role: "system", Content: "rules"},
+		{Role: "user", Content: "one"}, {Role: "assistant", Content: "two"}, {Role: "user", Content: "three"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := (*got)[0].body
+	msgs := b["messages"].([]any)
+	if blockText(b["system"]) != "rules" || len(msgs) != 3 || msgs[0].(map[string]any)["content"] != "one" ||
+		blockText(msgs[1].(map[string]any)["content"]) != "two" || blockText(msgs[2].(map[string]any)["content"]) != "three" {
+		t.Errorf("body = %v", b)
+	}
+
+	// One message carries its own marker and the system prompt's; no system prompt, no marker for it.
+	if _, err := c.Chat(context.Background(), user); err != nil {
+		t.Fatal(err)
+	}
+	b = (*got)[1].body
+	if blockText(b["system"]) != "be brief" || blockText(b["messages"].([]any)[0].(map[string]any)["content"]) != "ping" {
+		t.Errorf("body = %v", b)
+	}
+
+	// Anthropic refuses a marker on empty text.
+	if _, err := c.Chat(context.Background(), []kernel.ChatMessage{{Role: "user", Content: ""}}); err != nil {
+		t.Fatal(err)
+	}
+	b = (*got)[2].body
+	if _, ok := b["system"]; ok || b["messages"].([]any)[0].(map[string]any)["content"] != "" {
+		t.Errorf("body = %v", b)
+	}
+}
+
+// The OpenAI protocol sends plain messages and no cache field, and one history is one body, which
+// is what a provider's automatic cache needs.
+func TestOpenAIBodyIsPlainAndRepeats(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"x"}}]}`))
+	}))
+	defer srv.Close()
+	c := client(ProtocolOpenAI, srv.URL, "k", Model{ID: "m", MaxTokens: 9})
+	schema := map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}, "b": map[string]any{"type": "string"}}}
+	for range 2 {
+		if _, err := c.complete(context.Background(), user, schema); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if bodies[0] != bodies[1] {
+		t.Errorf("bodies differ:\n%s\n%s", bodies[0], bodies[1])
+	}
+	if strings.Contains(bodies[0], "cache") || !strings.Contains(bodies[0], `"content":"ping"`) {
+		t.Errorf("body = %s", bodies[0])
+	}
+}
+
+// Each call logs its tokens by how they are billed, naming cache writes only where the provider
+// reports them, whichever way the call was made. Without a logger nothing is logged.
+func TestUsageIsLogged(t *testing.T) {
+	const anth = `"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":7}`
+	tools := []kernel.ToolDefinition{{Action: "bob@k/echo", Description: "Echo"}}
+	for name, tc := range map[string]struct {
+		protocol, path, reply string
+		decide                bool
+		want                  map[string]float64
+	}{
+		"anthropic chat": {ProtocolAnthropic, "/messages", `{"content":[],` + anth + `}`, false,
+			map[string]float64{"input": 5, "cache_read": 100, "cache_write": 20, "output": 7}},
+		"anthropic decide": {ProtocolAnthropic, "/messages", `{"content":[{"type":"tool_use","name":"bob_k_echo_1"}],` + anth + `}`, true,
+			map[string]float64{"input": 5, "cache_read": 100, "cache_write": 20, "output": 7}},
+		"openai without writes": {ProtocolOpenAI, "/chat/completions",
+			`{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":120,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":100}}}`, false,
+			map[string]float64{"input": 20, "cache_read": 100, "output": 7}},
+		"openai with writes": {ProtocolOpenAI, "/chat/completions",
+			`{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":120,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":100,"cache_write_tokens":15}}}`, false,
+			map[string]float64{"input": 5, "cache_read": 100, "cache_write": 15, "output": 7}},
+		"openai decide": {ProtocolOpenAI, "/chat/completions",
+			`{"choices":[{"message":{"tool_calls":[{"function":{"name":"bob_k_echo_1","arguments":"{}"}}]}}],"usage":{"prompt_tokens":120,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":100}}}`, true,
+			map[string]float64{"input": 20, "cache_read": 100, "output": 7}},
+		"no usage": {ProtocolOpenAI, "/chat/completions", `{"choices":[{"message":{"content":"x"}}]}`, false,
+			map[string]float64{"input": 0, "cache_read": 0, "output": 0}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := fakeEndpoint(t, map[string][]string{tc.path: {tc.reply}})
+			file := filepath.Join(t.TempDir(), "log")
+			logger, err := log.New(log.Config{Level: "debug", FilePath: file})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := client(tc.protocol, srv.URL, "k", Model{Name: "mine", ID: "m"})
+			c.Log = logger
+			if tc.decide {
+				_, _, err = c.ChatDecide(context.Background(), []kernel.DecideMessage{{Role: "user", Content: "go"}}, tools)
+			} else {
+				_, err = c.Chat(context.Background(), user)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var line map[string]any
+			if err := json.Unmarshal(raw, &line); err != nil {
+				t.Fatalf("log %q: %v", raw, err)
+			}
+			if line["msg"] != "llm.usage" || line["model"] != "mine" || line["level"] != "DEBUG" {
+				t.Errorf("line = %v", line)
+			}
+			for _, k := range []string{"input", "cache_read", "cache_write", "output"} {
+				want, wanted := tc.want[k]
+				if got, present := line[k]; present != wanted || (wanted && got != want) {
+					t.Errorf("%s = %v, want %v (present %v)", k, got, want, wanted)
+				}
+			}
+		})
+	}
+
+	srv, _ := fakeEndpoint(t, map[string][]string{"/messages": {`{"content":[],` + anth + `}`}})
+	if _, err := client(ProtocolAnthropic, srv.URL, "k", Model{ID: "m"}).Chat(context.Background(), user); err != nil {
+		t.Fatalf("a client with no logger: %v", err)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/kernel"
+	"github.com/daios-ai/juice/log"
 )
 
 // The wire protocols a model's provider may speak, and the kinds of model.
@@ -95,6 +96,10 @@ func ValidateModels(ms []Model) error {
 // a model; which it is used for is decided by the model's kind.
 type Client struct {
 	Model Model
+	// Log is told each call's token counts, the operator's alone: every user of a kernel shares its
+	// provider cache, so a cache read shown to a caller would say someone sent a like prompt. Nil
+	// logs nothing.
+	Log *log.Logger
 }
 
 // httpClient's timeout accommodates a large local model generating a long completion. It follows
@@ -167,7 +172,16 @@ func Probe(ctx context.Context, m Model) error {
 
 type wireMsg struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"` // a string, or the blocks of cachedText
+}
+
+// cachedText is s as the one text block Anthropic caches the prompt up to, for five minutes. Empty
+// text cannot be cached, so it stays a string.
+func cachedText(s string) any {
+	if s == "" {
+		return s
+	}
+	return []map[string]any{{"type": "text", "text": s, "cache_control": map[string]string{"type": "ephemeral"}}}
 }
 
 type openAIReply struct {
@@ -182,6 +196,14 @@ type openAIReply struct {
 			} `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"` // cached and written tokens included
+		CompletionTokens int `json:"completion_tokens"`
+		Details          struct {
+			CachedTokens     int  `json:"cached_tokens"`
+			CacheWriteTokens *int `json:"cache_write_tokens"` // absent on most models and providers
+		} `json:"prompt_tokens_details"`
+	} `json:"usage"`
 }
 
 type anthropicReply struct {
@@ -191,28 +213,85 @@ type anthropicReply struct {
 		Name  string         `json:"name"`
 		Input map[string]any `json:"input"`
 	} `json:"content"`
+	Usage struct {
+		InputTokens              int  `json:"input_tokens"` // cached and written tokens excluded
+		CacheReadInputTokens     int  `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+		OutputTokens             int  `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+// postAnthropic sends one Messages request and logs what it used.
+func (c *Client) postAnthropic(ctx context.Context, req map[string]any) (anthropicReply, error) {
+	var out anthropicReply
+	if err := c.do(ctx, http.MethodPost, "/messages", req, &out); err != nil {
+		return out, err
+	}
+	u := out.Usage
+	c.logUsage(u.InputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens, u.OutputTokens)
+	return out, nil
+}
+
+// postOpenAI sends one Chat Completions request and logs what it used.
+func (c *Client) postOpenAI(ctx context.Context, req map[string]any) (openAIReply, error) {
+	var out openAIReply
+	if err := c.do(ctx, http.MethodPost, "/chat/completions", req, &out); err != nil {
+		return out, err
+	}
+	u := out.Usage
+	input := u.PromptTokens - u.Details.CachedTokens
+	if w := u.Details.CacheWriteTokens; w != nil {
+		input -= *w
+	}
+	c.logUsage(input, u.Details.CachedTokens, u.Details.CacheWriteTokens, u.CompletionTokens)
+	return out, nil
+}
+
+// logUsage logs one call's tokens by how they are billed. A provider that reports no cache writes
+// has none logged, since 0 would claim there were none.
+func (c *Client) logUsage(input, cacheRead int, cacheWrite *int, output int) {
+	if c.Log == nil {
+		return
+	}
+	args := []any{"model", c.Model.Name, "input", input, "cache_read", cacheRead}
+	if cacheWrite != nil {
+		args = append(args, "cache_write", *cacheWrite)
+	}
+	c.Log.Debug("llm.usage", append(args, "output", output)...)
 }
 
 // request is the body every completion starts from. Anthropic takes the system prompt beside the
-// conversation rather than in it, and requires an output cap.
+// conversation rather than in it, and requires an output cap. It also caches only where it is told,
+// so the system prompt is marked for what conversations share, the next-to-last message for a final
+// message that is replaced on the next call, and the last for one that is kept. Each token is
+// written once however many markers cover it. The other protocol adds nothing: a provider that
+// caches there does so unasked.
 func (c *Client) request(messages []kernel.ChatMessage) map[string]any {
 	req := map[string]any{"model": c.Model.ID}
+	anthropic := c.Model.Protocol == ProtocolAnthropic
 	var system []string
-	msgs := make([]wireMsg, 0, len(messages))
+	turns := make([]kernel.ChatMessage, 0, len(messages))
 	for _, m := range messages {
-		if c.Model.Protocol == ProtocolAnthropic && m.Role == "system" {
+		if anthropic && m.Role == "system" {
 			system = append(system, m.Content)
 			continue
 		}
-		msgs = append(msgs, wireMsg{Role: m.Role, Content: m.Content})
+		turns = append(turns, m)
+	}
+	msgs := make([]wireMsg, len(turns))
+	for i, m := range turns {
+		msgs[i] = wireMsg{Role: m.Role, Content: m.Content}
+		if anthropic && i >= len(turns)-2 {
+			msgs[i].Content = cachedText(m.Content)
+		}
 	}
 	req["messages"] = msgs
 	if len(system) > 0 {
-		req["system"] = strings.Join(system, "\n")
+		req["system"] = cachedText(strings.Join(system, "\n"))
 	}
 	if c.Model.MaxTokens > 0 {
 		req["max_tokens"] = c.Model.MaxTokens
-	} else if c.Model.Protocol == ProtocolAnthropic {
+	} else if anthropic {
 		req["max_tokens"] = anthropicMaxTokens
 	}
 	return req
@@ -225,8 +304,8 @@ func (c *Client) complete(ctx context.Context, messages []kernel.ChatMessage, sc
 		if schema != nil {
 			req["output_config"] = map[string]any{"format": map[string]any{"type": "json_schema", "schema": structuredSubset(schema)}}
 		}
-		var out anthropicReply
-		if err := c.do(ctx, http.MethodPost, "/messages", req, &out); err != nil {
+		out, err := c.postAnthropic(ctx, req)
+		if err != nil {
 			return "", err
 		}
 		var text strings.Builder
@@ -242,8 +321,8 @@ func (c *Client) complete(ctx context.Context, messages []kernel.ChatMessage, sc
 		// need not say. The reply is validated against the whole schema by the native either way.
 		req["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "output", "schema": schema}}
 	}
-	var out openAIReply
-	if err := c.do(ctx, http.MethodPost, "/chat/completions", req, &out); err != nil {
+	out, err := c.postOpenAI(ctx, req)
+	if err != nil {
 		return "", err
 	}
 	if len(out.Choices) == 0 {
@@ -275,8 +354,8 @@ func (c *Client) selectTool(ctx context.Context, messages []kernel.ChatMessage, 
 	req["tools"] = defs
 	if c.Model.Protocol == ProtocolAnthropic {
 		req["tool_choice"] = map[string]any{"type": "auto"}
-		var out anthropicReply
-		if err := c.do(ctx, http.MethodPost, "/messages", req, &out); err != nil {
+		out, err := c.postAnthropic(ctx, req)
+		if err != nil {
 			return "", nil, err
 		}
 		for _, b := range out.Content {
@@ -286,8 +365,8 @@ func (c *Client) selectTool(ctx context.Context, messages []kernel.ChatMessage, 
 		}
 		return "", nil, nil
 	}
-	var out openAIReply
-	if err := c.do(ctx, http.MethodPost, "/chat/completions", req, &out); err != nil {
+	out, err := c.postOpenAI(ctx, req)
+	if err != nil {
 		return "", nil, err
 	}
 	if len(out.Choices) == 0 || len(out.Choices[0].Message.ToolCalls) == 0 {

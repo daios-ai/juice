@@ -464,6 +464,9 @@ func TestOpenLLMGeneratesFromConfiguration(t *testing.T) {
 		models.Embedder != models.Embedders["upe"] {
 		t.Error("the canonical natives are not bound to the configured models")
 	}
+	if models.Chats["upc"].(*llm.Client).Log != logger {
+		t.Error("a model's client does not log to the kernel's logger; its token counts would be lost")
+	}
 	if identity != fmt.Sprintf("%q %q", up.URL, "upe-id") || !reachable {
 		t.Errorf("embedder identity %q reachable %v", identity, reachable)
 	}

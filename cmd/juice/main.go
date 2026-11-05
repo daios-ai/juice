@@ -505,7 +505,7 @@ func openLLM(cfg NativeLLMConfig, logger *log.Logger) (native.LLM, string, bool,
 		if !m.Enabled {
 			continue
 		}
-		c := &llm.Client{Model: m}
+		c := &llm.Client{Model: m, Log: logger}
 		if m.Kind == llm.KindEmbed {
 			models.Embedders[m.Name] = c
 		} else {
