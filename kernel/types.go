@@ -105,6 +105,9 @@ type Action struct {
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// RequiresGrant is a cached remote action's own word, from its signed manifest, that calling it
+	// needs the caller's grant (P6). An action of this kernel says so by its auth scheme instead.
+	RequiresGrant bool `json:"-"`
 }
 
 // Upstream auth schemes (§8). Owner-held schemes carry their secret in auth_json; the delegated
@@ -138,6 +141,7 @@ type AuthInput struct {
 // Connection (ConnectionID) whose credential it may wield. It holds no token of its own.
 type Grant struct {
 	ID            string    `json:"id"`
+	GrantorKernel string    `json:"grantor_kernel,omitempty"` // the grantor's kernel, empty for this one (D15)
 	GrantorUserID string    `json:"grantor_user_id"`
 	ActionID      string    `json:"action_id"`
 	ConnectionID  string    `json:"-"` // FK to Connection (empty on unbackfilled legacy rows)
@@ -150,6 +154,7 @@ type Grant struct {
 // never serialized by any read path. ScopesJSON is the requested-scope union consented so far.
 type Connection struct {
 	ID           string    `json:"id"`
+	UserKernel   string    `json:"user_kernel,omitempty"` // the user's kernel, empty for this one (D15)
 	UserID       string    `json:"user_id"`
 	ProviderKey  string    `json:"provider_key"`
 	SealedSecret string    `json:"-"` // sealed; never returned
@@ -192,6 +197,11 @@ type Process struct {
 	RequestHash string     `json:"-"`
 	CreatedAt   time.Time  `json:"created_at"`
 	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	// Ref is what another kernel asks this one about the process by, and never shown: a random value
+	// for a process a user here started, and for one serving a call, the reference that call carried
+	// from OriginKernel, where the run began (D10).
+	Ref          string `json:"-"`
+	OriginKernel string `json:"-"`
 }
 
 // TaskStatus is the lifecycle state of a task.
@@ -573,6 +583,9 @@ type Receipt struct {
 	// non-executable action). omitempty keeps it out of the JCS signature for every other receipt, so
 	// those verify unchanged; a receipt setting it must be a valid zero-charge rejection or it quarantines.
 	RefreshProxy bool `json:"refresh_proxy,omitempty"`
+	// GrantRequired says a zero-charge rejection was for want of the grantor's grant (D10): the action
+	// is as cached, so the origin keeps its proxy, and the caller has consent to give first.
+	GrantRequired bool `json:"grant_required,omitempty"`
 	// IdempotencyKey and Counterparty bind this receipt to the one request it answers: the call's
 	// own name and the buyer kernel that sent it (P4). The request signs (counterparty, recipient,
 	// key); the receipt signs the same triple from the other side — the seller by its signature,
@@ -738,6 +751,9 @@ type ActionManifest struct {
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	Signature    string         `json:"signature"` // base64url Ed25519 signature
+	// RequiresGrant says a caller must hold a grant for the action on the serving kernel (P6). Absent
+	// when false, so a manifest signed before the field existed still verifies.
+	RequiresGrant bool `json:"requires_grant,omitempty"`
 }
 
 // ResolvedAction is what a resolve reply carries: the signed manifest, and where the serving kernel

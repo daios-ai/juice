@@ -54,6 +54,12 @@ func (f *fakeFed) Reveal(_ context.Context, _ string, _ fed.RevealRequest) (fed.
 func (f *fakeFed) Transfer(_ context.Context, _ string, _ fed.TransferRequest) (fed.TransferResponse, error) {
 	return fed.TransferResponse{}, errors.New("fed: transfer not used in these tests")
 }
+func (f *fakeFed) Grant(_ context.Context, _ string, _ fed.GrantRequest) (fed.Response, error) {
+	return fed.Response{}, errors.New("fed: grant not used in these tests")
+}
+func (f *fakeFed) Process(_ context.Context, _ string, _ fed.ProcessRequest) (fed.Response, error) {
+	return fed.Response{}, errors.New("fed: process not used in these tests")
+}
 func (f *fakeFed) Task(_ context.Context, _ string, req fed.TaskRequest) (fed.TaskResponse, error) {
 	f.lastTask = req
 	// taskMidStream models a failure AFTER bytes may have reached the peer (a stream error, or a

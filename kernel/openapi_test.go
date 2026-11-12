@@ -364,14 +364,14 @@ func TestImportOpenAPIAuthParity(t *testing.T) {
 	row, _ := k.ReadActionByOwnerName(ctx, owner.ID, "moving/sayHello")
 	grantor := setupUser(t, st, "acme-caller", 0)
 	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: grantor.ID, ActionID: row.ID, CreatedAt: time.Now().UTC()}
-	if err := st.CreateOrReplaceGrant(ctx, g); err != nil {
+	if err := st.CreateOrReplaceGrant(ctx, g, row.UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	changed := strings.Replace(minOpenAPISpec, "says hello", "greets you", 1)
 	if _, err := k.ImportOpenAPI(ctx, owner.ID, owner.ID, "moving", "http://api.example.com/moving.json", []byte(changed), nil); err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
-	if _, gerr := st.ReadGrant(ctx, grantor.ID, row.ID); gerr == nil {
+	if _, gerr := st.ReadGrant(ctx, kernel.User(grantor.ID), row.ID); gerr == nil {
 		t.Error("consent survived a re-import that moved the document")
 	}
 

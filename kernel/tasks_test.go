@@ -1490,7 +1490,7 @@ type blockingHTTP struct {
 	fail    bool
 }
 
-func (b *blockingHTTP) Execute(ctx context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+func (b *blockingHTTP) Execute(ctx context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
 	select {
 	case <-b.release:
 		if b.fail {

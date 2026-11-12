@@ -987,6 +987,7 @@ func (s *story) actDelegated() error {
 		"--source", s.n.Backend+"/headers", "--price", cr(15),
 		"--description", "Reads the caller's own upstream account", "--auth", auth)
 	_, _ = k2.Run("cara", "action", "enable", s.k("k2").At("cara/vault/read"))
+	_, _ = k2.Run("cara", "action", "update", s.k("k2").At("cara/vault/read"), "--visibility", "public")
 
 	// A refusal for want of consent must cost nothing and count for nothing (U28), read off the
 	// action rather than off its owner's balance: she is a seller and a buyer besides, and her
@@ -1008,6 +1009,19 @@ func (s *story) actDelegated() error {
 	s.n.MustWork("auth.disconnected", k2, "cara", "user", "disconnect", "--account", "bearer:"+host)
 	s.n.MustRefuse("auth.refused_after_revoking", "grant|connect|consent|authoriz",
 		k2, "cara", "run", k2.At("cara/vault/read"), `{"msg":"x"}`)
+
+	// The same application from another kernel (D10). eve, on k3, signs up by the same command and
+	// is then served as herself; before that, and after she disconnects the account where it is
+	// held, the refusal is her own kernel's and never reaches the seller.
+	k3, ref := s.k("k3"), k2.At("cara/vault/read")
+	used = k2.Uses("cara", ref)
+	s.n.MustRefuse("auth.remote_refused_without_consent", "grant|connect|consent|authoriz", k3, "eve", "run", ref, `{"msg":"x"}`)
+	s.n.MustWork("auth.remote_connected", k3, "eve", "user", "connect", k2.At("cara/vault"), "--token", "netsim-remote-token")
+	s.n.MustWork("auth.remote_works_with_consent", k3, "eve", "run", ref, `{"msg":"x"}`)
+	s.n.MustWork("auth.remote_disconnected", k3, "eve", "user", "disconnect", "--account", k2.At("bearer:"+host))
+	s.n.MustRefuse("auth.remote_refused_after_revoking", "grant|connect|consent|authoriz", k3, "eve", "run", ref, `{"msg":"x"}`)
+	s.n.Check("auth.remote_refusals_never_reached_the_seller", k2.Uses("cara", ref) == used+1,
+		fmt.Sprintf("the seller recorded %d uses from a buyer who was served once", k2.Uses("cara", ref)-used))
 	return nil
 }
 

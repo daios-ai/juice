@@ -938,6 +938,11 @@ func TestRemoteManifestHashFixture(t *testing.T) {
 		if got := remoteManifestHash(tc.m); got != tc.want {
 			t.Errorf("%s: manifest hash changed\n got  %s\n want %s", tc.name, got, tc.want)
 		}
+		// Requiring a grant is contract (P6): it moves the hash, and only when it is so.
+		tc.m.RequiresGrant = true
+		if remoteManifestHash(tc.m) == tc.want {
+			t.Errorf("%s: requiring a grant did not move the manifest hash", tc.name)
+		}
 	}
 }
 

@@ -328,15 +328,15 @@ func defaultScheme(rawURL string) string {
 // Execute fires a kind=http action. The source is the canonical HTTPSource JSON
 // (manual and OpenAPI-imported actions share one representation); executeHTTP
 // applies its method, path templating, and parameter binding uniformly.
-func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, ownerUserID, capability string) (map[string]any, error) {
+func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, grantor kernel.Principal, capability string) (map[string]any, error) {
 	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(action.Source), &src); err != nil {
 		return nil, kernel.ErrInvalidState.Wrap("http action source is not valid HTTPSource JSON")
 	}
-	return e.executeHTTP(ctx, action, &src, args, ownerUserID, capability)
+	return e.executeHTTP(ctx, action, &src, args, grantor, capability)
 }
 
-func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, ownerUserID, capability string) (map[string]any, error) {
+func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, grantor kernel.Principal, capability string) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}
@@ -447,7 +447,7 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 		}
 		reqURL := rawURL
 		if auth != nil {
-			if err := e.auth.Apply(ctx, action, ownerUserID, auth, reqHeaders, &reqURL, refresh); err != nil {
+			if err := e.auth.Apply(ctx, action, grantor, auth, reqHeaders, &reqURL, refresh); err != nil {
 				return nil, 0, err
 			}
 		}

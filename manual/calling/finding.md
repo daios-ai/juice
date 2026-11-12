@@ -122,7 +122,7 @@ This kernel's own calls
   3 calls, 3 succeeded  ~399ms  rating 1.00 from 1
 ```
 
-The `requires_grant` field indicates that the action uses an upstream account
+For both local and remote actions, `requires_grant` indicates use of an upstream account
 belonging to its caller. You must connect that account before the action can
 run; see [Consent and assigned work](consent-and-tasks.html).
 

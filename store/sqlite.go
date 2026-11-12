@@ -416,6 +416,10 @@ WHERE k.forgotten_at IS NULL AND k.suspended_at IS NULL AND `+namesKernel+`
            AND (s.required_caller_kernel=k.public_key
                 OR s.action_id IN (SELECT id FROM actions WHERE owner_kernel=k.public_key)))
   AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key=k.public_key AND m.status IN ('waiting','running'))
+  -- Nor consent between the two: a credential one of its users stored here, or a grant one of ours
+  -- holds on an action it serves. Neither can be rebuilt from discovery, and a local one never expires (D10).
+  AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.user_kernel=k.public_key)
+  AND NOT EXISTS (SELECT 1 FROM grants g JOIN actions a ON a.id=g.action_id WHERE a.owner_kernel=k.public_key)
   -- Nothing owed either way: no call it made is still unrevealed or unpaid here, and no call we
   -- made to it is still waiting to tell it how the draw came out. Purging would forget the kernel
   -- the reveal or the payment is keyed on, and the obligation could never close (P10).
@@ -638,11 +642,11 @@ func (s *DB) CreateAction(ctx context.Context, a *kernel.Action) error {
 	outJSON, _ := json.Marshal(a.OutputSchema)
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO actions
-		 (id,owner_kernel,owner_user_id,owner_handle,name,title,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_bps,base_price,effect,auth_json,created_at,updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 (id,owner_kernel,owner_user_id,owner_handle,name,title,kind,active,visibility,price,description,input_schema,output_schema,source,artifact_hash,wasm_artifact,remote_action_id,remote_bps,base_price,effect,requires_grant,auth_json,created_at,updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.OwnerKernel, a.OwnerUserID, remoteHandle(a), a.Name, a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price,
 		a.Description, string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact, a.RemoteActionID,
-		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
+		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), boolInt(a.RequiresGrant), a.AuthJSON, timeToStr(a.CreatedAt), timeToStr(a.UpdatedAt),
 	)
 	return dbErr(err, "create action")
 }
@@ -668,7 +672,7 @@ const ownerSuspended = `(CASE WHEN a.owner_kernel='' THEN u.id IS NULL OR u.susp
 
 // actionCols is the canonical column list for action SELECT statements over actionsFrom.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
-const actionCols = `a.id,a.owner_kernel,a.owner_user_id,COALESCE(u.handle,a.owner_handle),` + ownerSuspended + `,a.name,a.title,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.remote_bps,a.base_price,COALESCE(a.effect,''),a.auth_json,a.created_at,a.updated_at,a.deleted_at`
+const actionCols = `a.id,a.owner_kernel,a.owner_user_id,COALESCE(u.handle,a.owner_handle),` + ownerSuspended + `,a.name,a.title,a.kind,a.active,a.visibility,a.price,a.description,a.input_schema,a.output_schema,a.source,a.artifact_hash,a.wasm_artifact,a.remote_action_id,a.remote_bps,a.base_price,COALESCE(a.effect,''),a.requires_grant,a.auth_json,a.created_at,a.updated_at,a.deleted_at`
 
 func (s *DB) ReadAction(ctx context.Context, id string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
@@ -691,10 +695,10 @@ func (s *DB) updateActionTx(ctx context.Context, tx *sql.Tx, a *kernel.Action) e
 	}
 	_, err := tx.ExecContext(ctx,
 		`UPDATE actions SET owner_handle=?,title=?,kind=?,active=?,visibility=?,price=?,description=?,input_schema=?,output_schema=?,
-		 source=?,artifact_hash=?,wasm_artifact=?,remote_bps=?,base_price=?,effect=?,auth_json=?,updated_at=? WHERE id=?`,
+		 source=?,artifact_hash=?,wasm_artifact=?,remote_bps=?,base_price=?,effect=?,requires_grant=?,auth_json=?,updated_at=? WHERE id=?`,
 		remoteHandle(a), a.Title, string(a.Kind), boolInt(a.Active), string(a.Visibility), a.Price, a.Description,
 		string(inJSON), string(outJSON), a.Source, a.ArtifactHash, a.WasmArtifact,
-		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
+		a.RemoteBPS, a.BasePrice, nullStr(a.Effect), boolInt(a.RequiresGrant), a.AuthJSON, timeToStr(a.UpdatedAt), a.ID,
 	)
 	if err != nil || !schemaMoved {
 		return dbErr(err, "update action")
@@ -867,7 +871,7 @@ func scanActionFn(scan func(...any) error) (*kernel.Action, error) {
 	var active, ownerSuspended int
 	if err := scan(&a.ID, &a.OwnerKernel, &a.OwnerUserID, &a.OwnerHandle, &ownerSuspended, &a.Name, &a.Title, &kind, &active, &visibility, &a.Price,
 		&a.Description, &inJSON, &outJSON, &a.Source, &a.ArtifactHash, &a.WasmArtifact, &a.RemoteActionID,
-		&remoteBPS, &basePrice, &a.Effect, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
+		&remoteBPS, &basePrice, &a.Effect, &a.RequiresGrant, &a.AuthJSON, &createdAt, &updatedAt, &deletedAt); err != nil {
 		return nil, err
 	}
 	if remoteBPS.Valid {
@@ -1014,9 +1018,9 @@ func (s *DB) BeginRun(ctx context.Context, p *kernel.Process, t *kernel.Trace, o
 		// The owner's key for this run commits with its funding, so a run either holds its key or never
 		// happened; a key another run of the owner already holds refuses this one whole (D20).
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO processes (id,owner_user_id,available,locked,status,external_key,request_hash,created_at,ended_at)
-			 VALUES (?,?,0,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
-			p.ID, p.OwnerUserID, price, string(p.Status), nullStr(p.ExternalKey), p.RequestHash,
+			`INSERT INTO processes (id,owner_user_id,available,locked,status,external_key,request_hash,ref,origin_kernel,created_at,ended_at)
+			 VALUES (?,?,0,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			p.ID, p.OwnerUserID, price, string(p.Status), nullStr(p.ExternalKey), p.RequestHash, p.Ref, p.OriginKernel,
 			timeToStr(p.CreatedAt), nullTimeToStr(p.EndedAt),
 		)
 		if err != nil {
@@ -1055,8 +1059,8 @@ func (s *DB) ReadProcess(ctx context.Context, id string) (*kernel.Process, error
 	var status, createdAt string
 	var endedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,owner_user_id,available,locked,status,created_at,ended_at FROM processes WHERE id=?`, id,
-	).Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &createdAt, &endedAt)
+		`SELECT id,owner_user_id,available,locked,status,ref,origin_kernel,created_at,ended_at FROM processes WHERE id=?`, id,
+	).Scan(&p.ID, &p.OwnerUserID, &p.Available, &p.Locked, &status, &p.Ref, &p.OriginKernel, &createdAt, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("process not found")
 	}
@@ -1305,7 +1309,8 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 }
 
 // closeProcessTx closes a process within an existing transaction if it is quiescent:
-// no waiting/running tasks and no traces without a committed transaction.
+// no waiting/running tasks, no traces without a committed transaction, and no work another kernel
+// still holds for it (D2).
 // If not quiescent it is a no-op. Returns any remaining process.available to the owner.
 // processQuiescent reports whether nothing is in flight in a process: no task waiting or running,
 // no trace without a transaction. Automatic closure closes only then; forced closure refuses
@@ -1317,8 +1322,9 @@ func processQuiescent(ctx context.Context, tx *sql.Tx, processID string) (bool, 
 		`SELECT (SELECT COUNT(*) FROM tasks s JOIN traces t ON s.parent_trace_id=t.id
 		          WHERE t.process_id=? AND s.status IN ('waiting','running'))
 		      + (SELECT COUNT(*) FROM traces t WHERE t.process_id=?
-		          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))`,
-		processID, processID).Scan(&open); err != nil {
+		          AND NOT EXISTS (SELECT 1 FROM transactions WHERE trace_id=t.id))
+		      + (SELECT COUNT(*) FROM registrations WHERE process_id=? AND released=0)`,
+		processID, processID, processID).Scan(&open); err != nil {
 		return false, dbErr(err, "process quiescence")
 	}
 	return open == 0, nil
@@ -1359,6 +1365,9 @@ func closeProcessWallet(ctx context.Context, tx *sql.Tx, processID, ownerID stri
 		return err
 	} else if !ok {
 		return fmt.Errorf("%s: process %q moved while closing", op, processID)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM registrations WHERE process_id=?`, processID); err != nil {
+		return dbErr(err, op)
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE processes SET status='closed', ended_at=? WHERE id=?`,
 		timeToStr(time.Now().UTC()), processID)
@@ -2930,22 +2939,35 @@ func (s *DB) RevokeRefreshToken(ctx context.Context, token string) error {
 // CreateOrReplaceGrant upserts on (grantor_user_id, action_id): a re-consent overwrites the
 // row's id, connection_id, and created_at, so a user holds at most one grant per action. A
 // grant holds no secret of its own: it points at the Connection whose credential it consents to.
-func (s *DB) CreateOrReplaceGrant(ctx context.Context, g *kernel.Grant) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO grants (id,grantor_user_id,action_id,connection_id,created_at)
-		 VALUES (?,?,?,?,?)
-		 ON CONFLICT(grantor_user_id,action_id) DO UPDATE SET
+//
+// The row is written only while the action is as the grantor consented to it: asOf is the action's
+// updated_at when consent began, and an update since — which revokes the action's grants in its own
+// commit — leaves nothing written, so a consent begun before a revocation cannot outlive it (D10).
+func (s *DB) CreateOrReplaceGrant(ctx context.Context, g *kernel.Grant, asOf time.Time) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO grants (id,grantor_kernel,grantor_user_id,action_id,connection_id,created_at)
+		 SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM actions WHERE id=? AND updated_at=?)
+		 ON CONFLICT(grantor_kernel,grantor_user_id,action_id) DO UPDATE SET
 		   id=excluded.id, connection_id=excluded.connection_id, created_at=excluded.created_at`,
-		g.ID, g.GrantorUserID, g.ActionID, nullStr(g.ConnectionID), timeToStr(g.CreatedAt),
+		g.ID, g.GrantorKernel, g.GrantorUserID, g.ActionID, nullStr(g.ConnectionID), timeToStr(g.CreatedAt),
+		g.ActionID, timeToStr(asOf),
 	)
-	return dbErr(err, "create grant")
+	if err != nil {
+		return dbErr(err, "create grant")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrInvalidState.Wrap("the action changed since consent began; connect again")
+	}
+	return nil
 }
+
+const grantCols = `id,grantor_kernel,grantor_user_id,action_id,connection_id,created_at`
 
 func scanGrant(scan func(...any) error) (*kernel.Grant, error) {
 	var g kernel.Grant
 	var connID sql.NullString
 	var createdAt string
-	if err := scan(&g.ID, &g.GrantorUserID, &g.ActionID, &connID, &createdAt); err != nil {
+	if err := scan(&g.ID, &g.GrantorKernel, &g.GrantorUserID, &g.ActionID, &connID, &createdAt); err != nil {
 		return nil, err
 	}
 	g.ConnectionID = connID.String
@@ -2953,11 +2975,11 @@ func scanGrant(scan func(...any) error) (*kernel.Grant, error) {
 	return &g, nil
 }
 
-func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*kernel.Grant, error) {
+func (s *DB) ReadGrant(ctx context.Context, grantor kernel.Principal, actionID string) (*kernel.Grant, error) {
 	g, err := scanGrant(func(dest ...any) error {
 		return s.db.QueryRowContext(ctx,
-			`SELECT id,grantor_user_id,action_id,connection_id,created_at
-			 FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID).Scan(dest...)
+			`SELECT `+grantCols+` FROM grants WHERE grantor_kernel=? AND grantor_user_id=? AND action_id=?`,
+			grantor.Kernel, grantor.UserID, actionID).Scan(dest...)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("grant not found")
@@ -2968,10 +2990,10 @@ func (s *DB) ReadGrant(ctx context.Context, grantorUserID, actionID string) (*ke
 	return g, nil
 }
 
-func (s *DB) ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*kernel.Grant, error) {
+func (s *DB) ListGrantsByUser(ctx context.Context, grantor kernel.Principal) ([]*kernel.Grant, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,grantor_user_id,action_id,connection_id,created_at
-		 FROM grants WHERE grantor_user_id=? ORDER BY created_at DESC`, grantorUserID)
+		`SELECT `+grantCols+` FROM grants WHERE grantor_kernel=? AND grantor_user_id=? ORDER BY created_at DESC`,
+		grantor.Kernel, grantor.UserID)
 	if err != nil {
 		return nil, dbErr(err, "list grants")
 	}
@@ -2979,9 +3001,9 @@ func (s *DB) ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*ker
 	return queryList(rows, "list grants", scanGrant)
 }
 
-func (s *DB) DeleteGrant(ctx context.Context, grantorUserID, actionID string) error {
+func (s *DB) DeleteGrant(ctx context.Context, grantor kernel.Principal, actionID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM grants WHERE grantor_user_id=? AND action_id=?`, grantorUserID, actionID)
+		`DELETE FROM grants WHERE grantor_kernel=? AND grantor_user_id=? AND action_id=?`, grantor.Kernel, grantor.UserID, actionID)
 	if err != nil {
 		return dbErr(err, "delete grant")
 	}
@@ -3002,7 +3024,7 @@ func scanConnection(scan func(...any) error) (*kernel.Connection, error) {
 	var c kernel.Connection
 	var scopes sql.NullString
 	var createdAt, updatedAt string
-	if err := scan(&c.ID, &c.UserID, &c.ProviderKey, &c.SealedSecret, &scopes, &createdAt, &updatedAt); err != nil {
+	if err := scan(&c.ID, &c.UserKernel, &c.UserID, &c.ProviderKey, &c.SealedSecret, &scopes, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	c.ScopesJSON = scopes.String
@@ -3011,7 +3033,7 @@ func scanConnection(scan func(...any) error) (*kernel.Connection, error) {
 	return &c, nil
 }
 
-const connectionCols = `id,user_id,provider_key,sealed_secret,scopes_json,created_at,updated_at`
+const connectionCols = `id,user_kernel,user_id,provider_key,sealed_secret,scopes_json,created_at,updated_at`
 
 // CreateOrUpdateConnection upserts on (user_id, provider_key): a conflict keeps the existing id
 // and created_at (so the AAD the caller sealed with stays valid) and refreshes only the secret,
@@ -3019,10 +3041,10 @@ const connectionCols = `id,user_id,provider_key,sealed_secret,scopes_json,create
 func (s *DB) CreateOrUpdateConnection(ctx context.Context, c *kernel.Connection) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO connections (`+connectionCols+`)
-		 VALUES (?,?,?,?,?,?,?)
-		 ON CONFLICT(user_id,provider_key) DO UPDATE SET
+		 VALUES (?,?,?,?,?,?,?,?)
+		 ON CONFLICT(user_kernel,user_id,provider_key) DO UPDATE SET
 		   sealed_secret=excluded.sealed_secret, scopes_json=excluded.scopes_json, updated_at=excluded.updated_at`,
-		c.ID, c.UserID, c.ProviderKey, c.SealedSecret, nullStr(c.ScopesJSON), timeToStr(c.CreatedAt), timeToStr(c.UpdatedAt),
+		c.ID, c.UserKernel, c.UserID, c.ProviderKey, c.SealedSecret, nullStr(c.ScopesJSON), timeToStr(c.CreatedAt), timeToStr(c.UpdatedAt),
 	)
 	return dbErr(err, "create connection")
 }
@@ -3040,10 +3062,11 @@ func (s *DB) ReadConnection(ctx context.Context, id string) (*kernel.Connection,
 	return c, nil
 }
 
-func (s *DB) ReadConnectionByUserProvider(ctx context.Context, userID, providerKey string) (*kernel.Connection, error) {
+func (s *DB) ReadConnectionByUserProvider(ctx context.Context, user kernel.Principal, providerKey string) (*kernel.Connection, error) {
 	c, err := scanConnection(func(dest ...any) error {
 		return s.db.QueryRowContext(ctx,
-			`SELECT `+connectionCols+` FROM connections WHERE user_id=? AND provider_key=?`, userID, providerKey).Scan(dest...)
+			`SELECT `+connectionCols+` FROM connections WHERE user_kernel=? AND user_id=? AND provider_key=?`,
+			user.Kernel, user.UserID, providerKey).Scan(dest...)
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("connection not found")
@@ -3054,9 +3077,10 @@ func (s *DB) ReadConnectionByUserProvider(ctx context.Context, userID, providerK
 	return c, nil
 }
 
-func (s *DB) ListConnectionsByUser(ctx context.Context, userID string) ([]*kernel.Connection, error) {
+func (s *DB) ListConnectionsByUser(ctx context.Context, user kernel.Principal) ([]*kernel.Connection, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+connectionCols+` FROM connections WHERE user_id=? ORDER BY created_at DESC`, userID)
+		`SELECT `+connectionCols+` FROM connections WHERE user_kernel=? AND user_id=? ORDER BY created_at DESC`,
+		user.Kernel, user.UserID)
 	if err != nil {
 		return nil, dbErr(err, "list connections")
 	}
@@ -4259,4 +4283,126 @@ func (s *DB) ExecForTest(ctx context.Context, query string, args ...any) error {
 // kernel's own reads do not expose. Not used in production.
 func (s *DB) QueryRowForTest(ctx context.Context, query string, arg any, into any) error {
 	return s.db.QueryRowContext(ctx, query, arg).Scan(into)
+}
+
+// ---- Grants and processes across kernels (D2, D10) ----
+
+// CountRemoteConnections counts the credentials stored for users of other kernels, and for the users
+// of one of them. A suspended kernel's are stored all the same, so they count.
+func (s *DB) CountRemoteConnections(ctx context.Context, kernelKey string) (total, ofKernel int, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(user_kernel=?),0) FROM connections WHERE user_kernel<>''`, kernelKey).Scan(&total, &ofKernel)
+	return total, ofKernel, dbErr(err, "count remote connections")
+}
+
+// ApplyGrantOp records the time of a grant operation a kernel sent for one of its users, and refuses
+// one older than the newest already recorded: a disconnect delayed on the way cannot undo a later
+// sign-up. The operations are idempotent, so one sent again at the same time is simply done again.
+func (s *DB) ApplyGrantOp(ctx context.Context, kernelKey, userID string, at int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO grant_ops (kernel,user_id,applied) VALUES (?,?,?)
+		 ON CONFLICT(kernel,user_id) DO UPDATE SET applied=excluded.applied WHERE excluded.applied>=grant_ops.applied`,
+		kernelKey, userID, at)
+	if err != nil {
+		return dbErr(err, "apply grant operation")
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return kernel.ErrInvalidState.Wrap("a newer grant operation was already applied")
+	}
+	return nil
+}
+
+// HoldsGrantOn reports whether a user of this kernel holds a grant on an action a kernel serves.
+func (s *DB) HoldsGrantOn(ctx context.Context, userID, kernelKey string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM grants g JOIN actions a ON a.id=g.action_id
+		  WHERE g.grantor_kernel='' AND g.grantor_user_id=? AND a.owner_kernel=?`, userID, kernelKey).Scan(&n)
+	return n > 0, dbErr(err, "holds grant on kernel")
+}
+
+// openProcessByRef is the open process of this kernel a reference names. A process serving another
+// kernel's call carries that kernel's reference, never its own, so only a root process matches.
+const openProcessByRef = `SELECT id, owner_user_id FROM processes WHERE ref=? AND ref<>'' AND origin_kernel='' AND status='open'`
+
+// ProcessOwnerByRef returns the owner of the open process a reference names, or ErrNotFound.
+func (s *DB) ProcessOwnerByRef(ctx context.Context, ref string) (string, error) {
+	var id, owner string
+	err := s.db.QueryRowContext(ctx, openProcessByRef, ref).Scan(&id, &owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", kernel.ErrNotFound.Wrap("no open process has this reference")
+	}
+	return owner, dbErr(err, "process by reference")
+}
+
+// Register records that a kernel holds waiting work for the open process a reference names, which
+// then stays open until that work is released. Registering the same work again changes nothing,
+// released or not. A closed process is ErrNotFound; one already at limit rows, ErrInvalidState.
+func (s *DB) Register(ctx context.Context, ref, kernelKey, regID string, limit int) error {
+	return s.withTx(ctx, "register", func(tx *sql.Tx) error {
+		var id, owner string
+		err := tx.QueryRowContext(ctx, openProcessByRef, ref).Scan(&id, &owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return kernel.ErrNotFound.Wrap("no open process has this reference")
+		}
+		if err != nil {
+			return dbErr(err, "register: read process")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO registrations (process_id,kernel,reg_id)
+			 SELECT ?,?,? WHERE (SELECT COUNT(*) FROM registrations WHERE process_id=?) < ?
+			 ON CONFLICT DO NOTHING`, id, kernelKey, regID, id, limit); err != nil {
+			return dbErr(err, "register")
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM registrations WHERE process_id=? AND kernel=? AND reg_id=?`, id, kernelKey, regID).Scan(&n); err != nil {
+			return dbErr(err, "register: read back")
+		}
+		if n == 0 {
+			return kernel.ErrInvalidState.Wrap("the process holds as many registrations as it may")
+		}
+		return nil
+	})
+}
+
+// Release ends a registration, for good, and closes its process if nothing else holds it open.
+// Only the kernel that registered can name its row; anything else matches nothing.
+func (s *DB) Release(ctx context.Context, ref, kernelKey, regID string) error {
+	return s.withTx(ctx, "release", func(tx *sql.Tx) error {
+		var id, owner string
+		err := tx.QueryRowContext(ctx, openProcessByRef, ref).Scan(&id, &owner)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // closed already, and its registrations went with it
+		}
+		if err != nil {
+			return dbErr(err, "release: read process")
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE registrations SET released=1 WHERE process_id=? AND kernel=? AND reg_id=?`, id, kernelKey, regID); err != nil {
+			return dbErr(err, "release")
+		}
+		return s.closeProcessTx(ctx, tx, id)
+	})
+}
+
+// SetRegistered records where a served process stands with the kernel that started it: 1 once that
+// kernel holds it open, 2 once it has been told the process closed.
+func (s *DB) SetRegistered(ctx context.Context, processID string, state int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE processes SET registered=? WHERE id=?`, state, processID)
+	return dbErr(err, "set registered")
+}
+
+// ListUnreleasedProcesses returns the closed processes whose origin still holds them registered.
+func (s *DB) ListUnreleasedProcesses(ctx context.Context) ([]*kernel.Process, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, ref, origin_kernel FROM processes WHERE status='closed' AND registered=1`)
+	if err != nil {
+		return nil, dbErr(err, "list unreleased processes")
+	}
+	defer rows.Close()
+	return queryList(rows, "list unreleased processes", func(scan func(...any) error) (*kernel.Process, error) {
+		var p kernel.Process
+		return &p, scan(&p.ID, &p.Ref, &p.OriginKernel)
+	})
 }

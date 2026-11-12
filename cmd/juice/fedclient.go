@@ -121,6 +121,8 @@ type federationTransport interface {
 	Reveal(ctx context.Context, peerKey string, req fed.RevealRequest) (fed.RevealResponse, error)
 	Transfer(ctx context.Context, peerKey string, req fed.TransferRequest) (fed.TransferResponse, error)
 	Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error)
+	Grant(ctx context.Context, peerKey string, req fed.GrantRequest) (fed.Response, error)
+	Process(ctx context.Context, peerKey string, req fed.ProcessRequest) (fed.Response, error)
 }
 
 // Transport deadlines live here, with the carrier: the kernel owns task protocol semantics but has
@@ -157,6 +159,31 @@ func (c *fedAdapter) SendTask(ctx context.Context, peerKey string, r kernel.Task
 		return 0, nil, errors.Is(err, fed.ErrNotDispatched), err
 	}
 	return resp.Status, resp.Body, false, nil
+}
+
+// SendGrant and SendProcess implement kernel.GrantCarrier (D10). A completion waits on the serving
+// kernel's exchange with the provider, hence the wider bound; the rest are quick.
+func (c *fedAdapter) SendGrant(ctx context.Context, peerKey string, op kernel.GrantOp, signature string) (int, []byte, error) {
+	if c.transport == nil {
+		return 0, nil, fed.ErrNotDispatched
+	}
+	raw, _ := json.Marshal(op)
+	octx, cancel := context.WithTimeout(ctx, fedTaskCompleteTimeout)
+	defer cancel()
+	resp, err := c.transport.Grant(octx, peerKey, fed.GrantRequest{Counterparty: op.Counterparty, Signature: signature, Op: raw})
+	c.contacted(ctx, peerKey, contactFromErr(err))
+	return resp.Status, resp.Body, err
+}
+
+func (c *fedAdapter) SendProcess(ctx context.Context, peerKey, kind, ref, regID string) (int, []byte, error) {
+	if c.transport == nil {
+		return 0, nil, fed.ErrNotDispatched
+	}
+	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
+	defer cancel()
+	resp, err := c.transport.Process(octx, peerKey, fed.ProcessRequest{Kind: kind, Ref: ref, RegID: regID})
+	c.contacted(ctx, peerKey, contactFromErr(err))
+	return resp.Status, resp.Body, err
 }
 
 // Reveal implements kernel.TicketRevealer over /juice/fed/settle/1 (P10): the buyer tells the seller
@@ -274,6 +301,8 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 		BlockchainProof:      blockchainProof,
 		CallerUserID:         call.CallerUserID,
 		CallerHandle:         call.CallerHandle,
+		ProcessKernel:        call.ProcessKernel,
+		ProcessRef:           call.ProcessRef,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {

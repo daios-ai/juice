@@ -305,7 +305,7 @@ func connectOAuthCode(selector, provider string) ([]string, error) {
 
 	var done grantCompleteResp
 	if err := cli.call(context.Background(), "POST", "/v1/grants/complete", map[string]string{
-		"state": start.State, "code": got.code,
+		"state": start.State, "code": got.code, "selector": selector,
 	}, &done); err != nil {
 		return nil, err
 	}
@@ -339,7 +339,7 @@ func connectOAuthDevice(selector, provider string) ([]string, error) {
 		time.Sleep(time.Duration(interval) * time.Second)
 		var done grantCompleteResp
 		if err := cli.call(context.Background(), "POST", "/v1/grants/complete",
-			map[string]string{"state": start.State}, &done); err != nil {
+			map[string]string{"state": start.State, "selector": selector}, &done); err != nil {
 			return nil, err
 		}
 		if done.Status == "granted" {
@@ -367,6 +367,6 @@ func userDisconnectCmd() *cobra.Command {
 			return cli.emit("DELETE", "/v1/grants?selector="+url.QueryEscape(args[0]), nil, output{})
 		},
 	}
-	cmd.Flags().StringVar(&account, "account", "", "Disconnect a whole upstream account (provider) and all its grants")
+	cmd.Flags().StringVar(&account, "account", "", "Disconnect a whole upstream account (provider) and all its grants; provider@kernel for one held on another kernel")
 	return cmd
 }

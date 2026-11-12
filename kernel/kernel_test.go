@@ -2296,20 +2296,25 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 // fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
 type fakeSuccessHTTP struct{}
 
-func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
 type fakeFederationHTTP struct {
-	sentCaller      kernel.OutboundCall // what the last dispatch carried, caller included (P4)
-	result          map[string]any
-	receiptJSON     string
-	httpStatus      int  // 0 → 200 (kept so existing tests read as success)
-	notDispatched   bool // simulate a provably-never-sent dispatch (§13)
-	resolveManifest *kernel.ActionManifest
-	resolveUserID   string
-	resolveHandle   string
-	resolveErr      error
+	// What the kernel a run began on answers about a process, and what a serving kernel answers a
+	// forwarded grant operation (D10). An unset one behaves as an unreachable kernel.
+	process             func(kind, ref, regID string) (int, string)
+	grant               func(op kernel.GrantOp) (int, string)
+	rejectGrantRequired bool
+	sentCaller          kernel.OutboundCall // what the last dispatch carried, caller included (P4)
+	result              map[string]any
+	receiptJSON         string
+	httpStatus          int  // 0 → 200 (kept so existing tests read as success)
+	notDispatched       bool // simulate a provably-never-sent dispatch (§13)
+	resolveManifest     *kernel.ActionManifest
+	resolveUserID       string
+	resolveHandle       string
+	resolveErr          error
 	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
 	resolveBlockchainAddress string
 	resolveBlockchainProof   string
@@ -2414,7 +2419,23 @@ func (f *fakeFederationHTTP) SendTask(_ context.Context, _ string, r kernel.Task
 	return status, []byte(f.taskBody), false, nil
 }
 
-func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+func (f *fakeFederationHTTP) SendProcess(_ context.Context, _, kind, ref, regID string) (int, []byte, error) {
+	if f.process == nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("process transport failure")
+	}
+	status, body := f.process(kind, ref, regID)
+	return status, []byte(body), nil
+}
+
+func (f *fakeFederationHTTP) SendGrant(_ context.Context, _ string, op kernel.GrantOp, _ string) (int, []byte, error) {
+	if f.grant == nil {
+		return 0, nil, kernel.ErrPeerUnreachable.Wrap("grant transport failure")
+	}
+	status, body := f.grant(op)
+	return status, []byte(body), nil
+}
+
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
@@ -2433,7 +2454,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _ string, call
 			ID: uuid.New().String(), ActionID: f.rejectActionID,
 			IdempotencyKey: idempotencyKey, Counterparty: f.buyerKey,
 			ArgsHash: f.rejectArgsHash, Status: kernel.TxFailure, Reason: "counterparty denied",
-			RefreshProxy: f.rejectRefreshProxy, StartedAt: now, CreatedAt: now,
+			RefreshProxy: f.rejectRefreshProxy, GrantRequired: f.rejectGrantRequired, StartedAt: now, CreatedAt: now,
 		}
 		payload, _ := testNet.ReceiptSigningBytes(r)
 		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
@@ -3297,7 +3318,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 // provider group and its scope union, CreateGrants stores one Connection and mints the grants. It
 // replaces the deleted single-action CreateGrant/AttachBearerGrant shortcuts.
 func grantVia(k *kernel.Kernel, ctx context.Context, callerID, selector, token string) error {
-	plan, err := k.ConsentPlan(ctx, callerID, selector)
+	plan, err := k.ConsentPlan(ctx, kernel.User(callerID), selector)
 	if err != nil {
 		return err
 	}
@@ -3314,13 +3335,13 @@ func grantVia(k *kernel.Kernel, ctx context.Context, callerID, selector, token s
 		b, _ := json.Marshal(g.Scopes)
 		scopesJSON = string(b)
 	}
-	_, err = k.CreateGrants(ctx, callerID, g.ProviderKey, ids, token, scopesJSON)
+	_, err = k.CreateGrants(ctx, kernel.User(callerID), g.ProviderKey, ids, token, scopesJSON, nil)
 	return err
 }
 
 // revokeVia revokes one action's consent through the selector path (§8).
 func revokeVia(k *kernel.Kernel, ctx context.Context, callerID, selector string) error {
-	_, err := k.RevokeGrantsBySelector(ctx, callerID, selector)
+	_, err := k.RevokeGrantsBySelector(ctx, kernel.User(callerID), selector)
 	return err
 }
 
@@ -3443,21 +3464,30 @@ func TestUpdateActionVisibility(t *testing.T) {
 	}
 }
 
-// TestManifestExcludesDelegatedAction: an oauth_delegated action is never served as a manifest,
-// since a remote peer can never complete a browser consent (§8/§13).
-func TestManifestExcludesDelegatedAction(t *testing.T) {
+// A delegated action is served abroad like any other public one, and its manifest says a caller
+// must hold a grant first (P6).
+func TestManifestServesDelegatedActionAndSaysSo(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	k := newTestKernel(st)
 	k.SetSecretBox(b64Box{})
+	setupSys(t, k, st)
 	owner := setupUser(t, st, "mfsvc", 0)
-	a := createDelegatedAction(t, k, owner.ID, "svc", 0)
 	pub := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
-		t.Fatalf("make public: %v", err)
-	}
-	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("delegated action served a manifest: got %v, want ErrUnauthorized", err)
+	for name, a := range map[string]*kernel.Action{
+		"oauth_delegated":  createDelegatedAction(t, k, owner.ID, "svc", 0),
+		"delegated_bearer": createBearerAction(t, k, owner.ID, "br", 0),
+	} {
+		if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+			t.Fatalf("%s: make public: %v", name, err)
+		}
+		if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+			t.Fatalf("%s: activate: %v", name, err)
+		}
+		m, err := k.GetActionManifest(ctx, a.ID)
+		if err != nil || !m.RequiresGrant {
+			t.Fatalf("%s: manifest = %+v, %v; want one that requires a grant", name, m, err)
+		}
 	}
 }
 
@@ -3571,7 +3601,7 @@ func TestAttachBearerGrant(t *testing.T) {
 	owner := setupUser(t, st, "br-attach", 0)
 	bearer := createBearerAction(t, k, owner.ID, "svc", 0)
 
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+bearer.Name, "", "ghp_secret"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), owner.Handle+"@k/"+bearer.Name, "", "ghp_secret"); err != nil {
 		t.Fatalf("AttachBearerGrants: %v", err)
 	}
 	views, err := k.ListGrantViews(ctx, owner.ID)
@@ -3594,7 +3624,7 @@ func TestAttachBearerGrant(t *testing.T) {
 
 	// An oauth_delegated action cannot be connected with a raw token.
 	oauth := createDelegatedAction(t, k, owner.ID, "oauthsvc", 0)
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+oauth.Name, "", "raw"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), owner.Handle+"@k/"+oauth.Name, "", "raw"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("attach to oauth_delegated: got %v, want ErrNotFound", err)
 	}
 
@@ -3604,24 +3634,6 @@ func TestAttachBearerGrant(t *testing.T) {
 	}
 	if views, _ := k.ListGrantViews(ctx, owner.ID); len(views) != 0 {
 		t.Errorf("bearer grant survived revoke: %d", len(views))
-	}
-}
-
-// TestManifestExcludesBearerAction: a delegated_bearer action is never served as a manifest — a
-// peer kernel can never hold a per-caller token (§8/§13).
-func TestManifestExcludesBearerAction(t *testing.T) {
-	st := newTestStore(t)
-	ctx := context.Background()
-	k := newTestKernel(st)
-	k.SetSecretBox(b64Box{})
-	owner := setupUser(t, st, "br-mf", 0)
-	a := createBearerAction(t, k, owner.ID, "svc", 0)
-	pub := kernel.VisibilityPublic
-	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
-		t.Fatalf("make public: %v", err)
-	}
-	if _, err := k.GetActionManifest(ctx, a.ID); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("bearer action served a manifest: got %v, want ErrUnauthorized", err)
 	}
 }
 
@@ -3731,7 +3743,7 @@ func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
 
 	// Victim legitimately connects the good action → a covering connection for the provider's domain.
 	const goodPK = "oauth:https://provider.example/token|cid|provider.example"
-	if _, err := k.CreateGrants(ctx, victim.ID, goodPK, []string{good.ID}, "refresh", `["read"]`); err != nil {
+	if _, err := k.CreateGrants(ctx, kernel.User(victim.ID), goodPK, []string{good.ID}, "refresh", `["read"]`, nil); err != nil {
 		t.Fatalf("connect good: %v", err)
 	}
 
@@ -3739,12 +3751,12 @@ func TestOAuthDestinationBindingBlocksConfusedDeputy(t *testing.T) {
 	// silent instant-grant (no-token) path is refused. Without this bind it would have ridden the
 	// victim's connection and exfiltrated the minted token to evil.attacker.com.
 	const evilPK = "oauth:https://provider.example/token|cid|attacker.com"
-	if _, err := k.CreateGrants(ctx, victim.ID, evilPK, []string{evil.ID}, "", `["read"]`); err == nil {
+	if _, err := k.CreateGrants(ctx, kernel.User(victim.ID), evilPK, []string{evil.ID}, "", `["read"]`, nil); err == nil {
 		t.Fatal("malicious action rode the victim's connection via instant-grant (confused deputy!)")
 	}
 
 	// The consent plan for the malicious action reveals where the credential would actually go.
-	plan, err := k.ConsentPlan(ctx, victim.ID, "victim@k/evil")
+	plan, err := k.ConsentPlan(ctx, kernel.User(victim.ID), "victim@k/evil")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3768,7 +3780,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)
 	_ = createBearerAction(t, k, owner.ID, "chat/history", 0)
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
+	plan, err := k.ConsentPlan(ctx, kernel.User(owner.ID), "chatco@k/chat")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3779,7 +3791,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Error("group should not be connected before consent")
 	}
 
-	grants, err := k.AttachBearerGrants(ctx, owner.ID, "chatco@k/chat", "", "ghp_x")
+	grants, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), "chatco@k/chat", "", "ghp_x")
 	if err != nil || len(grants) != 2 {
 		t.Fatalf("AttachBearerGrants: %v n=%d", err, len(grants))
 	}
@@ -3788,7 +3800,7 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 		t.Fatalf("connections = %+v, want one with two actions", conns)
 	}
 
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
+	plan, _ = k.ConsentPlan(ctx, kernel.User(owner.ID), "chatco@k/chat")
 	g := plan.Groups[0]
 	if !g.Connected || !g.Covered {
 		t.Error("group should be connected and covered after consent")
@@ -3801,10 +3813,10 @@ func TestConnectBearerSelectorBatch(t *testing.T) {
 
 	// A later sibling: instant-grant with no token (bearer covered because the connection exists).
 	react := createBearerAction(t, k, owner.ID, "chat/react", 0)
-	if _, err := k.CreateGrants(ctx, owner.ID, "bearer:provider.example", []string{react.ID}, "", ""); err != nil {
+	if _, err := k.CreateGrants(ctx, kernel.User(owner.ID), "bearer:provider.example", []string{react.ID}, "", "", nil); err != nil {
 		t.Fatalf("instant bearer grant: %v", err)
 	}
-	plan, _ = k.ConsentPlan(ctx, owner.ID, "chatco@k/chat")
+	plan, _ = k.ConsentPlan(ctx, kernel.User(owner.ID), "chatco@k/chat")
 	if len(plan.Groups[0].Actions) != 3 {
 		t.Fatalf("expected 3 actions after adding react, got %d", len(plan.Groups[0].Actions))
 	}
@@ -3827,7 +3839,7 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 	a2 := createOAuthActionScopes(t, k, owner.ID, "g/write", "write")
 	const pk = "oauth:https://provider.example/token|cid|provider.example"
 
-	plan, err := k.ConsentPlan(ctx, owner.ID, "gco@k/g")
+	plan, err := k.ConsentPlan(ctx, kernel.User(owner.ID), "gco@k/g")
 	if err != nil {
 		t.Fatalf("ConsentPlan: %v", err)
 	}
@@ -3836,7 +3848,7 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 	}
 
 	// One consent covering the union grants both actions against one connection.
-	grants, err := k.CreateGrants(ctx, owner.ID, pk, []string{a1.ID, a2.ID}, "refresh-tok", `["read","write"]`)
+	grants, err := k.CreateGrants(ctx, kernel.User(owner.ID), pk, []string{a1.ID, a2.ID}, "refresh-tok", `["read","write"]`, nil)
 	if err != nil || len(grants) != 2 {
 		t.Fatalf("CreateGrants union: %v n=%d", err, len(grants))
 	}
@@ -3846,12 +3858,12 @@ func TestConnectOAuthUnionScopes(t *testing.T) {
 
 	// A sibling needing only "read" is covered → instant grant, no token.
 	a3 := createOAuthActionScopes(t, k, owner.ID, "g/peek", "read")
-	if _, err := k.CreateGrants(ctx, owner.ID, pk, []string{a3.ID}, "", `["read"]`); err != nil {
+	if _, err := k.CreateGrants(ctx, kernel.User(owner.ID), pk, []string{a3.ID}, "", `["read"]`, nil); err != nil {
 		t.Errorf("covered sibling should instant-grant: %v", err)
 	}
 	// A sibling needing "admin" is not covered → instant grant refused.
 	a4 := createOAuthActionScopes(t, k, owner.ID, "g/admin", "admin")
-	if _, err := k.CreateGrants(ctx, owner.ID, pk, []string{a4.ID}, "", `["admin"]`); err == nil {
+	if _, err := k.CreateGrants(ctx, kernel.User(owner.ID), pk, []string{a4.ID}, "", `["admin"]`, nil); err == nil {
 		t.Error("uncovered sibling instant-grant should be refused")
 	}
 }
@@ -3867,19 +3879,19 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	_ = createBearerAction(t, k, owner.ID, "chat/send", 0)                              // bearer:provider.example
 	_ = createBearerActionSrc(t, k, owner.ID, "mail/inbox", "https://mail.example/api") // bearer:mail.example
 
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi@k/chat", "", "t1"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), "multi@k/chat", "", "t1"); err != nil {
 		t.Fatalf("connect chat: %v", err)
 	}
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, "multi@k/mail", "", "t2"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), "multi@k/mail", "", "t2"); err != nil {
 		t.Fatalf("connect mail: %v", err)
 	}
 
 	// Disconnect chat by selector: chat grant gone, mail grant survives, both connections remain.
-	revoked, err := k.RevokeGrantsBySelector(ctx, owner.ID, "multi@k/chat")
+	revoked, err := k.RevokeGrantsBySelector(ctx, kernel.User(owner.ID), "multi@k/chat")
 	if err != nil || len(revoked) != 1 {
 		t.Fatalf("RevokeGrantsBySelector: %v n=%d", err, len(revoked))
 	}
-	mailPlan, _ := k.ConsentPlan(ctx, owner.ID, "multi@k/mail")
+	mailPlan, _ := k.ConsentPlan(ctx, kernel.User(owner.ID), "multi@k/mail")
 	if !mailPlan.Groups[0].Actions[0].Granted {
 		t.Error("mail grant should survive a chat-selector revoke")
 	}
@@ -3898,11 +3910,11 @@ func TestRevokeSelectorAndAccount(t *testing.T) {
 	}
 
 	// Disconnect mail by account: connection and its grant cascade away.
-	refs, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example")
+	refs, err := k.RevokeConnection(ctx, kernel.User(owner.ID), "bearer:mail.example")
 	if err != nil || len(refs) != 1 {
 		t.Fatalf("RevokeConnection: %v n=%d", err, len(refs))
 	}
-	if _, err := k.RevokeConnection(ctx, owner.ID, "bearer:mail.example"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := k.RevokeConnection(ctx, kernel.User(owner.ID), "bearer:mail.example"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("re-revoking absent connection: got %v, want ErrNotFound", err)
 	}
 }
@@ -3937,13 +3949,13 @@ func TestUpdateRevokesGrantsRegardlessOfActiveState(t *testing.T) {
 	consent := func(a *kernel.Action) {
 		t.Helper()
 		g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: grantor.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
-		if err := st.CreateOrReplaceGrant(ctx, g); err != nil {
+		if err := st.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
 			t.Fatal(err)
 		}
 	}
 	granted := func(a *kernel.Action) bool {
 		t.Helper()
-		_, err := st.ReadGrant(ctx, grantor.ID, a.ID)
+		_, err := st.ReadGrant(ctx, kernel.User(grantor.ID), a.ID)
 		return err == nil
 	}
 
@@ -4049,7 +4061,7 @@ func (r *recordingMetrics) CallSettled(scope, outcome string, elapsed time.Durat
 // failingHTTP is an upstream that is down: every execution fails.
 type failingHTTP struct{}
 
-func (failingHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _, _ string) (map[string]any, error) {
+func (failingHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
 	return nil, kernel.ErrExecutionFailed.Wrap("upstream down")
 }
 
@@ -4328,5 +4340,124 @@ func TestLookupSearchesTheTitle(t *testing.T) {
 	}
 	if !containsAction(results, a.ID) {
 		t.Error("a word in the title must find the action")
+	}
+}
+
+// What users of other kernels may store here is bounded per kernel and in all (D10): a kernel key
+// costs nothing, so one bound without the other would not hold. A user who already holds a
+// connection is not refused its renewal, and users of this kernel are not counted at all.
+func TestRemoteConnectionsAreBounded(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "cap-owner", 0)
+	a := createBearerAction(t, k, owner.ID, "svc", 0)
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	peer := func() string {
+		p, _, _ := ed25519.GenerateKey(rand.Reader)
+		key := base64.RawURLEncoding.EncodeToString(p)
+		if err := k.KnowKernel(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	fill := func(kernelKey string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := st.CreateOrUpdateConnection(ctx, &kernel.Connection{ID: uuid.New().String(), UserKernel: kernelKey, UserID: uuid.New().String(),
+				ProviderKey: "bearer:elsewhere", SealedSecret: "s", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	signUp := func(who kernel.Principal) error {
+		_, err := k.AttachBearerGrants(ctx, who, owner.Handle+"@k/svc", "", "tok")
+		return err
+	}
+	k1, k2, k3 := peer(), peer(), peer()
+	regular := kernel.Principal{Kernel: k1, UserID: "u-regular", Handle: "regular"}
+	if err := signUp(regular); err != nil {
+		t.Fatalf("a first user of another kernel: %v", err)
+	}
+	fill(k1, 999)
+	if err := signUp(kernel.Principal{Kernel: k1, UserID: "u-late", Handle: "late"}); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("the 1001st connection for one kernel's users: %v, want ErrInvalidState", err)
+	}
+	if err := signUp(regular); err != nil {
+		t.Errorf("a user who already holds a connection was refused its renewal: %v", err)
+	}
+	if err := signUp(kernel.Principal{Kernel: k2, UserID: "u2", Handle: "two"}); err != nil {
+		t.Errorf("another kernel's user, under both bounds: %v", err)
+	}
+	fill(k3, 8999)
+	if err := signUp(kernel.Principal{Kernel: k2, UserID: "u3", Handle: "three"}); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("the 10001st connection for users of other kernels: %v, want ErrInvalidState", err)
+	}
+	if err := signUp(kernel.User(setupUser(t, st, "cap-local", 0).ID)); err != nil {
+		t.Errorf("a user of this kernel was refused by a bound on other kernels' users: %v", err)
+	}
+	// A kernel this one has never met, or has suspended, signs nobody up.
+	stranger, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := signUp(kernel.Principal{Kernel: base64.RawURLEncoding.EncodeToString(stranger), UserID: "u", Handle: "h"}); err == nil {
+		t.Errorf("a user of an unknown kernel signed up")
+	}
+}
+
+// A consent that took time to give is for the action as it was when it began (D10): once the action
+// has changed, completing that consent writes nothing — the grants the change revoked stay revoked.
+func TestConsentBegunBeforeAnUpdateWritesNoGrant(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	k := newTestKernel(st)
+	k.SetSecretBox(b64Box{})
+	owner := setupUser(t, st, "stale-owner", 0)
+	user := setupUser(t, st, "stale-user", 0)
+	a := createBearerAction(t, k, owner.ID, "svc", 0)
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	began, _ := k.ReadAction(ctx, a.ID)
+	asOf := map[string]time.Time{a.ID: began.UpdatedAt}
+	desc := "now does something else"
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Description: &desc}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pk := "bearer:provider.example"
+	if _, err := k.CreateGrants(ctx, kernel.User(user.ID), pk, []string{a.ID}, "tok", "", asOf); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Fatalf("completing a consent begun before the action changed: %v, want ErrInvalidState", err)
+	}
+	if _, err := st.ReadGrant(ctx, kernel.User(user.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("the stale consent left a grant: %v", err)
+	}
+	if _, err := k.CreateGrants(ctx, kernel.User(user.ID), pk, []string{a.ID}, "tok", "", nil); err != nil {
+		t.Errorf("a consent begun now: %v", err)
+	}
+}
+
+// A sealed credential is bound to its principal: a user here seals as before principals existed, so
+// nothing stored needs resealing, and a user of another kernel with the same id seals differently.
+func TestConnectionAADSeparatesPrincipals(t *testing.T) {
+	local := kernel.ConnectionAAD(kernel.User("u1"), "c1")
+	if local != "u1|c1" {
+		t.Errorf("a local user's AAD = %q, want the pre-existing u1|c1", local)
+	}
+	for _, other := range []kernel.Principal{{Kernel: "k", UserID: "u1"}, {Kernel: "k2", UserID: "u1"}, {Kernel: "k", UserID: "u2"}} {
+		if got := kernel.ConnectionAAD(other, "c1"); got == local || got == kernel.ConnectionAAD(kernel.Principal{Kernel: "k9", UserID: "u9"}, "c1") {
+			t.Errorf("%+v seals as %q, which another principal also does", other, got)
+		}
 	}
 }

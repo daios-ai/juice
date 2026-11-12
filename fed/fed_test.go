@@ -30,6 +30,10 @@ type fakeHandlers struct {
 	revealBody       json.RawMessage
 	lastTransferPeer string
 	lastTransfer     TransferRequest
+	lastGrantPeer    string
+	lastGrant        GrantRequest
+	lastProcessPeer  string
+	lastProcess      ProcessRequest
 }
 
 func (f *fakeHandlers) OnCall(_ context.Context, peerKey string, req CallRequest) CallResponse {
@@ -52,6 +56,16 @@ func (f *fakeHandlers) OnReveal(_ context.Context, peerKey string, req RevealReq
 	f.lastRevealPeer = peerKey
 	f.lastReveal = req
 	return RevealResponse{Status: 200, Body: f.revealBody}
+}
+
+func (f *fakeHandlers) OnGrant(_ context.Context, peerKey string, req GrantRequest) Response {
+	f.lastGrantPeer, f.lastGrant = peerKey, req
+	return Response{Status: 200, Body: json.RawMessage(`{}`)}
+}
+
+func (f *fakeHandlers) OnProcess(_ context.Context, peerKey string, req ProcessRequest) Response {
+	f.lastProcessPeer, f.lastProcess = peerKey, req
+	return Response{Status: 200, Body: json.RawMessage(`{}`)}
 }
 
 func (f *fakeHandlers) OnTransfer(_ context.Context, peerKey string, req TransferRequest) TransferResponse {
@@ -171,6 +185,22 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 	if srv.lastTransferPeer != b.PublicKey() || srv.lastTransfer != tr {
 		t.Errorf("server saw transfer %+v from %q", srv.lastTransfer, srv.lastTransferPeer)
+	}
+
+	// Grant and process (D10): each reaches its handler whole, with the sender's proven key.
+	gr := GrantRequest{Counterparty: b.PublicKey(), Signature: "sig", Op: json.RawMessage(`{"kind":"plan"}`)}
+	if gResp, err := b.Grant(ctx, a.PublicKey(), gr); err != nil || gResp.Status != 200 {
+		t.Fatalf("Grant: %v %+v", err, gResp)
+	}
+	if srv.lastGrantPeer != b.PublicKey() || srv.lastGrant.Signature != "sig" || string(srv.lastGrant.Op) != `{"kind":"plan"}` {
+		t.Errorf("server saw grant %+v from %q", srv.lastGrant, srv.lastGrantPeer)
+	}
+	pr := ProcessRequest{Kind: "register", Ref: "ref-1", RegID: "work-1"}
+	if pResp, err := b.Process(ctx, a.PublicKey(), pr); err != nil || pResp.Status != 200 {
+		t.Fatalf("Process: %v %+v", err, pResp)
+	}
+	if srv.lastProcessPeer != b.PublicKey() || srv.lastProcess != pr {
+		t.Errorf("server saw process %+v from %q", srv.lastProcess, srv.lastProcessPeer)
 	}
 
 	// Reachability probe reports a live path.

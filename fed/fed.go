@@ -37,6 +37,8 @@ const (
 	ProtocolTask     = "/juice/fed/task/1"
 	ProtocolReveal   = "/juice/fed/settle/1"
 	ProtocolTransfer = "/juice/fed/transfer/1"
+	ProtocolGrant    = "/juice/fed/grant/1"
+	ProtocolProcess  = "/juice/fed/process/1"
 )
 
 // GossipRequest is the wire form of a /juice/fed/gossip/1 request (§13): the evidence cursor to
@@ -90,6 +92,8 @@ type CallRequest struct {
 	BlockchainProof      string `json:"blockchain_proof,omitempty"`   // that address's own signature over the caller's key (D23)
 	CallerUserID         string `json:"caller_user_id,omitempty"`     // the buyer's own user the call is made for: their stable id there (P4)
 	CallerHandle         string `json:"caller_handle,omitempty"`      // and the handle they go by, so the seller records who called
+	ProcessKernel        string `json:"process_kernel,omitempty"`     // where the run began, and its process there (D10): unsigned,
+	ProcessRef           string `json:"process_ref,omitempty"`        // since the seller asks that kernel itself and takes nothing on trust
 	// Signature is Ed25519 over JCS({action,args_hash,caller_handle,caller_user_id,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
@@ -157,6 +161,24 @@ type TransferRequest struct {
 // TransferResponse acknowledges the word stored, or carries an error.
 type TransferResponse = Response
 
+// GrantRequest is the wire form of a /juice/fed/grant/1 request (D10): one grant operation a kernel
+// forwards for a user of its own. Op is the operation exactly as signed.
+type GrantRequest struct {
+	Counterparty string          `json:"counterparty"` // sender's base64url Ed25519 public key
+	Signature    string          `json:"signature"`    // Ed25519 over the operation
+	Op           json.RawMessage `json:"op"`
+}
+
+// ProcessRequest is the wire form of a /juice/fed/process/1 request (D2, D10), put to the kernel a
+// run began on: "check" asks whose process a reference names, "register" holds it open for work
+// waiting on the sender, "release" ends that. It carries no signature: it claims nothing beyond who
+// sent it, and the connection proves that.
+type ProcessRequest struct {
+	Kind  string `json:"kind"` // "check" | "register" | "release"
+	Ref   string `json:"ref"`
+	RegID string `json:"reg_id,omitempty"` // register, release: the sender's own name for the work
+}
+
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
 // receives the peer's verified public key (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
@@ -181,6 +203,10 @@ type Handlers interface {
 	// OnTransfer handles an inbound /juice/fed/transfer/1 request (P11): whom a payment to this kernel
 	// is for. The handler verifies req.Signature against req.Counterparty.
 	OnTransfer(ctx context.Context, peerKey string, req TransferRequest) TransferResponse
+	// OnGrant handles an inbound /juice/fed/grant/1 request and OnProcess a /juice/fed/process/1
+	// request (D10). OnProcess trusts peerKey alone, which the connection authenticated.
+	OnGrant(ctx context.Context, peerKey string, req GrantRequest) Response
+	OnProcess(ctx context.Context, peerKey string, req ProcessRequest) Response
 }
 
 // Config configures a transport host.

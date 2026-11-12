@@ -54,6 +54,12 @@ func (f *fakeFedCaller) Task(_ context.Context, _ string, req fed.TaskRequest) (
 	return f.taskResp, f.err
 }
 
+func (f *fakeFedCaller) Grant(_ context.Context, _ string, _ fed.GrantRequest) (fed.Response, error) {
+	return fed.Response{}, fed.ErrNotDispatched
+}
+func (f *fakeFedCaller) Process(_ context.Context, _ string, _ fed.ProcessRequest) (fed.Response, error) {
+	return fed.Response{}, fed.ErrNotDispatched
+}
 func (f *fakeFedCaller) Transfer(_ context.Context, _ string, req fed.TransferRequest) (fed.TransferResponse, error) {
 	f.lastTransfer = req
 	return f.transferResp, f.err
@@ -175,7 +181,8 @@ func TestAnOutboundCallReachesTheWireWhole(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	local := base64.RawURLEncoding.EncodeToString(pub)
 	call := kernel.OutboundCall{ActionID: "v-action", ExpectedContractHash: "v-hash", IdempotencyKey: "v-key",
-		Commitment: "v-commitment", Lottery: 7, CallerUserID: "v-user", CallerHandle: "v-handle"}
+		Commitment: "v-commitment", Lottery: 7, CallerUserID: "v-user", CallerHandle: "v-handle",
+		ProcessKernel: "v-origin", ProcessRef: "v-ref"}
 	fc := &fakeFedCaller{resp: fed.CallResponse{Status: 200, Body: []byte(`{"result":{},"receipt":{"id":"r"}}`)}}
 	signer := func(c kernel.OutboundCall, counterparty, recipient, argsHash string) (string, string, error) {
 		sig, err := testNet.SignFederationPayload(priv, c, counterparty, recipient, "2026-09-28T12:00:00Z", argsHash)
@@ -188,7 +195,8 @@ func TestAnOutboundCallReachesTheWireWhole(t *testing.T) {
 	req := fc.lastReq
 	got := kernel.OutboundCall{ActionID: req.Action, ExpectedContractHash: req.ExpectedContractHash,
 		IdempotencyKey: req.IdempotencyKey, Commitment: req.Commitment, Lottery: req.Lottery,
-		CallerUserID: req.CallerUserID, CallerHandle: req.CallerHandle}
+		CallerUserID: req.CallerUserID, CallerHandle: req.CallerHandle,
+		ProcessKernel: req.ProcessKernel, ProcessRef: req.ProcessRef}
 	if got != call || req.Counterparty != local || req.BlockchainAddress != "v-address" || req.BlockchainProof != "v-proof" || string(req.Args) != `{"n":1}` {
 		t.Errorf("wire request = %+v, want every field from its own source", req)
 	}

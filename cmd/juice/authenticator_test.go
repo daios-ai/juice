@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -49,10 +50,10 @@ func (f *fakeGrantStore) seed(box *aesGCMBox, grantor, actionID, secret string) 
 	f.mu.Unlock()
 	return connID
 }
-func (f *fakeGrantStore) ReadGrant(_ context.Context, grantor, action string) (*kernel.Grant, error) {
+func (f *fakeGrantStore) ReadGrant(_ context.Context, grantor kernel.Principal, action string) (*kernel.Grant, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if g := f.grants[grantor+"|"+action]; g != nil {
+	if g := f.grants[grantor.Kernel+grantor.UserID+"|"+action]; g != nil {
 		return g, nil
 	}
 	return nil, kernel.ErrNotFound.Wrap("no grant")
@@ -121,21 +122,21 @@ func TestOAuthClientCredentialsCached(t *testing.T) {
 	action := &kernel.Action{ID: "act-cc", Name: "svc", AuthJSON: "seal-1"}
 	ctx := context.Background()
 
-	tok, err := eng.token(ctx, action, "", auth, false)
+	tok, err := eng.token(ctx, action, kernel.Principal{}, auth, false)
 	if err != nil || tok != "cc-tok" {
 		t.Fatalf("first token: %q %v", tok, err)
 	}
-	if _, _ = eng.token(ctx, action, "", auth, false); hits != 1 {
+	if _, _ = eng.token(ctx, action, kernel.Principal{}, auth, false); hits != 1 {
 		t.Fatalf("second call not cached: hits=%d", hits)
 	}
 	// Forced refresh (401 path) re-fetches.
-	_, _ = eng.token(ctx, action, "", auth, true)
+	_, _ = eng.token(ctx, action, kernel.Principal{}, auth, true)
 	if hits != 2 {
 		t.Fatalf("forced refresh did not re-fetch: hits=%d", hits)
 	}
 	// A credential change invalidates the cache.
 	action.AuthJSON = "seal-2"
-	_, _ = eng.token(ctx, action, "", auth, false)
+	_, _ = eng.token(ctx, action, kernel.Principal{}, auth, false)
 	if hits != 3 {
 		t.Fatalf("credential change did not invalidate cache: hits=%d", hits)
 	}
@@ -170,7 +171,7 @@ func TestOAuthJWTBearer(t *testing.T) {
 		Config:  map[string]any{"token_url": provider.URL, "client_id": "svc@acct"},
 		Secrets: map[string]any{"private_key": keyPEM},
 	}
-	tok, err := eng.token(context.Background(), &kernel.Action{ID: "act-jwt", AuthJSON: "s"}, "", auth, false)
+	tok, err := eng.token(context.Background(), &kernel.Action{ID: "act-jwt", AuthJSON: "s"}, kernel.Principal{}, auth, false)
 	if err != nil || tok != "jwt-tok" {
 		t.Fatalf("jwt-bearer token: %q %v", tok, err)
 	}
@@ -214,11 +215,11 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	ctx := context.Background()
 
 	// Binding match: ownerA gets a token.
-	if tok, err := eng.token(ctx, action, "ownerA", auth, false); err != nil || tok != "acc" {
+	if tok, err := eng.token(ctx, action, kernel.User("ownerA"), auth, false); err != nil || tok != "acc" {
 		t.Fatalf("ownerA token: %q %v", tok, err)
 	}
 	// Binding mismatch: ownerB has no grant → grant-required error carrying the qualified ref.
-	if _, err := eng.token(ctx, action, "ownerB", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
+	if _, err := eng.token(ctx, action, kernel.User("ownerB"), auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want grant-required", err)
 	} else if got := grantMeta(err); got != "sys/inbox" {
 		t.Errorf("ownerB grant-required meta[action] = %q, want @sys/inbox", got)
@@ -226,7 +227,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 
 	// Rotation persists the new refresh token onto the connection (siblings unaffected).
 	rotate = true
-	if _, err := eng.token(ctx, action, "ownerA", auth, true); err != nil {
+	if _, err := eng.token(ctx, action, kernel.User("ownerA"), auth, true); err != nil {
 		t.Fatalf("rotation token: %v", err)
 	}
 	if gs.rotated[connA] == "" {
@@ -235,7 +236,7 @@ func TestDelegatedTokenBinding(t *testing.T) {
 
 	// invalid_grant deletes the connection and cascades its grant.
 	connC := gs.seed(box, "ownerC", action.ID, "wrong")
-	if _, err := eng.token(ctx, action, "ownerC", auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
+	if _, err := eng.token(ctx, action, kernel.User("ownerC"), auth, true); err == nil || !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("invalid_grant: got %v, want grant-required", err)
 	} else if got := grantMeta(err); got != "sys/inbox" {
 		t.Errorf("invalid_grant grant-required meta[action] = %q, want @sys/inbox", got)
@@ -287,7 +288,7 @@ func TestDelegatedBearerTokenApplied(t *testing.T) {
 
 			eng := newAuthenticator(box, gs, true, time.Second)
 			exec := &httpActionExecutor{auth: eng}
-			if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerA", ""); err != nil {
+			if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerA"), ""); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			if got != tc.want {
@@ -321,7 +322,7 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	exec := &httpActionExecutor{auth: eng}
 
 	// ownerB holds no grant → grant-required, request never sent.
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "ownerB", ""); !errors.Is(err, kernel.ErrGrantRequired) {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerB"), ""); !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want ErrGrantRequired", err)
 	}
 	if reached {
@@ -372,10 +373,10 @@ func TestDelegatedConnectionShared(t *testing.T) {
 	ctx := context.Background()
 
 	// Action A exchanges once; action B shares the connection's cached access token (no 2nd exchange).
-	if tok, err := eng.token(ctx, actionA, grantor, auth, false); err != nil || tok != "acc1" {
+	if tok, err := eng.token(ctx, actionA, kernel.User(grantor), auth, false); err != nil || tok != "acc1" {
 		t.Fatalf("A token: %q %v", tok, err)
 	}
-	if tok, err := eng.token(ctx, actionB, grantor, auth, false); err != nil || tok != "acc1" {
+	if tok, err := eng.token(ctx, actionB, kernel.User(grantor), auth, false); err != nil || tok != "acc1" {
 		t.Fatalf("B token (should be cached): %q %v", tok, err)
 	}
 	if refreshCalls != 1 {
@@ -384,13 +385,13 @@ func TestDelegatedConnectionShared(t *testing.T) {
 
 	// A forced refresh rotates the connection's secret; the sibling B then works with the new secret.
 	rotate = true
-	if _, err := eng.token(ctx, actionA, grantor, auth, true); err != nil {
+	if _, err := eng.token(ctx, actionA, kernel.User(grantor), auth, true); err != nil {
 		t.Fatalf("A forced refresh: %v", err)
 	}
 	if gs.rotated[connID] == "" {
 		t.Fatal("rotation was not persisted onto the shared connection")
 	}
-	if tok, err := eng.token(ctx, actionB, grantor, auth, true); err != nil || tok != "acc2" {
+	if tok, err := eng.token(ctx, actionB, kernel.User(grantor), auth, true); err != nil || tok != "acc2" {
 		t.Fatalf("sibling B after rotation: %q %v (want acc2 via ref-2)", tok, err)
 	}
 }
@@ -426,16 +427,16 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 
 	// A bad-scheme redirect is rejected; a hosted https redirect is accepted (the provider, not
 	// the kernel, validates redirect targets).
-	if _, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "ftp://nope/cb", "code"); err == nil {
+	if _, err := broker.start(ctx, kernel.User("u1"), nil, []string{"act"}, "prov", `["read"]`, auth, "ftp://nope/cb", "code"); err == nil {
 		t.Error("bad-scheme redirect_uri accepted")
 	}
-	if res, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "https://app.example/callback", "code"); err != nil {
+	if res, err := broker.start(ctx, kernel.User("u1"), nil, []string{"act"}, "prov", `["read"]`, auth, "https://app.example/callback", "code"); err != nil {
 		t.Errorf("hosted https redirect rejected: %v", err)
 	} else if !strings.Contains(res.AuthorizeURL, "redirect_uri=https%3A%2F%2Fapp.example%2Fcallback") {
 		t.Errorf("hosted redirect not embedded in authorize_url: %s", res.AuthorizeURL)
 	}
 
-	res, err := broker.start(ctx, "u1", []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:9999/callback", "code")
+	res, err := broker.start(ctx, kernel.User("u1"), nil, []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:9999/callback", "code")
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -446,11 +447,11 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 	}
 
 	// A different user cannot complete this consent.
-	if _, err := broker.complete(ctx, res.State, "attacker", "code"); !errors.Is(err, kernel.ErrUnauthorized) {
+	if _, err := broker.complete(ctx, res.State, kernel.User("attacker"), "code"); !errors.Is(err, kernel.ErrUnauthorized) {
 		t.Errorf("foreign complete: got %v, want ErrUnauthorized", err)
 	}
 	// The rightful user completes and gets the refresh token.
-	cr, err := broker.complete(ctx, res.State, "u1", "the-code")
+	cr, err := broker.complete(ctx, res.State, kernel.User("u1"), "the-code")
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -458,7 +459,7 @@ func TestGrantBrokerCodeFlow(t *testing.T) {
 		t.Fatalf("complete result = %+v", cr)
 	}
 	// State is single-use.
-	if _, err := broker.complete(ctx, res.State, "u1", "the-code"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := broker.complete(ctx, res.State, kernel.User("u1"), "the-code"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("reused state: got %v, want ErrNotFound", err)
 	}
 }
@@ -468,14 +469,14 @@ func TestBrokerExpiredState(t *testing.T) {
 	broker := newGrantBroker(newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second))
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"auth_url": "https://p.example/a", "token_url": "https://p.example/t", "client_id": "c"}}
-	res, err := broker.start(context.Background(), "u1", []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:1/callback", "code")
+	res, err := broker.start(context.Background(), kernel.User("u1"), nil, []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:1/callback", "code")
 	if err != nil {
 		t.Fatal(err)
 	}
 	broker.mu.Lock()
 	broker.pending[res.State].expiresAt = time.Now().Add(-time.Minute)
 	broker.mu.Unlock()
-	if _, err := broker.complete(context.Background(), res.State, "u1", "c"); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := broker.complete(context.Background(), res.State, kernel.User("u1"), "c"); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("expired state: got %v, want ErrNotFound", err)
 	}
 }
@@ -539,4 +540,58 @@ func verifyRS256(assertion string, pub *rsa.PublicKey) bool {
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	return rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig) == nil
+}
+
+// Sign-ups begun and not finished are bounded for users of other kernels, per kernel and in all,
+// and a grantor holds one per provider: a newer one replaces the older. Users of this kernel are
+// neither bounded nor counted.
+func TestBrokerBoundsUnfinishedConsentsFromOtherKernels(t *testing.T) {
+	broker := newGrantBroker(newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second))
+	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
+		Config: map[string]any{"auth_url": "https://provider.example/auth", "token_url": "https://provider.example/token", "client_id": "cid", "scopes": "read"}}
+	ctx := context.Background()
+	start := func(kernelKey, user, provider string) error {
+		_, err := broker.start(ctx, kernel.Principal{Kernel: kernelKey, UserID: user}, nil, []string{"act"}, provider, `["read"]`, auth, "http://127.0.0.1:9/cb", "code")
+		return err
+	}
+	for i := 0; i < kernel.MaxPendingConsentsPerKernel; i++ {
+		if err := start("k1", "u"+strconv.Itoa(i), "prov"); err != nil {
+			t.Fatalf("sign-up %d of one kernel: %v", i, err)
+		}
+	}
+	if err := start("k1", "one-more", "prov"); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a sign-up beyond one kernel's share: %v, want ErrInvalidState", err)
+	}
+	// The same user and provider again takes the place of the one it began, at the bound or not.
+	if err := start("k1", "u0", "prov"); err != nil {
+		t.Errorf("a user beginning the same sign-up again: %v", err)
+	}
+	if n := len(broker.pending); n != kernel.MaxPendingConsentsPerKernel {
+		t.Errorf("%d sign-ups pending, want %d: the repeat replaces, it does not add", n, kernel.MaxPendingConsentsPerKernel)
+	}
+	for k := 2; len(broker.pending) < kernel.MaxPendingConsents; k++ {
+		for i := 0; i < kernel.MaxPendingConsentsPerKernel; i++ {
+			if err := start("k"+strconv.Itoa(k), "u"+strconv.Itoa(i), "prov"); err != nil {
+				t.Fatalf("filling the total: %v", err)
+			}
+		}
+	}
+	if err := start("k-new", "u", "prov"); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a sign-up beyond the total: %v, want ErrInvalidState", err)
+	}
+	if err := start("", "local-user", "prov"); err != nil {
+		t.Errorf("a user of this kernel was refused by a bound on other kernels' users: %v", err)
+	}
+	// A consent belongs to the principal that began it: the same user id on another kernel, or
+	// here, does not complete it.
+	broker = newGrantBroker(newAuthenticator(testBox(t), newFakeGrantStore(), true, time.Second))
+	res, err := broker.start(ctx, kernel.Principal{Kernel: "k1", UserID: "u1"}, nil, []string{"act"}, "prov", `["read"]`, auth, "http://127.0.0.1:9/cb", "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, other := range []kernel.Principal{kernel.User("u1"), {Kernel: "k2", UserID: "u1"}} {
+		if _, err := broker.complete(ctx, res.State, other, "code"); !errors.Is(err, kernel.ErrUnauthorized) {
+			t.Errorf("%+v completed a consent begun by u1 of k1: %v", other, err)
+		}
+	}
 }

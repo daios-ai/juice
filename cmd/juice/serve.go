@@ -384,7 +384,7 @@ func runServer(name string) error {
 		k.SetMetrics(m)
 		observe = m.observeRequest
 	}
-	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world, observe)
+	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world, srv.oauth, observe)
 	// Every outbound contact records whether the peer answered (§13). Two integration points reach
 	// all of it: the adapter below (calls, resolves, tasks, settlement) and the discovery pass
 	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
@@ -426,7 +426,10 @@ func runServer(name string) error {
 		defer metricsSrv.Close()
 		logger.Info("metrics.ready", "addr", addr)
 	}
-	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, retry, k.SettleReady, globalCfg.remoteRetryInterval())
+	go startRemoteRetryLoop(retryCtx, pending, k.PendingRemoteTraces, retry, func(ctx context.Context) {
+		k.SettleReady(ctx)
+		k.ReleaseClosedProcesses(ctx)
+	}, globalCfg.remoteRetryInterval())
 
 	// Grow and refresh the known network (§13). One loop: each pass advertises this kernel to the
 	// routing-discovery namespace, then pulls gossip from the union of the namespace's providers,
@@ -1751,6 +1754,32 @@ func (s *server) getLedger(w http.ResponseWriter, r *http.Request) {
 
 // ---- delegated-OAuth grants (§8) ----
 
+// grantAbroad forwards a grant operation that names another kernel to it, as the caller, and
+// answers with that kernel's own reply; it reports false for one that names this kernel, which the
+// handler then serves itself. The commands are the same either way (D10, D20).
+func (s *server) grantAbroad(w http.ResponseWriter, r *http.Request, kernelSeg string, op kernel.GrantOp) bool {
+	kr, err := s.kernel.ResolveKernel(r.Context(), kernelSeg)
+	if err != nil || kr.Local {
+		return false
+	}
+	status, body, err := s.kernel.ForwardGrant(r.Context(), callerFrom(r), kr.Key, op)
+	if err != nil {
+		writeErr(w, err)
+	} else {
+		writeJSON(w, status, body)
+	}
+	return true
+}
+
+// selectorKernel is the kernel segment of a consent selector, "" when it has none to read.
+func selectorKernel(selector string) string {
+	a, err := kernel.ParseAddress(strings.TrimSuffix(strings.TrimSpace(selector), "/*"))
+	if err != nil {
+		return ""
+	}
+	return a.Kernel
+}
+
 // getGrantPlan expands a selector into the consent plan user connect walks (§8).
 func (s *server) getGrantPlan(w http.ResponseWriter, r *http.Request) {
 	selector := r.URL.Query().Get("selector")
@@ -1758,56 +1787,70 @@ func (s *server) getGrantPlan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("selector query parameter is required"))
 		return
 	}
-	res, err := s.kernel.ConsentPlan(r.Context(), callerFrom(r), selector)
+	if s.grantAbroad(w, r, selectorKernel(selector), kernel.GrantOp{Kind: "plan", Selector: selector}) {
+		return
+	}
+	res, err := s.kernel.ConsentPlan(r.Context(), kernel.User(callerFrom(r)), selector)
 	writeOr(w, res, err)
 }
 
 func (s *server) postGrantStart(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		Selector    string `json:"selector"`
-		Provider    string `json:"provider"`
-		RedirectURI string `json:"redirect_uri"`
-		Flow        string `json:"flow"`
-	}) (any, int, error) {
-		res, err := startGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.Selector, body.Provider, body.RedirectURI, body.Flow)
-		return res, http.StatusOK, err
-	})(w, r)
+	var op kernel.GrantOp
+	if !decodeBody(w, r, &op) {
+		return
+	}
+	op.Kind = "start"
+	if s.grantAbroad(w, r, selectorKernel(op.Selector), op) {
+		return
+	}
+	res, err := startGrant(s.kernel, s.oauth, r.Context(), kernel.User(callerFrom(r)), op.Selector, op.Provider, op.RedirectURI, op.Flow)
+	writeOr(w, res, err)
 }
 
+// postGrantComplete finishes a consent. The selector says which kernel holds it; a consent begun
+// here needs none.
 func (s *server) postGrantComplete(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		State string `json:"state"`
-		Code  string `json:"code"`
-	}) (any, int, error) {
-		res, err := completeGrant(s.kernel, s.oauth, r.Context(), callerFrom(r), body.State, body.Code)
-		return res, http.StatusOK, err
-	})(w, r)
+	var op kernel.GrantOp
+	if !decodeBody(w, r, &op) {
+		return
+	}
+	op.Kind = "complete"
+	if s.grantAbroad(w, r, selectorKernel(op.Selector), op) {
+		return
+	}
+	res, err := completeGrant(s.kernel, s.oauth, r.Context(), kernel.User(callerFrom(r)), op.State, op.Code)
+	writeOr(w, res, err)
 }
 
 // postGrant is the direct token-store for a delegated_bearer group (§8): a paste-once static token,
 // no browser roundtrip. OAuth groups use start/complete instead.
 func (s *server) postGrant(w http.ResponseWriter, r *http.Request) {
-	handle(func(r *http.Request, body struct {
-		Selector string `json:"selector"`
-		Provider string `json:"provider"`
-		Token    string `json:"token"`
-	}) (any, int, error) {
-		res, err := attachToken(s.kernel, r.Context(), callerFrom(r), body.Selector, body.Provider, body.Token)
-		return res, http.StatusOK, err
-	})(w, r)
+	var op kernel.GrantOp
+	if !decodeBody(w, r, &op) {
+		return
+	}
+	op.Kind = "token"
+	if s.grantAbroad(w, r, selectorKernel(op.Selector), op) {
+		return
+	}
+	res, err := attachToken(s.kernel, r.Context(), kernel.User(callerFrom(r)), op.Selector, op.Provider, op.Token)
+	writeOr(w, res, err)
 }
 
 // deleteGrant revokes by selector (grants only) or by account (connection + cascade), §8. A full
 // owner@kernel/name is the degenerate single-action selector, so there is one spelling per intent.
+// An account on another kernel is named `provider@kernel`, since a provider key alone says nothing
+// of where its connection is held.
 func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	caller := kernel.User(callerFrom(r))
 	if account := q.Get("account"); account != "" {
-		res, err := revokeConnection(s.kernel, r.Context(), callerFrom(r), account)
-		if err != nil {
-			writeErr(w, err)
+		if i := strings.LastIndex(account, "@"); i > 0 &&
+			s.grantAbroad(w, r, account[i+1:], kernel.GrantOp{Kind: "disconnect", Account: account[:i]}) {
 			return
 		}
-		writeJSON(w, http.StatusOK, res)
+		res, err := revokeConnection(s.kernel, r.Context(), caller, account)
+		writeOr(w, res, err)
 		return
 	}
 	selector := q.Get("selector")
@@ -1815,7 +1858,10 @@ func (s *server) deleteGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, kernel.ErrInvalidInput.Wrap("selector or account query parameter is required"))
 		return
 	}
-	res, err := revokeGrantsBySelector(s.kernel, r.Context(), callerFrom(r), selector)
+	if s.grantAbroad(w, r, selectorKernel(selector), kernel.GrantOp{Kind: "disconnect", Selector: selector}) {
+		return
+	}
+	res, err := revokeGrantsBySelector(s.kernel, r.Context(), caller, selector)
 	writeOr(w, res, err)
 }
 
@@ -1883,13 +1929,13 @@ func writeErr(w http.ResponseWriter, err error) {
 // platform signing key from config (the same key bootstrap loaded) so the libp2p identity is the
 // kernel's Ed25519 identity (§12). AllowPrivateAddrs mirrors allow_local_sources so the flow
 // harness can run a whole network on loopback.
-func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World, observe func(protocol, direction string, ok bool)) (*fed.Transport, error) {
+func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World, oauth *grantBroker, observe func(protocol, direction string, ok bool)) (*fed.Transport, error) {
 	privB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
 	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
 	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
 		return nil, kernel.ErrInvalidState.Wrap("signing key unavailable for federation transport")
 	}
-	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(ctx, 50, 100)}
+	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(ctx, 50, 100), oauth: oauth}
 	tr, err := fed.New(ctx, fed.Config{
 		SigningKey:        ed25519.PrivateKey(privBytes),
 		BootstrapPeers:    world.Seeds,

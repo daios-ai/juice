@@ -358,6 +358,7 @@ const (
 	sigDomainTaskComplete    = "task_complete"
 	sigDomainTaskCancel      = "task_cancel"
 	sigDomainTaskNotice      = "task_notice"
+	sigDomainGrant           = "grant"
 	sigDomainReveal          = "reveal"
 	sigDomainTransfer        = "transfer"
 	sigDomainCapability      = "capability"
@@ -805,6 +806,14 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 				// not been paid for. Operator-actionable, so a client never renders it as the
 				// caller's own insufficient_funds.
 				failErr = PeerUnfundedError(k.KernelName(ctx, peer))
+			case r.GrantRequired:
+				// The grantor holds no grant there. The action is as cached, so the proxy stays; this
+				// kernel's own record of the consent is what was wrong, and in a run begun here it
+				// goes, so the next call is refused before any money moves (D10).
+				failErr = GrantRequiredError(k.ActionAddress(ctx, action))
+				if p, perr := k.store.ReadProcess(ctx, trace.ProcessID); perr == nil && p.OriginKernel == "" {
+					_ = k.store.DeleteGrant(ctx, User(p.OwnerUserID), action.ID)
+				}
 			case r.RefreshProxy:
 				// The peer's contract moved under our cached copy. NOT a terms change in the buyer's
 				// sense: the contract hash also covers the artifact, kind, and owner id (§6 P6), so a
@@ -852,10 +861,11 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// call re-resolves. Three such outcomes: a signed refresh_proxy rejection (the contract moved), a
 	// quarantined receipt, and any other non-funding rejection — the peer refused to serve this action
 	// at all (retired, made private, owner suspended), so the entry is stale whether or not it says so.
-	// A funding (402) rejection is exempt: our credit is exhausted, the action is fine.
+	// A funding (402) rejection is exempt: our credit is exhausted, the action is fine. So is a missing
+	// grant: the caller has something to do first, and the action is as cached (P7).
 	// Supervision-side, outside the monetary write set (a failure here never rolls back settlement),
 	// and hash-conditional so a stale dispatch settling after a re-resolve spares the refreshed row.
-	if r.RefreshProxy || quarantined || (rejection && fr.HTTPStatus != 402) {
+	if r.RefreshProxy || quarantined || (rejection && fr.HTTPStatus != 402 && !r.GrantRequired) {
 		// The dispatch snapshots the hash it bound; absent it (a trace not dispatched through the normal
 		// path), guard against the row's current hash so the deactivation still targets this row.
 		guardHash := dispatchedHash
@@ -1007,6 +1017,7 @@ func (k *Kernel) retryRemoteTrace(ctx context.Context, logger *log.Logger, trace
 		ActionID: action.RemoteActionID, ExpectedContractHash: dispatch.ContractHash, IdempotencyKey: *trace.IdempotencyKey,
 		Commitment: commitmentOf(dispatch.Secret), Lottery: dispatch.Lottery,
 		CallerUserID: dispatch.CallerUserID, CallerHandle: dispatch.CallerHandle,
+		ProcessKernel: k.originOf(ctx, process), ProcessRef: process.Ref,
 	}, dispatch.Args)
 	if fr.ReceiptJSON != "" {
 		_, err = k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, mp, fr, 0)
@@ -1886,7 +1897,7 @@ func (k *Kernel) catalogPage(ctx context.Context, cursor string) ([]*ActionManif
 		for _, a := range batch {
 			last = a.ID
 			if k.exportable(a) != nil {
-				continue // public, and still not describable abroad (delegated auth, §8)
+				continue // not describable abroad
 			}
 			ow, cached := owners[a.OwnerUserID]
 			if !cached {
@@ -1962,7 +1973,7 @@ func (k *Kernel) gossipEvidencePage(ctx context.Context, ourKey, cursor string) 
 	}
 	// Whether a row is evidence was decided when it settled and stored with it (P9): the sender
 	// asks nothing further. Re-deriving it here would make publication a function of the action's
-	// present state — an action that became delegated-auth after a trade would retract evidence of
+	// present state — an action made private after a trade would retract evidence of
 	// a trade that was open when it happened — and would cost a read per row to reach the wrong
 	// answer.
 	bundles := make([]EvidenceBundle, 0, len(rows))
@@ -2117,7 +2128,7 @@ func (k *Kernel) RecordKernelContact(ctx context.Context, publicKey string, ok b
 // records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
 // settled failure is legible rather than always reading "denied". refreshProxy marks a cache fault
 // (contract-hash mismatch, non-executable action) so the origin invalidates its cached proxy (§13).
-func (k *Kernel) CreateSignedRejectionReceipt(callerUserID, counterpartyKey, actionParam string, rawArgs []byte, idempotencyKey, reason string, refreshProxy bool) (*Receipt, error) {
+func (k *Kernel) CreateSignedRejectionReceipt(callerUserID, counterpartyKey, actionParam string, rawArgs []byte, idempotencyKey, reason string, refreshProxy, grantRequired bool) (*Receipt, error) {
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
 	}
@@ -2142,6 +2153,7 @@ func (k *Kernel) CreateSignedRejectionReceipt(callerUserID, counterpartyKey, act
 		Net:            0,
 		Fee:            0,
 		RefreshProxy:   refreshProxy,
+		GrantRequired:  grantRequired,
 		Reason:         reason,
 		StartedAt:      now,
 		CreatedAt:      now,
@@ -2368,7 +2380,7 @@ func remoteManifestHash(m ActionManifest) string {
 	outputJSON, _ := CanonicalJSON(m.OutputSchema)
 	// owner_id (stable identity) and remote_bps (provider pricing) are contract fields; owner_handle
 	// is display metadata, so a remote handle rename never re-keys the cache or deactivates a proxy.
-	payload, _ := CanonicalJSON(map[string]any{
+	fields := map[string]any{
 		"action_id":     m.ActionID,
 		"artifact_hash": m.ArtifactHash,
 		"description":   m.Description,
@@ -2384,7 +2396,13 @@ func remoteManifestHash(m ActionManifest) string {
 		"price":         m.Price,
 		"remote_bps":    m.RemoteBPS,
 		"title":         m.Title,
-	})
+	}
+	// Whether a caller must hold a grant is contract: it changes what the caller must do first (P6).
+	// The key is present only when true, so no hash a peer cached before it existed moves.
+	if m.RequiresGrant {
+		fields["requires_grant"] = true
+	}
+	payload, _ := CanonicalJSON(fields)
 	h := sha256.Sum256(payload)
 	return hex.EncodeToString(h[:])
 }
@@ -2509,6 +2527,7 @@ func (k *Kernel) importRemoteActionCore(ctx context.Context, peerKey string, m A
 			a.OwnerUserID = m.OwnerID
 			a.RemoteBPS = &rbps
 			a.BasePrice = &basePrice
+			a.RequiresGrant = m.RequiresGrant
 		},
 		// Identity and lifecycle only; apply writes the contract fields.
 		new: func() *Action {
@@ -2563,11 +2582,6 @@ func (k *Kernel) exportable(a *Action) error {
 	if !a.Active || a.Visibility != VisibilityPublic {
 		return ErrUnauthorized.Wrap("manifest only available for public active actions")
 	}
-	// Delegated-OAuth actions are never advertised: a peer kernel cannot complete a
-	// browser consent, so importing one could only ever produce grant-required failures (§8/§13).
-	if k.isDelegatedAuth(a) {
-		return ErrUnauthorized.Wrap("delegated-OAuth actions are not served as manifests")
-	}
 	// Imported (remote_proxy) actions are never re-exported: a kernel serves manifests only for its
 	// own actions, so friendship stays non-transitive — reaching a peer's imported action requires
 	// friending its true owner directly (§13).
@@ -2579,8 +2593,8 @@ func (k *Kernel) exportable(a *Action) error {
 
 // ServedAbroad reports whether a peer may call this action at all. It is the same rule that decides
 // whether the action is described in a manifest, so a refusal tells a stranger exactly what the
-// catalogue already tells them and nothing more: absent, inactive, private, delegated-auth and
-// imported all read alike [→U48].
+// catalogue already tells them and nothing more: absent, inactive, private and imported all read
+// alike [→U48].
 func (k *Kernel) ServedAbroad(a *Action) bool { return a != nil && k.exportable(a) == nil }
 
 func (k *Kernel) GetActionManifest(ctx context.Context, actionID string) (*ActionManifest, error) {
@@ -2628,19 +2642,20 @@ func (k *Kernel) implementationHash(a *Action) string {
 // gossip can reuse one owner read across every manifest it serves.
 func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (*ActionManifest, error) {
 	m := &ActionManifest{
-		ActionID:     a.ID,
-		OwnerID:      owner.ID,
-		OwnerHandle:  owner.Handle,
-		Name:         a.Name,
-		Title:        a.Title,
-		RemoteBPS:    k.econ.RemoteBPS,
-		Description:  a.Description,
-		InputSchema:  a.InputSchema,
-		OutputSchema: a.OutputSchema,
-		Price:        a.Price,
-		Kind:         a.Kind,
-		ArtifactHash: k.implementationHash(a),
-		UpdatedAt:    a.UpdatedAt,
+		ActionID:      a.ID,
+		OwnerID:       owner.ID,
+		OwnerHandle:   owner.Handle,
+		Name:          a.Name,
+		Title:         a.Title,
+		RemoteBPS:     k.econ.RemoteBPS,
+		Description:   a.Description,
+		InputSchema:   a.InputSchema,
+		OutputSchema:  a.OutputSchema,
+		Price:         a.Price,
+		Kind:          a.Kind,
+		ArtifactHash:  k.implementationHash(a),
+		UpdatedAt:     a.UpdatedAt,
+		RequiresGrant: k.isDelegatedAuth(a),
 	}
 	sig, err := k.cfg.Network.SignManifest(k.cfg.SigningKey, m)
 	if err != nil {
@@ -2652,7 +2667,7 @@ func (k *Kernel) buildManifest(ctx context.Context, a *Action, owner *Account) (
 
 // CurrentContractHash returns the contract hash a peer would cache for this action — the same
 // remoteManifestHash the caller stored at resolve time (§8 If-Match). It errors for an action not
-// currently servable as a manifest (inactive, non-public, delegated-auth, remote_proxy); the inbound
+// currently servable as a manifest (inactive, non-public, remote_proxy); the inbound
 // handler then skips the explicit precondition and lets the non-executable path sign the rejection.
 func (k *Kernel) CurrentContractHash(ctx context.Context, actionID string) (string, error) {
 	m, err := k.GetActionManifest(ctx, actionID)
@@ -2808,4 +2823,247 @@ func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idem
 // ourKeyB64 is this kernel's own public key in the base64url form every payload names it by.
 func (k *Kernel) ourKeyB64() string {
 	return base64.RawURLEncoding.EncodeToString(k.cfg.SigningKey.Public().(ed25519.PublicKey))
+}
+
+// ---- Grants across kernels (D10) ----
+
+// originOf is the kernel a process's run began on, as a call from it says: this one for a process
+// begun here, else the kernel whose reference the process carries.
+func (k *Kernel) originOf(ctx context.Context, p *Process) string {
+	if p.OriginKernel == "" {
+		return k.SelfKey(ctx)
+	}
+	return p.OriginKernel
+}
+
+// askProcess puts one question or notice about a process to the kernel that owns it: "check" asks
+// whose it is, "register" holds it open for waiting work here, "release" ends that. A refusal is the
+// kernel's own error, final; a kernel that cannot be reached is ErrPeerUnreachable, to try again.
+// So is an answer that is no answer of its — a carrier's refusal, which names no error of the
+// kernel's. A check answers with the user that kernel names, and nobody when it names none.
+func (k *Kernel) askProcess(ctx context.Context, origin, kind, ref, regID string) (Principal, error) {
+	var reply struct {
+		UserID string `json:"user_id"`
+		Handle string `json:"handle"`
+		Code   string `json:"code"`
+		Error  string `json:"error"`
+	}
+	status := 0
+	if k.fedClient != nil {
+		var body []byte
+		status, body, _ = k.fedClient.SendProcess(ctx, origin, kind, ref, regID)
+		_ = json.Unmarshal(body, &reply)
+	}
+	if status == 0 || (status != 200 && reply.Code == "") {
+		return Principal{}, PeerUnreachableError(k.KernelName(ctx, origin))
+	}
+	if status != 200 {
+		if kind == "check" && reply.Code == ErrNotFound.Code {
+			return Principal{}, nil
+		}
+		return Principal{}, ErrorFromCode(reply.Code).Wrap(reply.Error)
+	}
+	return Principal{Kernel: origin, UserID: reply.UserID, Handle: reply.Handle}, nil
+}
+
+// ProcessOwnerFor answers a kernel that asks whose run a reference names (D10): the owner of the
+// open process, and only to a kernel that serves an action the owner holds a grant on — so a kernel
+// a run merely passes through learns nothing of who began it (U41).
+func (k *Kernel) ProcessOwnerFor(ctx context.Context, asker, ref string) (*Account, error) {
+	if k.holderSuspended(ctx, asker) {
+		return nil, ErrUnauthorized.Wrap("this kernel has suspended the peer")
+	}
+	ownerID, err := k.store.ProcessOwnerByRef(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	if holds, herr := k.store.HoldsGrantOn(ctx, ownerID, asker); herr != nil {
+		return nil, herr
+	} else if !holds {
+		return nil, ErrNotFound.Wrap("no open process has this reference")
+	}
+	return k.requireActiveUser(ctx, ownerID)
+}
+
+// RegisterWork and ReleaseWork answer a kernel that holds, or no longer holds, waiting work for a
+// process begun here (D2). They ride the authenticated connection, so asker is who it says it is.
+func (k *Kernel) RegisterWork(ctx context.Context, asker, ref, regID string) error {
+	// Holding the reference is the authority: a kernel further along a run need not be one this
+	// kernel has ever met. One it has suspended is refused all the same.
+	if k.holderSuspended(ctx, asker) {
+		return ErrUnauthorized.Wrap("this kernel has suspended the peer")
+	}
+	err := k.store.Register(ctx, ref, asker, regID, maxProcessRegistrations)
+	if err != nil {
+		k.log.With(ctx).Warn("process.registration_refused", "kernel", asker, "error", err)
+	}
+	return err
+}
+
+func (k *Kernel) ReleaseWork(ctx context.Context, asker, ref, regID string) error {
+	return k.store.Release(ctx, ref, asker, regID)
+}
+
+// EnsureRegistered is called before a served call's outcome is given out, first time or again: if
+// its process is still open, the kernel the run began on must hold that process's work registered
+// first, so the two are never both unprotected (D2). Only that kernel being out of reach is an
+// error, and the outcome waits for it; its refusal is final: the work loses its grantor when that
+// process closes.
+func (k *Kernel) EnsureRegistered(ctx context.Context, processID string) error {
+	p, err := k.store.ReadProcess(ctx, processID)
+	if err != nil || p.OriginKernel == "" || p.Ref == "" || p.Status != ProcessOpen {
+		return nil
+	}
+	if p.OriginKernel == k.SelfKey(ctx) {
+		err = k.RegisterWork(ctx, p.OriginKernel, p.Ref, p.ID)
+	} else {
+		_, err = k.askProcess(ctx, p.OriginKernel, "register", p.Ref, p.ID)
+	}
+	if errors.Is(err, ErrPeerUnreachable) {
+		return err
+	}
+	if err != nil {
+		k.log.With(ctx).Warn("process.registration_refused", "process_id", p.ID, "error", err)
+		return nil
+	}
+	return k.store.SetRegistered(ctx, p.ID, 1)
+}
+
+// ReleaseClosedProcesses tells each kernel that holds a now-closed process of ours registered that
+// it closed, until it has heard. Driven by the remote-retry loop.
+func (k *Kernel) ReleaseClosedProcesses(ctx context.Context) {
+	ps, err := k.store.ListUnreleasedProcesses(ctx)
+	if err != nil {
+		return
+	}
+	for _, p := range ps {
+		if p.OriginKernel == k.SelfKey(ctx) {
+			err = k.ReleaseWork(ctx, p.OriginKernel, p.Ref, p.ID)
+		} else {
+			_, err = k.askProcess(ctx, p.OriginKernel, "release", p.Ref, p.ID)
+		}
+		if !errors.Is(err, ErrPeerUnreachable) {
+			_ = k.store.SetRegistered(ctx, p.ID, 2)
+		}
+	}
+}
+
+// GrantOp is one grant operation a kernel forwards for a user of its own to the kernel that serves
+// the actions it names (D10), signed whole. Timestamp is in nanoseconds: it is also the operation's
+// place in that user's sequence, and the receiver refuses one older than the newest it applied.
+type GrantOp struct {
+	Kind         string `json:"kind"` // plan | start | complete | token | disconnect
+	Counterparty string `json:"counterparty"`
+	Recipient    string `json:"recipient"`
+	Timestamp    string `json:"timestamp"`
+	ForUserID    string `json:"for_user_id"`
+	ForHandle    string `json:"for_handle"`
+	Selector     string `json:"selector,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	RedirectURI  string `json:"redirect_uri,omitempty"`
+	Flow         string `json:"flow,omitempty"`
+	State        string `json:"state,omitempty"`
+	Code         string `json:"code,omitempty"`
+	Token        string `json:"token,omitempty"`
+	Account      string `json:"account,omitempty"`
+}
+
+// SignGrantOp signs a grant operation whole, as the kernel that forwards it.
+func (n Network) SignGrantOp(key ed25519.PrivateKey, op GrantOp) (string, error) {
+	return n.sign(key, sigDomainGrant, op)
+}
+
+// AdmitGrantOp verifies a forwarded grant operation and returns the principal it acts for: signed
+// by the kernel on the connection, for this kernel, naming a user by id and handle. Anything but a
+// read is placed in that user's sequence, which refuses it if a newer one was applied.
+func (k *Kernel) AdmitGrantOp(ctx context.Context, peerKey string, op GrantOp, signature string) (Principal, error) {
+	pub, err := decodeRemotePublicKey(peerKey)
+	if err != nil {
+		return Principal{}, err
+	}
+	at, terr := time.Parse(time.RFC3339Nano, op.Timestamp)
+	if terr != nil || op.Counterparty != peerKey || op.Recipient != k.SelfKey(ctx) || op.ForUserID == "" || op.ForHandle == "" {
+		return Principal{}, ErrUnauthenticated.Wrap("grant operation is not addressed to this kernel for a named user")
+	}
+	if err := k.cfg.Network.verify(pub, sigDomainGrant, op, signature); err != nil {
+		return Principal{}, err
+	}
+	if err := k.KnowKernel(ctx, peerKey); err != nil {
+		return Principal{}, err
+	}
+	p := Principal{Kernel: peerKey, UserID: op.ForUserID, Handle: op.ForHandle}
+	if err := k.requireGrantor(ctx, p); err != nil {
+		return Principal{}, err
+	}
+	if op.Kind != "plan" {
+		if err := k.store.ApplyGrantOp(ctx, peerKey, op.ForUserID, at.UnixNano()); err != nil {
+			return Principal{}, err
+		}
+	}
+	return p, nil
+}
+
+// ForwardGrant sends a user's grant operation to the kernel that serves the actions it names, and
+// keeps this kernel's own record of the user's grants there in step (D10): a grant row on each
+// action's cached copy, holding no credential — what `user me` lists, and what refuses a call before
+// funds lock. A disconnect by selector removes those rows first, so it takes effect here even when
+// the other kernel cannot be reached; it is not sent again by itself. The reply is the serving
+// kernel's own, with the actions it names rewritten as this kernel names them.
+func (k *Kernel) ForwardGrant(ctx context.Context, userID, kernelKey string, op GrantOp) (int, map[string]any, error) {
+	user, err := k.requireActiveUser(ctx, userID)
+	if err != nil {
+		return 0, nil, err
+	}
+	if k.fedClient == nil {
+		return 0, nil, ErrInvalidState.Wrap("federation transport not running")
+	}
+	if op.Kind == "disconnect" && op.Selector != "" {
+		sel, perr := ParseAddress(strings.TrimSuffix(strings.TrimSpace(op.Selector), "/*"))
+		if perr != nil {
+			return 0, nil, perr
+		}
+		grants, _ := k.store.ListGrantsByUser(ctx, User(userID))
+		for _, g := range grants {
+			if a, aerr := k.store.ReadAction(ctx, g.ActionID); aerr == nil && a.OwnerKernel == kernelKey &&
+				a.OwnerHandle == sel.Handle && selectorPathMatches(sel.Name, a.Name) {
+				_ = k.store.DeleteGrant(ctx, User(userID), a.ID)
+			}
+		}
+	}
+	op.Counterparty, op.Recipient, op.ForUserID, op.ForHandle = k.SelfKey(ctx), kernelKey, user.ID, user.Handle
+	op.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	sig, err := k.cfg.Network.SignGrantOp(k.cfg.SigningKey, op)
+	if err != nil {
+		return 0, nil, err
+	}
+	status, raw, err := k.fedClient.SendGrant(ctx, kernelKey, op, sig)
+	if err != nil {
+		pn := k.KernelName(ctx, kernelKey)
+		return 0, nil, PeerUnreachableError(pn).Wrapf("%s could not be reached; run the command again when it can", pn)
+	}
+	var body map[string]any
+	if json.Unmarshal(raw, &body) != nil || status != 200 {
+		return status, body, nil
+	}
+	for _, field := range []string{"actions", "revoked"} {
+		refs, _ := body[field].([]any)
+		for i, r := range refs {
+			addr, perr := ParseAddress(fmt.Sprint(r))
+			if perr != nil {
+				continue
+			}
+			a, rerr := k.ResolveAction(ctx, addr.Handle+"@"+kernelKey+"/"+addr.Name)
+			if rerr != nil || a == nil {
+				continue
+			}
+			if field == "revoked" {
+				_ = k.store.DeleteGrant(ctx, User(userID), a.ID)
+			} else if gerr := k.store.CreateOrReplaceGrant(ctx, &Grant{ID: uuid.New().String(), GrantorUserID: userID,
+				ActionID: a.ID, CreatedAt: time.Now().UTC()}, a.UpdatedAt); gerr != nil {
+				return 0, nil, gerr
+			}
+			refs[i] = k.ActionAddress(ctx, a)
+		}
+	}
+	return status, body, nil
 }

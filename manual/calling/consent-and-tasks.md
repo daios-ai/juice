@@ -16,7 +16,9 @@ explains how to give and revoke consent, and how to complete assigned work.
 An upstream service is the external system an action accesses while doing its
 work. For a personal mailbox, calendar, or repository, the action needs a
 credential for your account on that service. Connecting the account grants
-specified actions permission to use it when you pay for their execution.
+specified actions permission to use it in processes you own, including calls
+made for you by other actions. The same connection commands work whether the
+application is on your kernel or another kernel.
 
 If a required consent is absent, the call is rejected before charging and
 identifies what you need to connect:
@@ -80,8 +82,10 @@ $ juice user me
 
 The `connections` list shows the upstream accounts stored for you, including
 accounts no longer used by any action. The `connectors` view groups the actions
-you have authorized by directory. These views contain no credentials; the
-kernel also excludes credentials from call inputs, outputs, logs, and receipts.
+you have authorized by directory. Grants held on another kernel appear by
+action and date, without a local provider key or connection. These views contain
+no credentials; the kernel also excludes credentials from call inputs, outputs,
+logs, and receipts.
 To revoke access for a selection of actions, use:
 
 ```console
@@ -92,16 +96,34 @@ $ juice user disconnect bob@acme/mail
 ```
 
 To remove the saved upstream account and all grants using it, use
-`user disconnect --account <provider_key>`.
+`user disconnect --account <provider_key>`. For an account held on another
+kernel, use `user disconnect --account <provider_key>@<kernel>` if you know
+the provider key. Otherwise, disconnect the remote application by selector,
+as above; `user me` lists the action names you can use.
 
-A grant authorizes a particular action when you are the payer. If that action
-calls another, the second action needs its own grant. Delegated credentials
-are not sent across federation or exposed to sandboxed code.
+Disconnecting by selector removes your local record at once, so your kernel
+refuses further direct calls to those actions. If the application's kernel
+cannot be reached, repeat the command when it is available. Revocation through
+other actions takes full effect when that kernel confirms it. Disconnecting
+a whole remote account removes the local records after confirmation.
+
+A grant authorizes a particular action within your process. If that action
+calls another, the second action needs its own grant. The application's kernel
+stores the credential and applies it to requests to the upstream service;
+intermediate kernels and composing actions do not receive it. An action serving
+your run uses your grant, never its owner's grant.
+
+Your kernel must be reachable when an application on another kernel checks
+your grant. If it cannot be reached, that use is refused; your consent remains.
 
 Changes to the action's source, schemas, or price revoke its grants, as do
 credential replacement and deletion. Disabling the action or changing its
 title or description alone does not revoke them. After revocation, reconnect
-before using the action with your upstream account again.
+before using the action with your upstream account again. If a remote
+application has revoked a grant, a call to it reports the missing grant.
+When the call is made from your kernel, including by a local composing action,
+it also removes the local entry from `user me`. A direct call is refunded in
+full; inside a composing action, work already delivered remains paid.
 
 ## Completing work addressed to you
 

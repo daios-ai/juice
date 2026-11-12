@@ -1553,3 +1553,235 @@ flow_compose_cycle() {
     assert_jnum "compose_cycle.l_books" "$(jj "$FED_DBL" "$FED_HL" admin kernel show)" gap 0
     assert_jnum "compose_cycle.r_books" "$(jj "$FED_DBR" "$FED_HR" admin kernel show)" gap 0
 }
+
+# ---------------------------------------------------------------------------
+# Grants across kernels (D10). An application that needs its caller's own account is used from
+# another kernel exactly as from its own: one sign-up, by the same command, and from then on the
+# application knows the user however the run reaches it. The upstream names the account it was
+# reached as, so a flow reads who was recognised and no output ever carries a credential.
+# ---------------------------------------------------------------------------
+GRANT_AUTH='{"scheme":"delegated_bearer","config":{"header":"X-Api-Key","template":"{token}"}}'
+GRANT_TOKENS="tok-alice=alice-acct,tok-bob=bob-acct,tok-owner=owner-acct,tok-home=alice-home"
+
+# _grant_app db home name port [price] — publish an action that acts on its caller's own account.
+_grant_app() {
+    publish "$1" "$2" "$3" --kind http --source "http://127.0.0.1:$4/api" --price "$(units "${5:-0}")" \
+        --description "acts on the caller's own account" --auth "$GRANT_AUTH" >/dev/null
+}
+# _grant_setup dir — L and R, an account upstream, R's two-action application `vault`, and alice and
+# bob on L. Sets GRANT_PORT GRANT_HA GRANT_HB.
+_grant_setup() {
+    local dir="$1"
+    FED_RCFG=(remote_retry_interval_seconds=2); FED_LCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || return 1
+    GRANT_PORT=$(backend_port); start_account_backend "$GRANT_PORT" X-Api-Key "$GRANT_TOKENS" || return 1
+    _grant_app "$FED_DBR" "$FED_HR" vault/read "$GRANT_PORT" || return 1
+    _grant_app "$FED_DBR" "$FED_HR" vault/send "$GRANT_PORT" || return 1
+    GRANT_HA=$(home "$dir" alice); GRANT_HB=$(home "$dir" bob)
+    make_user "$FED_DBL" "$FED_HL" "$GRANT_HA" alice
+    make_user "$FED_DBL" "$FED_HL" "$GRANT_HB" bob
+    deposit "$FED_DBL" "$FED_HL" alice 5000
+    deposit "$FED_DBL" "$FED_HL" bob 5000
+}
+# _acct db home ref — the account a run of ref reached, "" when it reached none.
+_acct() { resultf "$(jj "$1" "$2" run "$3" '{}' 2>/dev/null)" account; }
+
+flow_grant_remote() {
+    echo "=== FLOW grant_remote ==="
+    local dir; dir=$(new_dir)
+    _grant_setup "$dir" || { fail "grant_remote.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha="$GRANT_HA" hb="$GRANT_HB"
+
+    # Before sign-up: the application is found and says what it needs; a call is refused before
+    # anything moves, and its kernel never hears of it.
+    assert_contains "grant_remote.says_a_grant_is_needed" '"requires_grant": true' "$(jj "$L" "$ha" action show sys@kernel-r/vault/read | python3 -m json.tool)"
+    await_eq "grant_remote.found_by_lookup" yes has_lookup "$L" "$ha" "acts on the caller" vault/read
+    local served; served=$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")
+    assert_fails "grant_remote.refused_before_signup" "grant" -- j "$L" "$ha" run sys@kernel-r/vault/read '{}'
+    assert_eq "grant_remote.nothing_charged" 5000 "$(balance_of "$L" "$ha")"
+    assert_eq "grant_remote.serving_kernel_never_asked" "$served" "$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")"
+
+    # One sign-up, by the command a local application takes, covers the directory.
+    local out; out=$(j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice 2>&1)
+    assert_contains "grant_remote.connected" "vault/read" "$out"
+    assert_eq "grant_remote.read_as_alice" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
+    assert_eq "grant_remote.send_as_alice" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/send)"
+    local me; me=$(j "$L" "$ha" user me)
+    assert_contains "grant_remote.listed_read" "sys@kernel-r/vault/read" "$me"
+    assert_contains "grant_remote.listed_send" "sys@kernel-r/vault/send" "$me"
+    # The credential appears in nothing either kernel shows anyone.
+    local shown; shown="$out $me $(jj "$L" "$ha" tx list) $(jj "$L" "$ha" run sys@kernel-r/vault/read '{}') $(jj "$R" "$FED_HR" tx list) $(jj "$R" "$FED_HR" user me)"
+    assert_not_contains "grant_remote.token_shown_nowhere" "tok-alice" "$shown"
+
+    # A grant is one user's: the next user is refused until they sign up, then is themselves.
+    assert_fails "grant_remote.second_user_refused" "grant" -- j "$L" "$hb" run sys@kernel-r/vault/read '{}'
+    j "$L" "$hb" user connect sys@kernel-r/vault/read --token tok-bob >/dev/null 2>&1
+    assert_eq "grant_remote.read_as_bob" bob-acct "$(_acct "$L" "$hb" sys@kernel-r/vault/read)"
+    assert_eq "grant_remote.alice_still_alice" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
+    assert_fails "grant_remote.grant_is_per_action" "grant" -- j "$L" "$hb" run sys@kernel-r/vault/send '{}'
+}
+
+# has_lookup db home query name — 'yes' when this kernel's lookup for query names an action.
+has_lookup() {
+    case "$(jj "$1" "$2" run "sys@$(kname "$1")/lookup" "{\"query\":\"$3\"}" 2>/dev/null)" in *"$4"*) echo yes;; *) echo no;; esac
+}
+
+# The user is recognised through an action that calls the application for them, wherever that action
+# is hosted: on the user's kernel, on the application's, on a third, and — for an application on the
+# user's own kernel — through an action elsewhere. Nobody else's credential ever stands in.
+flow_grant_remote_compose() {
+    echo "=== FLOW grant_remote_compose ==="
+    local dir; dir=$(new_dir)
+    _grant_setup "$dir" || { fail "grant_compose.setup" "setup failed"; return; }
+    _fed_chain "$dir" 0 0 || { fail "grant_compose.chain" "chain setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" T="$FED3_DBT" ha="$GRANT_HA" hb="$GRANT_HB"
+
+    # T meets R and L by name, as an operator names the kernels it deals with.
+    local i
+    for i in $(seq 1 20); do j "$T" "$FED3_HT" run "sys@$FED_RKEY/greet" '{}' >/dev/null 2>&1 && break; sleep 1; done
+    j "$T" "$FED3_HT" admin peer rename -- "$FED_RKEY" kernel-r >/dev/null 2>&1
+    _grant_app "$L" "$FED_HL" hvault "$GRANT_PORT"
+    for i in $(seq 1 20); do j "$T" "$FED3_HT" action show "sys@$FED_LKEY/hvault" >/dev/null 2>&1 && break; sleep 1; done
+    j "$T" "$FED3_HT" admin peer rename -- "$FED_LKEY" kernel-l >/dev/null 2>&1
+
+    make_contractor_wasm "$dir/via.wasm" "sys@kernel-r/vault/read"
+    make_contractor_wasm "$dir/homeward.wasm" "sys@kernel-l/hvault"
+    publish "$L" "$FED_HL" viahome  --kind wasm --source "$dir/via.wasm" --description "calls the vault" --price "$(units 0)" >/dev/null
+    publish "$R" "$FED_HR" viaapp   --kind wasm --source "$dir/via.wasm" --description "calls the vault" --price "$(units 0)" >/dev/null
+    publish "$T" "$FED3_HT" viathird --kind wasm --source "$dir/via.wasm" --description "calls the vault" --price "$(units 0)" >/dev/null
+    publish "$T" "$FED3_HT" homeward --kind wasm --source "$dir/homeward.wasm" --description "calls home" --price "$(units 0)" >/dev/null
+    # The owner of the action at the application is signed up too. That is theirs alone.
+    j "$R" "$FED_HR" user connect sys@kernel-r/vault --token tok-owner >/dev/null 2>&1
+    assert_eq "grant_compose.owner_is_owner" owner-acct "$(_acct "$R" "$FED_HR" sys@kernel-r/vault/read)"
+
+    j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1
+    j "$L" "$ha" user connect sys@kernel-l/hvault --token tok-home >/dev/null 2>&1
+    assert_eq "grant_compose.through_her_own_kernel" alice-acct "$(_acct "$L" "$ha" sys@kernel-l/viahome)"
+    assert_eq "grant_compose.through_the_applications_kernel" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/viaapp)"
+    assert_eq "grant_compose.through_a_third_kernel" alice-acct "$(_acct "$L" "$ha" "sys@$FED3_TKEY/viathird")"
+    assert_eq "grant_compose.home_again_through_a_third" alice-home "$(_acct "$L" "$ha" "sys@$FED3_TKEY/homeward")"
+
+    # bob has signed up to nothing: every route fails, and none lends him another's account.
+    local ref
+    for ref in sys@kernel-l/viahome sys@kernel-r/viaapp "sys@$FED3_TKEY/viathird" "sys@$FED3_TKEY/homeward"; do
+        assert_eq "grant_compose.no_grant_no_account:${ref##*/}" "" "$(_acct "$L" "$hb" "$ref")"
+    done
+}
+
+# An action on another kernel leaves work waiting and returns. The user's process stays open for it,
+# so the work still reaches the application as the user when it completes later; then the process
+# closes. Ending the process first ends that, and signing up while the work waits is enough.
+flow_grant_remote_waiting() {
+    echo "=== FLOW grant_remote_waiting ==="
+    local dir; dir=$(new_dir)
+    _grant_setup "$dir" || { fail "grant_waiting.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha="$GRANT_HA" hb="$GRANT_HB"
+    make_parker_wasm "$dir/later.wasm" "sys@kernel-r/vault/read" "sys@kernel-r"
+    publish "$R" "$FED_HR" later --kind wasm --source "$dir/later.wasm" --description "does it later" --price "$(units 0)" >/dev/null
+    j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1
+
+    # _park home — run the parker; echo "<the user's process> <the task it left at R>".
+    _park() {
+        local before pid
+        before=$(jj "$R" "$FED_HR" task list | python3 -c "import sys,json;print(' '.join(t['id'] for t in json.load(sys.stdin)))")
+        pid=$(strfield "$(jj "$L" "$1" run sys@kernel-r/later '{}')" process_id)
+        echo "$pid $(jj "$R" "$FED_HR" task list | python3 -c "
+import sys,json
+print(next((t['id'] for t in json.load(sys.stdin) if t['id'] not in sys.argv[1].split() and t.get('status')=='waiting'), ''))" "$before")"
+    }
+    _open() { strfield "$(jj "$L" "$2" process show "$1")" status; }
+
+    local pid task
+    read -r pid task <<<"$(_park "$ha")"
+    assert_nonempty "grant_waiting.work_left_waiting" "$task"
+    assert_eq "grant_waiting.process_stays_open" open "$(_open "$pid" "$ha")"
+    assert_contains "grant_waiting.process_is_listed" "$pid" "$(jj "$L" "$ha" process list)"
+    assert_eq "grant_waiting.completed_later_as_alice" alice-acct "$(resultf "$(jj "$R" "$FED_HR" task complete "$task" '{}')" account)"
+    await_eq "grant_waiting.process_closes_when_told" closed _open "$pid" "$ha"
+
+    # Ending the process ends what its waiting work may do as her.
+    read -r pid task <<<"$(_park "$ha")"
+    j "$L" "$ha" process end "$pid" >/dev/null 2>&1
+    assert_eq "grant_waiting.process_ended" closed "$(_open "$pid" "$ha")"
+    assert_fails "grant_waiting.ended_work_is_not_her" "grant" -- j "$R" "$FED_HR" task complete "$task" '{}'
+
+    # bob begins the work first and signs up while it waits.
+    read -r pid task <<<"$(_park "$hb")"
+    j "$L" "$hb" user connect sys@kernel-r/vault/read --token tok-bob >/dev/null 2>&1
+    assert_eq "grant_waiting.signed_up_while_waiting" bob-acct "$(resultf "$(jj "$R" "$FED_HR" task complete "$task" '{}')" account)"
+}
+
+# Disconnecting takes effect on the user's own kernel at once — by selector, or the whole account
+# named where it is held — and when the other kernel cannot be reached the command says it must be
+# run again. A sign-up made afterwards stands.
+flow_grant_remote_disconnect() {
+    echo "=== FLOW grant_remote_disconnect ==="
+    local dir; dir=$(new_dir)
+    _grant_setup "$dir" || { fail "grant_disconnect.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha="$GRANT_HA"
+    _signed_up() { j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1; _acct "$L" "$ha" sys@kernel-r/vault/read; }
+    _refused_here() {
+        local served; served=$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")
+        assert_fails "$1.refused" "grant" -- j "$L" "$ha" run sys@kernel-r/vault/read '{}'
+        assert_eq "$1.no_call_sent" "$served" "$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")"
+        assert_not_contains "$1.no_longer_listed" "vault/read" "$(j "$L" "$ha" user me)"
+    }
+
+    assert_eq "grant_disconnect.signed_up" alice-acct "$(_signed_up)"
+    j "$L" "$ha" user disconnect sys@kernel-r/vault >/dev/null 2>&1
+    _refused_here grant_disconnect.by_selector
+
+    assert_eq "grant_disconnect.signed_up_again" alice-acct "$(_signed_up)"
+    j "$L" "$ha" user disconnect --account "bearer:127.0.0.1:${GRANT_PORT}@kernel-r" >/dev/null 2>&1
+    _refused_here grant_disconnect.by_account
+    # The credential went with the account: an instant re-grant has nothing to stand on.
+    assert_fails "grant_disconnect.credential_gone" "token\|connection" -- j "$L" "$ha" user connect sys@kernel-r/vault --token ""
+
+    # The other kernel is down: the disconnect still holds here, and says to run it again.
+    assert_eq "grant_disconnect.signed_up_once_more" alice-acct "$(_signed_up)"
+    stop_server "$R"
+    assert_fails "grant_disconnect.unreachable_says_run_again" "again" -- j "$L" "$ha" user disconnect sys@kernel-r/vault
+    assert_fails "grant_disconnect.unreachable_still_refused_here" "grant" -- j "$L" "$ha" run sys@kernel-r/vault/read '{}'
+    # It returns at the address its peer knows it by, as a deployed kernel's restart does.
+    local port="${FED_BOOT#*/tcp/}"; port="${port%%/*}"
+    start_server "$R" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 remote_retry_interval_seconds=2 \
+        fed_listen_addrs="/ip4/127.0.0.1/tcp/$port" || { fail "grant_disconnect.restart" "R did not restart"; return; }
+    await_login "$R" "$FED_HR" || { fail "grant_disconnect.provider_up" "not serving after restart"; return; }
+    local i ok=no
+    for i in $(seq 1 30); do j "$L" "$ha" user disconnect sys@kernel-r/vault >/dev/null 2>&1 && { ok=yes; break; }; sleep 1; done
+    assert_eq "grant_disconnect.run_again_reaches_it" yes "$ok"
+    # What follows a disconnect is not undone by it.
+    assert_eq "grant_disconnect.later_signup_stands" alice-acct "$(_signed_up)"
+    assert_eq "grant_disconnect.and_still_stands" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
+}
+
+# The application changes, which revokes what was consented to. The user's kernel learns it at the
+# next call: refused for want of a grant, nothing charged, the action still there to sign up to again.
+flow_grant_remote_stale() {
+    echo "=== FLOW grant_remote_stale ==="
+    local dir; dir=$(new_dir)
+    FED_RCFG=(remote_retry_interval_seconds=2); FED_LCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "grant_stale.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" port ha; port=$(backend_port); ha=$(home "$dir" alice)
+    start_account_backend "$port" X-Api-Key "$GRANT_TOKENS" || { fail "grant_stale.backend" "backend failed"; return; }
+    j "$R" "$FED_HR" admin user deposit sys@kernel-r "$(units 50000)" --ref "$(newref)" --yes >/dev/null 2>&1
+    _grant_app "$R" "$FED_HR" vault/read "$port" 1000
+    make_user "$L" "$FED_HL" "$ha" alice
+    deposit "$L" "$FED_HL" alice 50000
+    j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1
+    assert_eq "grant_stale.signed_up" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
+
+    local rid; rid=$(strfield "$(jj "$R" "$FED_HR" action show sys@kernel-r/vault/read)" id)
+    j "$R" "$FED_HR" action update "$rid" --source "http://127.0.0.1:$port/v2" >/dev/null 2>&1
+    j "$R" "$FED_HR" action enable "$rid" >/dev/null 2>&1
+    local funds out="" i; funds=$(balance_of "$L" "$ha")
+    # The first call may only learn the terms moved; the one after is refused for the grant.
+    for i in 1 2 3 4; do out=$(j "$L" "$ha" run sys@kernel-r/vault/read '{}' 2>&1); case "$out" in *rant*) break;; esac; done
+    assert_contains "grant_stale.refused_for_the_grant" "rant" "$out"
+    assert_eq "grant_stale.nothing_charged" "$funds" "$(balance_of "$L" "$ha")"
+    assert_not_contains "grant_stale.no_longer_listed" "vault/read" "$(j "$L" "$ha" user me)"
+    assert_json "grant_stale.action_still_there" "$(jj "$L" "$ha" action show sys@kernel-r/vault/read)" name vault/read
+    j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1
+    assert_eq "grant_stale.signed_up_again" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
+    assert_eq "grant_stale.paid_for_what_ran" yes "$([ "$(balance_of "$L" "$ha")" -lt "$funds" ] && echo yes || echo no)"
+}

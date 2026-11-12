@@ -208,10 +208,20 @@ your own experience and the independently recorded history of trade.
 ## Retention
 
 The kernel retains peers with recent activity, suspended status, or unresolved
-work in either direction. After an eligible peer has been idle beyond
+work in either direction. A peer is also retained while its users hold upstream
+connections here, or local users hold grants on its actions. After an eligible
+peer has been idle beyond
 `peer_retention_days`, its cached actions, statistics, discovery entries, and
 evidence can be removed with its peer record.
 
 The associated account remains as a reference for historical transactions and
 ledger entries. Removing cached peer information therefore does not remove
 the immutable financial history.
+
+## Remote account connections
+
+A kernel accepts up to 10,000 upstream account connections for users of other
+kernels, with at most 1,000 from any one kernel. Connections from suspended
+kernels still count. Further connections are refused when either limit is
+reached. There is no operator command to clear another kernel's users'
+connections.

@@ -300,6 +300,10 @@ type BuyerTerms struct {
 	// them (P4): the principal this kernel records as the caller, on the buyer's kernel.
 	CallerUserID string
 	CallerHandle string
+	// ProcessKernel and ProcessRef are where the buyer says the run began (D10), unsigned: they
+	// claim nothing this kernel takes on trust, since it asks that kernel itself.
+	ProcessKernel string
+	ProcessRef    string
 	// IdempotencyKey is the call's own name, as the buyer signed it. It is frozen with the rest of
 	// the admitted terms so every receipt this kernel signs for the call names the request it
 	// answers (P4, P5).

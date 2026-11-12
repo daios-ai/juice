@@ -42,6 +42,10 @@ type callRequest struct {
 	// BeginRun (root call) or BeginTaskCall (task completion). Call adopts it instead of
 	// calling BeginSubcall, and uses its pre-locked amount as gross.
 	ExistingTraceID string
+	// Grantor, when non-nil, is what beginRun's precondition check found before it funded the root
+	// trace. Call takes it and does not check again: a second answer could differ from the first,
+	// and a refusal after funding would leave the funds locked under no transaction.
+	Grantor *Principal
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -556,12 +560,14 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		}
 	}
 
-	// 5 + 6. Liveness, visibility, and input-schema validation, enforced for every path (root,
-	// task, subcall). The pre-resolved snapshot (req.Action) is validated, so root calls are
-	// checked here too with no extra DB read and no TOCTOU window — Call is the single validity
-	// function; no entry path bypasses it (beginRun runs the same check before funding). A task
-	// completion (req.TaskID != "") bound visibility at creation (§10), so it skips that check.
-	if err := k.checkCallPreconditions(ctx, caller, process.OwnerUserID, action, req.Args, req.TaskID == "", ""); err != nil {
+	// 5 + 6. Liveness, visibility, input-schema validation and the grant, enforced for every path:
+	// here for a subcall and a task completion, and by beginRun for a root call, on the same
+	// snapshot and before it funds (req.Grantor). A task completion (req.TaskID != "") bound
+	// visibility at creation (§10), so it skips that check.
+	var grantor Principal
+	if req.Grantor != nil {
+		grantor = *req.Grantor
+	} else if grantor, err = k.checkCallPreconditions(ctx, caller, process, action, req.Args, req.TaskID == "", ""); err != nil {
 		return nil, err
 	}
 
@@ -719,6 +725,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		fr, _ := fe.ExecuteFederation(ctx, action.OwnerKernel, OutboundCall{
 			ActionID: action.RemoteActionID, ExpectedContractHash: action.ArtifactHash, IdempotencyKey: ikey,
 			Commitment: commitmentOf(d.Secret), Lottery: d.Lottery, CallerUserID: d.CallerUserID, CallerHandle: d.CallerHandle,
+			ProcessKernel: k.originOf(ctx, process), ProcessRef: process.Ref,
 		}, req.Args)
 		latency := time.Since(started).Seconds()
 		ktx.EndedAt = time.Now().UTC()
@@ -736,7 +743,7 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, mp, fr, latency)
 	}
 
-	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, localID(caller), process.OwnerUserID)
+	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, localID(caller), process.OwnerUserID, grantor)
 	latency := time.Since(started).Seconds()
 	ktx.EndedAt = time.Now().UTC()
 
@@ -896,17 +903,18 @@ func canCall(caller Principal, action *Action) bool {
 // for every entry path, and beginRun runs it once before funding so an invalid root call never
 // creates a funded process (§6). checkVisibility is false only for a task completion, which bound
 // visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
-// change does not. The grant check stays keyed on the process owner: delegated consent binds to the
-// paying human (§8). quoteHash is empty on every path but a pinned root run.
-func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, processOwnerID string, action *Action, args map[string]any, checkVisibility bool, quoteHash string) error {
+// change does not. The grant check stays keyed on the process: delegated consent binds to whoever
+// began the run it serves (§8), and the grantor it finds is returned for the executor. quoteHash is
+// empty on every path but a pinned root run.
+func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, p *Process, action *Action, args map[string]any, checkVisibility bool, quoteHash string) (Principal, error) {
 	if !action.Active {
-		return ErrInvalidState.Wrap("action is inactive")
+		return Principal{}, ErrInvalidState.Wrap("action is inactive")
 	}
 	if action.OwnerSuspended {
-		return ErrInvalidState.Wrap("action owner is suspended")
+		return Principal{}, ErrInvalidState.Wrap("action owner is suspended")
 	}
 	if checkVisibility && !canCall(caller, action) {
-		return ErrUnauthorized.Wrap("call permission denied")
+		return Principal{}, ErrUnauthorized.Wrap("call permission denied")
 	}
 	// After visibility, so a mismatch never discloses a private action's terms; before input
 	// validation, so terms that changed enough to invalidate the args still report as changed terms
@@ -915,41 +923,70 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, p
 	// for a pin nobody supplied is pure waste.
 	if quoteHash != "" {
 		if cur := QuoteHash(action); quoteHash != cur {
-			return TermsChangedError(k.cfg.Network, cur, action.Price)
+			return Principal{}, TermsChangedError(k.cfg.Network, cur, action.Price)
 		}
 	}
 	if err := ValidateInput(action.InputSchema, args); err != nil {
-		return err
+		return Principal{}, err
 	}
-	return k.checkGrantRequired(ctx, processOwnerID, action)
+	return k.checkGrantRequired(ctx, p, action)
 }
 
-// checkGrantRequired implements §8 lazy consent: a call to a delegated http action (oauth_delegated
-// or delegated_bearer) whose process owner holds no matching grant is rejected here — before any
-// funds are locked and before any transaction exists (a precondition rejection creates no
-// transaction, §6, and does not dent the provider's failure stats, §9). Non-delegated actions pass
-// through untouched. An undecryptable or malformed auth payload is left for the executor's
-// fail-closed path, not treated as consent.
-func (k *Kernel) checkGrantRequired(ctx context.Context, ownerID string, action *Action) error {
-	if action.Kind != KindHTTP || action.AuthJSON == "" || k.secretBox == nil {
-		return nil
-	}
-	auth, err := k.openAuthInput(action)
-	if err != nil || auth == nil || !isDelegatedScheme(auth.Scheme) {
-		return nil
-	}
-	if _, gerr := k.store.ReadGrant(ctx, ownerID, action.ID); gerr != nil {
-		if errors.Is(gerr, ErrNotFound) {
-			return GrantRequiredError(k.ActionAddress(ctx, action))
+// checkGrantRequired implements §8 lazy consent: a call to an action that needs its caller's grant,
+// in a process whose grantor holds none, is rejected here — before any funds are locked and before
+// any transaction exists (a precondition rejection creates no transaction, §6, and does not dent the
+// provider's failure stats, §9). Other actions pass through untouched. It returns the grantor whose
+// credential the executor applies.
+//
+// An action here needs one by its auth scheme; an undecryptable or malformed auth payload is left
+// for the executor's fail-closed path, not treated as consent. A cached remote action needs one by
+// its manifest: in a run begun here the owner's own record of consent is read, so the refusal costs
+// nothing, while in a run begun elsewhere only the serving kernel can decide and the call goes on.
+func (k *Kernel) checkGrantRequired(ctx context.Context, p *Process, action *Action) (Principal, error) {
+	if action.Kind == KindRemoteProxy {
+		if !action.RequiresGrant || p.OriginKernel != "" {
+			return Principal{}, nil
 		}
-		return gerr
+	} else if !k.isDelegatedAuth(action) {
+		return Principal{}, nil
 	}
-	return nil
+	grantor, err := k.grantorOf(ctx, p)
+	if err != nil {
+		return Principal{}, err
+	}
+	if grantor.UserID != "" {
+		if _, gerr := k.store.ReadGrant(ctx, grantor, action.ID); gerr == nil {
+			return grantor, nil
+		} else if !errors.Is(gerr, ErrNotFound) {
+			return Principal{}, gerr
+		}
+	}
+	return Principal{}, GrantRequiredError(k.ActionAddress(ctx, action))
+}
+
+// grantorOf is whose grants a process's calls consult (D10): the owner of a process begun here; for
+// one serving another kernel's call, the user that kernel says began the run — asked each time,
+// never remembered, since only it knows whether that process is still open (D2). It is never the
+// served action's own owner. Nobody is an answer; a kernel that cannot be reached is an error.
+func (k *Kernel) grantorOf(ctx context.Context, p *Process) (Principal, error) {
+	switch {
+	case p.OriginKernel == "":
+		return User(p.OwnerUserID), nil
+	case p.OriginKernel == k.SelfKey(ctx):
+		owner, err := k.store.ProcessOwnerByRef(ctx, p.Ref)
+		if errors.Is(err, ErrNotFound) {
+			return Principal{}, nil
+		}
+		return User(owner), err
+	case p.Ref == "" || k.requireActiveKernel(ctx, p.OriginKernel) != nil:
+		return Principal{}, nil
+	}
+	return k.askProcess(ctx, p.OriginKernel, "check", p.Ref, "")
 }
 
 // execute dispatches to the correct execution backend for HTTP, WASM, and native actions.
 // KindRemoteProxy is handled separately in Call() via ExecuteFederation.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string) (map[string]any, string, error) {
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string, grantor Principal) (map[string]any, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -959,7 +996,7 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		// Signing is ready by dispatch (requireReceiptSigningReady, checked in Call); on the
 		// off chance it is not, an empty capability just disables composition for this call.
 		capability, _ := k.IssueCapability(trace.ID)
-		res, err := k.http.Execute(ctx, action, args, ownerUserID, capability)
+		res, err := k.http.Execute(ctx, action, args, grantor, capability)
 		return res, "", err
 	case KindWasm:
 		res, err := k.executeWasm(ctx, action, args, trace, targetID)

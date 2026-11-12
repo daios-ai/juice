@@ -84,6 +84,8 @@ const (
 	verbReveal   simVerb = "reveal"
 	verbTask     simVerb = "task"
 	verbTransfer simVerb = "transfer"
+	verbGrant    simVerb = "grant"
+	verbProcess  simVerb = "process"
 )
 
 // simPlan is the scenario's instruction to the network: what to do to the next message of a given
@@ -315,6 +317,18 @@ func (p *simPort) Transfer(ctx context.Context, peerKey string, req fed.Transfer
 	})
 }
 
+func (p *simPort) Grant(ctx context.Context, peerKey string, req fed.GrantRequest) (fed.Response, error) {
+	return p.deliver(ctx, peerKey, verbGrant, func(h *fedHandlers) fed.Response {
+		return h.OnGrant(ctx, p.self, req)
+	})
+}
+
+func (p *simPort) Process(ctx context.Context, peerKey string, req fed.ProcessRequest) (fed.Response, error) {
+	return p.deliver(ctx, peerKey, verbProcess, func(h *fedHandlers) fed.Response {
+		return h.OnProcess(ctx, p.self, req)
+	})
+}
+
 // body renders a reply for the trace, truncated: a trace is for reading, not for archiving.
 func body(r fed.Response) string {
 	b := string(r.Body)
@@ -470,7 +484,9 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	if err != nil {
 		t.Fatalf("%s: secret box: %v", name, err)
 	}
-	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
+	// A callback address, so an endpoint is handed the capability it composes on (§9). The scenarios
+	// that compose call the kernel in-process with it, so the address itself is never dialled.
+	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), callbackURL: "http://sim.invalid"}
 	k := newKernel(cfg, kernel.Dependencies{Store: base, HTTP: httpExec, Economy: econ})
 	k.SetSecretBox(box)
 	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
@@ -1850,5 +1866,596 @@ func TestSimRestartDeliversTasksMadeBeforeTheMailbox(t *testing.T) {
 	}
 	if e, err := node.k.ReadTask(ctx, bob.ID, id); err != nil || e.Status != kernel.TaskWaiting {
 		t.Errorf("after restart: %+v %v; want the waiting task delivered", e, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: a grant follows its grantor's run across kernels (D10)
+// ---------------------------------------------------------------------------
+
+// grantWorld is an upstream that knows its accounts by their tokens, and the actions that reach it:
+// a vault that needs the caller's grant, a relay that calls another action for its caller, and a
+// parker that leaves a task for one and returns. Relay and parker run as their kernel's own
+// composition does, on the capability the kernel hands them.
+type grantWorld struct {
+	t        *testing.T
+	upstream *httptest.Server
+	nodes    map[string]*simNode
+	mu       sync.Mutex
+	accounts map[string]string // token → account
+	seen     []string          // accounts the vault answered for, in order
+	parked   map[string]string // node → the task its parker last left
+}
+
+func newGrantWorld(t *testing.T, nodes ...*simNode) *grantWorld {
+	w := &grantWorld{t: t, nodes: map[string]*simNode{}, accounts: map[string]string{}, parked: map[string]string{}}
+	for _, n := range nodes {
+		w.nodes[n.name] = n
+	}
+	w.upstream = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		reply := map[string]any{}
+		var err error
+		if parts[0] == "vault" {
+			w.mu.Lock()
+			acct := w.accounts[r.Header.Get("X-Api-Key")]
+			w.seen = append(w.seen, acct)
+			w.mu.Unlock()
+			if acct == "" {
+				err = errors.New("unknown token")
+			}
+			reply["account"] = acct
+		} else {
+			node := w.nodes[parts[1]]
+			target, _ := base64.RawURLEncoding.DecodeString(parts[2])
+			trace, owner, verr := node.k.VerifyCapability(ctx, r.Header.Get(capabilityHeader))
+			switch {
+			case verr != nil:
+				err = verr
+			case parts[0] == "relay":
+				// One target after another; the reply is the last one's.
+				for _, ref := range strings.Split(string(target), "|") {
+					var sub *kernel.CallReply
+					if sub, err = node.k.Subcall(ctx, kernel.SubcallRequest{CallerID: owner, ParentTraceID: trace, ActionRef: ref, Args: map[string]any{}}); err != nil {
+						break
+					}
+					reply = sub.Result
+				}
+			default: // park
+				me, _ := node.k.ReadUser(ctx, owner)
+				var e *kernel.TaskEntry
+				if e, err = node.k.CreateTaskByRef(ctx, trace, string(target), me.Handle+"@"+testOwnName, owner, nil); err == nil {
+					w.mu.Lock()
+					w.parked[node.name] = e.ID
+					w.mu.Unlock()
+				}
+			}
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			rw.WriteHeader(http.StatusBadGateway)
+			t.Logf("upstream %s: %v", r.URL.Path, err)
+			reply = map[string]any{"error": err.Error()}
+		}
+		_ = json.NewEncoder(rw).Encode(reply)
+	}))
+	t.Cleanup(w.upstream.Close)
+	return w
+}
+
+// action publishes one of the world's actions on a node: kind "vault", or "relay"/"park" aimed at target.
+func (w *grantWorld) action(node *simNode, owner *kernel.Account, name, kind, target string, price int64) *kernel.Action {
+	w.t.Helper()
+	ctx := context.Background()
+	req := kernel.CreateActionRequest{OwnerUserID: owner.ID, Title: "Test action", Name: name, Kind: kernel.KindHTTP, Price: price,
+		Source: w.upstream.URL + "/vault", Description: kind + " " + name,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}
+	if kind == "vault" {
+		req.Auth = &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer, Config: map[string]any{"header": "X-Api-Key", "template": "{token}"}}
+	} else {
+		req.Source = w.upstream.URL + "/" + kind + "/" + node.name + "/" + base64.RawURLEncoding.EncodeToString([]byte(target))
+	}
+	a, err := node.k.CreateAction(ctx, owner.ID, req)
+	if err != nil {
+		w.t.Fatalf("%s: create %s: %v", node.name, name, err)
+	}
+	if err := node.k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		w.t.Fatalf("%s: enable %s: %v", node.name, name, err)
+	}
+	vis := kernel.VisibilityPublic
+	if a, err = node.k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &vis}); err != nil {
+		w.t.Fatalf("%s: publish %s: %v", node.name, name, err)
+	}
+	return a
+}
+
+// signUp connects a user to a selector with a token, by the one path a user has: their own kernel.
+func (w *grantWorld) signUp(home *simNode, user *kernel.Account, serving *simNode, selector, token, account string) {
+	w.t.Helper()
+	w.mu.Lock()
+	w.accounts[token] = account
+	w.mu.Unlock()
+	status, body, err := home.k.ForwardGrant(context.Background(), user.ID, serving.key, kernel.GrantOp{Kind: "token", Selector: selector, Token: token})
+	if err != nil || status != http.StatusOK {
+		home.net.dump()
+		w.t.Fatalf("sign %s up to %s: status %d body %v err %v", user.Handle, selector, status, body, err)
+	}
+}
+
+// account runs ref as the user and returns the upstream account the run reached.
+func (w *grantWorld) account(node *simNode, userID, ref string) (string, error) {
+	reply, err := node.run(w.t, userID, ref)
+	if err != nil {
+		return "", err
+	}
+	acct, _ := reply.Result["account"].(string)
+	return acct, nil
+}
+
+// TestSimGrantFollowsTheRunAcrossKernels is the requirement itself: once signed up, a user is
+// recognised by an application on another kernel however the run reaches it — directly, or through
+// an action hosted on the user's kernel, on the application's, or on a third — and never by anyone
+// else's credential. Nothing but the hosting differs between the cases, and neither does the answer.
+func TestSimGrantFollowsTheRunAcrossKernels(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	ctx := context.Background()
+
+	carol, carl := app.user(t, "carol", sellerCapital), app.user(t, "carl", sellerCapital)
+	vault := w.action(app, carol, "vault", "vault", "", 0)
+	vaultRef := remoteRef(app, "carol", "vault")
+	atapp := w.action(app, carl, "atapp", "relay", "carol@"+testOwnName+"/vault", 0)
+	// The relay's own owner is signed up too: that credential must never serve anyone else.
+	w.accounts["tok-carl"] = "carl"
+	if _, err := app.k.AttachBearerGrants(ctx, kernel.User(carl.ID), "carol@"+testOwnName+"/vault", "", "tok-carl"); err != nil {
+		t.Fatalf("carl signs up: %v", err)
+	}
+	w.action(mid, mid.user(t, "mia", sellerCapital), "atmid", "relay", vaultRef, 0)
+	alice, dan := home.user(t, "alice", 1000), home.user(t, "dan", 1000)
+	w.action(home, home.user(t, "bob", 1000), "athome", "relay", vaultRef, 0)
+	// An application on the user's own kernel, reached through an action hosted elsewhere.
+	hank := home.user(t, "hank", sellerCapital)
+	w.action(home, hank, "hvault", "vault", "", 0)
+	w.action(mid, mid.user(t, "max", sellerCapital), "homeward", "relay", remoteRef(home, "hank", "hvault"), 0)
+
+	routes := map[string]string{
+		"directly":                             vaultRef,
+		"through an action at home":            "bob@" + testOwnName + "/athome",
+		"through an action at the application": remoteRef(app, "carl", "atapp"),
+		"through an action on a third kernel":  remoteRef(mid, "mia", "atmid"),
+	}
+
+	// Before sign-up the direct call is refused before anything moves, and the application's kernel
+	// never hears of it; through any action the run fails and no credential is used.
+	if _, err := w.account(home, alice.ID, vaultRef); !errors.Is(err, kernel.ErrGrantRequired) {
+		t.Fatalf("direct call before sign-up: %v, want ErrGrantRequired", err)
+	}
+	if n := app.txCount(t, vault.ID); n != 0 || home.balance(t, alice.ID) != 1000 {
+		t.Fatalf("a call refused for want of a grant left %d transactions at the application and balance %d", n, home.balance(t, alice.ID))
+	}
+	for name, ref := range routes {
+		if acct, err := w.account(home, alice.ID, ref); err == nil {
+			t.Errorf("before sign-up, %s reached account %q", name, acct)
+		}
+	}
+	if len(w.seen) != 0 {
+		t.Fatalf("the upstream was reached with %v before anyone signed up", w.seen)
+	}
+
+	w.signUp(home, alice, app, vaultRef, "tok-alice", "alice")
+	w.accounts["tok-alice-home"] = "alice-at-home"
+	if _, err := home.k.AttachBearerGrants(ctx, kernel.User(alice.ID), "hank@"+testOwnName+"/hvault", "", "tok-alice-home"); err != nil {
+		t.Fatalf("alice signs up at home: %v", err)
+	}
+	routes["home again, through an action elsewhere"] = remoteRef(mid, "max", "homeward")
+
+	for name, ref := range routes {
+		want := "alice"
+		if strings.HasPrefix(name, "home again") {
+			want = "alice-at-home"
+		}
+		if acct, err := w.account(home, alice.ID, ref); err != nil || acct != want {
+			net.dump()
+			t.Errorf("%s: account %q, err %v; want %q", name, acct, err, want)
+		}
+		// A user who has not signed up is never served, by any route, with anybody's credential.
+		if acct, err := w.account(home, dan.ID, ref); err == nil {
+			t.Errorf("%s: a user with no grant reached account %q", name, acct)
+		}
+	}
+	for _, acct := range w.seen {
+		if acct != "alice" && acct != "alice-at-home" {
+			t.Fatalf("the upstream answered for %q; only alice ran anything that may reach it (%v)", acct, w.seen)
+		}
+	}
+
+	// A call that names no run is nobody's run: the action's own owner's credential does not serve it.
+	used := len(w.seen)
+	if reply, err := app.k.RunFederated(ctx, home.key, atapp, map[string]any{}, "", kernel.BuyerTerms{}); err == nil || len(w.seen) != used {
+		t.Errorf("a call carrying no reference was served (%+v, %v) with a credential of the action owner's", reply, err)
+	}
+
+	// What the user sees is the grant, by its name here, and no credential.
+	views, _ := home.k.ListGrantViews(ctx, alice.ID)
+	listed, _ := json.Marshal(views)
+	if !strings.Contains(string(listed), "carol@") || strings.Contains(string(listed), "tok-alice") {
+		t.Errorf("alice's grants read %s: want the remote action named and no token", listed)
+	}
+	// And the application's kernel holds it under her principal, not under any local user.
+	if _, err := app.db.ReadGrant(ctx, kernel.Principal{Kernel: home.key, UserID: alice.ID}, vault.ID); err != nil {
+		t.Errorf("the application holds no grant for alice@home: %v", err)
+	}
+}
+
+// TestSimWaitingWorkKeepsTheGrantUntilTheProcessEnds: an action on another kernel leaves a task
+// waiting and returns. The user's process stays open for it, so the task still reaches the
+// application as the user when it completes later — exactly as a task waiting at home would — and
+// closes once that kernel says the work is done. Ending the process first ends the grant's use there.
+func TestSimWaitingWorkKeepsTheGrantUntilTheProcessEnds(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	ctx := context.Background()
+
+	w.action(app, app.user(t, "carol", sellerCapital), "vault", "vault", "", 0)
+	vaultRef := remoteRef(app, "carol", "vault")
+	mia := mid.user(t, "mia", sellerCapital)
+	w.action(mid, mia, "later", "park", vaultRef, 0)
+	alice, zoe := home.user(t, "alice", 1000), home.user(t, "zoe", 1000)
+	w.signUp(home, alice, app, vaultRef, "tok-alice", "alice")
+
+	park := func(user *kernel.Account) (processID, taskID string) {
+		t.Helper()
+		reply, err := home.run(t, user.ID, remoteRef(mid, "mia", "later"))
+		if err != nil {
+			net.dump()
+			t.Fatalf("%s runs the parker: %v", user.Handle, err)
+		}
+		return reply.ProcessID, w.parked["mid"]
+	}
+	status := func(processID string) kernel.ProcessStatus {
+		p, err := home.db.ReadProcess(ctx, processID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.Status
+	}
+	complete := func(taskID string) (string, error) {
+		reply, err := mid.k.CompleteTask(ctx, mia.ID, taskID, json.RawMessage(`{}`))
+		if err != nil {
+			return "", err
+		}
+		acct, _ := reply.Result["account"].(string)
+		return acct, nil
+	}
+
+	// The call returned, and the process is open all the same.
+	pid, task := park(alice)
+	if status(pid) != kernel.ProcessOpen {
+		t.Fatalf("alice's process closed while the work it began waits on another kernel")
+	}
+	// Whose run it is, is told only to a kernel she holds a grant on: the one that merely holds her
+	// work learns nothing by asking, though it carries the same reference.
+	p, _ := home.db.ReadProcess(ctx, pid)
+	if resp := home.h.OnProcess(ctx, mid.key, fed.ProcessRequest{Kind: "check", Ref: p.Ref}); resp.Status == http.StatusOK {
+		t.Errorf("a kernel alice holds no grant on was told whose run it serves: %s", resp.Body)
+	}
+	if resp := home.h.OnProcess(ctx, app.key, fed.ProcessRequest{Kind: "check", Ref: p.Ref}); !strings.Contains(string(resp.Body), alice.ID) {
+		t.Errorf("the application was not told whose run it serves: %d %s", resp.Status, resp.Body)
+	}
+	if acct, err := complete(task); err != nil || acct != "alice" {
+		net.dump()
+		t.Fatalf("the task completed later reached %q, err %v; want alice", acct, err)
+	}
+	mid.k.ReleaseClosedProcesses(ctx)
+	if status(pid) != kernel.ProcessClosed {
+		t.Errorf("alice's process is still open after the kernel holding its work said it was done")
+	}
+	// Told again, nothing reopens and nothing breaks.
+	mid.k.ReleaseClosedProcesses(ctx)
+
+	// Ending the process ends what it may do everywhere: the waiting work no longer acts as her.
+	pid, task = park(alice)
+	if err := home.k.EndProcess(ctx, alice.ID, pid); err != nil {
+		t.Fatalf("end process: %v", err)
+	}
+	before := len(w.seen)
+	if acct, err := complete(task); err == nil {
+		t.Errorf("after alice ended her process, its waiting work still reached %q", acct)
+	}
+	if len(w.seen) != before {
+		t.Errorf("the upstream was reached after the process ended")
+	}
+
+	// Signing up while the work waits is enough: consent is read when it is used, not when the run began.
+	_, task = park(zoe)
+	w.signUp(home, zoe, app, vaultRef, "tok-zoe", "zoe")
+	if acct, err := complete(task); err != nil || acct != "zoe" {
+		net.dump()
+		t.Errorf("a user who signed up while work waited reached %q, err %v; want zoe", acct, err)
+	}
+}
+
+// TestSimOutcomeWaitsForItsRegistration: the answer to a call that left work waiting is given out
+// only once the kernel the run began on holds that work registered — the first time and on every
+// retry — so there is no moment at which that kernel's process may close under it (D2).
+func TestSimOutcomeWaitsForItsRegistration(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	ctx := context.Background()
+	w.action(app, app.user(t, "carol", sellerCapital), "vault", "vault", "", 0)
+	w.action(mid, mid.user(t, "mia", sellerCapital), "later", "park", remoteRef(app, "carol", "vault"), 0)
+	alice := home.user(t, "alice", 1000)
+	ref := remoteRef(mid, "mia", "later")
+	// Warm the proxy, so what the cut meets is the registration and nothing before it.
+	if _, err := home.run(t, alice.ID, ref); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+
+	net.cut(mid.key, home.key)
+	if _, err := home.run(t, alice.ID, ref); err == nil {
+		t.Fatalf("the call returned an outcome while its work could not be registered")
+	}
+	if n := home.pendingRemote(t); n != 1 {
+		t.Fatalf("home holds %d calls in doubt, want the 1 whose answer is withheld", n)
+	}
+	// Asked again while still cut off, the answer is still withheld: a retry does not get around it.
+	home.k.RetryPendingRemoteDispatches(ctx)
+	if n := home.pendingRemote(t); n != 1 {
+		t.Fatalf("a retry was answered before the registration: %d calls in doubt", n)
+	}
+	net.blocked = map[string]map[string]bool{}
+	home.k.RetryPendingRemoteDispatches(ctx)
+	if n := home.pendingRemote(t); n != 0 {
+		net.dump()
+		t.Fatalf("the call did not settle once the registration could be made: %d in doubt", n)
+	}
+	var open int
+	if err := home.db.QueryRowForTest(ctx, `SELECT COUNT(*) FROM processes p JOIN registrations r ON r.process_id=p.id
+		 WHERE p.status='open' AND r.released=0 AND r.kernel=?`, mid.key, &open); err != nil || open != 2 {
+		t.Errorf("home holds %d open processes registered for mid (err %v), want 2: the warm run's and the withheld one's", open, err)
+	}
+}
+
+// TestSimDisconnectAndStaleGrants: a disconnect takes effect on the user's own kernel at once,
+// whether or not the other kernel can be told; an operation that arrives late cannot undo a later
+// one; and when the two kernels disagree the serving one is right, at no cost to anyone.
+func TestSimDisconnectAndStaleGrants(t *testing.T) {
+	net := newSimNet(t)
+	home, app := net.addNode("home", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, app)
+	ctx := context.Background()
+	carol := app.user(t, "carol", sellerCapital)
+	vault := w.action(app, carol, "vault", "vault", "", 20)
+	ref := remoteRef(app, "carol", "vault")
+	alice := home.user(t, "alice", 1000)
+	principal := kernel.Principal{Kernel: home.key, UserID: alice.ID, Handle: "alice"}
+	disconnect := func(op kernel.GrantOp) error {
+		op.Kind = "disconnect"
+		status, body, err := home.k.ForwardGrant(ctx, alice.ID, app.key, op)
+		if err == nil && status != http.StatusOK {
+			err = fmt.Errorf("status %d: %v", status, body)
+		}
+		return err
+	}
+	refusedHere := func(when string) {
+		t.Helper()
+		calls, funds := app.txCount(t, vault.ID), home.balance(t, alice.ID)
+		if _, err := w.account(home, alice.ID, ref); !errors.Is(err, kernel.ErrGrantRequired) {
+			t.Errorf("%s: run gave %v, want ErrGrantRequired", when, err)
+		}
+		if app.txCount(t, vault.ID) != calls || home.balance(t, alice.ID) != funds {
+			t.Errorf("%s: the refusal reached the application or moved money", when)
+		}
+	}
+
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	if acct, err := w.account(home, alice.ID, ref); err != nil || acct != "alice" {
+		t.Fatalf("signed up: %q, %v", acct, err)
+	}
+	if err := disconnect(kernel.GrantOp{Selector: ref}); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	refusedHere("after a disconnect by selector")
+	if _, err := app.db.ReadGrant(ctx, principal, vault.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("the application still holds the grant: %v", err)
+	}
+
+	// Cut off from the application, the disconnect still holds here, and says it must be sent again.
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	net.cut(home.key, app.key)
+	if err := disconnect(kernel.GrantOp{Selector: ref}); !errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Fatalf("disconnect while cut off: %v, want ErrPeerUnreachable", err)
+	}
+	net.blocked = map[string]map[string]bool{}
+	refusedHere("after a disconnect the application never heard")
+	if err := disconnect(kernel.GrantOp{Selector: ref}); err != nil {
+		t.Fatalf("disconnect, sent again: %v", err)
+	}
+
+	// The whole account, named where it is held; its credential goes with it.
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	conns, _ := app.db.ListConnectionsByUser(ctx, principal)
+	if len(conns) != 1 {
+		t.Fatalf("the application holds %d connections for alice, want 1", len(conns))
+	}
+	if err := disconnect(kernel.GrantOp{Account: conns[0].ProviderKey}); err != nil {
+		t.Fatalf("disconnect the account: %v", err)
+	}
+	refusedHere("after disconnecting the account")
+	if conns, _ = app.db.ListConnectionsByUser(ctx, principal); len(conns) != 0 {
+		t.Errorf("the credential outlived its account's disconnect")
+	}
+
+	// An operation older than one already applied is refused, however validly it is signed: a
+	// disconnect delayed on the way cannot delete the sign-up that followed it.
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	late := kernel.GrantOp{Kind: "disconnect", Selector: ref, Counterparty: home.key, Recipient: app.key,
+		Timestamp: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), ForUserID: alice.ID, ForHandle: "alice"}
+	sig, _ := testNet.SignGrantOp(home.priv, late)
+	raw, _ := json.Marshal(late)
+	if resp := app.h.OnGrant(ctx, home.key, fed.GrantRequest{Counterparty: home.key, Signature: sig, Op: raw}); resp.Status == http.StatusOK {
+		t.Fatalf("a disconnect older than the sign-up was applied: %s", resp.Body)
+	}
+	if acct, err := w.account(home, alice.ID, ref); err != nil || acct != "alice" {
+		t.Errorf("after the late disconnect was refused: %q, %v; want alice", acct, err)
+	}
+
+	// The application drops the grant without this kernel hearing. The next call is refused there,
+	// signed, at no charge; the action is as cached, so its proxy stays; and this kernel's record
+	// goes, so the call after that is refused here.
+	if _, err := app.k.RevokeGrantsBySelector(ctx, principal, "carol@"+testOwnName+"/vault"); err != nil {
+		t.Fatalf("revoke at the application: %v", err)
+	}
+	funds := home.balance(t, alice.ID)
+	proxy, _ := home.k.ResolveAction(ctx, ref)
+	if _, err := w.account(home, alice.ID, ref); !errors.Is(err, kernel.ErrGrantRequired) {
+		net.dump()
+		t.Fatalf("call on a grant the application dropped: %v, want ErrGrantRequired", err)
+	}
+	if got := home.balance(t, alice.ID); got != funds {
+		t.Errorf("the refusal cost %d", funds-got)
+	}
+	// Read as stored, not resolved afresh: resolving would mend a proxy the refusal had retired.
+	if stored, err := home.db.ReadAction(ctx, proxy.ID); err != nil || !stored.Active {
+		t.Errorf("the proxy did not survive a missing grant: %+v, %v", stored, err)
+	}
+	if views, _ := home.k.ListGrantViews(ctx, alice.ID); len(views) != 0 {
+		t.Errorf("alice still lists %d grants the application no longer holds", len(views))
+	}
+	refusedHere("once this kernel's record is gone")
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	if acct, err := w.account(home, alice.ID, ref); err != nil || acct != "alice" {
+		t.Errorf("signed up again: %q, %v", acct, err)
+	}
+}
+
+// A forwarded grant operation is admitted only as its kernel signed it, for this kernel, now, for a
+// named user, on that kernel's own connection — and never from a kernel this one has suspended.
+func TestSimGrantOperationsAreAdmittedOnlyAsSigned(t *testing.T) {
+	net := newSimNet(t)
+	home, app := net.addNode("home", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, app)
+	ctx := context.Background()
+	w.action(app, app.user(t, "carol", sellerCapital), "vault", "vault", "", 0)
+	alice := home.user(t, "alice", 0)
+	stranger := net.addNode("stranger", defaultSimConfig())
+
+	send := func(change func(op *kernel.GrantOp, signer **simNode, conn *string), after func(op *kernel.GrantOp)) int {
+		op := kernel.GrantOp{Kind: "plan", Selector: "carol@" + testOwnName + "/vault", Counterparty: home.key, Recipient: app.key,
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), ForUserID: alice.ID, ForHandle: "alice"}
+		signer, conn := home, home.key
+		if change != nil {
+			change(&op, &signer, &conn)
+		}
+		sig, _ := testNet.SignGrantOp(signer.priv, op)
+		if after != nil {
+			after(&op)
+		}
+		raw, _ := json.Marshal(op)
+		return app.h.OnGrant(ctx, conn, fed.GrantRequest{Counterparty: op.Counterparty, Signature: sig, Op: raw}).Status
+	}
+	if got := send(nil, nil); got != http.StatusOK {
+		t.Fatalf("an operation signed as it should be: status %d", got)
+	}
+	for name, tc := range map[string]struct {
+		change func(op *kernel.GrantOp, signer **simNode, conn *string)
+		after  func(op *kernel.GrantOp)
+	}{
+		"addressed to another kernel": {change: func(op *kernel.GrantOp, _ **simNode, _ *string) { op.Recipient = stranger.key }},
+		"signed long ago": {change: func(op *kernel.GrantOp, _ **simNode, _ *string) {
+			op.Timestamp = time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
+		}},
+		"signed by another kernel":       {change: func(_ *kernel.GrantOp, signer **simNode, _ *string) { *signer = stranger }},
+		"changed after it was signed":    {after: func(op *kernel.GrantOp) { op.Selector = "carol@" + testOwnName }},
+		"naming a user by id alone":      {change: func(op *kernel.GrantOp, _ **simNode, _ *string) { op.ForHandle = "" }},
+		"naming no user":                 {change: func(op *kernel.GrantOp, _ **simNode, _ *string) { op.ForUserID = "" }},
+		"arriving on another connection": {change: func(_ *kernel.GrantOp, _ **simNode, conn *string) { *conn = stranger.key }},
+		"of a kind nobody defined":       {change: func(op *kernel.GrantOp, _ **simNode, _ *string) { op.Kind = "seize" }},
+	} {
+		if got := send(tc.change, tc.after); got == http.StatusOK {
+			t.Errorf("an operation %s was admitted", name)
+		}
+	}
+	if err := app.k.SuspendKernel(ctx, app.sysID, home.key); err != nil {
+		t.Fatal(err)
+	}
+	if got := send(nil, nil); got == http.StatusOK {
+		t.Errorf("an operation from a suspended kernel was admitted")
+	}
+}
+
+// When the kernel a run began on cannot be asked, or is one this kernel has suspended, there is no
+// grantor: the call is refused, nothing is charged and no credential is used. Not being reachable
+// is not a revocation — the same call works once it can be asked again.
+func TestSimNoGrantorWithoutTheOriginsWord(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	ctx := context.Background()
+	w.action(app, app.user(t, "carol", sellerCapital), "vault", "vault", "", 20)
+	ref := remoteRef(app, "carol", "vault")
+	w.action(mid, mid.user(t, "mia", sellerCapital), "atmid", "relay", ref, 0)
+	alice := home.user(t, "alice", 1000)
+	w.signUp(home, alice, app, ref, "tok-alice", "alice")
+	if acct, err := w.account(home, alice.ID, ref); err != nil || acct != "alice" {
+		t.Fatalf("signed up: %q, %v", acct, err)
+	}
+	funds, used := home.balance(t, alice.ID), len(w.seen)
+
+	net.cut(app.key, home.key)
+	if acct, err := w.account(home, alice.ID, ref); err == nil {
+		t.Errorf("served as %q while the kernel the run began on could not be asked", acct)
+	}
+	net.blocked = map[string]map[string]bool{}
+	if home.balance(t, alice.ID) != funds || len(w.seen) != used {
+		t.Errorf("a call refused for want of an answer cost %d or used a credential", funds-home.balance(t, alice.ID))
+	}
+	if acct, err := w.account(home, alice.ID, ref); err != nil || acct != "alice" {
+		net.dump()
+		t.Errorf("once it could be asked again: %q, %v; want alice", acct, err)
+	}
+
+	used = len(w.seen)
+	if err := app.k.SuspendKernel(ctx, app.sysID, home.key); err != nil {
+		t.Fatal(err)
+	}
+	if acct, err := w.account(home, alice.ID, remoteRef(mid, "mia", "atmid")); err == nil || len(w.seen) != used {
+		t.Errorf("a run begun on a suspended kernel was served as %q through a kernel that is not", acct)
+	}
+}
+
+// A missing grant met inside an action is an ordinary failure of that action (U13): the work it had
+// already bought stays bought and paid, the caller pays for that and no more, and nothing but the
+// grant stands between the same run and success.
+func TestSimMissingGrantInsideAnActionKeepsDeliveredWorkPaid(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	w.action(app, app.user(t, "carol", sellerCapital), "vault", "vault", "", 0)
+	vaultRef := remoteRef(app, "carol", "vault")
+	leaf := mid.publish(t, mid.user(t, "lea", sellerCapital), "leaf", 7)
+	w.action(mid, mid.user(t, "mia", sellerCapital), "pair", "relay", "lea@"+testOwnName+"/leaf|"+vaultRef, 100)
+	alice := home.user(t, "alice", 1000)
+	pair := remoteRef(mid, "mia", "pair")
+
+	if acct, err := w.account(home, alice.ID, pair); err == nil {
+		t.Fatalf("with no grant the pair reached account %q", acct)
+	}
+	paid := 1000 - home.balance(t, alice.ID)
+	if n := mid.txCount(t, leaf.ID); n != 1 || paid <= 0 {
+		net.dump()
+		t.Fatalf("the leaf settled %d times and the caller paid %d: delivered work must stay settled and paid for", n, paid)
+	}
+	w.signUp(home, alice, app, vaultRef, "tok-alice", "alice")
+	if acct, err := w.account(home, alice.ID, pair); err != nil || acct != "alice" {
+		net.dump()
+		t.Fatalf("with the grant: %q, %v; want alice", acct, err)
+	}
+	if whole := 1000 - paid - home.balance(t, alice.ID); whole <= paid {
+		t.Errorf("the failed run cost %d and the whole one %d: a failure must cost only what was delivered", paid, whole)
 	}
 }

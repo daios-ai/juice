@@ -26,7 +26,8 @@ import (
 type fedHandlers struct {
 	kernel      *kernel.Kernel
 	log         *log.Logger
-	callLimiter *keyLimiter // per-peer inbound call rate limit (§13; known-peer-bounded)
+	callLimiter *keyLimiter  // per-peer inbound call rate limit (§13; known-peer-bounded)
+	oauth       *grantBroker // the consent broker a forwarded sign-up runs through (D10); nil when no credentials box
 }
 
 // keyLimiter is a per-key token-bucket rate limiter, used by every surface that admits work from
@@ -147,6 +148,7 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, kernel.BuyerTerms{
 			Commitment: req.Commitment, Lottery: req.Lottery, BlockchainAddress: req.BlockchainAddress, BlockchainProof: req.BlockchainProof,
 			CallerUserID: req.CallerUserID, CallerHandle: req.CallerHandle,
+			ProcessKernel: req.ProcessKernel, ProcessRef: req.ProcessRef,
 		}, []byte(req.Args))
 	if err != nil {
 		// No receipt to settle on → the caller treats this as pending (retry).
@@ -203,6 +205,73 @@ func (h *fedHandlers) OnTask(ctx context.Context, peerKey string, req fed.TaskRe
 }
 
 // ownKey is this kernel's own public key, the recipient every inbound signature is bound to.
+
+// OnGrant answers /juice/fed/grant/1 (D10): one grant operation a peer forwards for a user of its
+// own. Once admitted it is the same operation a user here would run, for that principal.
+func (h *fedHandlers) OnGrant(ctx context.Context, peerKey string, req fed.GrantRequest) fed.Response {
+	if rej := h.admit(req.Counterparty, peerKey, true); rej != nil {
+		return *rej
+	}
+	var op kernel.GrantOp
+	if json.Unmarshal(req.Op, &op) != nil {
+		return fedError(kernel.ErrInvalidInput.Wrap("malformed grant operation"))
+	}
+	if err := checkFederationTimestamp(op.Timestamp); err != nil {
+		return fedError(err)
+	}
+	who, err := h.kernel.AdmitGrantOp(ctx, peerKey, op, req.Signature)
+	if err != nil {
+		return fedError(err)
+	}
+	var res any
+	switch {
+	case op.Kind == "plan":
+		res, err = h.kernel.ConsentPlan(ctx, who, op.Selector)
+	case op.Kind == "start":
+		res, err = startGrant(h.kernel, h.oauth, ctx, who, op.Selector, op.Provider, op.RedirectURI, op.Flow)
+	case op.Kind == "complete":
+		res, err = completeGrant(h.kernel, h.oauth, ctx, who, op.State, op.Code)
+	case op.Kind == "token":
+		res, err = attachToken(h.kernel, ctx, who, op.Selector, op.Provider, op.Token)
+	case op.Kind == "disconnect" && op.Account != "":
+		res, err = revokeConnection(h.kernel, ctx, who, op.Account)
+	case op.Kind == "disconnect":
+		res, err = revokeGrantsBySelector(h.kernel, ctx, who, op.Selector)
+	default:
+		err = kernel.ErrInvalidInput.Wrap("unknown grant operation")
+	}
+	if err != nil {
+		return fedError(err)
+	}
+	return fedOK(http.StatusOK, res)
+}
+
+// OnProcess answers /juice/fed/process/1 (D2, D10) for a process begun here. The connection proves
+// who asks, and that is all the request claims.
+func (h *fedHandlers) OnProcess(ctx context.Context, peerKey string, req fed.ProcessRequest) fed.Response {
+	if rej := h.admit("", peerKey, true); rej != nil {
+		return *rej
+	}
+	var err error
+	body := map[string]string{}
+	switch req.Kind {
+	case "check":
+		var owner *kernel.Account
+		if owner, err = h.kernel.ProcessOwnerFor(ctx, peerKey, req.Ref); err == nil {
+			body["user_id"], body["handle"] = owner.ID, owner.Handle
+		}
+	case "register":
+		err = h.kernel.RegisterWork(ctx, peerKey, req.Ref, req.RegID)
+	case "release":
+		err = h.kernel.ReleaseWork(ctx, peerKey, req.Ref, req.RegID)
+	default:
+		err = kernel.ErrInvalidInput.Wrap("unknown process request kind")
+	}
+	if err != nil {
+		return fedError(err)
+	}
+	return fedOK(http.StatusOK, body)
+}
 
 // OnReveal answers the /juice/fed/settle/1 protocol (P10): the seller side of one obligation's
 // draw. The connection-key check and freshness window mirror OnCall/OnTask; the kernel verifies the
@@ -541,7 +610,7 @@ func duplicateInFlight() (int, map[string]any, error) {
 // is what keeps a catalogue it cannot see from being mapped by asking (U48, P4).
 func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, callerUserID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
 	code, msg := wireError(cause)
-	receipt, err := k.CreateSignedRejectionReceipt(callerUserID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy)
+	receipt, err := k.CreateSignedRejectionReceipt(callerUserID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy, errors.Is(cause, kernel.ErrGrantRequired))
 	if err != nil {
 		return 0, nil, cause
 	}
@@ -585,6 +654,9 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// never execute the work twice, and must be answered even when the action has since been
 	// deleted — which is why the outcome is looked up before the action (P4).
 	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
+		if err := k.EnsureRegistered(ctx, receipt.ProcessID); err != nil {
+			return 0, nil, err
+		}
 		return replayStatus(result, receipt), map[string]any{"result": result, "receipt": receipt}, nil
 	}
 
@@ -602,7 +674,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 
 	// The inbound wire reference is this (the serving) kernel's stable action id (§13): a handle is
 	// mutable display metadata, so naming execution by it parks a caller forever the moment it drifts.
-	// Anything this kernel does not serve abroad — absent, inactive, private, delegated-auth, or an
+	// Anything this kernel does not serve abroad — absent, inactive, private, or an
 	// import, federation being non-transitive (§8) — is refused with a signed rejection like every
 	// other pre-execution refusal, and with one reason for all of them: telling a stranger which of
 	// those it was would describe a catalogue it cannot see (U48). A rejection commits nothing and
@@ -634,6 +706,16 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	}
 
 	reply, callErr := k.RunFederated(ctx, cpPubKey, action, args, rec.ID, buyer)
+	// An outcome is given out only once the kernel the run began on holds this process's remaining
+	// work registered: until then the buyer goes on waiting, which is what keeps that process open
+	// (D2). No receipt here reads as pending, and its retry is answered above, by the same rule.
+	if reply != nil && reply.ReceiptID != "" {
+		if rc, _ := k.GetReceiptByID(ctx, reply.ReceiptID); rc != nil {
+			if err := k.EnsureRegistered(ctx, rc.ProcessID); err != nil {
+				return 0, nil, err
+			}
+		}
+	}
 	if callErr != nil {
 		wireCode, wireMsg := wireError(callErr)
 		// A committed transaction (reply carries a receipt) means the call settled — possibly

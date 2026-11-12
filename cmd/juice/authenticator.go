@@ -30,7 +30,7 @@ import (
 // It owns every scheme so nothing else needs to know how any of them work — static header/query/
 // bearer/basic; the OAuth token exchanges (client-credentials, jwt-bearer, delegated) with an
 // in-memory access-token cache; and the two delegated schemes' per-caller Grant lookup, which IS
-// the binding rule (§8): a grant applies only when grant.grantor_user_id == ownerUserID and it
+// the binding rule (§8): a grant applies only when grant.grantor == grantor and it
 // names this exact action. `kernel` must not import this (§2/§9); the executor holds one behind a
 // field and calls Parse/Apply.
 
@@ -95,14 +95,14 @@ func (e *authenticator) Parse(action *kernel.Action) (*kernel.AuthInput, error) 
 // bearer (owner-held for client-credentials/jwt-bearer, the owner's grant for delegated) and set
 // Authorization; static schemes set their header/query directly. An unrecognized scheme fails closed
 // via applyStatic's default — a request is never sent unauthenticated (§8). A nil auth is a no-op.
-func (e *authenticator) Apply(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, headers map[string]string, rawURL *string, refresh bool) error {
+func (e *authenticator) Apply(ctx context.Context, action *kernel.Action, grantor kernel.Principal, auth *kernel.AuthInput, headers map[string]string, rawURL *string, refresh bool) error {
 	switch {
 	case auth == nil:
 		return nil
 	case auth.Scheme == kernel.AuthSchemeDelegatedBearer:
-		return e.applyDelegatedBearer(ctx, action, ownerUserID, auth, headers)
+		return e.applyDelegatedBearer(ctx, action, grantor, auth, headers)
 	case e.Refreshable(auth.Scheme):
-		token, err := e.token(ctx, action, ownerUserID, auth, refresh)
+		token, err := e.token(ctx, action, grantor, auth, refresh)
 		if err != nil {
 			return err
 		}
@@ -129,8 +129,8 @@ func (e *authenticator) Refreshable(scheme string) bool {
 // token is an ordinary HTTP failure. Config is optional: header defaults to "Authorization" and
 // template to "Bearer {token}", so the common case needs none while GitHub ("token {token}"),
 // GitLab ("Private-Token" / "{token}"), and X-Api-Key styles are expressible.
-func (e *authenticator) applyDelegatedBearer(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, headers map[string]string) error {
-	_, token, err := e.openGrant(ctx, action, ownerUserID)
+func (e *authenticator) applyDelegatedBearer(ctx context.Context, action *kernel.Action, grantor kernel.Principal, auth *kernel.AuthInput, headers map[string]string) error {
+	_, token, err := e.openGrant(ctx, action, grantor)
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ type tokenResponse struct {
 // token returns a bearer access token for the action's OAuth scheme. When refresh is true any
 // cached token is discarded first (used on a 401 retry). Access tokens are cached with a 30s
 // safety margin on their expiry.
-func (e *authenticator) token(ctx context.Context, action *kernel.Action, ownerUserID string, auth *kernel.AuthInput, refresh bool) (string, error) {
+func (e *authenticator) token(ctx context.Context, action *kernel.Action, grantor kernel.Principal, auth *kernel.AuthInput, refresh bool) (string, error) {
 	cfg := parseOAuthConfig(auth)
 	var key, fp string
 	// delegated resolves its shared connection up front so the cache is keyed by account (siblings
@@ -248,7 +248,7 @@ func (e *authenticator) token(ctx context.Context, action *kernel.Action, ownerU
 	case kernel.AuthSchemeOAuthJWTBearer:
 		key, fp = "jwt|"+action.ID, fingerprint(action.AuthJSON)
 	case kernel.AuthSchemeOAuthDelegated:
-		c, secret, err := e.openGrant(ctx, action, ownerUserID)
+		c, secret, err := e.openGrant(ctx, action, grantor)
 		if err != nil {
 			return "", err
 		}
@@ -275,7 +275,7 @@ func (e *authenticator) token(ctx context.Context, action *kernel.Action, ownerU
 	case kernel.AuthSchemeOAuthJWTBearer:
 		tr, err = e.exchangeJWTBearer(ctx, cfg)
 	case kernel.AuthSchemeOAuthDelegated:
-		tr, err = e.refreshDelegated(ctx, action, ownerUserID, conn, refreshSecret, cfg)
+		tr, err = e.refreshDelegated(ctx, action, grantor, conn, refreshSecret, cfg)
 	}
 	if err != nil {
 		return "", err
@@ -294,20 +294,20 @@ func (e *authenticator) token(ctx context.Context, action *kernel.Action, ownerU
 }
 
 // openGrant resolves the process owner's grant for a delegated action to its shared Connection and
-// opens the sealed secret — the binding rule (§8): the grant must belong to ownerUserID and name
+// opens the sealed secret — the binding rule (§8): the grant must belong to grantor and name
 // this exact action; the credential is then fetched through grant.connection_id and unsealed with
-// AAD ownerUserID|connectionID (so actions sharing an account share the credential). It is the
+// AAD grantor|connectionID (so actions sharing an account share the credential). It is the
 // single grant-open shared by both delegated schemes; the caller decides what the secret is (an
 // OAuth refresh token for oauth_delegated, a static token for delegated_bearer). A missing grant or
 // connection returns the typed grant-required error the pre-lock check normally raises first.
-func (e *authenticator) openGrant(ctx context.Context, action *kernel.Action, ownerUserID string) (*kernel.Connection, string, error) {
+func (e *authenticator) openGrant(ctx context.Context, action *kernel.Action, grantor kernel.Principal) (*kernel.Connection, string, error) {
 	if e.grants == nil {
 		return nil, "", kernel.ErrInvalidState.Wrap("grant store not configured")
 	}
 	if e.box == nil {
 		return nil, "", kernel.ErrInvalidState.Wrap("credential encryption not configured")
 	}
-	g, err := e.grants.ReadGrant(ctx, ownerUserID, action.ID)
+	g, err := e.grants.ReadGrant(ctx, grantor, action.ID)
 	if err != nil || g.ConnectionID == "" {
 		if err == nil || errors.Is(err, kernel.ErrNotFound) {
 			return nil, "", kernel.GrantRequiredError(e.actionRef(ctx, action))
@@ -321,7 +321,7 @@ func (e *authenticator) openGrant(ctx context.Context, action *kernel.Action, ow
 		}
 		return nil, "", err
 	}
-	secret, err := e.box.Open(ownerUserID+"|"+conn.ID, conn.SealedSecret)
+	secret, err := e.box.Open(kernel.ConnectionAAD(grantor, conn.ID), conn.SealedSecret)
 	if err != nil {
 		return nil, "", kernel.ErrInvalidState.Wrap("stored credential could not be decrypted")
 	}
@@ -332,7 +332,7 @@ func (e *authenticator) openGrant(ctx context.Context, action *kernel.Action, ow
 // refresh token onto the connection (all sibling grants unaffected); invalid_grant deletes the
 // connection and cascades its grants, returning the same typed grant-required error the pre-lock
 // check uses.
-func (e *authenticator) refreshDelegated(ctx context.Context, action *kernel.Action, ownerUserID string, conn *kernel.Connection, refreshToken string, cfg oauthConfig) (*tokenResponse, error) {
+func (e *authenticator) refreshDelegated(ctx context.Context, action *kernel.Action, grantor kernel.Principal, conn *kernel.Connection, refreshToken string, cfg oauthConfig) (*tokenResponse, error) {
 	tr, err := e.exchangeRefresh(ctx, cfg, refreshToken)
 	if err != nil {
 		if errors.Is(err, oauthErrInvalidGrant) {
@@ -343,7 +343,7 @@ func (e *authenticator) refreshDelegated(ctx context.Context, action *kernel.Act
 	}
 	// Provider rotation: persist the new refresh token (resealed) on the one connection.
 	if tr.RefreshToken != "" && tr.RefreshToken != refreshToken {
-		if sealed, serr := e.box.Seal(ownerUserID+"|"+conn.ID, tr.RefreshToken); serr == nil {
+		if sealed, serr := e.box.Seal(kernel.ConnectionAAD(grantor, conn.ID), tr.RefreshToken); serr == nil {
 			_ = e.grants.UpdateConnectionSecret(ctx, conn.ID, sealed)
 		}
 	}
@@ -572,15 +572,16 @@ type grantBroker struct {
 }
 
 type pendingConsent struct {
-	grantorUserID string
-	actionIDs     []string // the provider group's actions (§8): one consent mints one grant each
-	providerKey   string
-	scopesJSON    string // the requested-scope union stored on the connection
-	verifier      string
-	redirectURI   string
-	flow          string // "code" | "device"
-	cfg           oauthConfig
-	expiresAt     time.Time
+	grantor     kernel.Principal
+	actionIDs   []string             // the provider group's actions (§8): one consent mints one grant each
+	asOf        map[string]time.Time // each action's updated_at when consent began: a grant is written only if it still is (D10)
+	providerKey string
+	scopesJSON  string // the requested-scope union stored on the connection
+	verifier    string
+	redirectURI string
+	flow        string // "code" | "device"
+	cfg         oauthConfig
+	expiresAt   time.Time
 
 	// device flow: filled by the poller goroutine
 	mu      sync.Mutex
@@ -614,14 +615,33 @@ func randomState() (string, error) {
 // start creates a pending consent and returns the browser-facing details. For the code flow the
 // redirect URI must be loopback (the client hosts the listener); for the device flow the broker
 // spawns a background poller.
-func (b *grantBroker) start(ctx context.Context, grantorUserID string, actionIDs []string, providerKey, scopesJSON string, auth *kernel.AuthInput, redirectURI, flow string) (*startResult, error) {
+func (b *grantBroker) start(ctx context.Context, grantor kernel.Principal, asOf map[string]time.Time, actionIDs []string, providerKey, scopesJSON string, auth *kernel.AuthInput, redirectURI, flow string) (*startResult, error) {
 	cfg := parseOAuthConfig(auth)
 	b.sweep()
 	state, err := randomState()
 	if err != nil {
 		return nil, err
 	}
-	pc := &pendingConsent{grantorUserID: grantorUserID, actionIDs: actionIDs, providerKey: providerKey, scopesJSON: scopesJSON, cfg: cfg, flow: flow, expiresAt: time.Now().Add(consentTTL)}
+	pc := &pendingConsent{grantor: grantor, asOf: asOf, actionIDs: actionIDs, providerKey: providerKey, scopesJSON: scopesJSON, cfg: cfg, flow: flow, expiresAt: time.Now().Add(consentTTL)}
+	// One unfinished consent per grantor and provider: a newer one replaces the older, whose poller
+	// stops when it finds its entry gone. What users of other kernels hold open is bounded besides.
+	b.mu.Lock()
+	remote, ofKernel := 0, 0
+	for st, p := range b.pending {
+		switch {
+		case p.grantor.Same(grantor) && p.providerKey == providerKey:
+			delete(b.pending, st)
+		case !p.grantor.Local():
+			remote++
+			if p.grantor.Kernel == grantor.Kernel {
+				ofKernel++
+			}
+		}
+	}
+	b.mu.Unlock()
+	if !grantor.Local() && (remote >= kernel.MaxPendingConsents || ofKernel >= kernel.MaxPendingConsentsPerKernel) {
+		return nil, kernel.ErrInvalidState.Wrap("too many sign-ups from other kernels are unfinished; try again shortly")
+	}
 
 	if flow == "device" {
 		dr, err := b.engine.startDeviceAuth(ctx, cfg)
@@ -668,6 +688,7 @@ func (b *grantBroker) start(ctx context.Context, grantorUserID string, actionIDs
 type completeResult struct {
 	Status      string
 	ActionIDs   []string
+	AsOf        map[string]time.Time
 	ProviderKey string
 	ScopesJSON  string
 	Refresh     string
@@ -676,14 +697,14 @@ type completeResult struct {
 // complete finishes a consent. callerID must equal the grantor. For the code flow it exchanges the
 // code immediately; for the device flow it reports the poller's result (or pending). On success the
 // pending entry is consumed and the refresh token is returned for the service layer to store.
-func (b *grantBroker) complete(ctx context.Context, state, callerID, code string) (*completeResult, error) {
+func (b *grantBroker) complete(ctx context.Context, state string, caller kernel.Principal, code string) (*completeResult, error) {
 	b.mu.Lock()
 	pc := b.pending[state]
 	b.mu.Unlock()
 	if pc == nil || time.Now().After(pc.expiresAt) {
 		return nil, kernel.ErrNotFound.Wrap("consent state not found or expired")
 	}
-	if pc.grantorUserID != callerID {
+	if !pc.grantor.Same(caller) {
 		return nil, kernel.ErrUnauthorized.Wrap("consent belongs to another user")
 	}
 
@@ -699,7 +720,7 @@ func (b *grantBroker) complete(ctx context.Context, state, callerID, code string
 			return &completeResult{Status: "pending"}, nil
 		}
 		b.consume(state)
-		return &completeResult{Status: "complete", ActionIDs: pc.actionIDs, ProviderKey: pc.providerKey, ScopesJSON: pc.scopesJSON, Refresh: refresh}, nil
+		return &completeResult{Status: "complete", ActionIDs: pc.actionIDs, AsOf: pc.asOf, ProviderKey: pc.providerKey, ScopesJSON: pc.scopesJSON, Refresh: refresh}, nil
 	}
 
 	tr, err := b.engine.exchangeAuthCode(ctx, pc.cfg, code, pc.redirectURI, pc.verifier)
@@ -710,7 +731,7 @@ func (b *grantBroker) complete(ctx context.Context, state, callerID, code string
 		return nil, kernel.ErrExecutionFailed.Wrap("provider returned no refresh token")
 	}
 	b.consume(state)
-	return &completeResult{Status: "complete", ActionIDs: pc.actionIDs, ProviderKey: pc.providerKey, ScopesJSON: pc.scopesJSON, Refresh: tr.RefreshToken}, nil
+	return &completeResult{Status: "complete", ActionIDs: pc.actionIDs, AsOf: pc.asOf, ProviderKey: pc.providerKey, ScopesJSON: pc.scopesJSON, Refresh: tr.RefreshToken}, nil
 }
 
 func (b *grantBroker) pollDevice(state string, cfg oauthConfig, deviceCode string, interval time.Duration) {

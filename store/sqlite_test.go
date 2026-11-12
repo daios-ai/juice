@@ -2621,7 +2621,7 @@ func TestUpdateActionLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
-		if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+		if err := db.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
 			t.Fatal(err)
 		}
 		return a
@@ -2653,7 +2653,7 @@ func TestUpdateActionLifecycle(t *testing.T) {
 			if !tc.resetStats && st.Uses != 3 {
 				t.Errorf("stats reset when they should stand: uses = %d", st.Uses)
 			}
-			_, err := db.ReadGrant(ctx, user.ID, a.ID)
+			_, err := db.ReadGrant(ctx, kernel.User(user.ID), a.ID)
 			if tc.revokeGrants && !errors.Is(err, kernel.ErrNotFound) {
 				t.Errorf("grant survived revocation: %v", err)
 			}
@@ -2675,7 +2675,7 @@ func TestDeleteActionAndGrants(t *testing.T) {
 	a := newAction(user.ID, "doomed", 0, true)
 	_ = db.CreateAction(ctx, a)
 	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
-	if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+	if err := db.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2685,7 +2685,7 @@ func TestDeleteActionAndGrants(t *testing.T) {
 	if got, _ := db.ReadAction(ctx, a.ID); got != nil {
 		t.Error("action still readable after delete")
 	}
-	if _, err := db.ReadGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := db.ReadGrant(ctx, kernel.User(user.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("grant survived the action it consented to: %v", err)
 	}
 }
@@ -3782,6 +3782,21 @@ func TestListPurgeablePeers(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// excluded: one of its users stored a credential here, and one of ours holds a grant on an
+	// action it serves — consent a local user's never loses to idleness (D10)
+	if err := db.CreateOrUpdateConnection(ctx, &kernel.Connection{ID: uuid.New().String(), UserKernel: counterparty("connp", "k-connp", old),
+		UserID: "u-there", ProviderKey: "bearer:x", SealedSecret: "s", CreatedAt: old, UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	proxy := newAction("o-there", "served", 0, true)
+	proxy.OwnerKernel, proxy.Kind = counterparty("grantp", "k-grantp", old), kernel.KindRemoteProxy
+	if err := db.CreateAction(ctx, proxy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: owner.ID, ActionID: proxy.ID, CreatedAt: old}, proxy.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+
 	// excluded: a foreign call it made here is still unrevealed — its reveal is keyed on this kernel
 	{
 		p := newProcess(owner.ID)
@@ -3911,10 +3926,10 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
-	if err := db.CreateOrReplaceGrant(ctx, g); err != nil {
+	if err := db.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
 		t.Fatalf("CreateOrReplaceGrant: %v", err)
 	}
-	got, err := db.ReadGrant(ctx, user.ID, a.ID)
+	got, err := db.ReadGrant(ctx, kernel.User(user.ID), a.ID)
 	if err != nil {
 		t.Fatalf("ReadGrant: %v", err)
 	}
@@ -3925,10 +3940,10 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 	// Re-consent overwrites in place: still one row, new id. A grant holds no secret of its own —
 	// the credential lives on the Connection it points at (§8).
 	g2 := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: user.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
-	if err := db.CreateOrReplaceGrant(ctx, g2); err != nil {
+	if err := db.CreateOrReplaceGrant(ctx, g2, a.UpdatedAt); err != nil {
 		t.Fatalf("re-consent: %v", err)
 	}
-	list, _ := db.ListGrantsByUser(ctx, user.ID)
+	list, _ := db.ListGrantsByUser(ctx, kernel.User(user.ID))
 	if len(list) != 1 {
 		t.Fatalf("grant count = %d, want 1 (upsert)", len(list))
 	}
@@ -3936,13 +3951,13 @@ func TestGrantCRUDAndUpsert(t *testing.T) {
 		t.Errorf("after upsert id = %q, want %q", list[0].ID, g2.ID)
 	}
 
-	if err := db.DeleteGrant(ctx, user.ID, a.ID); err != nil {
+	if err := db.DeleteGrant(ctx, kernel.User(user.ID), a.ID); err != nil {
 		t.Fatalf("DeleteGrant: %v", err)
 	}
-	if _, err := db.ReadGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := db.ReadGrant(ctx, kernel.User(user.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("after delete: got %v, want ErrNotFound", err)
 	}
-	if err := db.DeleteGrant(ctx, user.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+	if err := db.DeleteGrant(ctx, kernel.User(user.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("delete absent grant: got %v, want ErrNotFound", err)
 	}
 }
@@ -3959,13 +3974,13 @@ func TestDeleteGrantsForAction(t *testing.T) {
 	_ = db.CreateAction(ctx, a)
 
 	for _, u := range []*kernel.Account{u1, u2} {
-		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()})
+		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}, a.UpdatedAt)
 	}
 	if err := db.DeleteGrantsForAction(ctx, a.ID); err != nil {
 		t.Fatalf("DeleteGrantsForAction: %v", err)
 	}
 	for _, u := range []*kernel.Account{u1, u2} {
-		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		if _, err := db.ReadGrant(ctx, kernel.User(u.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
 			t.Errorf("grant for %s survived action-wide delete", u.Handle)
 		}
 	}
@@ -3998,7 +4013,7 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 	if err := db.CreateOrUpdateConnection(ctx, c2); err != nil {
 		t.Fatalf("upsert connection: %v", err)
 	}
-	got, err := db.ReadConnectionByUserProvider(ctx, u.ID, "bearer:api.test.com")
+	got, err := db.ReadConnectionByUserProvider(ctx, kernel.User(u.ID), "bearer:api.test.com")
 	if err != nil {
 		t.Fatalf("ReadConnectionByUserProvider: %v", err)
 	}
@@ -4023,9 +4038,9 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 
 	// Two grants point at the connection; cascade removes both and the connection.
 	for _, a := range []*kernel.Action{a1, a2} {
-		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, ConnectionID: got.ID, CreatedAt: time.Now().UTC()})
+		_ = db.CreateOrReplaceGrant(ctx, &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, ConnectionID: got.ID, CreatedAt: time.Now().UTC()}, a.UpdatedAt)
 	}
-	if list, _ := db.ListConnectionsByUser(ctx, u.ID); len(list) != 1 {
+	if list, _ := db.ListConnectionsByUser(ctx, kernel.User(u.ID)); len(list) != 1 {
 		t.Fatalf("connection count = %d, want 1", len(list))
 	}
 	if err := db.DeleteConnectionCascade(ctx, got.ID); err != nil {
@@ -4035,7 +4050,7 @@ func TestConnectionCRUDAndCascade(t *testing.T) {
 		t.Errorf("connection survived cascade: %v", err)
 	}
 	for _, a := range []*kernel.Action{a1, a2} {
-		if _, err := db.ReadGrant(ctx, u.ID, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		if _, err := db.ReadGrant(ctx, kernel.User(u.ID), a.ID); !errors.Is(err, kernel.ErrNotFound) {
 			t.Errorf("grant on %s survived connection cascade", a.Name)
 		}
 	}
@@ -5730,5 +5745,223 @@ func TestCreateTaskRefusesABlockedRequester(t *testing.T) {
 	}
 	if err := task(alice.ID, alice.ID); err != nil {
 		t.Errorf("a self-addressed task was refused: %v", err)
+	}
+}
+
+// A grantor and a connection's user are principals (D10): a user here and a user of another kernel
+// who happen to share an id hold separate grants and credentials, and neither reads the other's.
+func TestGrantsAndConnectionsAreKeyedByPrincipal(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	u := newUser("gp-local", 0)
+	_ = db.CreateUser(ctx, u)
+	a := newAction(u.ID, "gp-act", 0, true)
+	_ = db.CreateAction(ctx, a)
+	local, remote := kernel.User(u.ID), kernel.Principal{Kernel: "k-other", UserID: u.ID}
+	for i, who := range []kernel.Principal{local, remote} {
+		c := &kernel.Connection{ID: uuid.New().String(), UserKernel: who.Kernel, UserID: who.UserID, ProviderKey: "bearer:x",
+			SealedSecret: fmt.Sprint("sealed-", i), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := db.CreateOrUpdateConnection(ctx, c); err != nil {
+			t.Fatalf("connection for %+v: %v", who, err)
+		}
+		g := &kernel.Grant{ID: uuid.New().String(), GrantorKernel: who.Kernel, GrantorUserID: who.UserID, ActionID: a.ID, ConnectionID: c.ID, CreatedAt: time.Now().UTC()}
+		if err := db.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
+			t.Fatalf("grant for %+v: %v", who, err)
+		}
+	}
+	for i, who := range []kernel.Principal{local, remote} {
+		c, err := db.ReadConnectionByUserProvider(ctx, who, "bearer:x")
+		g, gerr := db.ReadGrant(ctx, who, a.ID)
+		if err != nil || gerr != nil || c.SealedSecret != fmt.Sprint("sealed-", i) || g.ConnectionID != c.ID {
+			t.Errorf("%+v reads connection %+v (%v) and grant %+v (%v), want its own", who, c, err, g, gerr)
+		}
+	}
+	if total, of, err := db.CountRemoteConnections(ctx, "k-other"); err != nil || total != 1 || of != 1 {
+		t.Errorf("remote connections = %d, of k-other %d (%v), want 1 and 1", total, of, err)
+	}
+	if err := db.DeleteGrant(ctx, remote, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ReadGrant(ctx, local, a.ID); err != nil {
+		t.Errorf("deleting the remote user's grant took the local user's: %v", err)
+	}
+
+	// A grant is written only for the action as it was when consent began: once the action has
+	// been updated — which revokes its grants — a consent begun before cannot put one back.
+	stale := a.UpdatedAt
+	a.UpdatedAt = stale.Add(time.Second)
+	if err := db.UpdateActionLifecycle(ctx, a, false, true); err != nil {
+		t.Fatal(err)
+	}
+	g := &kernel.Grant{ID: uuid.New().String(), GrantorUserID: u.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
+	if err := db.CreateOrReplaceGrant(ctx, g, stale); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a grant for an action changed since consent began: %v, want ErrInvalidState", err)
+	}
+	if _, err := db.ReadGrant(ctx, local, a.ID); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("the refused grant was written all the same: %v", err)
+	}
+	if err := db.CreateOrReplaceGrant(ctx, g, a.UpdatedAt); err != nil {
+		t.Errorf("a grant for the action as it now is: %v", err)
+	}
+}
+
+// A grant operation older than the newest applied for that user is refused; the same one again, or
+// a newer one, is applied — and one user's sequence is not another's.
+func TestApplyGrantOpRefusesAnOlderOne(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		user   string
+		at     int64
+		refuse bool
+	}{
+		{"u1", 100, false}, {"u1", 100, false}, {"u1", 200, false}, {"u1", 199, true}, {"u2", 50, false}, {"u1", 200, false},
+	} {
+		if err := db.ApplyGrantOp(ctx, "k-home", tc.user, tc.at); (err != nil) != tc.refuse {
+			t.Errorf("operation at %d for %s: %v, want refused=%v", tc.at, tc.user, err, tc.refuse)
+		}
+	}
+}
+
+// Work another kernel holds keeps a process open until every piece is released, and a release is for
+// good: nothing restores it, nobody but the kernel that registered can make it, and a process takes
+// no more registrations than its limit, released ones included. Closing the process forgets them.
+func TestRegistrationsHoldAProcessOpen(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	owner := newUser("reg-owner", 0)
+	_ = db.CreateUser(ctx, owner)
+	act := newAction(owner.ID, "reg-act", 0, true)
+	_ = db.CreateAction(ctx, act)
+	p := newProcess(owner.ID)
+	p.Ref = "ref-1"
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: owner.ID, CallerUserID: owner.ID, ActionID: act.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, owner.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	status := func() kernel.ProcessStatus {
+		got, err := db.ReadProcess(ctx, p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.Status
+	}
+	if got, err := db.ProcessOwnerByRef(ctx, "ref-1"); err != nil || got != owner.ID {
+		t.Fatalf("owner by reference = %q, %v", got, err)
+	}
+	if _, err := db.ProcessOwnerByRef(ctx, ""); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("an empty reference named a process: %v", err)
+	}
+	if err := db.Register(ctx, "no-such", "k1", "w1", 3); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("register for an unknown reference: %v, want ErrNotFound", err)
+	}
+	for _, w := range []string{"w1", "w1", "w2"} { // the same work twice is one registration
+		if err := db.Register(ctx, "ref-1", "k1", w, 3); err != nil {
+			t.Fatalf("register %s: %v", w, err)
+		}
+	}
+	// The root trace has no transaction, which holds the process open by itself; give it one, so
+	// the registrations are all that does.
+	txID := insertTxID(t, db, uuid.New().String(), owner.ID, owner.ID, owner.ID, act.ID, time.Now().UTC())
+	if _, err := db.db.Exec(`UPDATE transactions SET trace_id=? WHERE id=?`, root.ID, txID); err != nil {
+		t.Fatal(err)
+	}
+	var live int
+	if err := db.Release(ctx, "ref-1", "k-other", "w1"); err != nil {
+		t.Fatalf("a release by a kernel that registered nothing: %v", err)
+	}
+	_ = db.db.QueryRow(`SELECT COUNT(*) FROM registrations WHERE process_id=? AND released=0`, p.ID).Scan(&live)
+	if live != 2 {
+		t.Fatalf("%d pieces hold the process after another kernel's release, want both still", live)
+	}
+	if err := db.Release(ctx, "ref-1", "k1", "w1"); err != nil || status() != kernel.ProcessOpen {
+		t.Fatalf("one of two pieces released: %v, process %s; want it open", err, status())
+	}
+	if err := db.Register(ctx, "ref-1", "k1", "w1", 3); err != nil {
+		t.Fatalf("registering released work again: %v", err)
+	}
+	_ = db.db.QueryRow(`SELECT COUNT(*) FROM registrations WHERE process_id=? AND released=0`, p.ID).Scan(&live)
+	if live != 1 {
+		t.Errorf("%d pieces hold the process, want 1: a release is not undone by registering again", live)
+	}
+	if err := db.Register(ctx, "ref-1", "k2", "w3", 3); err != nil {
+		t.Fatalf("a third registration under a limit of three: %v", err)
+	}
+	if err := db.Register(ctx, "ref-1", "k2", "w4", 3); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a fourth registration, one released, under a limit of three: %v, want ErrInvalidState", err)
+	}
+	for _, r := range [][2]string{{"k1", "w2"}, {"k2", "w3"}} {
+		if err := db.Release(ctx, "ref-1", r[0], r[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status() != kernel.ProcessClosed {
+		t.Fatalf("the process is %s after its last piece of work was released", status())
+	}
+	var left int
+	_ = db.db.QueryRow(`SELECT COUNT(*) FROM registrations WHERE process_id=?`, p.ID).Scan(&left)
+	if left != 0 {
+		t.Errorf("%d registrations outlived their process", left)
+	}
+	if err := db.Register(ctx, "ref-1", "k1", "w9", 3); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("register on a closed process: %v, want ErrNotFound", err)
+	}
+	if err := db.Release(ctx, "ref-1", "k1", "w2"); err != nil {
+		t.Errorf("a release told again after the process closed: %v", err)
+	}
+}
+
+// Migration 061 keeps every grant and connection, as a user's of this kernel, gives each open
+// process a reference, and stops requiring that a grantor be an account here.
+func TestMigration061KeepsGrantsAndNamesPrincipals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "juice.db")
+	db := openAt(t, path)
+	ctx := context.Background()
+	u := newUser("m61", 0)
+	_ = db.CreateUser(ctx, u)
+	a := newAction(u.ID, "m61-act", 0, true)
+	_ = db.CreateAction(ctx, a)
+	p := newProcess(u.ID)
+	root := &kernel.Trace{ID: uuid.New().String(), ProcessID: p.ID, ActionOwnerID: u.ID, CallerUserID: u.ID, ActionID: a.ID, CreatedAt: time.Now().UTC()}
+	if err := db.BeginRun(ctx, p, root, u.ID, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`PRAGMA foreign_keys=OFF`,
+		`DROP TABLE grants`, `DROP TABLE connections`, `DROP TABLE registrations`, `DROP TABLE grant_ops`,
+		`DROP INDEX idx_processes_ref`,
+		`ALTER TABLE processes DROP COLUMN ref`, `ALTER TABLE processes DROP COLUMN origin_kernel`, `ALTER TABLE processes DROP COLUMN registered`,
+		`ALTER TABLE actions DROP COLUMN requires_grant`,
+		`CREATE TABLE connections (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES accounts(id), provider_key TEXT NOT NULL,
+		   sealed_secret TEXT NOT NULL, scopes_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (user_id, provider_key))`,
+		`CREATE TABLE grants (id TEXT PRIMARY KEY, grantor_user_id TEXT NOT NULL REFERENCES accounts(id), action_id TEXT NOT NULL REFERENCES actions(id),
+		   connection_id TEXT REFERENCES connections(id), created_at TEXT NOT NULL, UNIQUE (grantor_user_id, action_id))`,
+		`INSERT INTO connections VALUES ('c1','` + u.ID + `','bearer:x','sealed','["r"]','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`INSERT INTO grants VALUES ('g1','` + u.ID + `','` + a.ID + `','c1','2026-01-01T00:00:00Z')`,
+		`DELETE FROM schema_migrations WHERE version='061_remote_grants'`,
+	} {
+		if _, err := db.db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	db = openAt(t, path)
+	g, err := db.ReadGrant(ctx, kernel.User(u.ID), a.ID)
+	if err != nil || g.ID != "g1" || g.ConnectionID != "c1" {
+		t.Fatalf("the grant after migration: %+v, %v", g, err)
+	}
+	if c, err := db.ReadConnectionByUserProvider(ctx, kernel.User(u.ID), "bearer:x"); err != nil || c.SealedSecret != "sealed" || c.ScopesJSON != `["r"]` {
+		t.Errorf("the connection after migration: %+v, %v", c, err)
+	}
+	if got, _ := db.ReadProcess(ctx, p.ID); got == nil || len(got.Ref) != 64 {
+		t.Errorf("an open process was left without a reference: %+v", got)
+	}
+	remote := &kernel.Grant{ID: "g2", GrantorKernel: "k-other", GrantorUserID: "not-an-account", ActionID: a.ID, ConnectionID: "c1", CreatedAt: time.Now().UTC()}
+	if err := db.CreateOrReplaceGrant(ctx, remote, a.UpdatedAt); err != nil {
+		t.Errorf("a grant for a user of another kernel: %v", err)
+	}
+	remote.ID, remote.ConnectionID = "g3", "no-such-connection"
+	if err := db.CreateOrReplaceGrant(ctx, remote, a.UpdatedAt); err == nil {
+		t.Errorf("a grant naming no stored connection was accepted: the rebuilt table lost its reference to connections")
 	}
 }

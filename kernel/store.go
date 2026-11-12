@@ -36,13 +36,13 @@ type ScriptExecutor interface {
 	Execute(ctx context.Context, artifact []byte, input []byte, host HostFunctions) ([]byte, error)
 }
 
-// HTTPExecutor calls an external HTTP action endpoint. ownerUserID is the process owner (the
-// payer): the executor needs it to resolve a delegated OAuth grant (§8), whose binding rule is
-// grant.grantor_user_id == ownerUserID. capability is the trace-scoped composition token (§9)
+// HTTPExecutor calls an external HTTP action endpoint. grantor is whose grant the process's calls
+// consult (D10): the executor needs it to resolve a delegated grant (§8), whose binding rule is
+// grant.grantor == grantor. capability is the trace-scoped composition token (§9)
 // the executor delivers as a header so the endpoint can call back; empty disables composition.
 // kernel/ defines this interface; cmd/juice implements it.
 type HTTPExecutor interface {
-	Execute(ctx context.Context, action *Action, args map[string]any, ownerUserID, capability string) (map[string]any, error)
+	Execute(ctx context.Context, action *Action, args map[string]any, grantor Principal, capability string) (map[string]any, error)
 }
 
 // GrantStore is the executor-facing subset of Store for the delegated-token lifecycle (§8).
@@ -50,7 +50,7 @@ type HTTPExecutor interface {
 // exchange (which lives outside kernel/) can resolve a grant to its Connection, persist a
 // rotated refresh token on that connection, and cascade-delete it on invalid_grant.
 type GrantStore interface {
-	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
+	ReadGrant(ctx context.Context, grantor Principal, actionID string) (*Grant, error)
 	ReadConnection(ctx context.Context, id string) (*Connection, error)
 	UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error
 	DeleteConnectionCascade(ctx context.Context, id string) error
@@ -77,6 +77,11 @@ type OutboundCall struct {
 	Lottery              int64
 	CallerUserID         string
 	CallerHandle         string
+	// ProcessKernel and ProcessRef say where the run began and name its process there, so a kernel
+	// that needs the grantor can ask (D10). They ride beside the request, outside its signature: a
+	// retry sends the request first signed, and whoever is asked answers for itself.
+	ProcessKernel string
+	ProcessRef    string
 }
 
 // TicketRevealer carries one signed reveal to a peer over /juice/fed/settle/1 (P10): how a draw came
@@ -136,6 +141,15 @@ type FederationClient interface {
 	TransferAnnouncer
 	RemoteResolver
 	TaskCaller
+	GrantCarrier
+}
+
+// GrantCarrier carries what grants need between kernels (D10): a signed grant operation to the kernel
+// that serves the action, over /juice/fed/grant/1, and a question or notice about a process to the
+// kernel that owns it, over /juice/fed/process/1. The kernel owns the payloads; the adapter the wire.
+type GrantCarrier interface {
+	SendGrant(ctx context.Context, peerPublicKey string, op GrantOp, signature string) (status int, body []byte, err error)
+	SendProcess(ctx context.Context, peerPublicKey, kind, ref, regID string) (status int, body []byte, err error)
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -487,12 +501,13 @@ type Store interface {
 	// ---- Grants (delegated upstream OAuth, §8) ----
 
 	// CreateOrReplaceGrant upserts on (grantor_user_id, action_id); re-consent overwrites.
-	CreateOrReplaceGrant(ctx context.Context, g *Grant) error
+	// It writes nothing, and fails, when the action's updated_at is no longer asOf (D10).
+	CreateOrReplaceGrant(ctx context.Context, g *Grant, asOf time.Time) error
 	// ReadGrant returns the grant for (grantor, action), or ErrNotFound.
-	ReadGrant(ctx context.Context, grantorUserID, actionID string) (*Grant, error)
-	ListGrantsByUser(ctx context.Context, grantorUserID string) ([]*Grant, error)
+	ReadGrant(ctx context.Context, grantor Principal, actionID string) (*Grant, error)
+	ListGrantsByUser(ctx context.Context, grantor Principal) ([]*Grant, error)
 	// DeleteGrant removes one grant (revoke / invalid_grant); ErrNotFound if absent.
-	DeleteGrant(ctx context.Context, grantorUserID, actionID string) error
+	DeleteGrant(ctx context.Context, grantor Principal, actionID string) error
 	DeleteGrantsForAction(ctx context.Context, actionID string) error
 	// DeleteGrantsForAction removes every grant on an action (deactivating update / delete).
 
@@ -504,12 +519,30 @@ type Store interface {
 	// ReadConnection returns the connection by id, or ErrNotFound.
 	ReadConnection(ctx context.Context, id string) (*Connection, error)
 	// ReadConnectionByUserProvider returns a user's connection for a provider_key, or ErrNotFound.
-	ReadConnectionByUserProvider(ctx context.Context, userID, providerKey string) (*Connection, error)
-	ListConnectionsByUser(ctx context.Context, userID string) ([]*Connection, error)
+	ReadConnectionByUserProvider(ctx context.Context, user Principal, providerKey string) (*Connection, error)
+	ListConnectionsByUser(ctx context.Context, user Principal) ([]*Connection, error)
 	// UpdateConnectionSecret replaces the sealed secret (provider rotation).
 	UpdateConnectionSecret(ctx context.Context, id, sealedSecret string) error
 	// DeleteConnectionCascade removes a connection and all its grants atomically.
 	DeleteConnectionCascade(ctx context.Context, id string) error
+
+	// ---- Grants and processes across kernels (D2, D10) ----
+
+	// CountRemoteConnections counts connections of other kernels' users, and of one kernel's.
+	CountRemoteConnections(ctx context.Context, kernelKey string) (total, ofKernel int, err error)
+	// ApplyGrantOp records a grant operation's time for a kernel's user and refuses an older one.
+	ApplyGrantOp(ctx context.Context, kernelKey, userID string, at int64) error
+	// HoldsGrantOn reports whether a user here holds a grant on an action a kernel serves.
+	HoldsGrantOn(ctx context.Context, userID, kernelKey string) (bool, error)
+	// ProcessOwnerByRef returns the owner of the open process a reference names, or ErrNotFound.
+	ProcessOwnerByRef(ctx context.Context, ref string) (string, error)
+	// Register holds the process a reference names open for a kernel's waiting work; Release ends
+	// that for good and closes the process if nothing else holds it.
+	Register(ctx context.Context, ref, kernelKey, regID string, limit int) error
+	Release(ctx context.Context, ref, kernelKey, regID string) error
+	// SetRegistered and ListUnreleasedProcesses track a served process with the kernel it serves.
+	SetRegistered(ctx context.Context, processID string, state int) error
+	ListUnreleasedProcesses(ctx context.Context) ([]*Process, error)
 
 	// ---- Config ----
 

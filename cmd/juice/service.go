@@ -468,11 +468,11 @@ func grantRefs(k *kernel.Kernel, ctx context.Context, grants []*kernel.Grant) []
 // startGrant begins delegated-OAuth consent for one provider group of a selector (§8). When the
 // caller's connection already covers the group's scope union, it mints the grants instantly and
 // returns {status:"granted"}; otherwise it drives the broker's browser/device flow.
-func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, selector, provider, redirectURI, flow string) (any, error) {
+func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, caller kernel.Principal, selector, provider, redirectURI, flow string) (any, error) {
 	if broker == nil {
 		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
 	}
-	plan, err := k.ConsentPlan(ctx, callerID, selector)
+	plan, err := k.ConsentPlan(ctx, caller, selector)
 	if err != nil {
 		return nil, err
 	}
@@ -483,13 +483,13 @@ func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, call
 	ids := groupActionIDs(g)
 	scopesJSON, _ := json.Marshal(g.Scopes)
 	if g.Covered {
-		grants, err := k.CreateGrants(ctx, callerID, g.ProviderKey, ids, "", string(scopesJSON))
+		grants, err := k.CreateGrants(ctx, caller, g.ProviderKey, ids, "", string(scopesJSON), nil)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"status": "granted", "provider": g.Provider, "actions": grantRefs(k, ctx, grants)}, nil
 	}
-	auth, err := k.DelegatedAuthConfig(ctx, callerID, ids[0])
+	auth, err := k.DelegatedAuthConfig(ctx, caller, ids[0])
 	if err != nil {
 		return nil, err
 	}
@@ -501,23 +501,32 @@ func startGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, call
 	if flow == "" {
 		flow = "code"
 	}
-	return broker.start(ctx, callerID, ids, g.ProviderKey, string(scopesJSON), auth, redirectURI, flow)
+	// What each action is now is what the user consents to: a grant is written only for one still so.
+	asOf := map[string]time.Time{}
+	for _, id := range ids {
+		a, aerr := k.ReadAction(ctx, id)
+		if aerr != nil {
+			return nil, aerr
+		}
+		asOf[id] = a.UpdatedAt
+	}
+	return broker.start(ctx, caller, asOf, ids, g.ProviderKey, string(scopesJSON), auth, redirectURI, flow)
 }
 
 // completeGrant finishes a consent and, on success, homes the refresh token on the group's
 // connection and mints one grant per action (§8).
-func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, callerID, state, code string) (map[string]any, error) {
+func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, caller kernel.Principal, state, code string) (map[string]any, error) {
 	if broker == nil {
 		return nil, kernel.ErrInvalidState.Wrap("OAuth consent is not configured on this server")
 	}
-	res, err := broker.complete(ctx, state, callerID, code)
+	res, err := broker.complete(ctx, state, caller, code)
 	if err != nil {
 		return nil, err
 	}
 	if res.Status == "pending" {
 		return map[string]any{"status": "pending"}, nil
 	}
-	grants, err := k.CreateGrants(ctx, callerID, res.ProviderKey, res.ActionIDs, res.Refresh, res.ScopesJSON)
+	grants, err := k.CreateGrants(ctx, caller, res.ProviderKey, res.ActionIDs, res.Refresh, res.ScopesJSON, res.AsOf)
 	if err != nil {
 		return nil, err
 	}
@@ -527,8 +536,8 @@ func completeGrant(k *kernel.Kernel, broker *grantBroker, ctx context.Context, c
 // attachToken stores a caller-supplied static token across a selector's delegated_bearer group
 // (§8): the direct non-OAuth twin of the start/complete consent flow, minting one grant per action
 // against one connection. The raw token never appears in any read path.
-func attachToken(k *kernel.Kernel, ctx context.Context, callerID, selector, provider, token string) (map[string]any, error) {
-	grants, err := k.AttachBearerGrants(ctx, callerID, selector, provider, token)
+func attachToken(k *kernel.Kernel, ctx context.Context, caller kernel.Principal, selector, provider, token string) (map[string]any, error) {
+	grants, err := k.AttachBearerGrants(ctx, caller, selector, provider, token)
 	if err != nil {
 		return nil, err
 	}
@@ -536,8 +545,8 @@ func attachToken(k *kernel.Kernel, ctx context.Context, callerID, selector, prov
 }
 
 // revokeGrantsBySelector deletes the caller's grants matching a selector (grants only, §8).
-func revokeGrantsBySelector(k *kernel.Kernel, ctx context.Context, callerID, selector string) (map[string]any, error) {
-	revoked, err := k.RevokeGrantsBySelector(ctx, callerID, selector)
+func revokeGrantsBySelector(k *kernel.Kernel, ctx context.Context, caller kernel.Principal, selector string) (map[string]any, error) {
+	revoked, err := k.RevokeGrantsBySelector(ctx, caller, selector)
 	if err != nil {
 		return nil, err
 	}
@@ -545,8 +554,8 @@ func revokeGrantsBySelector(k *kernel.Kernel, ctx context.Context, callerID, sel
 }
 
 // revokeConnection deletes the caller's connection for a provider and cascades its grants (§8).
-func revokeConnection(k *kernel.Kernel, ctx context.Context, callerID, providerKey string) (map[string]any, error) {
-	revoked, err := k.RevokeConnection(ctx, callerID, providerKey)
+func revokeConnection(k *kernel.Kernel, ctx context.Context, caller kernel.Principal, providerKey string) (map[string]any, error) {
+	revoked, err := k.RevokeConnection(ctx, caller, providerKey)
 	if err != nil {
 		return nil, err
 	}

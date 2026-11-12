@@ -667,6 +667,28 @@ PYEOF
     track_pid $!
     _await_http "$port" POST
 }
+# start_account_backend port header tok=account[,tok=account...]  — an upstream that knows its
+# accounts by their tokens: it answers {"account": <name>} for a known token in `header` and 401
+# otherwise (its root path answers anyone, which is how the harness knows it is up). A flow reads whose account was reached, and no reply ever carries a token.
+start_account_backend() {
+    local port="$1" header="$2" accounts="$3"
+    python3 - "$port" "$header" "$accounts" <<'PYEOF' &
+import sys, json, http.server
+port, header = int(sys.argv[1]), sys.argv[2]
+accounts = dict(p.split('=', 1) for p in sys.argv[3].split(','))
+class H(http.server.BaseHTTPRequestHandler):
+    def respond(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        acct = accounts.get(self.headers.get(header, '')) or ('ready' if self.path == '/' else None)
+        self.send_response(200 if acct else 401); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(json.dumps({"account": acct} if acct else {"error": "unknown token"}).encode())
+    do_GET = do_POST = respond
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
+PYEOF
+    track_pid $!
+    _await_http "$port" POST
+}
 # start_echo_backend port  — reflects request method + echoed `v` (query or body) for every verb.
 start_echo_backend() {
     local port="$1"
@@ -784,6 +806,42 @@ data = leb128u(2)+dseg(0,name_b)+dseg(32,b'{}')
 wasm = (b'\x00asm\x01\x00\x00\x00'+sec(1,types)+sec(2,imports)+sec(3,funcs)
         +sec(5,mems)+sec(6,globs)+sec(7,exports)+sec(10,codes)+sec(11,data))
 open(outfile,'wb').write(wasm)
+PYEOF
+}
+
+# make_parker_wasm out action required_caller — an action that leaves a task for `action` waiting,
+# addressed to required_caller, and returns {"parked":true}: work that outlives the call that began it.
+make_parker_wasm() {
+    python3 - "$1" "$2" "$3" <<'PYEOF'
+import sys
+outfile, action, caller = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+reply = b'{"parked":true}'
+def leb(n, signed=False):
+    r=[]
+    while True:
+        b=n&0x7f; n>>=7
+        done = (n==0 and not (signed and b&0x40)) or (signed and n==-1 and b&0x40)
+        r.append(b|(0 if done else 0x80))
+        if done: break
+    return bytes(r)
+def vec(d): return leb(len(d))+bytes(d)
+def sec(i,p): return bytes([i])+vec(p)
+def i32(n): return b'\x41'+leb(n, True)
+A, C, P, R = 0, 256, 480, 512                      # where action, caller, "{}" and the reply sit
+types   = leb(3)+b'\x60\x06'+b'\x7f'*6+b'\x01\x7e'+b'\x60\x01\x7f\x01\x7f'+b'\x60\x02\x7f\x7f\x01\x7e'
+imports = leb(1)+vec(b'juice')+vec(b'task_create')+b'\x00\x00'
+funcs   = leb(2)+b'\x01\x02'
+mems    = leb(1)+b'\x00\x01'
+globs   = leb(1)+b'\x7f\x01'+i32(1024)+b'\x0b'
+exports = leb(3)+vec(b'memory')+b'\x02\x00'+vec(b'alloc')+b'\x00\x01'+vec(b'run')+b'\x00\x02'
+alloc   = bytes([0x01,0x01,0x7f,0x23,0x00,0x21,0x01,0x23,0x00,0x20,0x00,0x6a,0x24,0x00,0x20,0x01,0x0b])
+run     = (b'\x00'+i32(P)+i32(2)+i32(C)+i32(len(caller))+i32(A)+i32(len(action))+b'\x10\x00\x1a'
+           +b'\x42'+leb((R<<32)|len(reply), True)+b'\x0b')
+codes   = leb(2)+vec(alloc)+vec(run)
+def dseg(off,d): return b'\x00'+i32(off)+b'\x0b'+vec(d)
+data    = leb(4)+dseg(A,action)+dseg(C,caller)+dseg(P,b'{}')+dseg(R,reply)
+open(outfile,'wb').write(b'\x00asm\x01\x00\x00\x00'+sec(1,types)+sec(2,imports)+sec(3,funcs)
+                         +sec(5,mems)+sec(6,globs)+sec(7,exports)+sec(10,codes)+sec(11,data))
 PYEOF
 }
 

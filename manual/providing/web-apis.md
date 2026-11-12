@@ -214,10 +214,11 @@ A caller without the required grant is refused before charging and told which
 action to connect. The consent procedure is described in
 [Connecting an upstream account](../calling/consent-and-tasks.html#connecting-an-upstream-account).
 
-Delegated actions are excluded from federation: a peer kernel cannot stand
-in for each remote user's upstream consent. Locally, each
-credential applies only to the action granted access and when its grantor is
-the payer. A child action must have its own grant.
+Public delegated actions are available through federation and are marked as
+requiring a grant. Each credential applies only to the action granted access,
+within a process owned by its grantor. A child action needs its own grant,
+wherever it runs. An action serving another user's process never substitutes
+its owner's grant for that user's consent.
 
 The upstream provider must know the application before any caller can consent:
 register it in the provider's console and add the redirect address the consent

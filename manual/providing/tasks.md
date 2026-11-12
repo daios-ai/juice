@@ -123,7 +123,8 @@ settle before the process can close.
 
 A process groups the calls and tasks started by one `run`, together with their
 funds. It closes automatically once the root call and its descendants have
-settled and no tasks remain outstanding. Any funds left at closure return to
+settled and no tasks or registered work on other kernels remain outstanding.
+Any funds left at closure return to
 the process owner.
 
 ```console
@@ -142,7 +143,10 @@ Process e3539f75a421 ended.
 ```
 
 Ending cancels waiting tasks and returns their reserved funds. It is useful for
-abandoned approvals or messages whose recipients will not respond.
+abandoned approvals or messages whose recipients will not respond. Ending
+your process also prevents subsequent use of its grants on every kernel. It
+does not cancel tasks held on another kernel, and a use already approved may
+complete.
 
 Closure is refused while a call awaits a peer's signed receipt or refusal;
 the message says how long it has waited. Such calls have no timeout refund,

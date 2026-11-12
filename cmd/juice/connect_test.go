@@ -63,11 +63,11 @@ func TestUserDisconnectCLI(t *testing.T) {
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "grant-cli")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
-	plan, err := env.k.ConsentPlan(ctx, uid, "grant-cli@k/inbox")
+	plan, err := env.k.ConsentPlan(ctx, kernel.User(uid), "grant-cli@k/inbox")
 	if err != nil || len(plan.Groups) != 1 {
 		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
 	}
-	if _, err := env.k.CreateGrants(ctx, uid, plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", ""); err != nil {
+	if _, err := env.k.CreateGrants(ctx, kernel.User(uid), plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", "", nil); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	if err := saveToken(tok); err != nil {
@@ -91,11 +91,11 @@ func TestDeleteGrantsHasOneSpelling(t *testing.T) {
 	ctx := context.Background()
 	uid, tok := makeUser(t, env.k, "grant-alias")
 	aid := createDelegatedCLIAction(t, env.k, uid, "inbox")
-	plan, err := env.k.ConsentPlan(ctx, uid, "grant-alias@k/inbox")
+	plan, err := env.k.ConsentPlan(ctx, kernel.User(uid), "grant-alias@k/inbox")
 	if err != nil || len(plan.Groups) != 1 {
 		t.Fatalf("consent plan: %v groups=%d", err, len(plan.Groups))
 	}
-	if _, err := env.k.CreateGrants(ctx, uid, plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", ""); err != nil {
+	if _, err := env.k.CreateGrants(ctx, kernel.User(uid), plan.Groups[0].ProviderKey, []string{aid}, "refresh-tok", "", nil); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 

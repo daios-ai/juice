@@ -100,7 +100,7 @@ func TestHTTPActionExecutorSuccess(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{"msg": "hello"}, "", "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{"msg": "hello"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestHTTPActionExecutorNon200(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "")
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, kernel.Principal{}, "")
 	if err == nil {
 		t.Fatal("expected error for non-200 response")
 	}
@@ -129,7 +129,7 @@ func TestHTTPActionExecutorInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	exec := &httpActionExecutor{}
-	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "")
+	_, err := exec.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, kernel.Principal{}, "")
 	if err == nil {
 		t.Fatal("expected error for non-JSON response")
 	}
@@ -163,7 +163,7 @@ func TestHTTPActionAuthFailsClosed(t *testing.T) {
 
 			exec := &httpActionExecutor{auth: newAuthenticator(tc.box, nil, false, 0)}
 			_, err := exec.Execute(context.Background(),
-				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{}, "", "")
+				&kernel.Action{Source: httpSrc(srv.URL, "POST"), AuthJSON: "x"}, map[string]any{}, kernel.Principal{}, "")
 			if !errors.Is(err, kernel.ErrInvalidState) {
 				t.Fatalf("got %v, want ErrInvalidState", err)
 			}
@@ -195,7 +195,7 @@ func TestHTTPActionValidAuthApplied(t *testing.T) {
 		t.Fatalf("seal: %v", err)
 	}
 	exec := &httpActionExecutor{auth: newAuthenticator(box, nil, false, 0)}
-	_, err = exec.Execute(context.Background(), action, map[string]any{}, "", "")
+	_, err = exec.Execute(context.Background(), action, map[string]any{}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestExecuteOpenAPIGet(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"name": "world"}, "", "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"name": "world"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI GET: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestExecuteOpenAPIPost(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"msg": "hello"}, "", "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"msg": "hello"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI POST: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestExecuteOpenAPIPathParam(t *testing.T) {
 	srcJSON, _ := json.Marshal(src)
 
 	exec := &httpActionExecutor{}
-	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"id": "42", "filter": "active"}, "", "")
+	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{"id": "42", "filter": "active"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute OpenAPI path param: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestExecuteOpenAPIPostQueryParam(t *testing.T) {
 	result, err := exec.Execute(context.Background(), &kernel.Action{Source: string(srcJSON)}, map[string]any{
 		"format": "json",
 		"data":   "hello",
-	}, "", "")
+	}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestExecuteHTTPManualGet(t *testing.T) {
 
 	exec := &httpActionExecutor{}
 	result, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "GET")}, map[string]any{"q": "hi"}, "", "")
+		&kernel.Action{Source: httpSrc(srv.URL, "GET")}, map[string]any{"q": "hi"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute manual GET: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestExecuteHTTPManualPathTemplate(t *testing.T) {
 
 	exec := &httpActionExecutor{}
 	result, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL+"/items/{id}", "GET")}, map[string]any{"id": "42"}, "", "")
+		&kernel.Action{Source: httpSrc(srv.URL+"/items/{id}", "GET")}, map[string]any{"id": "42"}, kernel.Principal{}, "")
 	if err != nil {
 		t.Fatalf("Execute manual path template: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestExecuteHTTPManualPathTemplate(t *testing.T) {
 func TestExecuteHTTPInvalidSource(t *testing.T) {
 	exec := &httpActionExecutor{}
 	_, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: "https://not-json.example.com"}, map[string]any{}, "", "")
+		&kernel.Action{Source: "https://not-json.example.com"}, map[string]any{}, kernel.Principal{}, "")
 	if !errors.Is(err, kernel.ErrInvalidState) {
 		t.Fatalf("got %v, want ErrInvalidState", err)
 	}
@@ -521,7 +521,7 @@ func TestExecuteOAuthClientCredentials(t *testing.T) {
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
 	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "", ""); err != nil {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.Principal{}, ""); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if sawAuth != "Bearer cc-tok" {
@@ -560,7 +560,7 @@ func TestExecuteOAuth401RefreshRetry(t *testing.T) {
 	action.AuthJSON, _ = box.Seal(action.ID, string(authJSON))
 
 	exec := &httpActionExecutor{allowLocal: true, auth: newAuthenticator(box, newFakeGrantStore(), true, 0)}
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, "", ""); err != nil {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.Principal{}, ""); err != nil {
 		t.Fatalf("Execute with 401 retry: %v", err)
 	}
 	if issued < 2 {
@@ -580,7 +580,7 @@ func TestExecuteInjectsCapabilityHeaders(t *testing.T) {
 
 	exec := &httpActionExecutor{allowLocal: true, callbackURL: "http://cb.example:9999"}
 	if _, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, kernel.Principal{}, "captoken.sig"); err != nil {
 		t.Fatal(err)
 	}
 	if got.Get(capabilityHeader) != "captoken.sig" {
@@ -593,7 +593,7 @@ func TestExecuteInjectsCapabilityHeaders(t *testing.T) {
 	// With no callback URL, a leaf endpoint receives neither header.
 	exec2 := &httpActionExecutor{allowLocal: true}
 	if _, err := exec2.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		&kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, kernel.Principal{}, "captoken.sig"); err != nil {
 		t.Fatal(err)
 	}
 	if got.Get(capabilityHeader) != "" || got.Get(callbackHeader) != "" {
@@ -619,7 +619,7 @@ func TestCapabilityHeaderStrippedOnCrossHostRedirect(t *testing.T) {
 
 	exec := &httpActionExecutor{allowLocal: true, callbackURL: "http://cb:1"}
 	if _, err := exec.Execute(context.Background(),
-		&kernel.Action{Source: httpSrc(srv.URL+"/start", "GET")}, map[string]any{}, "", "captoken.sig"); err != nil {
+		&kernel.Action{Source: httpSrc(srv.URL+"/start", "GET")}, map[string]any{}, kernel.Principal{}, "captoken.sig"); err != nil {
 		t.Fatal(err)
 	}
 	if endHeaders.Get(capabilityHeader) != "" {

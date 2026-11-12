@@ -95,8 +95,9 @@ updated  Echo a message  bob@acme/echo  0.50 fUSD  yes     local
 | `public` | anyone, including other kernels |
 
 For an eligible action, `public` makes it available through federation without
-a separate listing or approval procedure. Actions using callers' delegated
-credentials remain local, as explained in the web API chapter.
+a separate listing or approval procedure. This includes actions using callers'
+delegated credentials; each caller must connect their upstream account before
+using them, as explained in the web API chapter.
 
 When you publish or enable a public action, the client warns if your balance
 cannot cover its price. Remote work is funded from the provider's account;
@@ -127,6 +128,9 @@ consent:
 $ juice action update bob@acme/echo --price 0.75
 $ juice action enable bob@acme/echo
 ```
+
+Remote callers also need to reconnect after their grants are revoked; see
+[Seeing and revoking consents](../calling/consent-and-tasks.html#seeing-and-revoking-consents).
 
 Changing only the title or the description resets statistics but preserves
 activity and grants. Changing visibility preserves both activity and statistics. Every `run`

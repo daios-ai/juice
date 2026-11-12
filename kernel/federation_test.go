@@ -932,11 +932,9 @@ func TestSettleRemoteCallRejectsWrongActionID(t *testing.T) {
 	}
 }
 
-// TestGossipEvidenceExcludesDelegatedAuth: a delegated-auth action is never described abroad (§6 P6,
-// §8 D10), so evidence must not name it either — otherwise a peer learns the existence, identity, and
-// usage volume of a capability it can never call or even see. An ordinary public action's execution
-// stays gossip-eligible, so the exclusion is the scheme, not the leg.
-func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
+// A delegated-auth action is described abroad like any public action (P6), so its executions are
+// evidence like any other's (P9): a buyer on another kernel weighs it by the same record.
+func TestGossipEvidenceIncludesDelegatedAuth(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernelWithHTTP(st, &fakeSuccessHTTP{})
 	k.SetSecretBox(b64Box{})
@@ -964,7 +962,7 @@ func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
 	if err := k.SetActive(ctx, owner.ID, delegated.ID, true); err != nil {
 		t.Fatalf("reactivate delegated: %v", err)
 	}
-	if _, err := k.AttachBearerGrants(ctx, owner.ID, owner.Handle+"@k/"+delegated.Name, "", "tok"); err != nil {
+	if _, err := k.AttachBearerGrants(ctx, kernel.User(owner.ID), owner.Handle+"@k/"+delegated.Name, "", "tok"); err != nil {
 		t.Fatalf("AttachBearerGrants: %v", err)
 	}
 
@@ -982,19 +980,14 @@ func TestGossipEvidenceExcludesDelegatedAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	named := map[string]bool{}
 	for _, b := range resp.Evidence {
-		if b.EvidenceReceipt != nil && b.EvidenceReceipt.SubjectActionID == delegated.ID {
-			t.Error("evidence must not name a delegated-auth action the manifests exclude")
+		if b.EvidenceReceipt != nil {
+			named[b.EvidenceReceipt.SubjectActionID] = true
 		}
 	}
-	found := false
-	for _, b := range resp.Evidence {
-		if b.EvidenceReceipt != nil && b.EvidenceReceipt.SubjectActionID == plain.ID {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("an ordinary public action's execution must still be gossip-eligible")
+	if !named[plain.ID] || !named[delegated.ID] {
+		t.Errorf("evidence names plain=%v delegated=%v, want both", named[plain.ID], named[delegated.ID])
 	}
 }
 
@@ -2220,7 +2213,7 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 
 	rawArgs := []byte(`{"url":"https://example.test/x?a=1&b=2"}`)
 	// The caller named is the buyer's user as the buyer signed it (P4, P5).
-	r, err := k.CreateSignedRejectionReceipt("buyer-user", pubB64, "some-action-id", rawArgs, "idem-key-456", "action inactive", false)
+	r, err := k.CreateSignedRejectionReceipt("buyer-user", pubB64, "some-action-id", rawArgs, "idem-key-456", "action inactive", false, false)
 	if err != nil {
 		t.Fatalf("CreateSignedRejectionReceipt: %v", err)
 	}
@@ -4214,5 +4207,125 @@ func TestARemoteIDEqualToALocalIDMatchesNothing(t *testing.T) {
 	}
 	if got, _ := st.ReadTask(ctx, task.ID); got.Status != kernel.TaskWaiting {
 		t.Errorf("task status %s, want waiting", got.Status)
+	}
+}
+
+// Whose grants a served call consults is what the kernel its run began on says (D10), and only that:
+// the user it names, nobody when it names none, cannot be asked for want of a reference, or is
+// suspended — and no answer at all, whether silence or a carrier's refusal, is not "nobody" but
+// "cannot tell yet", since a kernel out of reach has revoked nothing.
+func TestServedCallAsksItsOriginForTheGrantor(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+	k.SetSecretBox(b64Box{})
+	setupSys(t, k, st)
+	const origin, banned = "b3JpZ2luLWtlcm5lbA", "YmFubmVkLWtlcm5lbA"
+	for _, key := range []string{origin, banned} {
+		if err := st.UpsertKernel(ctx, key, key[:6], "", "", "", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SetKernelSuspended(ctx, banned, true, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	owner := setupUser(t, st, "served-owner", 1000)
+	a := createBearerAction(t, k, owner.ID, "svc", 0)
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	sel := owner.Handle + "@k/svc"
+	// The served action's own owner holds a grant; so does one user of the origin kernel.
+	for _, who := range []kernel.Principal{kernel.User(owner.ID), {Kernel: origin, UserID: "u-granted", Handle: "granted"}} {
+		if _, err := k.AttachBearerGrants(ctx, who, sel, "", "tok"); err != nil {
+			t.Fatalf("sign up %+v: %v", who, err)
+		}
+	}
+	action, _ := k.ReadAction(ctx, a.ID)
+	named := func(user string) func(string, string, string) (int, string) {
+		return func(string, string, string) (int, string) { return 200, `{"user_id":"` + user + `","handle":"h"}` }
+	}
+	for name, tc := range map[string]struct {
+		answer func(kind, ref, regID string) (int, string)
+		terms  kernel.BuyerTerms
+		want   *kernel.KernelError // nil: the grant check passes
+		asked  int
+	}{
+		"a user who holds the grant": {answer: named("u-granted"), terms: kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"}, asked: 1},
+		"a user who holds none":      {answer: named("u-other"), terms: kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"}, want: kernel.ErrGrantRequired, asked: 1},
+		"nobody": {answer: func(string, string, string) (int, string) { return 404, `{"code":"not_found","error":"no"}` },
+			terms: kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"}, want: kernel.ErrGrantRequired, asked: 1},
+		"a carrier's refusal": {answer: func(string, string, string) (int, string) { return 429, `{"error":"rate limit exceeded"}` },
+			terms: kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"}, want: kernel.ErrPeerUnreachable, asked: 1},
+		"silence":            {terms: kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"}, want: kernel.ErrPeerUnreachable},
+		"no reference":       {answer: named("u-granted"), terms: kernel.BuyerTerms{ProcessKernel: origin}, want: kernel.ErrGrantRequired},
+		"no origin named":    {answer: named("u-granted"), terms: kernel.BuyerTerms{}, want: kernel.ErrGrantRequired},
+		"a suspended origin": {answer: named("u-granted"), terms: kernel.BuyerTerms{ProcessKernel: banned, ProcessRef: "r"}, want: kernel.ErrGrantRequired},
+		"its own closed run": {answer: named("u-granted"), terms: kernel.BuyerTerms{ProcessKernel: k.SelfKey(ctx), ProcessRef: "no-such"}, want: kernel.ErrGrantRequired},
+	} {
+		asked := 0
+		fake.process = nil
+		if tc.answer != nil {
+			fake.process = func(kind, ref, regID string) (int, string) { asked++; return tc.answer(kind, ref, regID) }
+		}
+		_, err := k.RunFederated(ctx, origin, action, map[string]any{}, "", tc.terms)
+		switch {
+		case tc.want == nil && (errors.Is(err, kernel.ErrGrantRequired) || errors.Is(err, kernel.ErrPeerUnreachable)):
+			t.Errorf("%s: %v, want the grant check to pass", name, err)
+		case tc.want != nil && !errors.Is(err, tc.want):
+			t.Errorf("%s: %v, want %v", name, err, tc.want)
+		}
+		if asked != tc.asked {
+			t.Errorf("%s: the origin was asked %d times, want %d", name, asked, tc.asked)
+		}
+	}
+}
+
+// A served root call asks the kernel its run began on once, before funds lock. A second answer
+// could differ, and a refusal after funding would leave the seller's funds locked.
+func TestServedCallAsksForItsGrantorOnceBeforeFunding(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	fake := &fakeFederationHTTP{}
+	k := newTestKernelWithHTTP(st, fake)
+	k.SetSecretBox(b64Box{})
+	setupSys(t, k, st)
+	const origin = "b3JpZ2luLWtlcm5lbA"
+	if err := st.UpsertKernel(ctx, origin, "origin", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	owner := setupUser(t, st, "once-owner", 1000)
+	a := createBearerAction(t, k, owner.ID, "svc", 10)
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, owner.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, owner.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	granted := kernel.Principal{Kernel: origin, UserID: "u-granted", Handle: "granted"}
+	if _, err := k.AttachBearerGrants(ctx, granted, owner.Handle+"@k/svc", "", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = k.ReadAction(ctx, a.ID)
+	asked := 0
+	fake.process = func(kind, ref, regID string) (int, string) {
+		if asked++; asked == 1 {
+			return 200, `{"user_id":"u-granted","handle":"granted"}`
+		}
+		return 404, `{"code":"not_found","error":"closed"}`
+	}
+	// The test executor fails every call; the call is admitted and settles as a failure all the same.
+	_, err := k.RunFederated(ctx, origin, a, map[string]any{}, "", kernel.BuyerTerms{ProcessKernel: origin, ProcessRef: "r"})
+	if errors.Is(err, kernel.ErrGrantRequired) || asked != 1 {
+		t.Fatalf("err=%v, origin asked %d times, want once and admitted", err, asked)
+	}
+	if after, _ := st.ReadUser(ctx, owner.ID); after.Locked != 0 {
+		t.Errorf("seller has %d locked after the call settled", after.Locked)
 	}
 }

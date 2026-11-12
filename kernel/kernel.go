@@ -367,6 +367,9 @@ func (k *Kernel) isDelegatedAuth(a *Action) bool {
 // scheme string, which is not a secret (R9 governs secrets, not the scheme). Returns ("", false)
 // when the action carries no upstream auth or the credential box is unconfigured or undecryptable.
 func (k *Kernel) ActionAuthInfo(a *Action) (scheme string, requiresGrant bool) {
+	if a.Kind == KindRemoteProxy {
+		return "", a.RequiresGrant // the serving kernel's word; its scheme is its own to report (P6)
+	}
 	auth, err := k.openAuthInput(a)
 	if err != nil || auth == nil {
 		return "", false
@@ -392,16 +395,46 @@ func (k *Kernel) readDelegatedAction(ctx context.Context, actionID string) (*Act
 	return a, auth, nil
 }
 
+// requireGrantor admits who a grant operation acts for (D10): an active user here, or a user of a
+// known kernel that is not suspended, named by that kernel.
+func (k *Kernel) requireGrantor(ctx context.Context, g Principal) error {
+	if g.UserID == "" {
+		return ErrInvalidInput.Wrap("a grant belongs to a user")
+	}
+	_, err := k.requireCaller(ctx, g)
+	return err
+}
+
+// ConnectionAAD binds a sealed credential to the one principal and connection it was stored for. A
+// user here has no kernel segment, so what was sealed before principals opens unchanged.
+func ConnectionAAD(user Principal, connectionID string) string {
+	if user.Local() {
+		return user.UserID + "|" + connectionID
+	}
+	return user.Kernel + "/" + user.UserID + "|" + connectionID
+}
+
+// What users of other kernels may leave on this one is bounded in all and per kernel, since a kernel
+// key costs nothing [policy]: stored credentials, sign-ups begun and not finished, and — per process
+// — work held open elsewhere. They are chosen, not derived, like the transport's own (fed).
+const (
+	maxRemoteConnections          = 10000
+	maxRemoteConnectionsPerKernel = 1000
+	MaxPendingConsents            = 320
+	MaxPendingConsentsPerKernel   = 32
+	maxProcessRegistrations       = 1024
+)
+
 // ListGrantViews returns the caller's grants as token-free views for GET /v1/me, resolving each
 // action to its address and surfacing the scopes its auth config requests.
 func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantView, error) {
-	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	grants, err := k.store.ListGrantsByUser(ctx, User(callerID))
 	if err != nil {
 		return nil, err
 	}
 	// Resolve each grant's backing Connection to its stable provider_key from the stored FK (§8),
 	// never by recomputing connectionKey — so the key always matches its connection's read view.
-	conns, err := k.store.ListConnectionsByUser(ctx, callerID)
+	conns, err := k.store.ListConnectionsByUser(ctx, User(callerID))
 	if err != nil {
 		return nil, err
 	}
@@ -426,9 +459,8 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 // DelegatedAuthConfig returns the decrypted provider config for a delegated-OAuth action the
 // caller may use, to drive the consent flow (§8). Internal consent helper, never a read path:
 // the returned AuthInput may carry the client_secret and is used only server-side.
-func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID string) (*AuthInput, error) {
-	caller, err := k.requireActiveUser(ctx, callerID)
-	if err != nil {
+func (k *Kernel) DelegatedAuthConfig(ctx context.Context, caller Principal, actionID string) (*AuthInput, error) {
+	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
 	a, auth, err := k.readDelegatedAction(ctx, actionID)
@@ -438,7 +470,7 @@ func (k *Kernel) DelegatedAuthConfig(ctx context.Context, callerID, actionID str
 	if auth.Scheme != AuthSchemeOAuthDelegated {
 		return nil, ErrInvalidInput.Wrap("action does not use delegated OAuth; supply its token via POST /v1/grants")
 	}
-	if !canCall(User(caller.ID), a) {
+	if !canCall(caller, a) {
 		return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
 	}
 	return auth, nil
@@ -662,13 +694,12 @@ const gossipEvidencePageSize = 100
 // expandSelector resolves a selector to the caller-callable delegated actions it names, grouped by
 // provider (§8). It applies the CanCall gate (§4) exactly as a single grant does, and reports how
 // many name-matched actions were skipped for needing no login (non-delegated) or being uncallable.
-func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matches []delegatedMatch, skippedLoginless, skippedUncallable int, ownerID string, err error) {
+func (k *Kernel) expandSelector(ctx context.Context, caller Principal, sel string) (matches []delegatedMatch, skippedLoginless, skippedUncallable int, ownerID string, err error) {
 	owner, path, err := k.selectorOwner(ctx, sel)
 	if err != nil {
 		return nil, 0, 0, "", err
 	}
 	ownerID = owner.ID
-	caller, _ := k.store.ReadUser(ctx, callerID)
 	actions, err := k.store.ListActionsByOwner(ctx, owner.ID, maxOwnerActions, 0)
 	if err != nil {
 		return nil, 0, 0, "", err
@@ -682,7 +713,7 @@ func (k *Kernel) expandSelector(ctx context.Context, callerID, sel string) (matc
 			skippedLoginless++
 			continue
 		}
-		if !canCall(User(caller.ID), a) {
+		if !canCall(caller, a) {
 			skippedUncallable++
 			continue
 		}
@@ -726,11 +757,11 @@ type ConsentPlan struct {
 
 // ConsentPlan expands a selector and groups the caller's connectable delegated actions by provider
 // account, marking each group connected/covered and each action granted (§8).
-func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*ConsentPlan, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+func (k *Kernel) ConsentPlan(ctx context.Context, caller Principal, sel string) (*ConsentPlan, error) {
+	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
-	matches, loginless, uncallable, _, err := k.expandSelector(ctx, callerID, sel)
+	matches, loginless, uncallable, _, err := k.expandSelector(ctx, caller, sel)
 	if err != nil {
 		return nil, err
 	}
@@ -768,7 +799,7 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 		sort.Strings(dests)
 
 		grp := ConsentGroup{ProviderKey: pk, Provider: ProviderLabel(pk), Scheme: ms[0].auth.Scheme, Scopes: scopes, Destinations: dests}
-		if conn, cerr := k.store.ReadConnectionByUserProvider(ctx, callerID, pk); cerr == nil {
+		if conn, cerr := k.store.ReadConnectionByUserProvider(ctx, caller, pk); cerr == nil {
 			grp.Connected = true
 			if ms[0].auth.Scheme == AuthSchemeDelegatedBearer {
 				grp.Covered = true
@@ -778,7 +809,7 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 		}
 		for _, m := range ms {
 			granted := false
-			if _, gerr := k.store.ReadGrant(ctx, callerID, m.action.ID); gerr == nil {
+			if _, gerr := k.store.ReadGrant(ctx, caller, m.action.ID); gerr == nil {
 				granted = true
 			}
 			grp.Actions = append(grp.Actions, ConsentAction{ActionID: m.action.ID, Action: k.ActionAddress(ctx, m.action), Granted: granted})
@@ -793,9 +824,11 @@ func (k *Kernel) ConsentPlan(ctx context.Context, callerID, sel string) (*Consen
 // provider_key) before any write. A non-empty secret is sealed under AAD callerID|connectionID and
 // widens the connection's scopes; an empty secret is the instant-grant path, valid only when a
 // covering connection already exists. Per-action binding at dispatch is unchanged.
-func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string, actionIDs []string, secret, scopesJSON string) ([]*Grant, error) {
-	caller, err := k.requireActiveUser(ctx, callerID)
-	if err != nil {
+//
+// asOf is each action's updated_at when consent began, for a consent that took time to give; nil
+// means now. A grant is written only for an action still as it was then (D10).
+func (k *Kernel) CreateGrants(ctx context.Context, caller Principal, providerKey string, actionIDs []string, secret, scopesJSON string, asOf map[string]time.Time) ([]*Grant, error) {
+	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
 	if k.secretBox == nil {
@@ -810,8 +843,14 @@ func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string,
 		if err != nil {
 			return nil, err
 		}
-		if !canCall(User(caller.ID), a) {
+		if !canCall(caller, a) {
 			return nil, ErrUnauthorized.Wrap("cannot grant for an action you may not call")
+		}
+		if _, begun := asOf[aid]; !begun {
+			if asOf == nil {
+				asOf = map[string]time.Time{}
+			}
+			asOf[aid] = a.UpdatedAt
 		}
 		pk, err := connectionKey(a, auth)
 		if err != nil {
@@ -823,17 +862,27 @@ func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string,
 	}
 	// Resolve or mint the connection.
 	connID, createdAt, existingScopes, sealed := "", time.Now().UTC(), "", ""
-	if existing, err := k.store.ReadConnectionByUserProvider(ctx, callerID, providerKey); err == nil {
+	if existing, err := k.store.ReadConnectionByUserProvider(ctx, caller, providerKey); err == nil {
 		connID, createdAt, existingScopes, sealed = existing.ID, existing.CreatedAt, existing.ScopesJSON, existing.SealedSecret
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
+	} else if !caller.Local() {
+		// What users of other kernels may store here is bounded in all and per kernel: a kernel key
+		// costs nothing, so neither bound alone would hold (D10).
+		total, ofKernel, cerr := k.store.CountRemoteConnections(ctx, caller.Kernel)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if total >= maxRemoteConnections || ofKernel >= maxRemoteConnectionsPerKernel {
+			return nil, ErrInvalidState.Wrap("this kernel holds as many connections for users of other kernels as it may")
+		}
 	}
 	unionJSON, covered := unionScopes(existingScopes, parseScopeJSON(scopesJSON))
 	if secret != "" {
 		if connID == "" {
 			connID = uuid.New().String()
 		}
-		s, serr := k.secretBox.Seal(callerID+"|"+connID, secret)
+		s, serr := k.secretBox.Seal(ConnectionAAD(caller, connID), secret)
 		if serr != nil {
 			return nil, ErrInternal.Wrapf("seal connection secret: %v", serr)
 		}
@@ -847,28 +896,28 @@ func (k *Kernel) CreateGrants(ctx context.Context, callerID, providerKey string,
 		}
 	}
 	if err := k.store.CreateOrUpdateConnection(ctx, &Connection{
-		ID: connID, UserID: callerID, ProviderKey: providerKey,
+		ID: connID, UserKernel: caller.Kernel, UserID: caller.UserID, ProviderKey: providerKey,
 		SealedSecret: sealed, ScopesJSON: unionJSON, CreatedAt: createdAt, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		return nil, err
 	}
 	out := make([]*Grant, 0, len(actionIDs))
 	for _, aid := range actionIDs {
-		g := &Grant{ID: uuid.New().String(), GrantorUserID: callerID, ActionID: aid, ConnectionID: connID, CreatedAt: time.Now().UTC()}
-		if err := k.store.CreateOrReplaceGrant(ctx, g); err != nil {
+		g := &Grant{ID: uuid.New().String(), GrantorKernel: caller.Kernel, GrantorUserID: caller.UserID, ActionID: aid, ConnectionID: connID, CreatedAt: time.Now().UTC()}
+		if err := k.store.CreateOrReplaceGrant(ctx, g, asOf[aid]); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
 	}
-	k.log.With(ctx).Info("grant.created", "provider", providerKey, "grantor", callerID, "count", len(out), "status", "success")
+	k.log.With(ctx).Info("grant.created", "provider", providerKey, "grantor", caller.UserID, "count", len(out), "status", "success")
 	return out, nil
 }
 
 // AttachBearerGrants stores one static token across a selector's delegated_bearer group (§8): the
 // batch twin of AttachBearerGrant. providerKey is optional when the selector resolves to exactly
 // one bearer group.
-func (k *Kernel) AttachBearerGrants(ctx context.Context, callerID, sel, providerKey, token string) ([]*Grant, error) {
-	matches, _, _, _, err := k.expandSelector(ctx, callerID, sel)
+func (k *Kernel) AttachBearerGrants(ctx context.Context, caller Principal, sel, providerKey, token string) ([]*Grant, error) {
+	matches, _, _, _, err := k.expandSelector(ctx, caller, sel)
 	if err != nil {
 		return nil, err
 	}
@@ -894,20 +943,20 @@ func (k *Kernel) AttachBearerGrants(ctx context.Context, callerID, sel, provider
 	if !ok {
 		return nil, ErrNotFound.Wrap("no bearer actions for that provider in the selector")
 	}
-	return k.CreateGrants(ctx, callerID, pk, ids, token, "")
+	return k.CreateGrants(ctx, caller, pk, ids, token, "", nil)
 }
 
 // RevokeGrantsBySelector deletes the caller's grants whose action matches the selector (§8): grants
 // only — connections survive. Returns the revoked action refs.
-func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel string) ([]string, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, caller Principal, sel string) ([]string, error) {
+	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
 	owner, path, err := k.selectorOwner(ctx, sel)
 	if err != nil {
 		return nil, err
 	}
-	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	grants, err := k.store.ListGrantsByUser(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -917,7 +966,7 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel strin
 		if aerr != nil || a == nil || !a.Owner().IsUser(owner.ID) || !selectorPathMatches(path, a.Name) {
 			continue
 		}
-		if derr := k.store.DeleteGrant(ctx, callerID, g.ActionID); derr == nil {
+		if derr := k.store.DeleteGrant(ctx, caller, g.ActionID); derr == nil {
 			revoked = append(revoked, k.ActionAddress(ctx, a))
 		}
 	}
@@ -929,15 +978,15 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, callerID, sel strin
 
 // RevokeConnection deletes the caller's Connection for a provider and cascades its grants (§8):
 // disconnect --account. Returns the affected action refs.
-func (k *Kernel) RevokeConnection(ctx context.Context, callerID, providerKey string) ([]string, error) {
-	if _, err := k.requireActiveUser(ctx, callerID); err != nil {
+func (k *Kernel) RevokeConnection(ctx context.Context, caller Principal, providerKey string) ([]string, error) {
+	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
-	conn, err := k.store.ReadConnectionByUserProvider(ctx, callerID, providerKey)
+	conn, err := k.store.ReadConnectionByUserProvider(ctx, caller, providerKey)
 	if err != nil {
 		return nil, err
 	}
-	grants, _ := k.store.ListGrantsByUser(ctx, callerID)
+	grants, _ := k.store.ListGrantsByUser(ctx, caller)
 	var refs []string
 	for _, g := range grants {
 		if g.ConnectionID == conn.ID {
@@ -947,18 +996,18 @@ func (k *Kernel) RevokeConnection(ctx context.Context, callerID, providerKey str
 	if err := k.store.DeleteConnectionCascade(ctx, conn.ID); err != nil {
 		return nil, err
 	}
-	k.log.With(ctx).Info("connection.revoked", "provider", providerKey, "grantor", callerID, "count", len(refs), "status", "success")
+	k.log.With(ctx).Info("connection.revoked", "provider", providerKey, "grantor", caller.UserID, "count", len(refs), "status", "success")
 	return refs, nil
 }
 
 // ListConnectionViews returns the caller's connections as token-free views for GET /v1/me (§8),
 // each with the number of actions consented against it and whether it is currently unused.
 func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*ConnectionView, error) {
-	conns, err := k.store.ListConnectionsByUser(ctx, callerID)
+	conns, err := k.store.ListConnectionsByUser(ctx, User(callerID))
 	if err != nil {
 		return nil, err
 	}
-	grants, err := k.store.ListGrantsByUser(ctx, callerID)
+	grants, err := k.store.ListGrantsByUser(ctx, User(callerID))
 	if err != nil {
 		return nil, err
 	}
@@ -2390,9 +2439,20 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
 	// rejection must not leave a funded process behind (a rejected call creates no transaction,
 	// §6), so the same check runs here before BeginRun parks funds. The grant check is the paying
-	// user's: a local root run's caller; a peer, which can hold no consent here, nobody.
-	if err := k.checkCallPreconditions(ctx, caller, localID(caller), action, args, true, quoteHash); err != nil {
+	// user's: a local root run's caller; for a peer, whoever the kernel the run began on names (D10).
+	origin := &Process{OwnerUserID: localID(caller), OriginKernel: buyer.ProcessKernel, Ref: buyer.ProcessRef}
+	if !caller.Local() && origin.OriginKernel == "" {
+		origin.OriginKernel = caller.Kernel // a call that carries no reference began, for all we know, at its sender
+	}
+	grantor, err := k.checkCallPreconditions(ctx, caller, origin, action, args, true, quoteHash)
+	if err != nil {
 		return nil, err
+	}
+	if caller.Local() {
+		var rerr error
+		if origin.Ref, rerr = newSecret(); rerr != nil {
+			return nil, rerr
+		}
 	}
 	if err := k.requireReceiptSigningReady(); err != nil {
 		return nil, err
@@ -2484,6 +2544,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 		ExternalKey: key.name,
 		RequestHash: key.hash,
 		CreatedAt:   now,
+		Ref:         origin.Ref, OriginKernel: origin.OriginKernel,
 	}
 	// Both parties as principals (D15), set once, here, for every settlement path: the caller a user
 	// here, or the buyer's own user as the buyer signed it, on the buyer's kernel.
@@ -2528,6 +2589,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
+		Grantor:             &grantor,
 		IdempotencyRecordID: idempotencyRecordID,
 	})
 	if reply != nil {

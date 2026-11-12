@@ -517,6 +517,8 @@ func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolTask), t.handleTask)
 	t.host.SetStreamHandler(protocol.ID(ProtocolReveal), t.handleReveal)
 	t.host.SetStreamHandler(protocol.ID(ProtocolTransfer), t.handleTransfer)
+	t.host.SetStreamHandler(protocol.ID(ProtocolGrant), t.handleGrant)
+	t.host.SetStreamHandler(protocol.ID(ProtocolProcess), t.handleProcess)
 }
 
 // streamsPerPeer and streamsSystemWide bound inbound concurrency [policy]; the connections behind
@@ -629,6 +631,18 @@ func (t *Transport) handleTransfer(s network.Stream) {
 	})
 }
 
+func (t *Transport) handleGrant(s network.Stream) {
+	serveReq(t, s, func(ctx context.Context, key string, req GrantRequest) any {
+		return t.cfg.Handlers.OnGrant(ctx, key, req)
+	})
+}
+
+func (t *Transport) handleProcess(s network.Stream) {
+	serveReq(t, s, func(ctx context.Context, key string, req ProcessRequest) any {
+		return t.cfg.Handlers.OnProcess(ctx, key, req)
+	})
+}
+
 func (t *Transport) handleGossip(s network.Stream) {
 	// Gossip carries the evidence cursor and the catalogue scan (§13). The reply frame is the JSON
 	// document; on handler error we close without a frame, which the client reads as empty.
@@ -733,6 +747,16 @@ func (t *Transport) Reveal(ctx context.Context, peerKey string, req RevealReques
 // Transfer tells the peer whom a payment to it is for (P11).
 func (t *Transport) Transfer(ctx context.Context, peerKey string, req TransferRequest) (TransferResponse, error) {
 	return roundTrip[TransferRequest, TransferResponse](ctx, t, peerKey, ProtocolTransfer, req)
+}
+
+// Grant forwards one signed grant operation to the peer that serves the actions it names (D10).
+func (t *Transport) Grant(ctx context.Context, peerKey string, req GrantRequest) (Response, error) {
+	return roundTrip[GrantRequest, Response](ctx, t, peerKey, ProtocolGrant, req)
+}
+
+// Process asks the peer a run began on about that run's process, or tells it of work held (D2).
+func (t *Transport) Process(ctx context.Context, peerKey string, req ProcessRequest) (Response, error) {
+	return roundTrip[ProcessRequest, Response](ctx, t, peerKey, ProtocolProcess, req)
 }
 
 // Gossip fetches one page of the peer's gossip document, resuming from cursor (§13). An empty
