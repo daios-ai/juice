@@ -2526,3 +2526,30 @@ func TestSimEveryKernelTellsTheSameParties(t *testing.T) {
 		}
 	}
 }
+
+// TestSimLocalhostNamesEachKernelItself: on two federated kernels, each holding a user called bob,
+// localhost names each kernel to itself (D15). The same run, sys@localhost/message to bob@localhost,
+// parks the task on each kernel for its own bob, never the other's, and dials no peer.
+func TestSimLocalhostNamesEachKernelItself(t *testing.T) {
+	net := newSimNet(t)
+	ctx := context.Background()
+	for _, s := range []*simNode{net.addNode("left", defaultSimConfig()), net.addNode("right", defaultSimConfig())} {
+		ana := s.user(t, "ana", 0)
+		bob := s.user(t, "bob", 0)
+		native.Register(s.k, []native.Spec{native.Message(), native.Sink()})
+		for _, spec := range []native.Spec{native.Message(), native.Sink()} {
+			if err := ensureSysNative(ctx, s.k, "sys", spec, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reply, err := s.k.Run(ctx, kernel.RunRequest{CallerID: ana.ID, ActionRef: "sys@localhost/message",
+			Args: map[string]any{"to": "bob@localhost", "message": "hello"}})
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		task, err := s.db.ReadTask(ctx, reply.Result["task_id"].(string))
+		if err != nil || task.RequiredCallerKernel != "" || task.RequiredCallerUserID != bob.ID {
+			t.Errorf("%s: the task is held for %+v, %v; want this kernel's bob", s.name, task, err)
+		}
+	}
+}

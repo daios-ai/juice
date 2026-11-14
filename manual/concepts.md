@@ -66,7 +66,11 @@ hosted on another kernel. These kinds share the same calling interface.
 
 A **reference** names an action as `owner@kernel/name`, on this kernel and on any
 other alike. The kernel is named as this kernel knows it: its own name for its own
-actions, a petname or public key for another kernel's. If the reference names no action directly, Juice tries its `index` child:
+actions, a petname or public key for another kernel's. The name `localhost`
+also names this kernel, on every kernel: `sys@localhost/time` reaches the time
+action of whichever kernel receives the reference. Replies show resolved
+addresses with the kernel's real name instead. If the reference names no action
+directly, Juice tries its `index` child:
 `bob@acme` can resolve to `bob@acme/index`, and `bob@acme/mail` to `bob@acme/mail/index`. This
 convention gives a group of related actions an entry point. Writing the owner
 by id and the kernel by key gives the action's principal,

@@ -1288,8 +1288,8 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (st
 		return "", err
 	}
 	seed := NormalizeHandle(petname)
-	if ValidateHandle(seed) != nil {
-		return "", ErrInvalidInput.Wrapf("petname %q is not a valid bare name", petname)
+	if err := ValidateKernelName(seed); err != nil {
+		return "", ErrInvalidInput.Wrapf("petname %q: %v", petname, err)
 	}
 	if err := k.store.BindPetname(ctx, publicKey, seed); err != nil {
 		return "", err

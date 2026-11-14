@@ -105,11 +105,18 @@ type KernelRef struct {
 	Local bool
 }
 
-// ResolveKernel is the one place a kernel segment becomes a key (D15): a bound petname — this
-// kernel's own name among them — else a raw key. A self-asserted nickname never resolves, so no
-// kernel can capture a name by gossiping it first.
+// Localhost names this kernel on every kernel (D15; RFC 6761), so a program reaches the stdlib as
+// sys@localhost/<name> wherever it runs. It is resolved, never bound to a kernel or rendered.
+const Localhost = "localhost"
+
+// ResolveKernel is the one place a kernel segment becomes a key (D15): localhost, a bound petname —
+// this kernel's own name among them — else a raw key. A self-asserted nickname never resolves, so
+// no kernel can capture a name by gossiping it first.
 func (k *Kernel) ResolveKernel(ctx context.Context, seg string) (KernelRef, error) {
 	seg = strings.TrimSpace(seg)
+	if seg == Localhost {
+		return KernelRef{Key: k.SelfKey(ctx), Local: true}, nil
+	}
 	var key string
 	if rk, err := k.store.ReadKernelByPetname(ctx, seg); err == nil && rk != nil {
 		key = rk.PublicKey

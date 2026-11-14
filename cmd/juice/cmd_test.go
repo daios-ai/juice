@@ -2580,6 +2580,8 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 		{"a peer under users", "POST", "/v1/admin/users/shop/suspend", http.StatusUnprocessableEntity}, // a bare name is not an address
 		{"a peer under peers", "POST", "/v1/admin/peers/shop/suspend", http.StatusOK},
 		{"a user under peers", "POST", "/v1/admin/peers/carol@k/suspend", http.StatusNotFound},
+		{"a user here by localhost", "GET", "/v1/admin/users/carol@localhost", http.StatusOK},
+		{"this kernel is no peer", "POST", "/v1/admin/peers/localhost/suspend", http.StatusNotFound},
 		{"the old prefix answers nothing", "POST", "/control/users/carol/suspend", http.StatusNotFound},
 		{"nor does the old deposit", "POST", "/control/deposit", http.StatusNotFound},
 	} {

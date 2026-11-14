@@ -1081,6 +1081,15 @@ func ValidateHandle(handle string) error {
 	return nil
 }
 
+// ValidateKernelName holds a name given to a kernel — its own, or a peer's petname — to the handle
+// rule, and keeps localhost free, since that names this kernel on every kernel (D15).
+func ValidateKernelName(name string) error {
+	if name == Localhost {
+		return ErrInvalidInput.Wrapf("%s names this kernel on every kernel and cannot be given to one", Localhost)
+	}
+	return ValidateHandle(name)
+}
+
 // CreateUser creates a new user account and returns the user.
 func (k *Kernel) CreateUser(ctx context.Context, req CreateUserRequest) (*Account, error) {
 	start := time.Now()

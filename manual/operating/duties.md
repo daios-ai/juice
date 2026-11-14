@@ -144,7 +144,8 @@ $ juice admin peer rename hqDr8oMX… beta-kernel
 hqDr8oMX… renamed to beta-kernel.
 ```
 
-Renaming requires the chosen petname to be available.
+Renaming requires the chosen petname to be available and not `localhost`,
+which every kernel reserves for itself.
 
 The contact columns report observations rather than a current online status.
 `LAST SEEN` records a reply, and `LAST FAILED` records a request known not to

@@ -55,7 +55,7 @@ This example calls `sys/time` and combines its result with a note from the input
 
 ```go
 func Handle(in map[string]any) (map[string]any, error) {
-	raw, err := JuiceCall("sys@acme/time", []byte("{}"))
+	raw, err := JuiceCall("sys@localhost/time", []byte("{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +68,9 @@ func Handle(in map[string]any) (map[string]any, error) {
 	return map[string]any{"note": in["note"], "stamped_at": now.ISO}, nil
 }
 ```
+
+A compiled module carries its references with it, so naming the kernel as
+`localhost` lets the same module run on any kernel.
 
 The supplied imports include `encoding/json`, `strings`, `strconv`, `math`,
 `sort`, and `errors`; they do not include `fmt`. Save the function in
@@ -156,6 +159,9 @@ Content-Type: application/json
 ```
 {"result": {"…"}, "tx_id": "…", "trace_id": "…"}
 ```
+
+An endpoint serving several kernels can use `carol@localhost/extract` to call
+that action on whichever kernel supplied the callback.
 
 The current HTTP interface expects the `X-Juice-Capability` header. Supplying
 the capability as an `Authorization: Bearer` token is rejected:

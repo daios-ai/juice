@@ -106,6 +106,13 @@ func TestFirstBootConfigAsksOrRefuses(t *testing.T) {
 	if _, err := firstBootConfig(w, home); err == nil {
 		t.Error("a name no peer would accept was written down")
 	}
+	// localhost names this kernel on every kernel, so no kernel is given it (D15).
+	if err := os.WriteFile(seeded, []byte(`{"kernel_handle":"localhost"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstBootConfig(w, home); err == nil || !strings.Contains(err.Error(), "localhost names this kernel") {
+		t.Errorf("a kernel named localhost: %v", err)
+	}
 }
 
 // TestCheckNetworkReadsTheRecord: a kernel serves one network for life. The database records which,

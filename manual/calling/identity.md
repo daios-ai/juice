@@ -90,6 +90,9 @@ petname only if that kernel's operator gives it one:
 | Own name | the kernel's operator, at first boot (`kernel_handle`) | on that kernel, as the kernel segment of its users' and actions' addresses, `alice@acme`, `bob@acme/echo`; and on your machine, since a client records a kernel under the name it calls itself |
 | Petname | one kernel's operator, with `admin peer rename` | on that kernel only, in `owner@kernel/name` and `handle@kernel` |
 | Nickname | the remote kernel's operator | never; shown as `~name` beside the key when no petname is bound |
+| `localhost` | reserved | on every kernel, as that kernel itself; replies use the resolved address instead |
+
+No kernel can be given `localhost` as its own name or as a petname.
 
 A kernel's own name is a petname it binds to its own key, so no peer can be given
 it there. Two kernels may call themselves the same thing; their public keys are

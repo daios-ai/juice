@@ -75,7 +75,7 @@ func firstBootConfig(w rail.World, home string) (ServerConfig, error) {
 	}
 	// Whatever answered — the file, the command line, the prompt — the name is held to the rule
 	// peers apply to it, so no kernel can take one the network would refuse to hear.
-	if verr := kernel.ValidateHandle(cfg.KernelHandle); verr != nil {
+	if verr := kernel.ValidateKernelName(cfg.KernelHandle); verr != nil {
 		return cfg, fmt.Errorf("%s %q: %w", "kernel_handle", cfg.KernelHandle, verr)
 	}
 	if cfg.CredentialsKey == "" {
@@ -109,7 +109,7 @@ func askHandle(path string) (string, error) {
 			}
 			continue
 		}
-		if verr := kernel.ValidateHandle(h); verr != nil {
+		if verr := kernel.ValidateKernelName(h); verr != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", verr)
 			continue
 		}

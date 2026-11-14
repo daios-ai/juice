@@ -189,6 +189,34 @@ try: datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')); print('ok')
 except Exception: print('bad')" "$(resultf "$out" iso)" 2>/dev/null)"
 }
 
+# localhost names this kernel (D15): a reference by it reaches this kernel's own action and user, the
+# record names them by the kernel's own name, data that mentions localhost passes as written, and no
+# kernel can be given the name.
+flow_localhost() {
+    echo "=== FLOW localhost ==="
+    local dir db hs ha hb; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice); hb=$(home "$dir" bob)
+    make_admin "$db" "$hs" || { fail "localhost.boot" "server did not start"; return; }
+    make_user "$db" "$hs" "$ha" alice; make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" alice 1000
+
+    local tx row; tx=$(strfield "$(jj "$db" "$ha" run sys@localhost/time '{}')" tx_id)
+    assert_nonempty "localhost.runs_the_stdlib" "$tx"
+    row=$(jj "$db" "$ha" tx show "$tx")
+    assert_jdot "localhost.action_by_own_name" "$row" action.address "sys@$(kname "$db")/time"
+    assert_eq "localhost.never_rendered" "" "$(python3 -c "import sys,json;d=json.loads(sys.argv[1]);print(' '.join(f for f in ('owner','caller','target','action') if 'localhost' in json.dumps(d.get(f))))" "$row")"
+
+    assert_nonempty "localhost.transfer" "$(strfield "$(jj "$db" "$ha" user transfer bob@localhost "$(units 100)" --yes)" tx_id)"
+    assert_eq "localhost.bob_credited" 100 "$(balance_of "$db" "$hb")"
+
+    # A message that names sys@localhost/time is the program's data, and reaches bob as written.
+    local task; task=$(resultf "$(jj "$db" "$ha" run sys@localhost/message '{"to":"bob@localhost","message":"call sys@localhost/time"}')" task_id)
+    j "$db" "$hb" user approve alice@localhost >/dev/null 2>&1
+    assert_eq "localhost.data_unchanged" "call sys@localhost/time" "$(pathf "$(jj "$db" "$hb" task show "$task")" partial_args.message)"
+
+    local key; key=$(python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode())')
+    assert_fails "localhost.reserved" "localhost names this kernel" -- j "$db" "$hs" admin peer rename "$key" localhost
+}
+
 # The operator's metrics (D20): off unless an address is configured; when on, a scrape of that
 # address names the build and counts a call the moment it settles, under fixed labels alone.
 flow_metrics() {

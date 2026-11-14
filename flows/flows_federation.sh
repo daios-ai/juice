@@ -1877,6 +1877,23 @@ flow_caller_symmetric() {
         "$(told "$L" "$ha" sys@kernel-r/who '{"X-Juice-Caller":"forged","X-Juice-Owner":"forged","caller":"forged"}')"
 }
 
+# localhost names each kernel to itself (D15, D17): one module calling sys@localhost/time, published
+# on two kernels, runs on each against that kernel's own stdlib, and each records it by its own name.
+flow_localhost_symmetric() {
+    echo "=== FLOW localhost_symmetric ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "localhost_sym.setup" "setup failed"; return; }
+    make_contractor_wasm "$dir/stamp.wasm" "sys@localhost/time"
+    local dbs=("$FED_DBL" "$FED_DBR") hs=("$FED_HL" "$FED_HR") names=(kernel-l kernel-r) i out tx
+    for i in 0 1; do
+        publish "${dbs[$i]}" "${hs[$i]}" stamp --kind wasm --source "$dir/stamp.wasm" --description "stamp" --price "$(units 0)" >/dev/null
+        out=$(jj "${dbs[$i]}" "${hs[$i]}" run "sys@${names[$i]}/stamp" '{}')
+        assert_nonempty "localhost_sym.module_runs_on_${names[$i]}" "$(resultf "$out" unix)"
+        tx=$(strfield "$(jj "${dbs[$i]}" "${hs[$i]}" run sys@localhost/time '{}')" tx_id)
+        assert_jdot "localhost_sym.recorded_by_own_name_${names[$i]}" "$(jj "${dbs[$i]}" "${hs[$i]}" tx show "$tx")" action.address "sys@${names[$i]}/time"
+    done
+}
+
 # Only the operator names a kernel (D15): a kernel met by a call is shown by its key with its own
 # nickname after it, which never resolves, until the operator binds a petname.
 flow_petnames_explicit() {

@@ -129,6 +129,9 @@ an execution price. Similarly, `GET /v1/me` returns `"available": 4795000`
 where the command line displays `4.795 fUSD`. Read `decimals` from
 `GET /health` when calculating conversions instead of hard-coding six.
 
+In program code, use `sys@localhost/...` for built-in actions so the program
+does not depend on the receiving kernel's name.
+
 ## Separate planning from spending
 
 The built-in `sys/llm/decide` action can choose among candidate actions and

@@ -17,6 +17,8 @@ and contract. The operator configures built-in prices under `native.<name>`;
 all default to zero except `sys/tinygo/compile`. Amounts in action JSON use
 base units. This page names each built-in by its path under `sys`; on a kernel
 named `acme`, `sys/time` is called as `sys@acme/time`.
+A program can call it as `sys@localhost/time` on any kernel. Use this form in
+code meant to run on more than one kernel.
 
 ## Search
 

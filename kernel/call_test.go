@@ -2872,3 +2872,52 @@ func TestWasmActionIsToldItsCallerAndOwner(t *testing.T) {
 		t.Errorf("the module was told %+v, want the buyer as both", script.told)
 	}
 }
+
+// callingScript is a module that calls the one reference compiled into it and returns the reply.
+type callingScript struct{}
+
+func (callingScript) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (callingScript) Execute(ctx context.Context, artifact []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	return host.Call(ctx, string(artifact), []byte(`{}`))
+}
+
+// One module that names the stdlib as sys@localhost runs unchanged on kernels with different names,
+// and on each reaches that kernel's own native (D15, D17): the portability localhost exists for.
+func TestOneModuleRunsOnEveryKernel(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range []string{kernel.TestOwnName, "other"} {
+		st := newTestStore(t)
+		k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: callingScript{}})
+		if err := k.BindOwnName(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+		sys := setupSys(t, k, st)
+		k.RegisterNativeHandler("where", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
+			return map[string]any{"kernel": name}, nil
+		})
+		n, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Title: "Where", Name: "where", Kind: kernel.KindNative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		obj := map[string]any{"type": "object"}
+		if err := k.ActivateNativeAction(ctx, n.ID, "Where", "where native", obj, obj, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+		owner := setupUser(t, st, "author", 0)
+		a := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "portable", Kind: kernel.KindWasm, Source: "sys@localhost/where",
+			Active: true, Visibility: kernel.VisibilityLocal, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		if err := st.CreateAction(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		reply, err := k.Run(ctx, kernel.RunRequest{CallerID: owner.ID, ActionRef: "author@localhost/portable", Args: map[string]any{}})
+		if err != nil {
+			t.Fatalf("%s: run: %v", name, err)
+		}
+		if reply.Result["kernel"] != name {
+			t.Errorf("%s: the module reached %v; want this kernel's own native", name, reply.Result)
+		}
+	}
+}

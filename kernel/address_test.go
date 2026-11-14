@@ -210,3 +210,116 @@ func TestLocalHandleRefusesOtherKernels(t *testing.T) {
 		t.Errorf("an account created on another kernel's name: want ErrInvalidInput, got %v", err)
 	}
 }
+
+// localhost names this kernel on every kernel (D15; RFC 6761): every reference that takes this
+// kernel's own name or key takes it alike, no kernel can be given it — not even a row already
+// holding it as a petname captures it — and what the kernel records and renders names the parties by
+// the own name and principal, while data a program passes is never rewritten.
+func TestLocalhostNamesThisKernel(t *testing.T) {
+	st := newTestStore(t)
+	k := newTestKernel(st)
+	ctx := context.Background()
+	sys := setupSys(t, k, st)
+	self := k.SelfKey(ctx)
+	alice := setupUser(t, st, "alice", 0)
+	act := setupLocalAction(t, st, alice.ID, "act", 0)
+
+	if kr, err := k.ResolveKernel(ctx, kernel.Localhost); err != nil || !kr.Local || kr.Key != self {
+		t.Fatalf("ResolveKernel(localhost) = %+v, %v; want this kernel", kr, err)
+	}
+	for _, seg := range []string{kernel.TestOwnName, self, kernel.Localhost} {
+		if a, err := k.ResolveAction(ctx, "alice@"+seg+"/act"); err != nil || a.ID != act.ID {
+			t.Errorf("ResolveAction(alice@%s/act) = %v, %v", seg, a, err)
+		}
+		if p, err := k.ResolvePrincipal(ctx, "alice@"+seg); err != nil || !p.Same(kernel.User(alice.ID)) {
+			t.Errorf("ResolvePrincipal(alice@%s) = %+v, %v", seg, p, err)
+		}
+		if u, err := k.ResolveLocalPrincipal(ctx, "alice@"+seg); err != nil || u.ID != alice.ID {
+			t.Errorf("ResolveLocalPrincipal(alice@%s) = %v, %v", seg, u, err)
+		}
+		// The selector reaches alice's action here, which holds no grant to revoke.
+		if _, err := k.RevokeGrantsBySelector(ctx, kernel.User(alice.ID), "alice@"+seg+"/act"); !errors.Is(err, kernel.ErrNotFound) || !strings.Contains(err.Error(), "no matching grants") {
+			t.Errorf("selector alice@%s/act: %v", seg, err)
+		}
+		if k.IsRemoteRef(ctx, "alice@"+seg+"/act") {
+			t.Errorf("alice@%s/act is reported remote", seg)
+		}
+	}
+	if h, err := k.LocalHandle(ctx, "carol@localhost"); err != nil || h != "carol" {
+		t.Errorf("LocalHandle(carol@localhost) = %q, %v", h, err)
+	}
+	// The user position is another namespace: a user may be called localhost.
+	for _, h := range []string{"dora@localhost", "localhost@localhost"} {
+		if _, err := k.CreateUser(ctx, kernel.CreateUserRequest{Handle: h, Password: "password123"}); err != nil {
+			t.Errorf("CreateUser(%s): %v", h, err)
+		}
+	}
+
+	// No kernel is given the name: not this one, not a peer.
+	peer := testKernelKey(7)
+	if err := kernel.ValidateKernelName(kernel.Localhost); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("ValidateKernelName(localhost) = %v", err)
+	}
+	for name, ok := range map[string]bool{"acme": true, "two@names": false, self: false} {
+		if err := kernel.ValidateKernelName(name); (err == nil) != ok || (err == nil) != (kernel.ValidateHandle(name) == nil) {
+			t.Errorf("ValidateKernelName(%q) = %v; want what ValidateHandle says", name, err)
+		}
+	}
+	if _, err := k.BindPetname(ctx, peer, kernel.Localhost); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("a peer was given localhost: %v", err)
+	}
+	if _, err := k.RenameKernel(ctx, sys.ID, peer, kernel.Localhost); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("an operator renamed a peer localhost: %v", err)
+	}
+	// A row that already holds it, written past the validator, captures nothing.
+	if err := st.BindPetname(ctx, peer, kernel.Localhost); err != nil {
+		t.Fatal(err)
+	}
+	if kr, err := k.ResolveKernel(ctx, kernel.Localhost); err != nil || kr.Key != self {
+		t.Errorf("a peer petnamed localhost captured it: %+v, %v", kr, err)
+	}
+	if kr, err := k.ResolveKernel(ctx, peer); err != nil || kr.Local || kr.Key != peer {
+		t.Errorf("that peer by its key: %+v, %v", kr, err)
+	}
+
+	// A run through localhost records and renders the parties by the own name and principal; the
+	// program's own data, which may name sys@localhost/time, passes through as it was written.
+	k.RegisterNativeHandler("echo", func(_ context.Context, args map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
+		return args, nil
+	})
+	n, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Title: "Echo", Name: "echo", Kind: kernel.KindNative})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj := map[string]any{"type": "object"}
+	if err := k.ActivateNativeAction(ctx, n.ID, "Echo", "echo native", obj, obj, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@localhost/echo", Args: map[string]any{"next": "sys@localhost/time"}})
+	if err != nil {
+		t.Fatalf("run sys@localhost/echo: %v", err)
+	}
+	if reply.Result["next"] != "sys@localhost/time" {
+		t.Errorf("the result was rewritten: %v", reply.Result)
+	}
+	tx, err := st.ReadTransaction(ctx, reply.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tx.ArgsJSON) != `{"next":"sys@localhost/time"}` || !strings.Contains(string(tx.ReplyJSON), `"sys@localhost/time"`) {
+		t.Errorf("the recorded data was rewritten: args %s, result %s", tx.ArgsJSON, tx.ReplyJSON)
+	}
+	names := k.NewNames()
+	for role, v := range map[string]kernel.AddressView{
+		"owner":  names.Address(ctx, kernel.User(tx.OwnerUserID)),
+		"caller": names.Address(ctx, kernel.User(tx.CallerUserID)),
+		"action": names.Address(ctx, kernel.User(tx.TargetUserID)).Child(tx.ActionName),
+	} {
+		if strings.Contains(v.Address+v.Principal, kernel.Localhost) || !strings.Contains(v.Principal, self) {
+			t.Errorf("%s is named %+v; want the own name and the principal", role, v)
+		}
+	}
+	if a := names.Address(ctx, kernel.User(tx.TargetUserID)).Child(tx.ActionName); a.Address != "sys@"+kernel.TestOwnName+"/echo" {
+		t.Errorf("the action is named %q", a.Address)
+	}
+}
