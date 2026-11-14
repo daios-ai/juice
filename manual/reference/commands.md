@@ -177,11 +177,12 @@ takes `--visibility`. `create` requires `--title`. The schemas follow
 | `juice admin peer show PEER` | what this kernel knows of one peer |
 | `juice admin peer suspend PEER` | refuse its requests, reversibly |
 | `juice admin peer unsuspend PEER` | restore |
-| `juice admin peer rename PEER NEW_NAME` | bind a petname |
+| `juice admin peer rename PEER NEW_NAME` | bind a petname: the only way a peer gets one |
 | `juice admin peer inspect PEER` | identity, catalogue, evidence, reachability, version |
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
 
 Peer targets use a public key or petname. User targets use a `handle@kernel`
 address or an account ID. The separate commands avoid ambiguity when a handle
-and a petname happen to be the same.
+and a petname happen to be the same. Ordinary user and action references also
+accept principals: `user_id@kernel_key` and `user_id@kernel_key/name`.

@@ -33,10 +33,11 @@ immediate caller's balance, as described in [Earnings](earnings.html).
 
 A `wasm` action runs a compiled WebAssembly module inside the kernel's sandbox.
 The module has no direct access to the filesystem, network, environment, or
-credentials. It interacts with Juice through four host functions:
+credentials. It interacts with Juice through the following host functions:
 
 | Host function | Effect |
 |---|---|
+| `JuiceParties()` | return the immediate caller and process owner as principals |
 | `JuiceCall(action, args)` | call another action from this call's budget |
 | `JuiceTaskCreate(partialArgs, requiredCaller, action)` | set work aside for a named party |
 | `JuiceTaskComplete(taskID, input)` | complete a task this call created |
@@ -128,6 +129,18 @@ When a callback address is available, the request includes:
 X-Juice-Callback: http://127.0.0.1:4040
 X-Juice-Capability: <trace-id>.<signature>
 ```
+
+Every dispatch also supplies `X-Juice-Caller` and `X-Juice-Owner`, whether or
+not a callback is available. These contain the immediate caller's principal
+and the principal of the user who began the run. Each header is absent when
+there is no such party. The kernel sets them; caller input and configured
+credentials cannot replace them.
+
+Use the caller to decide whether a request is authorized, and the owner to
+attribute work to the run that requested it. For a child call, the composing
+action's owner is the immediate caller; the user who began the run remains
+the process owner. This distinction parallels Ethereum's `msg.sender` and
+`tx.origin`.
 
 To make a child call, send the capability in the same header to the callback
 address. The kernel allocates the child's price from the current call's budget:

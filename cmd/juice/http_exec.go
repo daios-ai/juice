@@ -260,9 +260,12 @@ func doHTTPH(ctx context.Context, method, rawURL string, headers map[string]stri
 
 // Trace-scoped composition capability headers (§9): the token and the base URL the endpoint
 // calls back on. Distinct from the user Authorization header so routes disambiguate the credential.
+// Beside them, who the call is for (D8): its immediate caller and its process owner, as principals.
 const (
 	capabilityHeader = "X-Juice-Capability"
 	callbackHeader   = "X-Juice-Callback"
+	callerHeader     = "X-Juice-Caller"
+	ownerHeader      = "X-Juice-Owner"
 )
 
 // httpActionExecutor dispatches kind=http actions — one cohesive HTTP concern
@@ -328,15 +331,15 @@ func defaultScheme(rawURL string) string {
 // Execute fires a kind=http action. The source is the canonical HTTPSource JSON
 // (manual and OpenAPI-imported actions share one representation); executeHTTP
 // applies its method, path templating, and parameter binding uniformly.
-func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, grantor kernel.Principal, capability string) (map[string]any, error) {
+func (e *httpActionExecutor) Execute(ctx context.Context, action *kernel.Action, args map[string]any, owner kernel.Principal, parties kernel.Parties, capability string) (map[string]any, error) {
 	var src kernel.HTTPSource
 	if err := json.Unmarshal([]byte(action.Source), &src); err != nil {
 		return nil, kernel.ErrInvalidState.Wrap("http action source is not valid HTTPSource JSON")
 	}
-	return e.executeHTTP(ctx, action, &src, args, grantor, capability)
+	return e.executeHTTP(ctx, action, &src, args, owner, parties, capability)
 }
 
-func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, grantor kernel.Principal, capability string) (map[string]any, error) {
+func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Action, src *kernel.HTTPSource, args map[string]any, owner kernel.Principal, parties kernel.Parties, capability string) (map[string]any, error) {
 	path := src.Path
 	queryVals := url.Values{}
 	bodyArgs := map[string]any{}
@@ -447,8 +450,20 @@ func (e *httpActionExecutor) executeHTTP(ctx context.Context, action *kernel.Act
 		}
 		reqURL := rawURL
 		if auth != nil {
-			if err := e.auth.Apply(ctx, action, grantor, auth, reqHeaders, &reqURL, refresh); err != nil {
+			if err := e.auth.Apply(ctx, action, owner, auth, reqHeaders, &reqURL, refresh); err != nil {
 				return nil, 0, err
+			}
+		}
+		// Set last, from the kernel's own resolution, so no binding or credential replaces them: a
+		// header of either name, in any case, is dropped first, and an absent party is sent as none.
+		for h := range reqHeaders {
+			if strings.EqualFold(h, callerHeader) || strings.EqualFold(h, ownerHeader) {
+				delete(reqHeaders, h)
+			}
+		}
+		for h, v := range map[string]string{callerHeader: parties.Caller, ownerHeader: parties.Owner} {
+			if v != "" {
+				reqHeaders[h] = v
 			}
 		}
 		var body io.Reader

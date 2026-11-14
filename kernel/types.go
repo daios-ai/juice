@@ -166,10 +166,10 @@ type Connection struct {
 // GrantView is the token-free read shape for GET /v1/me: the action reference, the scopes the
 // action requests (from its auth config), and when the grant was created.
 type GrantView struct {
-	Action      string    `json:"action"` // owner@kernel/name
-	Scopes      any       `json:"scopes,omitempty"`
-	ProviderKey string    `json:"provider_key,omitempty"` // key of the backing Connection (§8); empty on unbackfilled legacy grants
-	CreatedAt   time.Time `json:"created_at"`
+	Action      AddressView `json:"action"` // owner@kernel/name
+	Scopes      any         `json:"scopes,omitempty"`
+	ProviderKey string      `json:"provider_key,omitempty"` // key of the backing Connection (§8); empty on unbackfilled legacy grants
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
 // ConnectionView is the token-free read shape for GET /v1/me: the provider label, how many of
@@ -803,7 +803,7 @@ type TraceOutcome struct {
 type ReceiptVerification struct {
 	TransactionID         string        `json:"transaction_id"`
 	Valid                 bool          `json:"valid"`
-	RemoteKernelHandle    string        `json:"remote_kernel_handle,omitempty"`
+	RemoteKernelHandle    AddressView   `json:"remote_kernel_handle,omitzero"`
 	RemoteKernelPublicKey string        `json:"remote_kernel_public_key,omitempty"`
 	Checks                ReceiptChecks `json:"checks"`
 	Receipt               *Receipt      `json:"receipt"`
@@ -992,6 +992,7 @@ type EvidenceRow struct {
 type DiscoveryDoc struct {
 	KernelPublicKey string         `json:"kernel_public_key"`
 	Handle          string         `json:"handle,omitempty"`
+	OwnerID         string         `json:"owner_id,omitempty"` // the owner's stable id there, from the signed manifest (D15)
 	Title           string         `json:"title,omitempty"`
 	Description     string         `json:"description,omitempty"`
 	ActionID        string         `json:"action_id,omitempty"` // remote action id

@@ -245,7 +245,10 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
-        "action": "bob@acme/echo",
+        "action": {
+          "address": "bob@acme/echo",
+          "principal": "<user-id>@<kernel-key>/echo"
+        },
         "action_id": "6a9e04ce-…",
         "title": "Echo a message",
         "description": "Echo a message back to the caller",

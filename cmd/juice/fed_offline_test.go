@@ -95,7 +95,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	}
 	// The outbound-use path also binds the local petname (§13), which is how the peer is
 	// addressable by name in the commands below.
-	if _, err := k.BindPetname(ctx, key, handle, false); err != nil {
+	if _, err := k.BindPetname(ctx, key, handle); err != nil {
 		t.Fatal(err)
 	}
 	m := kernel.ActionManifest{
@@ -257,7 +257,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 		if c.a["indicative"] != true {
 			t.Errorf("%s price must be marked indicative, got %v", c.name, c.a["indicative"])
 		}
-		if name, _ := c.a["name"].(string); c.a["action_id"] != "act-1" || !strings.HasSuffix(name, "@peer-priced/greet") {
+		if name := addressOf(c.a["name"]); c.a["action_id"] != "act-1" || !strings.HasSuffix(name, "@peer-priced/greet") {
 			t.Errorf("%s projection lost its identity fields: %v", c.name, c.a)
 		}
 	}

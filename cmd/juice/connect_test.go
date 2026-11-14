@@ -160,7 +160,7 @@ func TestUserConnectTokenBatchCLI(t *testing.T) {
 	})
 	flagJSON = old
 	var reply struct {
-		Connected []string `json:"connected"`
+		Connected []kernel.AddressView `json:"connected"`
 	}
 	if err := json.Unmarshal([]byte(out), &reply); err != nil || len(reply.Connected) != 2 {
 		t.Fatalf("user connect --json = %q (%v)", out, err)
@@ -195,7 +195,8 @@ func TestRunGrantRequiredNonTTY(t *testing.T) {
 	if !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
-	if grantActionRef(err, "fallback") != "run-grant@k/inbox" {
-		t.Errorf("grantActionRef did not recover the action from meta: %q", grantActionRef(err, "fallback"))
+	// Meta names the action by its principal, which a program acts on and which always resolves.
+	if want := uid + "@" + env.k.SelfKey(context.Background()) + "/inbox"; grantActionRef(err, "fallback") != want {
+		t.Errorf("grantActionRef = %q, want the action's principal %q", grantActionRef(err, "fallback"), want)
 	}
 }

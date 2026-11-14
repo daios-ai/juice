@@ -33,7 +33,7 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.Pri
 		t.Fatal(err)
 	}
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.BindPetname(context.Background(), pubB64, handle, false); err != nil {
+	if _, err := k.BindPetname(context.Background(), pubB64, handle); err != nil {
 		t.Fatal(err)
 	}
 	return pubB64, priv

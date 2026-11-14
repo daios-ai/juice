@@ -7,19 +7,20 @@ import (
 	"strings"
 )
 
-// Address is the one name form (D15): `handle@kernel` names a user, `handle@kernel/name` an action.
-// The kernel segment is a petname — this kernel's own name is one, bound to its own key — or a raw
-// key; the two are disjoint by shape, so nothing guesses. A bare handle is not a name anywhere: like
-// an email address, the local part means nothing without its host.
+// Address is the one name form (D15): `user@kernel` names a user, `user@kernel/name` an action. The
+// user segment is a handle or a user id, the kernel segment a petname — this kernel's own name is one,
+// bound to its own key — or a raw key; each pair is disjoint by shape, so nothing guesses. Written
+// with an id and a key, an address is a principal, meaning the same party on every kernel. A bare
+// handle is not a name anywhere: like an email address, the local part means nothing without its host.
 type Address struct {
-	Handle string // the user's handle on Kernel
+	User   string // the user's handle or id on Kernel
 	Kernel string // petname or raw key, as typed; never stored, never signed
 	Name   string // action name, possibly with `/`; "" names the user, or an owner's root
 }
 
-// ParseAddress reads handle@kernel[/name]. The first `/` ends the head; the head is handle@kernel,
-// both parts non-empty, the handle bare. A raw action id is a different production (looksLikeID)
-// and is refused here so an id is never mistaken for a path.
+// ParseAddress reads user@kernel[/name]. The first `/` ends the head; the head is user@kernel, both
+// parts non-empty, the user a bare handle or an id. A raw action id is a different production
+// (looksLikeID) and is refused here so an id is never mistaken for a path.
 func ParseAddress(s string) (Address, error) {
 	s = strings.TrimSpace(s)
 	head, name, _ := strings.Cut(s, "/")
@@ -27,25 +28,37 @@ func ParseAddress(s string) (Address, error) {
 	if !hasKernel || handle == "" || kernelSeg == "" || (strings.Contains(s, "/") && name == "") || strings.ContainsAny(s, " \t\r\n") {
 		return Address{}, ErrInvalidInput.Wrapf("%q is not an address: name the user as handle@kernel, an action as handle@kernel/name", s)
 	}
-	if err := ValidateHandle(handle); err != nil {
-		return Address{}, err
+	if !looksLikeID(handle) {
+		if err := ValidateHandle(handle); err != nil {
+			return Address{}, err
+		}
 	}
 	if ValidateHandle(kernelSeg) != nil && !looksLikeKey(kernelSeg) {
 		return Address{}, ErrInvalidInput.Wrapf("%q is not a kernel name or key", kernelSeg)
 	}
-	return Address{Handle: handle, Kernel: kernelSeg, Name: name}, nil
+	return Address{User: handle, Kernel: kernelSeg, Name: name}, nil
 }
 
 // errUserNotFound is the one refusal for a user reference that names nobody, so every resolver
 // reports a miss in the same words and the reference as it was written.
 func errUserNotFound(ref string) error { return ErrNotFound.Wrapf("user %s not found", ref) }
 
-// String renders handle@kernel[/name].
+// String renders user@kernel[/name].
 func (a Address) String() string {
 	if a.Name == "" {
-		return a.Handle + "@" + a.Kernel
+		return a.User + "@" + a.Kernel
 	}
-	return a.Handle + "@" + a.Kernel + "/" + a.Name
+	return a.User + "@" + a.Kernel + "/" + a.Name
+}
+
+// readUser reads a user of this kernel by the user segment of an address: an id, or a handle. The
+// one reader for local input and for a peer's resolve alike, so a principal answers wherever a
+// handle does (D15).
+func (k *Kernel) readUser(ctx context.Context, seg string) (*Account, error) {
+	if looksLikeID(seg) {
+		return k.store.ReadUser(ctx, seg)
+	}
+	return k.store.ReadUserByHandle(ctx, seg)
 }
 
 // Principal is who a record names (D15): the kernel the party lives on, empty for this one, and the
@@ -57,6 +70,19 @@ type Principal struct {
 	Kernel string
 	UserID string
 	Handle string
+}
+
+// Written is a principal as a program keeps it (D15): user_id@kernel_key, a kernel alone as its
+// key, and empty for nobody. self is this kernel's key, which a party here leaves implicit.
+func (p Principal) Written(self string) string {
+	key := firstNonEmpty(p.Kernel, self)
+	switch {
+	case p.UserID != "":
+		return p.UserID + "@" + key
+	case p.Kernel != "":
+		return key
+	}
+	return ""
 }
 
 // User is a user of this kernel as a principal.
@@ -111,11 +137,11 @@ func (k *Kernel) IsRemoteRef(ctx context.Context, ref string) bool {
 // ResolveLocalPrincipal resolves an address that must name a live user of this kernel: a
 // transfer's recipient, an admin target. A remote address is refused here rather than dialled.
 func (k *Kernel) ResolveLocalPrincipal(ctx context.Context, ref string) (*Account, error) {
-	handle, err := k.LocalHandle(ctx, ref)
+	a, err := k.localAddress(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
-	u, err := k.store.ReadUserByHandle(ctx, handle)
+	u, err := k.readUser(ctx, a.User)
 	if err != nil || u == nil {
 		return nil, errUserNotFound(ref)
 	}
@@ -124,29 +150,42 @@ func (k *Kernel) ResolveLocalPrincipal(ctx context.Context, ref string) (*Accoun
 
 // LocalHandle reads an account's own name on this kernel out of the address it is written as:
 // `handle@<this kernel>`. Creating, logging into, recovering and renaming an account all take the
-// address, and refuse one that names another kernel — an account lives where it was made.
+// address, and refuse one that names another kernel — an account lives where it was made — or that
+// is written with an id, since each of them names or chooses a handle.
 func (k *Kernel) LocalHandle(ctx context.Context, addr string) (string, error) {
-	a, err := ParseAddress(addr)
+	a, err := k.localAddress(ctx, addr)
 	if err != nil {
 		return "", err
 	}
+	if err := ValidateHandle(a.User); err != nil {
+		return "", err
+	}
+	return a.User, nil
+}
+
+// localAddress parses an address that must name a user of this kernel, by handle or by id.
+func (k *Kernel) localAddress(ctx context.Context, addr string) (Address, error) {
+	a, err := ParseAddress(addr)
+	if err != nil {
+		return Address{}, err
+	}
 	if a.Name != "" {
-		return "", ErrInvalidInput.Wrapf("%q names an action; an account is handle@kernel", addr)
+		return Address{}, ErrInvalidInput.Wrapf("%q names an action; an account is handle@kernel", addr)
 	}
 	kr, err := k.ResolveKernel(ctx, a.Kernel)
 	if err != nil {
-		return "", err
+		return Address{}, err
 	}
 	if !kr.Local {
-		return "", ErrInvalidInput.Wrapf("%s is on another kernel, not on %s", addr, k.OwnName(ctx))
+		return Address{}, ErrInvalidInput.Wrapf("%s is on another kernel, not on %s", addr, k.OwnName(ctx))
 	}
-	return a.Handle, nil
+	return a, nil
 }
 
 // ResolvePrincipal resolves an address to who a task may be parked for (P8): a user here, or a user on
 // a peer — the peer's key and the user's stable id there, resolved over /juice/fed/resolve/1. The
-// verified resolve makes the peer known and binds its petname too, best-effort: naming turns on our
-// own outbound act, never on a peer's.
+// verified resolve makes the peer known; it names it nothing, since only the operator binds a
+// petname (D15).
 func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, error) {
 	a, err := ParseAddress(ref)
 	if err != nil {
@@ -160,7 +199,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 		return Principal{}, err
 	}
 	if kr.Local {
-		u, uerr := k.store.ReadUserByHandle(ctx, a.Handle)
+		u, uerr := k.readUser(ctx, a.User)
 		if uerr != nil || u == nil {
 			return Principal{}, errUserNotFound(ref)
 		}
@@ -169,7 +208,7 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if k.fedClient == nil {
 		return Principal{}, ErrNotFound.Wrap("remote resolution unavailable")
 	}
-	res, rerr := k.fedClient.ResolveRemoteUser(ctx, kr.Key, a.Handle)
+	res, rerr := k.fedClient.ResolveRemoteUser(ctx, kr.Key, a.User)
 	if rerr != nil {
 		return Principal{}, rerr
 	}
@@ -185,17 +224,14 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if err := k.knowKernel(ctx, kr.Key); err != nil {
 		return Principal{}, err
 	}
-	if _, berr := k.BindPetname(ctx, kr.Key, "", false); berr != nil {
-		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", kr.Key, "error", berr.Error())
-	}
 	return Principal{Kernel: kr.Key, UserID: res.UserID, Handle: NormalizeHandle(res.Handle)}, nil
 }
 
 // LocalPrincipal answers the open /juice/fed/resolve/1 user question for a peer: a user of this
-// kernel who is not suspended, named by the bare handle the peer's address carried, to its stable id
-// and current handle; ids are addresses, not secrets.
+// kernel who is not suspended, named by the bare handle or id the peer's address carried, to its
+// stable id and current handle; ids are addresses, not secrets.
 func (k *Kernel) LocalPrincipal(ctx context.Context, ref string) (userID, handle string, err error) {
-	u, err := k.store.ReadUserByHandle(ctx, ref)
+	u, err := k.readUser(ctx, ref)
 	if err != nil || u == nil || u.SuspendedAt != nil {
 		return "", "", errUserNotFound(ref)
 	}
@@ -204,18 +240,37 @@ func (k *Kernel) LocalPrincipal(ctx context.Context, ref string) (userID, handle
 
 // ---- Rendering ----
 
-// Names renders principals and actions as addresses, reading each account and kernel row at most
-// once: a transaction list names few distinct parties across many rows. One per request.
+// AddressView is how a reply names a party or an action (D15, D20): the address a person reads and
+// types, the principal a program keeps — the same party on every kernel, whatever it is called — and,
+// for a kernel this one has given no petname, the nickname it calls itself, shown after its key and
+// never resolved.
+type AddressView struct {
+	Address   string `json:"address"`
+	Principal string `json:"principal"`
+	Nickname  string `json:"nickname,omitempty"`
+}
+
+// String is what a person reads: the address, then the nickname marked as the party's own claim.
+func (v AddressView) String() string {
+	if v.Nickname == "" {
+		return v.Address
+	}
+	return v.Address + " ~" + v.Nickname
+}
+
+// Names renders principals and actions, reading each account and kernel row at most once: a
+// transaction list names few distinct parties across many rows. One per request.
 type Names struct {
 	k        *Kernel
 	accounts map[string]*Account
-	kernels  map[string]string
+	kernels  map[string]AddressView
+	self     string
 	own      string
 }
 
 // NewNames starts one rendering scope.
 func (k *Kernel) NewNames() *Names {
-	return &Names{k: k, accounts: map[string]*Account{}, kernels: map[string]string{}}
+	return &Names{k: k, accounts: map[string]*Account{}, kernels: map[string]AddressView{}}
 }
 
 func (n *Names) account(ctx context.Context, id string) *Account {
@@ -227,68 +282,102 @@ func (n *Names) account(ctx context.Context, id string) *Account {
 	return u
 }
 
-func (n *Names) kernel(ctx context.Context, key string) string {
-	if name, ok := n.kernels[key]; ok {
-		return name
+// KeyAddress is a kernel known only by its key: the key is both its address and its principal.
+func KeyAddress(key string) AddressView { return AddressView{Address: key, Principal: key} }
+
+// Kernel renders a kernel (D15): its petname, else its key with the nickname it gives itself beside
+// it, so the true key is always what an unnamed kernel is shown and typed by.
+func (n *Names) Kernel(ctx context.Context, key string) AddressView {
+	if v, ok := n.kernels[key]; ok {
+		return v
 	}
-	name := n.k.KernelName(ctx, key)
-	n.kernels[key] = name
-	return name
+	v := KeyAddress(key)
+	if rk, err := n.k.store.ReadKernel(ctx, key); err == nil && rk != nil {
+		if rk.Petname != "" {
+			v.Address = rk.Petname
+		} else if ValidateHandle(rk.Nickname) == nil {
+			v.Nickname = rk.Nickname
+		}
+	}
+	n.kernels[key] = v
+	return v
 }
 
-func (n *Names) ownName(ctx context.Context) string {
-	if n.own == "" {
-		n.own = n.k.OwnName(ctx)
+func (n *Names) local(ctx context.Context) (self, own string) {
+	if n.self == "" {
+		n.self, n.own = n.k.SelfKey(ctx), n.k.OwnName(ctx)
 	}
-	return n.own
+	return n.self, n.own
 }
 
 // Address renders a principal (D20): a user here as handle@<own name>; a user on a peer as their
-// handle beneath the peer's name — its petname, or its key while it has none; the peer kernel
-// itself as that name alone. A user always carries `@`, a kernel never does, so the two cannot be
-// confused however they are named. An id that names nobody here — a party purged before kernels
-// were named by key — renders as itself, so an immutable ledger stays legible.
-func (n *Names) Address(ctx context.Context, p Principal) string {
+// handle beneath the peer's name; the peer kernel itself as that name alone. A user always carries
+// `@`, a kernel never does, so the two cannot be confused however they are named. Its principal is
+// the user's id beneath the kernel's key. An id that names nobody here — a party purged before
+// kernels were named by key — renders as itself, so an immutable ledger stays legible.
+func (n *Names) Address(ctx context.Context, p Principal) AddressView {
 	if !p.Local() {
-		host := n.kernel(ctx, p.Kernel)
-		if who := firstNonEmpty(p.Handle, p.UserID); who != "" {
-			return who + "@" + host
+		v := n.Kernel(ctx, p.Kernel)
+		if p.UserID == "" {
+			return v
 		}
-		return host
+		return v.under(firstNonEmpty(p.Handle, p.UserID), p.UserID, p.Kernel)
 	}
 	if p.UserID == "" {
-		return ""
+		return AddressView{}
 	}
+	self, own := n.local(ctx)
+	v := AddressView{Address: p.UserID, Principal: p.Written(self)}
 	if u := n.account(ctx, p.UserID); u != nil {
-		return u.Handle + "@" + n.ownName(ctx)
+		v.Address = u.Handle + "@" + own
 	}
-	return p.UserID
+	return v
 }
 
-// Action renders an action's address: its owner's, then the name. A proxy's owner is the peer's
-// user recorded on the row (D13), beneath the peer's name here.
-func (n *Names) Action(ctx context.Context, a *Action) string {
+// Action renders an action: its owner's address and principal, then the name. A proxy's owner is
+// the peer's user recorded on the row (D13), beneath the peer's name here.
+func (n *Names) Action(ctx context.Context, a *Action) AddressView {
 	if a == nil {
-		return ""
+		return AddressView{}
 	}
-	return n.Address(ctx, a.Owner()) + "/" + a.Name
+	return n.Address(ctx, a.Owner()).Child(a.Name)
+}
+
+// under renders a user of the kernel v names, by the handle a record or manifest carries and the id
+// that is their principal there.
+func (v AddressView) under(handle, userID, key string) AddressView {
+	v.Address = handle + "@" + v.Address
+	v.Principal = userID + "@" + key
+	return v
+}
+
+// Child renders a name beneath a party: an action of its owner.
+func (v AddressView) Child(name string) AddressView {
+	v.Address += "/" + name
+	v.Principal += "/" + name
+	return v
 }
 
 // Address is the single-shot form of Names.Address.
-func (k *Kernel) Address(ctx context.Context, p Principal) string {
+func (k *Kernel) Address(ctx context.Context, p Principal) AddressView {
 	return k.NewNames().Address(ctx, p)
 }
 
 // ActionAddress is the single-shot form of Names.Action.
-func (k *Kernel) ActionAddress(ctx context.Context, a *Action) string {
+func (k *Kernel) ActionAddress(ctx context.Context, a *Action) AddressView {
 	return k.NewNames().Action(ctx, a)
 }
 
+// KernelAddress is the single-shot form of Names.Kernel.
+func (k *Kernel) KernelAddress(ctx context.Context, key string) AddressView {
+	return k.NewNames().Kernel(ctx, key)
+}
+
 // ActionAddressByID renders an action named by id, falling back to the id when the row is gone.
-func (k *Kernel) ActionAddressByID(ctx context.Context, actionID string) string {
+func (k *Kernel) ActionAddressByID(ctx context.Context, actionID string) AddressView {
 	a, err := k.store.ReadAction(ctx, actionID)
 	if err != nil || a == nil {
-		return actionID
+		return AddressView{Address: actionID, Principal: actionID}
 	}
 	return k.ActionAddress(ctx, a)
 }

@@ -136,7 +136,7 @@ func TestExecuteLookup_ReturnsMatchingAction(t *testing.T) {
 		t.Fatalf("expected non-empty results, got %v", result)
 	}
 	first, _ := items[0].(map[string]any)
-	if first["action"] != "alice@k/weather" {
+	if action, _ := first["action"].(map[string]any); action["address"] != "alice@k/weather" {
 		t.Errorf("expected alice@k/weather first, got %v", first["action"])
 	}
 	if first["title"] != "About weather" {
@@ -216,7 +216,7 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	observed := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
 	doc := &kernel.DiscoveryDoc{
-		KernelPublicKey: peerKey, Handle: "prov", ActionID: "act-remote", Name: "weather",
+		KernelPublicKey: peerKey, Handle: "prov", OwnerID: "prov-id", ActionID: "act-remote", Name: "weather",
 		Description: "forecast the weather for a city", ServingPrice: 10, ObservedAt: observed,
 	}
 	if err := st.ApplyCatalogPage(ctx, peerKey, []*kernel.DiscoveryDoc{doc}, "", 0); err != nil {
@@ -251,16 +251,19 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	if remote["observed_at"] != observed.Format(time.RFC3339) {
 		t.Errorf("observed_at: got %v, want %v", remote["observed_at"], observed.Format(time.RFC3339))
 	}
-	// Before we have met the peer, the key is the only name that resolves.
-	if want := "prov@" + peerKey + "/weather"; remote["action"] != want {
-		t.Errorf("unmet peer must render by key: got %v, want %v", remote["action"], want)
+	// Before the operator names the peer, its key is the only name that resolves; the principal,
+	// from the signed manifest, names the owner by id beneath that key either way (D15).
+	principal := "prov-id@" + peerKey + "/weather"
+	action := func(m map[string]any) map[string]any { a, _ := m["action"].(map[string]any); return a }
+	if a := action(remote); a["address"] != "prov@"+peerKey+"/weather" || a["principal"] != principal {
+		t.Errorf("unmet peer must render by key: got %v, want prov@%s/weather and %s", a, peerKey, principal)
 	}
 	// Once it has a local name, that is what a buyer sees — and it resolves in kernel position.
-	if _, err := k.BindPetname(ctx, peerKey, "weatherco", true); err != nil {
+	if _, err := k.BindPetname(ctx, peerKey, "weatherco"); err != nil {
 		t.Fatalf("BindPetname: %v", err)
 	}
-	if _, remote = hits(); remote["action"] != "prov@weatherco/weather" {
-		t.Errorf("a named peer must render by petname: got %v", remote["action"])
+	if _, remote = hits(); action(remote)["address"] != "prov@weatherco/weather" || action(remote)["principal"] != principal {
+		t.Errorf("a named peer must render by petname, its principal unchanged: got %v", action(remote))
 	}
 
 	// Reachability of the hosting kernel rides every remote hit, so a search result can say when the

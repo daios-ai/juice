@@ -28,17 +28,17 @@ import (
 // parked on someone who may be offline (§13); its age is the task's created_at.
 type taskWithAction struct {
 	kernel.TaskNotice
-	UserID          string `json:"user_id,omitempty"`          // shadow-dropped: the required caller names the party
-	RequesterID     string `json:"requester_id,omitempty"`     // shadow-dropped: the requester below names it
-	RequesterHandle string `json:"requester_handle,omitempty"` // shadow-dropped: likewise
-	ActionID        string `json:"action_id,omitempty"`        // shadow-dropped: the address below names it
-	CreatedByID     string `json:"created_by_id,omitempty"`    // shadow-dropped: likewise
-	Action          string `json:"action,omitempty"`
-	CreatedBy       string `json:"created_by,omitempty"` // the creating action's address
-	Owner           string `json:"owner"`                // process owner (payer), or the kernel holding the task
-	RequiredCaller  string `json:"required_caller,omitempty"`
-	Requester       string `json:"requester,omitempty"` // who the task acts for (D6)
-	WaitingOnPeer   bool   `json:"waiting_on_peer,omitempty"`
+	UserID          string             `json:"user_id,omitempty"`          // shadow-dropped: the required caller names the party
+	RequesterID     string             `json:"requester_id,omitempty"`     // shadow-dropped: the requester below names it
+	RequesterHandle string             `json:"requester_handle,omitempty"` // shadow-dropped: likewise
+	ActionID        string             `json:"action_id,omitempty"`        // shadow-dropped: the address below names it
+	CreatedByID     string             `json:"created_by_id,omitempty"`    // shadow-dropped: likewise
+	Action          kernel.AddressView `json:"action,omitzero"`
+	CreatedBy       kernel.AddressView `json:"created_by,omitzero"` // the creating action
+	Owner           kernel.AddressView `json:"owner"`               // process owner (payer), or the kernel holding the task
+	RequiredCaller  kernel.AddressView `json:"required_caller,omitzero"`
+	Requester       kernel.AddressView `json:"requester,omitzero"` // who the task acts for (D6)
+	WaitingOnPeer   bool               `json:"waiting_on_peer,omitempty"`
 }
 
 // processView enriches a process with its owner's address and awaiting-receipt state and age (§13): a
@@ -46,24 +46,24 @@ type taskWithAction struct {
 // such call started — so an operator can see funds parked on an unreachable peer and for how long.
 type processView struct {
 	*kernel.Process
-	OwnerUserID          string     `json:"owner_user_id,omitempty"`
-	Owner                string     `json:"owner"`
-	AwaitingReceipt      bool       `json:"awaiting_receipt"`
-	AwaitingReceiptSince *time.Time `json:"awaiting_receipt_since,omitempty"`
+	OwnerUserID          string             `json:"owner_user_id,omitempty"`
+	Owner                kernel.AddressView `json:"owner"`
+	AwaitingReceipt      bool               `json:"awaiting_receipt"`
+	AwaitingReceiptSince *time.Time         `json:"awaiting_receipt_since,omitempty"`
 }
 
 // txView enriches a transaction with the addresses of its three parties (payer, caller, payee) and
 // of its action, replacing the raw ids and the stored name, which no command consumes.
 type txView struct {
 	*kernel.TransactionView
-	OwnerUserID  string `json:"owner_user_id,omitempty"`
-	CallerUserID string `json:"caller_user_id,omitempty"`
-	TargetUserID string `json:"target_user_id,omitempty"`
-	ActionName   string `json:"action_name,omitempty"`
-	Owner        string `json:"owner"`
-	Caller       string `json:"caller"`
-	Target       string `json:"target"`
-	Action       string `json:"action"`
+	OwnerUserID  string             `json:"owner_user_id,omitempty"`
+	CallerUserID string             `json:"caller_user_id,omitempty"`
+	TargetUserID string             `json:"target_user_id,omitempty"`
+	ActionName   string             `json:"action_name,omitempty"`
+	Owner        kernel.AddressView `json:"owner"`
+	Caller       kernel.AddressView `json:"caller"`
+	Target       kernel.AddressView `json:"target"`
+	Action       kernel.AddressView `json:"action"`
 }
 
 // txSummary is the list shape of a transaction. A call's arguments and result are read by id;
@@ -96,14 +96,14 @@ func summaries(resps []actionResp) []actionSummary {
 // owner_user_id and owner_handle are shadow-dropped: the address names the owner.
 type actionResp struct {
 	*kernel.Action
-	OwnerUserID   string    `json:"owner_user_id,omitempty"`
-	OwnerHandle   string    `json:"owner_handle,omitempty"`
-	ActionRef     string    `json:"action"`
-	HTTP          *httpView `json:"http,omitempty"`
-	AuthScheme    string    `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
-	RequiresGrant bool      `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
-	QuoteHash     string    `json:"quote_hash"`            // the terms a caller may pin on a run (§4 precondition 7)
-	Discovered    bool      `json:"discovered,omitempty"`  // learned from a peer's catalogue, not yet resolved: its price is indicative (§13)
+	OwnerUserID   string             `json:"owner_user_id,omitempty"`
+	OwnerHandle   string             `json:"owner_handle,omitempty"`
+	ActionRef     kernel.AddressView `json:"action"`
+	HTTP          *httpView          `json:"http,omitempty"`
+	AuthScheme    string             `json:"auth_scheme,omitempty"` // upstream auth scheme name (§8); present only when the action has auth; never config/secrets (R9)
+	RequiresGrant bool               `json:"requires_grant"`        // true iff a caller must connect a per-caller grant first (delegated schemes)
+	QuoteHash     string             `json:"quote_hash"`            // the terms a caller may pin on a run (§4 precondition 7)
+	Discovered    bool               `json:"discovered,omitempty"`  // learned from a peer's catalogue, not yet resolved: its price is indicative (§13)
 	// Evidence is what this kernel holds about the action's conduct, on the detail read. Present
 	// for every action, local or remote: the subject is whoever runs it (§13, U39).
 	Evidence *kernel.ActionRecord `json:"evidence,omitempty"`
@@ -124,7 +124,7 @@ type httpView struct {
 // of the transaction it settles into, or the kernel holding it, which withholds both (P8).
 func enrichTask(k *kernel.Kernel, ctx context.Context, e *kernel.TaskEntry, names *kernel.Names) *taskWithAction {
 	v := &taskWithAction{TaskNotice: e.TaskNotice, RequiredCaller: names.Address(ctx, e.RequiredCaller),
-		Owner: k.KernelName(ctx, e.HolderKey)}
+		Owner: k.KernelAddress(ctx, e.HolderKey)}
 	if e.Requester.UserID != "" {
 		v.Requester = names.Address(ctx, e.Requester)
 	}
@@ -159,14 +159,14 @@ func enrichProcess(ctx context.Context, p *kernel.Process, since map[string]time
 // destination).
 type ledgerView struct {
 	*kernel.LedgerEntry
-	ID             string `json:"id,omitempty"`
-	ExternalKey    string `json:"external_key,omitempty"`
-	OperatorUserID string `json:"operator_user_id,omitempty"`
-	FromUserID     string `json:"from_user_id,omitempty"`
-	ToUserID       string `json:"to_user_id,omitempty"`
-	Operator       string `json:"operator"`
-	From           string `json:"from,omitempty"`
-	To             string `json:"to,omitempty"`
+	ID             string             `json:"id,omitempty"`
+	ExternalKey    string             `json:"external_key,omitempty"`
+	OperatorUserID string             `json:"operator_user_id,omitempty"`
+	FromUserID     string             `json:"from_user_id,omitempty"`
+	ToUserID       string             `json:"to_user_id,omitempty"`
+	Operator       kernel.AddressView `json:"operator,omitzero"`
+	From           kernel.AddressView `json:"from,omitzero"`
+	To             kernel.AddressView `json:"to,omitzero"`
 }
 
 // ratingView withholds the rater's id: the rater is the caller, and a party is never a raw id
@@ -180,9 +180,9 @@ type ratingView struct {
 // and only GET /v1/me answers with the caller's own (D20).
 type accountView struct {
 	*kernel.Account
-	ID      string `json:"id,omitempty"`
-	Handle  string `json:"handle,omitempty"`
-	Address string `json:"address"`
+	ID      string             `json:"id,omitempty"`
+	Handle  string             `json:"handle,omitempty"`
+	Address kernel.AddressView `json:"address"`
 }
 
 func accountView1(ctx context.Context, names *kernel.Names, a *kernel.Account) accountView {
@@ -201,7 +201,7 @@ func accountViews(ctx context.Context, names *kernel.Names, as []*kernel.Account
 // the internal account id withheld (§14).
 type railTransferView struct {
 	*kernel.RailTransfer
-	Party string `json:"party,omitempty"`
+	Party kernel.AddressView `json:"party,omitzero"`
 }
 
 // railTransferViews names the party on each row: a withdrawal's is the account it leaves.
@@ -225,7 +225,7 @@ type awaiting struct {
 // owedView renders the buyer as a reference: a raw account id is never a surface value (D20).
 type owedView struct {
 	*kernel.Owed
-	Peer string `json:"peer"`
+	Peer kernel.AddressView `json:"peer"`
 }
 
 func owedViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Owed) []*owedView {
@@ -238,7 +238,7 @@ func owedViews(k *kernel.Kernel, ctx context.Context, rows []*kernel.Owed) []*ow
 }
 
 func enrichLedger(ctx context.Context, e *kernel.LedgerEntry, names *kernel.Names) *ledgerView {
-	one := func(id string) string { return names.Address(ctx, kernel.User(id)) }
+	one := func(id string) kernel.AddressView { return names.Address(ctx, kernel.User(id)) }
 	return &ledgerView{LedgerEntry: e, Operator: one(e.OperatorUserID), From: one(e.FromUserID), To: one(e.ToUserID)}
 }
 
@@ -252,7 +252,7 @@ func enrichTx(ctx context.Context, tv *kernel.TransactionView, names *kernel.Nam
 		Owner:           names.Address(ctx, kernel.User(tv.OwnerUserID)),
 		Caller:          names.Address(ctx, tv.Caller()),
 		Target:          target,
-		Action:          target + "/" + tv.ActionName,
+		Action:          target.Child(tv.ActionName),
 	}
 }
 
@@ -358,7 +358,7 @@ func createUser(k *kernel.Kernel, ctx context.Context, req kernel.CreateUserRequ
 // never gates a credential; the token binding stays per-action and fact-derived (§8 confused-deputy
 // defense), so grouping by it changes nothing about which credential dispatch applies.
 type connectorView struct {
-	Directory   string                   `json:"directory"`   // the folder the actions live in (owner@kernel or owner@kernel/path)
+	Directory   kernel.AddressView       `json:"directory"`   // the folder the actions live in (owner@kernel or owner@kernel/path)
 	Connections []*kernel.ConnectionView `json:"connections"` // upstream account(s) backing this directory (usually one)
 	Actions     []*kernel.GrantView      `json:"actions"`     // token-free granted actions under this directory
 }
@@ -367,11 +367,15 @@ type connectorView struct {
 // @chat/inbox/send and @chat/inbox/read both group under @chat/inbox (not a flat @chat). A
 // top-level action like @chat/create-room groups under @chat. Falls back to the whole ref when the
 // action did not resolve to owner@kernel/name.
-func directoryOf(actionRef string) string {
-	if i := strings.LastIndexByte(actionRef, '/'); i >= 0 {
-		return actionRef[:i]
+func directoryOf(action kernel.AddressView) kernel.AddressView {
+	parent := func(ref string) string {
+		if i := strings.LastIndexByte(ref, '/'); i >= 0 {
+			return ref[:i]
+		}
+		return ref
 	}
-	return actionRef
+	action.Address, action.Principal = parent(action.Address), parent(action.Principal)
+	return action
 }
 
 func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]any, error) {
@@ -400,16 +404,16 @@ func getMe(k *kernel.Kernel, ctx context.Context, callerID string) (map[string]a
 	byDir := map[string]*connectorView{}
 	for _, g := range grants {
 		dir := directoryOf(g.Action)
-		node := byDir[dir]
+		node := byDir[dir.Principal]
 		if node == nil {
 			node = &connectorView{Directory: dir, Connections: []*kernel.ConnectionView{}, Actions: []*kernel.GrantView{}}
-			byDir[dir] = node
-			order = append(order, dir)
+			byDir[dir.Principal] = node
+			order = append(order, dir.Principal)
 		}
 		node.Actions = append(node.Actions, g)
 	}
 	for _, node := range byDir {
-		sort.Slice(node.Actions, func(i, j int) bool { return node.Actions[i].Action < node.Actions[j].Action })
+		sort.Slice(node.Actions, func(i, j int) bool { return node.Actions[i].Action.Address < node.Actions[j].Action.Address })
 		seen := map[string]bool{}
 		for _, g := range node.Actions {
 			if g.ProviderKey == "" || seen[g.ProviderKey] {
@@ -457,8 +461,8 @@ func groupActionIDs(g *kernel.ConsentGroup) []string {
 	return ids
 }
 
-func grantRefs(k *kernel.Kernel, ctx context.Context, grants []*kernel.Grant) []string {
-	refs := make([]string, len(grants))
+func grantRefs(k *kernel.Kernel, ctx context.Context, grants []*kernel.Grant) []kernel.AddressView {
+	refs := make([]kernel.AddressView, len(grants))
 	for i, g := range grants {
 		refs[i] = k.ActionAddressByID(ctx, g.ActionID)
 	}
@@ -732,8 +736,8 @@ func listActions(k *kernel.Kernel, ctx context.Context, callerID, owner string, 
 			return []actionSummary{}, nil
 		}
 		if !kr.Local {
-			q.PeerKey, q.PeerHandle = kr.Key, addr.Handle
-		} else if u, err := k.ReadUserByHandle(ctx, addr.Handle); err != nil {
+			q.PeerKey, q.PeerUser = kr.Key, addr.User
+		} else if u, err := k.ResolveLocalPrincipal(ctx, owner); err != nil {
 			return []actionSummary{}, nil
 		} else {
 			q.OwnerID = u.ID
@@ -868,9 +872,9 @@ func getTask(k *kernel.Kernel, ctx context.Context, callerID, id string) (*taskW
 // requesterView is one principal that has addressed tasks to the caller: who, by address, and the
 // caller's decision. Nothing the requester wrote is shown.
 type requesterView struct {
-	Requester string    `json:"requester"`
-	Status    string    `json:"status"`
-	Since     time.Time `json:"since"`
+	Requester kernel.AddressView `json:"requester"`
+	Status    string             `json:"status"`
+	Since     time.Time          `json:"since"`
 }
 
 func viewRequester(ctx context.Context, r *kernel.Requester, names *kernel.Names) requesterView {

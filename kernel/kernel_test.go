@@ -589,7 +589,7 @@ func TestPruneOrphanedNativeActions(t *testing.T) {
 	owner := setupUser(t, st, "sys", 0)
 
 	// Only "keep" has a registered handler.
-	k.RegisterNativeHandler("keep", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("keep", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
 
@@ -2296,7 +2296,7 @@ func newTestKernelWithHTTP(st kernel.Store, http kernel.HTTPExecutor) *kernel.Ke
 // fakeSuccessHTTP is a minimal HTTPExecutor that returns an empty result for any Execute call.
 type fakeSuccessHTTP struct{}
 
-func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
+func (f *fakeSuccessHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ kernel.Parties, _ string) (map[string]any, error) {
 	return map[string]any{}, nil
 }
 
@@ -2435,7 +2435,7 @@ func (f *fakeFederationHTTP) SendGrant(_ context.Context, _ string, op kernel.Gr
 	return status, []byte(body), nil
 }
 
-func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
+func (f *fakeFederationHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ kernel.Parties, _ string) (map[string]any, error) {
 	return nil, kernel.ErrInvalidState.Wrap("not used in federation tests")
 }
 
@@ -3300,7 +3300,7 @@ func TestGrantRequiredRejectsBeforeLock(t *testing.T) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"@k/"+a.Name {
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.ID+"@"+k.SelfKey(ctx)+"/"+a.Name {
 		t.Errorf("error does not carry structured action meta: %+v", err)
 	}
 	// No funds locked, no process created.
@@ -3361,7 +3361,7 @@ func TestCreateGrantListAndRevoke(t *testing.T) {
 	if err != nil || len(views) != 1 {
 		t.Fatalf("ListGrantViews: %v, n=%d", err, len(views))
 	}
-	if views[0].Action != owner.Handle+"@k/"+a.Name {
+	if views[0].Action.Address != owner.Handle+"@k/"+a.Name {
 		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"@k/"+a.Name)
 	}
 	if views[0].Scopes != "read" {
@@ -3580,7 +3580,7 @@ func TestBearerGrantRequiredBeforeLock(t *testing.T) {
 		t.Fatalf("run without grant: got %v, want ErrGrantRequired", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["action"] != owner.Handle+"@k/"+a.Name {
+	if !errors.As(err, &ke) || ke.Meta["action"] != owner.ID+"@"+k.SelfKey(ctx)+"/"+a.Name {
 		t.Errorf("error does not carry structured action meta: %+v", err)
 	}
 	if u, _ := k.ReadUser(ctx, owner.ID); u.Available != 1000 || u.Locked != 0 {
@@ -3608,7 +3608,7 @@ func TestAttachBearerGrant(t *testing.T) {
 	if err != nil || len(views) != 1 {
 		t.Fatalf("ListGrantViews: %v n=%d", err, len(views))
 	}
-	if views[0].Action != owner.Handle+"@k/"+bearer.Name {
+	if views[0].Action.Address != owner.Handle+"@k/"+bearer.Name {
 		t.Errorf("view action = %q, want %q", views[0].Action, owner.Handle+"@k/"+bearer.Name)
 	}
 	if b, _ := json.Marshal(views[0]); strings.Contains(string(b), "ghp_secret") {
@@ -4061,7 +4061,7 @@ func (r *recordingMetrics) CallSettled(scope, outcome string, elapsed time.Durat
 // failingHTTP is an upstream that is down: every execution fails.
 type failingHTTP struct{}
 
-func (failingHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ string) (map[string]any, error) {
+func (failingHTTP) Execute(_ context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, _ kernel.Parties, _ string) (map[string]any, error) {
 	return nil, kernel.ErrExecutionFailed.Wrap("upstream down")
 }
 

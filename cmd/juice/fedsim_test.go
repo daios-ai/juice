@@ -324,7 +324,8 @@ func (p *simPort) Grant(ctx context.Context, peerKey string, req fed.GrantReques
 }
 
 func (p *simPort) Process(ctx context.Context, peerKey string, req fed.ProcessRequest) (fed.Response, error) {
-	return p.deliver(ctx, peerKey, verbProcess, func(h *fedHandlers) fed.Response {
+	// Each kind is its own verb, so a scenario can fault a registration and not the check before it.
+	return p.deliver(ctx, peerKey, verbProcess+simVerb(" "+req.Kind), func(h *fedHandlers) fed.Response {
 		return h.OnProcess(ctx, p.self, req)
 	})
 }
@@ -1906,6 +1907,9 @@ func newGrantWorld(t *testing.T, nodes ...*simNode) *grantWorld {
 				err = errors.New("unknown token")
 			}
 			reply["account"] = acct
+		} else if parts[0] == "parties" {
+			// What the action was told it runs for (D8), as it arrived.
+			reply["caller"], reply["owner"] = r.Header.Get(callerHeader), r.Header.Get(ownerHeader)
 		} else {
 			node := w.nodes[parts[1]]
 			target, _ := base64.RawURLEncoding.DecodeString(parts[2])
@@ -1944,7 +1948,8 @@ func newGrantWorld(t *testing.T, nodes ...*simNode) *grantWorld {
 	return w
 }
 
-// action publishes one of the world's actions on a node: kind "vault", or "relay"/"park" aimed at target.
+// action publishes one of the world's actions on a node: kind "vault" or "parties", or "relay"/"park"
+// aimed at target.
 func (w *grantWorld) action(node *simNode, owner *kernel.Account, name, kind, target string, price int64) *kernel.Action {
 	w.t.Helper()
 	ctx := context.Background()
@@ -1953,6 +1958,8 @@ func (w *grantWorld) action(node *simNode, owner *kernel.Account, name, kind, ta
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}}
 	if kind == "vault" {
 		req.Auth = &kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer, Config: map[string]any{"header": "X-Api-Key", "template": "{token}"}}
+	} else if kind == "parties" {
+		req.Source = w.upstream.URL + "/parties"
 	} else {
 		req.Source = w.upstream.URL + "/" + kind + "/" + node.name + "/" + base64.RawURLEncoding.EncodeToString([]byte(target))
 	}
@@ -2136,14 +2143,13 @@ func TestSimWaitingWorkKeepsTheGrantUntilTheProcessEnds(t *testing.T) {
 	if status(pid) != kernel.ProcessOpen {
 		t.Fatalf("alice's process closed while the work it began waits on another kernel")
 	}
-	// Whose run it is, is told only to a kernel she holds a grant on: the one that merely holds her
-	// work learns nothing by asking, though it carries the same reference.
+	// Whose run it is, is told to every kernel holding its reference, alike: the one that merely holds
+	// her work learns it as the application does, as an action on home itself would (U41).
 	p, _ := home.db.ReadProcess(ctx, pid)
-	if resp := home.h.OnProcess(ctx, mid.key, fed.ProcessRequest{Kind: "check", Ref: p.Ref}); resp.Status == http.StatusOK {
-		t.Errorf("a kernel alice holds no grant on was told whose run it serves: %s", resp.Body)
-	}
-	if resp := home.h.OnProcess(ctx, app.key, fed.ProcessRequest{Kind: "check", Ref: p.Ref}); !strings.Contains(string(resp.Body), alice.ID) {
-		t.Errorf("the application was not told whose run it serves: %d %s", resp.Status, resp.Body)
+	for _, asker := range []string{mid.key, app.key} {
+		if resp := home.h.OnProcess(ctx, asker, fed.ProcessRequest{Kind: "check", Ref: p.Ref}); !strings.Contains(string(resp.Body), alice.ID) {
+			t.Errorf("a kernel doing work for alice's run was not told whose it is: %d %s", resp.Status, resp.Body)
+		}
 	}
 	if acct, err := complete(task); err != nil || acct != "alice" {
 		net.dump()
@@ -2195,19 +2201,23 @@ func TestSimOutcomeWaitsForItsRegistration(t *testing.T) {
 		t.Fatalf("warm: %v", err)
 	}
 
-	net.cut(mid.key, home.key)
+	// Every served call first asks home whose run it is, so only the registration is refused: the
+	// call is admitted and executes, and its answer then waits.
+	net.arm(mid.key, home.key, verbProcess+" register", faultRefuseBeforeDispatch, 1000)
 	if _, err := home.run(t, alice.ID, ref); err == nil {
 		t.Fatalf("the call returned an outcome while its work could not be registered")
 	}
 	if n := home.pendingRemote(t); n != 1 {
 		t.Fatalf("home holds %d calls in doubt, want the 1 whose answer is withheld", n)
 	}
-	// Asked again while still cut off, the answer is still withheld: a retry does not get around it.
+	// Asked again while still refused, the answer is still withheld: a retry does not get around it.
 	home.k.RetryPendingRemoteDispatches(ctx)
 	if n := home.pendingRemote(t); n != 1 {
 		t.Fatalf("a retry was answered before the registration: %d calls in doubt", n)
 	}
-	net.blocked = map[string]map[string]bool{}
+	net.mu.Lock()
+	net.plans = nil
+	net.mu.Unlock()
 	home.k.RetryPendingRemoteDispatches(ctx)
 	if n := home.pendingRemote(t); n != 0 {
 		net.dump()
@@ -2457,5 +2467,62 @@ func TestSimMissingGrantInsideAnActionKeepsDeliveredWorkPaid(t *testing.T) {
 	}
 	if whole := 1000 - paid - home.balance(t, alice.ID); whole <= paid {
 		t.Errorf("the failed run cost %d and the whole one %d: a failure must cost only what was delivered", paid, whole)
+	}
+}
+
+// TestSimEveryKernelTellsTheSameParties: an action is told who called it and who began the run as
+// principals (D8), and a principal names the same party on every kernel (D15): run directly, through
+// a composing action on its own kernel, and through one on another kernel, the action hears the same
+// caller and owner whether the run began on its kernel or elsewhere. A user is reached by principal on
+// another kernel as by address.
+func TestSimEveryKernelTellsTheSameParties(t *testing.T) {
+	net := newSimNet(t)
+	home, mid, app := net.addNode("home", defaultSimConfig()), net.addNode("mid", defaultSimConfig()), net.addNode("app", defaultSimConfig())
+	w := newGrantWorld(t, home, mid, app)
+	ctx := context.Background()
+	carol := app.user(t, "carol", sellerCapital)
+	w.action(app, carol, "who", "parties", "", 0)
+	who := remoteRef(app, "carol", "who")
+	erin := app.user(t, "erin", sellerCapital)
+	w.action(app, erin, "near", "relay", who, 0)
+	mia := mid.user(t, "mia", sellerCapital)
+	w.action(mid, mia, "far", "relay", who, 0)
+	dave, alice := app.user(t, "dave", 1000), home.user(t, "alice", 1000)
+	at := func(u *kernel.Account, n *simNode) string { return u.ID + "@" + n.key }
+
+	told := func(n *simNode, u *kernel.Account, ref string) [2]string {
+		t.Helper()
+		reply, err := n.run(t, u.ID, ref)
+		if err != nil {
+			net.dump()
+			t.Fatalf("%s runs %s: %v", u.Handle, ref, err)
+		}
+		c, _ := reply.Result["caller"].(string)
+		o, _ := reply.Result["owner"].(string)
+		return [2]string{c, o}
+	}
+	for _, c := range []struct {
+		name string
+		node *simNode
+		user *kernel.Account
+		ref  string
+		want [2]string
+	}{
+		{"direct, here", app, dave, who, [2]string{at(dave, app), at(dave, app)}},
+		{"direct, from another kernel", home, alice, who, [2]string{at(alice, home), at(alice, home)}},
+		{"composed here, run here", app, dave, remoteRef(app, "erin", "near"), [2]string{at(erin, app), at(dave, app)}},
+		{"composed here, run from another kernel", home, alice, remoteRef(app, "erin", "near"), [2]string{at(erin, app), at(alice, home)}},
+		{"composed on a third kernel", home, alice, remoteRef(mid, "mia", "far"), [2]string{at(mia, mid), at(alice, home)}},
+	} {
+		if got := told(c.node, c.user, c.ref); got != c.want {
+			t.Errorf("%s: told caller, owner = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// A principal reaches the user an address does, from another kernel.
+	for _, ref := range []string{"carol@" + app.key, at(carol, app)} {
+		if p, err := home.k.ResolvePrincipal(ctx, ref); err != nil || p.Kernel != app.key || p.UserID != carol.ID {
+			t.Errorf("home resolves %s to %+v, %v; want carol on app", ref, p, err)
+		}
 	}
 }

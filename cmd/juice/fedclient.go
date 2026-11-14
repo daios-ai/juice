@@ -191,7 +191,7 @@ func (c *fedAdapter) SendProcess(ctx context.Context, peerKey, kind, ref, regID 
 // reported as-is so the worker can try again from the ticket row.
 func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.RevealPayload, signature string) error {
 	if c.transport == nil {
-		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
 	}
 	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
@@ -201,7 +201,7 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 	})
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return kernel.PeerUnreachableError(peerPublicKey)
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
 	}
 	if resp.Status != 200 {
 		return kernel.ErrExecutionFailed.Wrapf("the peer refused the reveal (status %d)", resp.Status)
@@ -213,7 +213,7 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 // tells the kernel a payment went to whom it is for. A refusal is reported so the worker tries again.
 func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string, p kernel.TransferPaidPayload, proof, signature string) error {
 	if c.transport == nil {
-		return kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
 	}
 	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
@@ -224,7 +224,7 @@ func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string,
 	})
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return kernel.PeerUnreachableError(peerPublicKey)
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
 	}
 	if resp.Status != 200 {
 		return kernel.ErrExecutionFailed.Wrapf("the peer refused the transfer (status %d): %s", resp.Status, resp.Body)
@@ -238,12 +238,12 @@ func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string,
 // the kernel never treats "no network" as "action absent".
 func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ResolvedAction, error) {
 	if c.transport == nil {
-		return nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
 	}
 	resp, err := c.transport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return nil, kernel.PeerUnreachableError(peerPublicKey)
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
 	}
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote action not found")
@@ -259,7 +259,7 @@ func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, own
 // knows where a payment from here comes from before any is sent (P11).
 func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (*kernel.ResolvedUser, error) {
 	if c.transport == nil {
-		return nil, kernel.PeerUnreachableError(peerPublicKey).Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
 	}
 	req := fed.ResolveRequest{Kind: "user", User: ref}
 	if c.blockchainIdentity != nil {
@@ -268,7 +268,7 @@ func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref s
 	resp, err := c.transport.Resolve(ctx, peerPublicKey, req)
 	c.contacted(ctx, peerPublicKey, contactFromErr(err))
 	if err != nil {
-		return nil, kernel.PeerUnreachableError(peerPublicKey)
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
 	}
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote user not found")

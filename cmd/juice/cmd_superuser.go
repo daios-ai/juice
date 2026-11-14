@@ -395,10 +395,10 @@ func peerInspectCmd() *cobra.Command {
 					PublicKey string `json:"public_key"`
 					About     string `json:"about"`
 					Actions   []struct {
-						Name        string `json:"name"`
-						Title       string `json:"title"`
-						Description string `json:"description"`
-						Price       int64  `json:"price"`
+						Name        kernel.AddressView `json:"name"`
+						Title       string             `json:"title"`
+						Description string             `json:"description"`
+						Price       int64              `json:"price"`
 					} `json:"actions"`
 					Evidence     []*kernel.SubjectEvidenceRow `json:"evidence"`
 					Suspended    bool                         `json:"suspended"`
@@ -454,7 +454,7 @@ func peerInspectCmd() *cobra.Command {
 					}
 					fmt.Printf("\n%s (%d):\n", label, len(out.Actions))
 					for _, a := range out.Actions {
-						fmt.Printf("  %-30s  %-30s  %s\n", a.Title, a.Name, net.Amount(a.Price))
+						fmt.Printf("  %-30s  %-30s  %s\n", a.Title, a.Name.String(), net.Amount(a.Price))
 						if a.Description != "" {
 							fmt.Printf("      %s\n", a.Description)
 						}

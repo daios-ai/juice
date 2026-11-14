@@ -163,19 +163,18 @@ var (
 	ErrRailStopped = &KernelError{Code: "rail_stopped", HTTP: 503}
 )
 
-// GrantRequiredError is the one lazy-consent rejection (§8): ref in both the message and
-// Meta["action"], so every mint site is identical and clients always get the address, owner@kernel/name.
-func GrantRequiredError(ref string) error {
-	return ErrGrantRequired.Wrapf("grant required for %s", ref).WithMeta("action", ref)
+// GrantRequiredError is the one lazy-consent rejection (§8): the action's address in the message for
+// a person, its principal in Meta["action"] for a program (D20), so every mint site is identical.
+func GrantRequiredError(action AddressView) error {
+	return ErrGrantRequired.Wrapf("grant required for %s", action).WithMeta("action", action.Principal)
 }
 
-// PeerUnreachableError attributes an unreachable peer to that peer (§13): the reference in both the
-// message and Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer —
-// call dispatch, resolve, task, settlement — mints it here, so a client never has to infer who was
-// unreachable from what the user typed. The reference is a petname where the caller knows one and
-// the raw key otherwise (both name a kernel, §13); a call adds its refund clause on top.
-func PeerUnreachableError(ref string) *KernelError {
-	return ErrPeerUnreachable.Wrapf("peer %s is unreachable", ref).WithMeta("peer", ref)
+// PeerUnreachableError attributes an unreachable peer to that peer (§13): its address in the message,
+// its key in Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer — call
+// dispatch, resolve, task, settlement — mints it here, so a client never has to infer who was
+// unreachable from what the user typed; a call adds its refund clause on top.
+func PeerUnreachableError(peer AddressView) *KernelError {
+	return ErrPeerUnreachable.Wrapf("peer %s is unreachable", peer).WithMeta("peer", peer.Principal)
 }
 
 // TermsChangedError refuses a run whose quote pin no longer matches (§4 precondition 7), before any
@@ -187,15 +186,16 @@ func TermsChangedError(net Network, currentHash string, currentPrice int64) erro
 }
 
 // PeerUnfundedError attributes a 402 signed rejection to this kernel's exhausted credit on the
-// peer (§13): handle in the message and Meta["peer"]. An operator condition, not the caller's.
-func PeerUnfundedError(handle string) *KernelError {
-	return ErrPeerUnfunded.Wrapf("this kernel's credit with peer %s is exhausted; the operator must top up", handle).WithMeta("peer", handle)
+// peer (§13): its address in the message, its key in Meta["peer"]. An operator condition, not the
+// caller's.
+func PeerUnfundedError(peer AddressView) *KernelError {
+	return ErrPeerUnfunded.Wrapf("this kernel's credit with peer %s is exhausted; the operator must top up", peer).WithMeta("peer", peer.Principal)
 }
 
 // PeerRefusedError attributes a signed rejection that is neither a funding condition nor a contract
 // mismatch to the peer's own refusal — a suspended caller, or an action it will not serve (§13). The
 // three federation outcomes are operationally distinct: unreachable means retry, unfunded means the
 // operator tops up, refused means stop calling until a human resolves it.
-func PeerRefusedError(handle string) *KernelError {
-	return ErrUnauthorized.Wrapf("peer %s refused this call", handle).WithMeta("peer", handle)
+func PeerRefusedError(peer AddressView) *KernelError {
+	return ErrUnauthorized.Wrapf("peer %s refused this call", peer).WithMeta("peer", peer.Principal)
 }

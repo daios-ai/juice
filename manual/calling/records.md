@@ -44,7 +44,9 @@ $ juice tx show 116fd3a64b0e
 The three party fields distinguish the participants, each an address. `owner` names the
 owner of the process that funded the work; `caller` names the immediate
 requester; and `target` names the action's owner. A caller on another kernel is
-named there too, as `handle@kernel`, because the call carried who made it. For a call you start
+named there too, as `handle@petname`, or `handle@<key> ~nickname` when your
+operator has not named the kernel. Under `--json`, each party is an object
+with `address` and `principal`, and `nickname` when present. For a call you start
 with `run`, you are both process owner and requester. If that action calls
 another, the original process owner stays the same, while the requester of the
 child call is the composing action's owner.

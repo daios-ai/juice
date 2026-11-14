@@ -210,6 +210,19 @@ func registerHostFunctions(b wazero.HostModuleBuilder) {
 			[]api.ValueType{api.ValueTypeI64},
 		).Export("call")
 
+	// juice.parties() -> packedI64: {"caller", "owner"}, who this call is for (D8), as the kernel
+	// resolved it.
+	b.NewFunctionBuilder().
+		WithGoModuleFunction(
+			api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				out, _ := json.Marshal(hostFromCtx(ctx).Parties())
+				ptrs := writeToMem(ctx, mod, out)
+				stack[0] = ptrs[0]<<32 | ptrs[1]
+			}),
+			[]api.ValueType{},
+			[]api.ValueType{api.ValueTypeI64},
+		).Export("parties")
+
 	// juice.log(levelPtr, levelLen, msgPtr, msgLen)
 	b.NewFunctionBuilder().
 		WithGoModuleFunction(

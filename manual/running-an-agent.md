@@ -153,6 +153,8 @@ $ juice task complete b75366d19c2e '{"answer":"carol@beta-kernel/translate, 0.25
   charge: 0
 ```
 
+Here the operator has assigned the remote kernel the petname `beta-kernel`.
+
 The task's target is `sys/sink`, which accepts any input, so the answer travels
 as the completion's arguments. You read it on the transaction, since the process
 that created the task is yours:

@@ -28,7 +28,7 @@ func Transfer() Spec {
 		OutputSchema: obj(map[string]any{"amount": integer("Amount transferred")}, "amount"),
 		Value:        transferValue,
 		Handler: func(Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				amount, _, err := transferValue(args)
 				if err != nil {
 					return nil, err

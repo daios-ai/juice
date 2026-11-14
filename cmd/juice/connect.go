@@ -48,22 +48,22 @@ func openBrowser(url string) bool {
 // start/complete/attach responses, which the service layer returns as ad-hoc JSON, are local here.
 
 type grantStartResp struct {
-	Status                  string   `json:"status"` // "granted" on success, "pending" mid-device-flow
-	Actions                 []string `json:"actions"`
-	State                   string   `json:"state"`
-	AuthorizeURL            string   `json:"authorize_url"`
-	VerificationURI         string   `json:"verification_uri"`
-	VerificationURIComplete string   `json:"verification_uri_complete"`
-	UserCode                string   `json:"user_code"`
-	Interval                int      `json:"interval"`
-	ExpiresIn               int      `json:"expires_in"`
+	Status                  string               `json:"status"` // "granted" on success, "pending" mid-device-flow
+	Actions                 []kernel.AddressView `json:"actions"`
+	State                   string               `json:"state"`
+	AuthorizeURL            string               `json:"authorize_url"`
+	VerificationURI         string               `json:"verification_uri"`
+	VerificationURIComplete string               `json:"verification_uri_complete"`
+	UserCode                string               `json:"user_code"`
+	Interval                int                  `json:"interval"`
+	ExpiresIn               int                  `json:"expires_in"`
 }
 
 type grantCompleteResp struct {
-	Status   string   `json:"status"`
-	Provider string   `json:"provider"`
-	Actions  []string `json:"actions"`
-	Created  string   `json:"created_at"`
+	Status   string               `json:"status"`
+	Provider string               `json:"provider"`
+	Actions  []kernel.AddressView `json:"actions"`
+	Created  string               `json:"created_at"`
 }
 
 // userConnectCmd and userDisconnectCmd are registered under the `user` group in cmd.go, next to
@@ -113,7 +113,7 @@ func userConnectCmd() *cobra.Command {
 // with one gesture: a token paste per bearer group, one browser consent per OAuth group (§8). It
 // returns what it granted rather than printing it: `user connect` answers with that, while a run
 // that authorized on the way through has its own reply to answer with, and stdout carries one.
-func connectSelector(selector string, device, yes bool) ([]string, error) {
+func connectSelector(selector string, device, yes bool) ([]kernel.AddressView, error) {
 	var plan kernel.ConsentPlan
 	if err := cli.call(context.Background(), "GET", "/v1/grants/plan?selector="+url.QueryEscape(selector), nil, &plan); err != nil {
 		return nil, err
@@ -133,10 +133,10 @@ func connectSelector(selector string, device, yes bool) ([]string, error) {
 	// Connecting is a ceremony of several acts — a token pasted here, a browser consent there —
 	// and what it answers with is what it connected. So the acts report progress on stderr and the
 	// actions they granted are collected, to be answered with once, like any other command (§14).
-	connected := []string{}
+	connected := []kernel.AddressView{}
 	for _, g := range todo {
 		var (
-			actions []string
+			actions []kernel.AddressView
 			err     error
 		)
 		if g.Scheme == kernel.AuthSchemeDelegatedBearer {
@@ -158,9 +158,18 @@ func connectSelector(selector string, device, yes bool) ([]string, error) {
 	return connected, nil
 }
 
+// joinAddresses reads a list of actions as a person does, by address.
+func joinAddresses(vs []kernel.AddressView) string {
+	names := make([]string, len(vs))
+	for i, v := range vs {
+		names[i] = v.String()
+	}
+	return strings.Join(names, ", ")
+}
+
 // emitConnected answers with what a connect ceremony granted: one reply for the whole gesture,
 // however many acts it took.
-func emitConnected(actions []string) error {
+func emitConnected(actions []kernel.AddressView) error {
 	body, err := json.Marshal(map[string]any{"connected": actions})
 	if err != nil {
 		return err
@@ -170,7 +179,7 @@ func emitConnected(actions []string) error {
 			fmt.Println("Already connected.")
 			return nil
 		}
-		fmt.Printf("Connected %s.\n", strings.Join(actions, ", "))
+		fmt.Printf("Connected %s.\n", joinAddresses(actions))
 		return nil
 	}})
 }
@@ -211,14 +220,14 @@ func printDelta(todo []kernel.ConsentGroup) {
 			if a.Granted {
 				mark = "✓"
 			}
-			fmt.Fprintf(os.Stderr, "    [%s] %s\n", mark, a.Action)
+			fmt.Fprintf(os.Stderr, "    [%s] %s\n", mark, a.Action.String())
 		}
 	}
 }
 
 // connectToken stores a static token for a delegated_bearer group via POST /v1/grants (§8). An
 // empty token instant-grants against an already-connected account.
-func connectToken(selector, provider, token string) ([]string, error) {
+func connectToken(selector, provider, token string) ([]kernel.AddressView, error) {
 	body := map[string]string{"selector": selector, "token": token}
 	if provider != "" {
 		body["provider"] = provider
@@ -251,7 +260,7 @@ func promptSecret(prompt string) (string, error) {
 
 // connectOAuthGroup connects one oauth_delegated provider group: an already-covered account grants
 // instantly (no browser); otherwise the loopback code flow (or device flow) drives one consent.
-func connectOAuthGroup(selector, provider string, device bool) ([]string, error) {
+func connectOAuthGroup(selector, provider string, device bool) ([]kernel.AddressView, error) {
 	if device {
 		return connectOAuthDevice(selector, provider)
 	}
@@ -260,7 +269,7 @@ func connectOAuthGroup(selector, provider string, device bool) ([]string, error)
 
 // connectOAuthCode runs the authorization-code + PKCE flow, hosting the loopback redirect listener
 // locally (the browser reaches it even behind NAT — the provider never contacts the kernel).
-func connectOAuthCode(selector, provider string) ([]string, error) {
+func connectOAuthCode(selector, provider string) ([]kernel.AddressView, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, kernel.ErrInternal.Wrapf("could not start loopback server: %v", err)
@@ -314,7 +323,7 @@ func connectOAuthCode(selector, provider string) ([]string, error) {
 
 // connectOAuthDevice runs the device-code flow: the server polls the provider, the CLI polls the
 // server's /complete until the connection lands.
-func connectOAuthDevice(selector, provider string) ([]string, error) {
+func connectOAuthDevice(selector, provider string) ([]kernel.AddressView, error) {
 	var start grantStartResp
 	if err := cli.call(context.Background(), "POST", "/v1/grants/start", map[string]string{
 		"selector": selector, "provider": provider, "flow": "device",

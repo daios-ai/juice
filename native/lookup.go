@@ -20,7 +20,7 @@ func Lookup() Spec {
 		OutputSchema: obj(map[string]any{
 			"results": arrayOf(obj(map[string]any{
 				"action_id":              str("Unique action identifier"),
-				"action":                 str("Action address as owner@kernel/name"),
+				"action":                 addressSchema("The action, as owner@kernel/name and as its principal"),
 				"title":                  str("Short name of the action, for a person reading a list"),
 				"description":            str("Human-readable description of the action"),
 				"price":                  integer("All-in price the caller pays; indicative for a not-yet-resolved remote action"),
@@ -35,7 +35,7 @@ func Lookup() Spec {
 			}), "Ranked list of matching actions"),
 		}),
 		Handler: func(k Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeLookup(ctx, args, callerID, k)
 			}
 		},
@@ -83,7 +83,8 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		// Each hit also carries the record a person reads on the action itself, so an agent
 		// choosing between candidates weighs what a person would (U10, U46). Ranking stays
 		// relevance only: a rank by evidence would be the opaque score U39 excludes.
-		var actionID, ref, title, description, observedAt string
+		var actionID, title, description, observedAt string
+		var ref kernel.AddressView
 		var in, out map[string]any
 		var record *kernel.ActionRecord
 		if d := r.Discovered; d != nil {
@@ -100,7 +101,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		}
 		item := map[string]any{
 			"action_id":     actionID,
-			"action":        ref,
+			"action":        asJSONObject(ref),
 			"title":         title,
 			"description":   description,
 			"price":         r.Price,

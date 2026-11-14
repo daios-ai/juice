@@ -169,9 +169,10 @@ print(next((p['id'] for p in rows if p.get('awaiting_receipt')), ''))" "$(jj "$1
 ledger_in() {
     python3 -c "
 import sys, json
+$_NM
 me, tx = sys.argv[2], sys.argv[3]
 rows = json.loads(sys.argv[1] or '[]')
-print(sum(e['amount'] for e in rows if e.get('reason') == tx and e.get('to') == me))" \
+print(sum(e['amount'] for e in rows if e.get('reason') == tx and nm(e.get('to')) == me))" \
         "$(jj "$1" "$2" user ledger --limit 100)" "$(strfield "$(jj "$1" "$2" user me)" address)" "$3"
 }
 
@@ -368,22 +369,30 @@ assert_fails() {
 # ---------------------------------------------------------------------------
 # JSON field extractors (python-backed; tolerate multi-line/indented JSON)
 # ---------------------------------------------------------------------------
-strfield() { python3 -c "import sys,json; print(json.loads(sys.argv[1]).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+# A reply names a party or an action as {address, principal, nickname?} (D15): read as a person reads
+# it, by its address, as the CLI does; a dotted path reaches .principal where a flow acts on it.
+_NM='def nm(v): return v["address"] if isinstance(v,dict) and "address" in v and "principal" in v else v'
+strfield() { python3 -c "
+import sys,json
+$_NM
+print(nm(json.loads(sys.argv[1]).get(sys.argv[2],'')))" "$1" "$2" 2>/dev/null; }
 numfield() { python3 -c "import sys,json; print(int(json.loads(sys.argv[1]).get(sys.argv[2],0)))" "$1" "$2" 2>/dev/null; }
 # dotfield json path — a nested field named by a dotted path (`evidence.local_experience.uses`).
 dotfield() { python3 -c "
 import sys,json
+$_NM
 v=json.loads(sys.argv[1])
 for k in sys.argv[2].split('.'):
     v=(v or {}).get(k)
-print('' if v is None else v)" "$1" "$2" 2>/dev/null; }
+print('' if v is None else nm(v))" "$1" "$2" 2>/dev/null; }
 assert_jdot() { assert_eq "$1" "$4" "$(dotfield "$2" "$3")"; }
 
 # rowfield json list field — a field of the first row of a named list inside a JSON object.
 rowfield() { python3 -c "
 import sys,json
+$_NM
 rows=json.loads(sys.argv[1]).get(sys.argv[2]) or []
-print('' if not rows else rows[0].get(sys.argv[3],''))" "$1" "$2" "$3" 2>/dev/null; }
+print('' if not rows else nm(rows[0].get(sys.argv[3],'')))" "$1" "$2" "$3" 2>/dev/null; }
 
 # owed_count db home peer — how many open obligations one buyer still owes this kernel, from the
 # operator's own view of them. An obligation is kept only by the side that is owed, so this is read
@@ -393,9 +402,10 @@ owed_count() {
     local db="$1" home="$2" peer="$3"
     python3 -c "
 import sys,json
+$_NM
 rows=json.loads(sys.argv[1]).get('owed') or []
 peer=sys.argv[2]
-print(sum(1 for r in rows if r.get('peer') in (peer, peer[:8]) or peer.startswith(r.get('peer',''))))" \
+print(sum(1 for r in rows if nm(r.get('peer')) in (peer, peer[:8]) or (r.get('peer') or {}).get('principal')==peer))" \
         "$(jj "$db" "$home" admin kernel deposits)" "$peer" 2>/dev/null || echo unreadable
 }
 
@@ -422,14 +432,16 @@ await_eq() {
 # pathf json dotted.path — a nested field, e.g. pathf "$out" result.task_id or checks.signature.
 pathf() { python3 -c "
 import sys,json
+$_NM
 v=json.loads(sys.argv[1])
 for k in sys.argv[2].split('.'):
     v = v.get(k) if isinstance(v,dict) else None
-print('' if v is None else v)" "$1" "$2" 2>/dev/null; }
+print('' if v is None else nm(v))" "$1" "$2" 2>/dev/null; }
 # find_id json field value — the id of the first list element whose field equals value.
 find_id() { python3 -c "
 import sys,json
-print(next((e.get('id','') for e in json.loads(sys.argv[1]) if str(e.get(sys.argv[2],''))==sys.argv[3]), ''))" "$1" "$2" "$3" 2>/dev/null; }
+$_NM
+print(next((e.get('id','') for e in json.loads(sys.argv[1]) if str(nm(e.get(sys.argv[2],'')))==sys.argv[3]), ''))" "$1" "$2" "$3" 2>/dev/null; }
 # resultf json field — a field inside a run/task reply's nested "result" object.
 resultf()  { pathf "$1" "result.$2"; }
 # list_len json — number of elements in a top-level JSON array.
@@ -666,6 +678,24 @@ http.server.HTTPServer(('127.0.0.1', port), H).serve_forever()
 PYEOF
     track_pid $!
     _await_http "$port" POST
+}
+# start_parties_backend port  — answers with who the call was told it runs for (D8): the caller and the
+# process owner from the X-Juice-Caller and X-Juice-Owner headers, whatever its input says.
+start_parties_backend() {
+    python3 - "$1" <<'PYEOF' &
+import sys, json, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def respond(self):
+        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        body = json.dumps({"caller": self.headers.get("X-Juice-Caller", ""), "owner": self.headers.get("X-Juice-Owner", "")}).encode()
+        self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+        self.wfile.write(body)
+    do_GET = do_POST = respond
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+PYEOF
+    track_pid $!
+    _await_http "$1" POST
 }
 # start_account_backend port header tok=account[,tok=account...]  — an upstream that knows its
 # accounts by their tokens: it answers {"account": <name>} for a known token in `header` and 401

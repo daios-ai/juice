@@ -343,11 +343,17 @@ flow_fed_gossip_discovery() {
     done
     assert_eq "fed_gossip.l_discovered_via_routing" yes "$lfound"
 
-    # T cold-resolves R's action by key with its FIRST call. No `admin peer rename` here on purpose:
-    # first meaningful use must bind the petname itself (§13), seeded from R's nickname kernel-r.
+    # T cold-resolves R's action by key with its FIRST call. That names R nothing (D15): it reads by
+    # its key, with the nickname it gives itself after it, until T's operator names it.
     assert_nonempty "fed_gossip.t_resolves_and_calls" "$(strfield "$(jj "$dbt" "$ht" run "sys@$rkey/greet" '{}')" tx_id)"
+    local unnamed; unnamed=$(jj "$dbt" "$ht" action show "sys@$rkey/greet")
+    assert_jdot "fed_gossip.t_unnamed_by_key" "$unnamed" action.address "sys@$rkey/greet"
+    assert_jdot "fed_gossip.t_nickname_beside_key" "$unnamed" action.nickname kernel-r
+    assert_contains "fed_gossip.t_cli_reads_key_then_nickname" "sys@$rkey/greet ~kernel-r" "$(j "$dbt" "$ht" action show "sys@$rkey/greet")"
+    assert_fails "fed_gossip.t_nickname_never_resolves" "not found" -- j "$dbt" "$ht" action show sys@kernel-r/greet
+    j "$dbt" "$ht" admin peer rename -- "$rkey" kernel-r >/dev/null 2>&1
     local tp; tp=$(strfield "$(jj "$dbt" "$ht" action show sys@kernel-r/greet)" id)
-    assert_nonempty "fed_gossip.t_auto_bound_petname" "$tp"
+    assert_nonempty "fed_gossip.t_named_by_the_operator" "$tp"
 
     # The buying loop continues PAST the charge (§15). A bought action must stay findable, must
     # render a reference a command can consume (R8), and must re-run from that reference alone.
@@ -985,7 +991,7 @@ flow_fed_provider_crash_recovery() {
     ntx=$(python3 -c "
 import sys, json
 rows = json.loads(sys.argv[1])
-print(sum(1 for t in rows if (t.get('action') or '').endswith('slow')))" "$(jj "$FED_DBL" "$ha" tx list --limit 50)")
+print(sum(1 for t in rows if ((t.get('action') or {}).get('address') or '').endswith('slow')))" "$(jj "$FED_DBL" "$ha" tx list --limit 50)")
 
     assert_eq "fed_crash.settled_exactly" yes \
         "$([ "$after" -eq "$before" ] || [ "$after" -eq "$((before - 23))" ] && echo yes || echo no)"
@@ -1784,4 +1790,116 @@ flow_grant_remote_stale() {
     j "$L" "$ha" user connect sys@kernel-r/vault --token tok-alice >/dev/null 2>&1
     assert_eq "grant_stale.signed_up_again" alice-acct "$(_acct "$L" "$ha" sys@kernel-r/vault/read)"
     assert_eq "grant_stale.paid_for_what_ran" yes "$([ "$(balance_of "$L" "$ha")" -lt "$funds" ] && echo yes || echo no)"
+}
+
+# ---------------------------------------------------------------------------
+# Addresses for people, principals for programs (D15). A reply names every party by both; a program
+# keeps the principal, which names the same user on every kernel, survives a rename, and is accepted
+# wherever an address is.
+# ---------------------------------------------------------------------------
+
+# principal_of db home — the logged-in user's own principal, from `user me`.
+principal_of() { dotfield "$(jj "$1" "$2" user me)" address.principal; }
+
+flow_principals_symmetric() {
+    echo "=== FLOW principals_symmetric ==="
+    local dir; dir=$(new_dir)
+    FED_LCFG=(remote_retry_interval_seconds=2)
+    _fed_setup "$dir" || { fail "principals.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha hb hd
+    ha=$(home "$dir" alice); hb=$(home "$dir" bob); hd=$(home "$dir" dave)
+    make_user "$L" "$FED_HL" "$ha" alice; make_user "$L" "$FED_HL" "$hb" bob; make_user "$R" "$FED_HR" "$hd" dave
+    deposit "$L" "$FED_HL" alice 5000; deposit "$R" "$FED_HR" dave 5000
+    local alice bob dave rsys
+    alice=$(principal_of "$L" "$ha"); bob=$(principal_of "$L" "$hb"); dave=$(principal_of "$R" "$hd"); rsys=$(principal_of "$R" "$FED_HR")
+    assert_eq "principals.written_id_at_key" "$FED_LKEY" "${alice#*@}"
+
+    # One call, read on both kernels: each names alice by her own address there, and by one principal.
+    local tx; tx=$(strfield "$(jj "$L" "$ha" run "$rsys/greet" '{}')" tx_id)
+    assert_nonempty "principals.run_by_principal_remotely" "$tx"
+    assert_jdot "principals.buyer_reads_her_principal" "$(jj "$L" "$ha" tx show "$tx")" caller.principal "$alice"
+    assert_jdot "principals.seller_reads_the_same" "$(jj "$R" "$FED_HR" tx list --limit 1 | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)[0]))')" caller.principal "$alice"
+    assert_nonempty "principals.run_by_principal_here" "$(strfield "$(jj "$R" "$hd" run "$rsys/greet" '{}')" tx_id)"
+
+    # A transfer, here and to another kernel, by principal.
+    assert_nonempty "principals.transfer_here" "$(strfield "$(jj "$L" "$ha" user transfer "$bob" "$(units 100)" --yes)" tx_id)"
+    assert_eq "principals.bob_credited" 100 "$(balance_of "$L" "$hb")"
+    assert_nonempty "principals.transfer_remote" "$(strfield "$(jj "$L" "$ha" user transfer "$dave" "$(units 50)" --yes)" tx_id)"
+    await_eq "principals.dave_credited" 5050 balance_of "$R" "$hd"
+
+    # A task addressed by principal from another kernel reaches alice on her own, and she answers it.
+    local task; task=$(resultf "$(jj "$R" "$FED_HR" run sys@kernel-r/message "{\"to\":\"$alice\",\"message\":\"ping\"}")" task_id)
+    assert_nonempty "principals.task_by_principal" "$task"
+    j "$L" "$ha" user approve "$rsys" >/dev/null 2>&1
+    await_eq "principals.task_reaches_her" yes has_task "$L" "$ha" "${task:0:8}"
+    assert_nonempty "principals.task_completed" "$(strfield "$(jj "$L" "$ha" task complete "$task" '{}')" tx_id)"
+
+    # A rename changes the address, never the principal: what a program kept still reaches bob, and a
+    # newcomer given his old handle is someone else.
+    j "$L" "$FED_HL" admin user rename bob@kernel-l robert@kernel-l >/dev/null 2>&1
+    local hn; hn=$(home "$dir" newbob); make_user "$L" "$FED_HL" "$hn" bob
+    jj "$L" "$ha" user transfer "$bob" "$(units 10)" --yes >/dev/null
+    assert_eq "principals.kept_principal_reaches_robert" 110 "$(numfield "$(jj "$L" "$FED_HL" admin user show robert@kernel-l)" available)"
+    assert_eq "principals.newcomer_not_diverted" 0 "$(balance_of "$L" "$hn")"
+    assert_eq "principals.reads_by_the_new_handle" "robert@kernel-l" \
+        "$(jj "$L" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["to"]["address"])')"
+}
+
+# has_task db home id-prefix — 'yes' when the task is in this user's list.
+has_task() { case "$(jj "$1" "$2" task list)" in *"$3"*) echo yes;; *) echo no;; esac; }
+
+# An action is told who called it and who began the run, the same on every kernel (D8): run directly,
+# through a composing action on its own kernel, and through one on another kernel, local and remote
+# runs alike, and no input forges either.
+flow_caller_symmetric() {
+    echo "=== FLOW caller_symmetric ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "caller.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha hd port
+    port=$(backend_port); start_parties_backend "$port" || { fail "caller.setup" "backend"; return; }
+    publish "$R" "$FED_HR" who --kind http --source "http://127.0.0.1:$port/who" --description "who" --price "$(units 0)" >/dev/null
+    make_contractor_wasm "$dir/near.wasm" "sys@kernel-r/who"
+    publish "$R" "$FED_HR" near --kind wasm --source "$dir/near.wasm" --description "near" --price "$(units 0)" >/dev/null
+    make_contractor_wasm "$dir/far.wasm" "sys@kernel-r/who"
+    publish "$L" "$FED_HL" far --kind wasm --source "$dir/far.wasm" --description "far" --price "$(units 0)" >/dev/null
+    ha=$(home "$dir" alice); hd=$(home "$dir" dave)
+    make_user "$L" "$FED_HL" "$ha" alice; make_user "$R" "$FED_HR" "$hd" dave
+    local alice dave rsys lsys
+    alice=$(principal_of "$L" "$ha"); dave=$(principal_of "$R" "$hd"); rsys=$(principal_of "$R" "$FED_HR"); lsys=$(principal_of "$L" "$FED_HL")
+    told() { local args="${4:-}" out; [ -n "$args" ] || args='{}'; out=$(jj "$1" "$2" run "$3" "$args"); echo "$(resultf "$out" caller) $(resultf "$out" owner)"; }
+
+    assert_eq "caller.direct_here" "$dave $dave" "$(told "$R" "$hd" sys@kernel-r/who)"
+    assert_eq "caller.direct_from_another_kernel" "$alice $alice" "$(told "$L" "$ha" sys@kernel-r/who)"
+    assert_eq "caller.composed_here_run_here" "$rsys $dave" "$(told "$R" "$hd" sys@kernel-r/near)"
+    assert_eq "caller.composed_here_run_elsewhere" "$rsys $alice" "$(told "$L" "$ha" sys@kernel-r/near)"
+    assert_eq "caller.composed_on_the_callers_kernel" "$lsys $alice" "$(told "$L" "$ha" sys@kernel-l/far)"
+    assert_eq "caller.not_forged_by_input" "$alice $alice" \
+        "$(told "$L" "$ha" sys@kernel-r/who '{"X-Juice-Caller":"forged","X-Juice-Owner":"forged","caller":"forged"}')"
+}
+
+# Only the operator names a kernel (D15): a kernel met by a call is shown by its key with its own
+# nickname after it, which never resolves, until the operator binds a petname.
+flow_petnames_explicit() {
+    echo "=== FLOW petnames_explicit ==="
+    local dir; dir=$(new_dir)
+    _fed_setup "$dir" || { fail "petnames.setup" "setup failed"; return; }
+    local L="$FED_DBL" R="$FED_DBR" ha
+    ha=$(home "$dir" alice); make_user "$L" "$FED_HL" "$ha" alice
+    jj "$L" "$ha" run sys@kernel-r/greet '{}' >/dev/null
+    # R has been called by L, and named it nothing.
+    assert_eq "petnames.no_petname_after_a_call" "" \
+        "$(jj "$R" "$FED_HR" admin peer list | python3 -c "import sys,json;print(next((p.get('petname','') for p in json.load(sys.stdin) if p.get('public_key')=='$FED_LKEY'),'missing'))")"
+    # The nickname is learned from L's own gossip, on R's next discovery pass; until then the key alone.
+    last_tx() { jj "$R" "$FED_HR" tx list --limit 1 | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)[0]))'; }
+    caller_nickname() { dotfield "$(last_tx)" caller.nickname; }
+    await_eq "petnames.nickname_beside_it" kernel-l caller_nickname
+    local row; row=$(last_tx)
+    assert_jdot "petnames.shown_by_key" "$row" caller.address "alice@$FED_LKEY"
+    assert_contains "petnames.cli_reads_key_then_nickname" "alice@$FED_LKEY ~kernel-l" "$(j "$R" "$FED_HR" tx show "$(strfield "$row" id)")"
+    assert_fails "petnames.nickname_never_resolves" "not" -- j "$R" "$FED_HR" admin peer show kernel-l
+    j "$R" "$FED_HR" admin peer rename -- "$FED_LKEY" kernel-l >/dev/null 2>&1
+    row=$(last_tx)
+    assert_jdot "petnames.named_by_the_operator" "$row" caller.address "alice@kernel-l"
+    assert_jdot "petnames.no_nickname_once_named" "$row" caller.nickname ""
+    assert_contains "petnames.the_name_resolves" "$FED_LKEY" "$(jj "$R" "$FED_HR" admin peer show kernel-l)"
 }

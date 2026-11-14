@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -209,7 +210,9 @@ func TestDelegatedTokenBinding(t *testing.T) {
 	eng := newAuthenticator(box, gs, true, time.Second)
 	// refFn is wired in main from k.ActionRef; stub it so the grant-required error carries the
 	// qualified @owner/name (the bug being guarded: dispatch sites used the bare action name).
-	eng.refFn = func(context.Context, string) string { return "sys/inbox" }
+	eng.refFn = func(context.Context, string) kernel.AddressView {
+		return kernel.AddressView{Address: "sys/inbox", Principal: "sys/inbox"}
+	}
 	auth := &kernel.AuthInput{Scheme: kernel.AuthSchemeOAuthDelegated,
 		Config: map[string]any{"token_url": provider.URL, "auth_url": provider.URL + "/a", "client_id": "c"}}
 	ctx := context.Background()
@@ -288,7 +291,7 @@ func TestDelegatedBearerTokenApplied(t *testing.T) {
 
 			eng := newAuthenticator(box, gs, true, time.Second)
 			exec := &httpActionExecutor{auth: eng}
-			if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerA"), ""); err != nil {
+			if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerA"), kernel.Parties{}, ""); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			if got != tc.want {
@@ -318,11 +321,13 @@ func TestDelegatedBearerBindingMismatch(t *testing.T) {
 	gs.seed(box, "ownerA", action.ID, "ghp_x")
 
 	eng := newAuthenticator(box, gs, true, time.Second)
-	eng.refFn = func(context.Context, string) string { return "sys/x" }
+	eng.refFn = func(context.Context, string) kernel.AddressView {
+		return kernel.AddressView{Address: "sys/x", Principal: "sys/x"}
+	}
 	exec := &httpActionExecutor{auth: eng}
 
 	// ownerB holds no grant → grant-required, request never sent.
-	if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerB"), ""); !errors.Is(err, kernel.ErrGrantRequired) {
+	if _, err := exec.Execute(context.Background(), action, map[string]any{}, kernel.User("ownerB"), kernel.Parties{}, ""); !errors.Is(err, kernel.ErrGrantRequired) {
 		t.Fatalf("ownerB: got %v, want ErrGrantRequired", err)
 	}
 	if reached {
@@ -593,5 +598,55 @@ func TestBrokerBoundsUnfinishedConsentsFromOtherKernels(t *testing.T) {
 		if _, err := broker.complete(ctx, res.State, other, "code"); !errors.Is(err, kernel.ErrUnauthorized) {
 			t.Errorf("%+v completed a consent begun by u1 of k1: %v", other, err)
 		}
+	}
+}
+
+// TestExecuteToldWhoItRunsFor: an HTTP action is told its immediate caller and its process owner as
+// two headers (D8), set last from the kernel's own resolution, so neither the caller's arguments nor
+// an upstream credential the owner configured under the same name can replace them; for nobody,
+// nothing is sent.
+func TestExecuteToldWhoItRunsFor(t *testing.T) {
+	box := testBox(t)
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+	// A credential bound under either reserved name, in any case, never replaces or supplies a party.
+	for _, header := range []string{ownerHeader, strings.ToLower(ownerHeader), strings.ToLower(callerHeader)} {
+		for _, told := range []kernel.Parties{{Caller: "c-id@KEY", Owner: "o-id@KEY"}, {}} {
+			auth := kernel.AuthInput{Scheme: kernel.AuthSchemeDelegatedBearer, Config: map[string]any{"header": header, "template": "{token}"}}
+			authJSON, _ := json.Marshal(auth)
+			action := &kernel.Action{ID: "act-told", Source: httpSrc(srv.URL, "POST")}
+			var err error
+			if action.AuthJSON, err = box.Seal(action.ID, string(authJSON)); err != nil {
+				t.Fatal(err)
+			}
+			gs := newFakeGrantStore()
+			gs.seed(box, "ownerA", action.ID, "forged")
+			exec := &httpActionExecutor{auth: newAuthenticator(box, gs, true, time.Second)}
+			args := map[string]any{callerHeader: "forged-caller", ownerHeader: "forged-owner"}
+			if _, err := exec.Execute(context.Background(), action, args, kernel.User("ownerA"), told, ""); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			// An absent party is no header: what arrives is exactly what the kernel resolved.
+			sent := func(v string) []string {
+				if v == "" {
+					return nil
+				}
+				return []string{v}
+			}
+			if !slices.Equal(got.Values(callerHeader), sent(told.Caller)) || !slices.Equal(got.Values(ownerHeader), sent(told.Owner)) {
+				t.Errorf("credential %q: told caller %q owner %q; want %+v", header, got.Values(callerHeader), got.Values(ownerHeader), told)
+			}
+		}
+	}
+	plain := &httpActionExecutor{allowLocal: true}
+	if _, err := plain.Execute(context.Background(), &kernel.Action{Source: httpSrc(srv.URL, "POST")}, map[string]any{}, kernel.Principal{}, kernel.Parties{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[callerHeader]; ok {
+		t.Errorf("a call for nobody still sent %s", callerHeader)
 	}
 }

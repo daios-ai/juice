@@ -58,7 +58,7 @@ func TestCapabilityRejectedAfterSettlement(t *testing.T) {
 	ctx := context.Background()
 
 	sys := setupUser(t, st, "sys", 0)
-	k.RegisterNativeHandler("echo", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("echo", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
 	a, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Title: "Test action", Name: "echo", Kind: kernel.KindNative})

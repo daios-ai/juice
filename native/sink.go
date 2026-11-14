@@ -17,7 +17,7 @@ func Sink() Spec {
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
 		Handler: func(Host) kernel.NativeFunc {
-			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeSink()
 			}
 		},

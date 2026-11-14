@@ -26,7 +26,7 @@ flow_process_lifecycle() {
 
     # The task's meaning comes from its creating action (sys/message), not its sink target.
     assert_eq "process_lifecycle.task_created_by" "sys@k/message" \
-        "$(jj "$db" "$ha" task list | python3 -c "import sys,json;print(next((s.get('created_by','') for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)"
+        "$(jj "$db" "$ha" task list | python3 -c "import sys,json;print(next(((s.get('created_by') or {}).get('address','') for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)"
 
     # End the process: waiting task cancelled, funds returned, process closed.
     j "$db" "$ha" process end "$proc" >/dev/null 2>&1

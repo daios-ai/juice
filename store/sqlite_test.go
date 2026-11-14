@@ -531,7 +531,7 @@ func newPeer(t *testing.T, db *DB, handle, key string, createdAt time.Time) stri
 	if err := db.UpsertKernel(context.Background(), key, handle, "", "", "", createdAt); err != nil {
 		t.Fatalf("upsert kernel %s: %v", handle, err)
 	}
-	if _, err := db.BindPetname(context.Background(), key, handle, false); err != nil {
+	if err := db.BindPetname(context.Background(), key, handle); err != nil {
 		t.Fatalf("bind petname %s: %v", handle, err)
 	}
 	return key
@@ -935,7 +935,7 @@ func TestListCatalog(t *testing.T) {
 		{"superuser sees every row", kernel.CatalogQuery{CallerID: bob.ID, Local: true, Superuser: true},
 			"a-off a-priv a-pub b-local b-off b-priv K/r2 dave/sum K/r3"},
 		{"another owner's visible rows", kernel.CatalogQuery{CallerID: alice.ID, Local: true, OwnerID: bob.ID}, "b-local"},
-		{"one user of a peer", kernel.CatalogQuery{CallerID: alice.ID, Local: true, PeerKey: "K", PeerHandle: "dave"}, "K/r2 dave/sum"},
+		{"one user of a peer", kernel.CatalogQuery{CallerID: alice.ID, Local: true, PeerKey: "K", PeerUser: "dave"}, "K/r2 dave/sum"},
 	} {
 		if got := strings.Join(list(c.q, 100, 0), " "); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
@@ -5664,6 +5664,70 @@ func TestReadProxyByNameReadsTheNewestUnderAHandle(t *testing.T) {
 	got, err := db.ReadProxyByName(ctx, peer, "dave", "sum")
 	if err != nil || got.ID != ids[1] {
 		t.Fatalf("read %v (err %v), want the newer copy %s", got, err, ids[1])
+	}
+	// A principal names one owner whatever handle they go by, so the id finds exactly their copy.
+	if got, err := db.ReadProxyByName(ctx, peer, "old-dave", "sum"); err != nil || got.ID != ids[0] {
+		t.Errorf("read by the owner's id %v (err %v), want %s", got, err, ids[0])
+	}
+}
+
+// Only the operator names a kernel, exactly (D15): a known kernel takes a free name, keeps it when
+// named again, and is refused one another kernel holds; an unknown kernel is named nothing.
+func TestBindPetnameIsExact(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	newPeer(t, db, "taken", "K1", time.Now().UTC())
+	if err := db.UpsertKernel(ctx, "K2", "", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BindPetname(ctx, "K1", "taken"); err != nil {
+		t.Errorf("naming a kernel its own name again: %v", err)
+	}
+	if err := db.BindPetname(ctx, "K2", "taken"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Errorf("a name another kernel holds: %v, want ErrInvalidInput", err)
+	}
+	if err := db.BindPetname(ctx, "K3", "free"); !errors.Is(err, kernel.ErrNotFound) {
+		t.Errorf("an unknown kernel: %v, want ErrNotFound", err)
+	}
+	if rk, _ := db.ReadKernel(ctx, "K2"); rk == nil || rk.Petname != "" {
+		t.Errorf("the refused kernel was named: %+v", rk)
+	}
+}
+
+// A discovered action keeps its owner's id from the signed manifest beside the handle (D15, D16),
+// and migration 062 keeps every row it finds, with an empty id until the catalogue is read again.
+func TestMigration062DropsDiscoveryWithoutOwnerIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "juice.db")
+	db := openAt(t, path)
+	ctx := context.Background()
+	peer := newPeer(t, db, "beta", "K", time.Now().UTC())
+	doc := &kernel.DiscoveryDoc{Handle: "dave", OwnerID: "dave-id", ActionID: "r1", Name: "sum", Title: "Sum", ObservedAt: time.Now().UTC()}
+	if err := db.ApplyCatalogPage(ctx, peer, []*kernel.DiscoveryDoc{doc}, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if docs, _ := db.ListDiscoveryDocs(ctx); len(docs) != 1 || docs[0].OwnerID != "dave-id" || docs[0].Handle != "dave" {
+		t.Fatalf("the discovered action: %+v", docs)
+	}
+	var fts int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM discovery_fts`).Scan(&fts); err != nil || fts == 0 {
+		t.Fatalf("the discovered action's search entry was never written: %d, %v", fts, err)
+	}
+	for _, q := range []string{`ALTER TABLE discovery_docs DROP COLUMN owner_id`, `DELETE FROM schema_migrations WHERE version='062_names_and_ids'`,
+		`UPDATE kernels SET catalog_cursor='mid-scan'`} {
+		if _, err := db.db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	db = openAt(t, path)
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM discovery_fts`).Scan(&fts); err != nil {
+		t.Fatal(err)
+	}
+	if docs, _ := db.ListDiscoveryDocs(ctx); len(docs) != 0 || fts != 0 {
+		t.Errorf("a discovered action without its owner's id survived the migration: %+v, %d search entries", docs, fts)
+	}
+	if cursor, _, _ := db.CatalogScan(ctx, peer); cursor != "" {
+		t.Errorf("the catalogue scan resumes at %q, past the dropped rows", cursor)
 	}
 }
 

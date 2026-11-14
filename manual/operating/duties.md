@@ -117,14 +117,16 @@ $ juice admin user rename carol@acme carolyn@acme
 
 The operator can rename a user through the dedicated rename command. The
 account ID and history remain the same, while the old handle becomes available
-for reuse. Programs keeping durable references should therefore store the ID.
+for reuse. Programs keeping durable references should store the principal,
+`user_id@kernel_key`. It is accepted wherever an address names an existing
+user or action; `sys/resolve` turns a user address into its principal.
 
 ## Peers
 
 ```console
 $ juice admin peer list
 PETNAME     NICKNAME  TRADED  LAST SEEN  LAST FAILED  ACTIONS  STATUS  PUBLIC KEY
-k-hqDr8oMX  —         yes     just now   never        0                hqDr8oMX…
+—           beta      yes     just now   never        0                hqDr8oMX…
 ```
 
 The roster combines known counterparties with kernels learned through discovery.
@@ -133,18 +135,16 @@ reported by the peer. A dash in the petname column means the peer must be
 addressed by key. With `--all`, suspended peers are included and marked in
 the `STATUS` column.
 
-A successful outbound action resolution can assign a petname automatically.
-An incoming call may provision an account but does not assign a local name,
-preventing a remote caller from claiming a petname by its own choice. To assign
-one explicitly, use:
+No call or resolution assigns a petname. Until the operator names a peer, it
+is shown by its key with its nickname after it as `~name`. To assign a petname,
+use:
 
 ```console
 $ juice admin peer rename hqDr8oMX… beta-kernel
 hqDr8oMX… renamed to beta-kernel.
 ```
 
-Explicit renaming requires the chosen petname to be available. Unlike automatic
-naming, it does not add a suffix to resolve a collision.
+Renaming requires the chosen petname to be available.
 
 The contact columns report observations rather than a current online status.
 `LAST SEEN` records a reply, and `LAST FAILED` records a request known not to

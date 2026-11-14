@@ -1915,7 +1915,7 @@ func TestResolveLocalPrincipal(t *testing.T) {
 	alice := setupUser(t, st, "alice", 0)
 	// A peer named like a user: the two namespaces never meet (D15).
 	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
-	if _, err := k.BindPetname(ctx, pub, "peer", true); err != nil {
+	if _, err := k.BindPetname(ctx, pub, "peer"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2706,7 +2706,7 @@ func TestAnIDPrefixNamesOneOfTheCallersRecords(t *testing.T) {
 	if _, err := k.ExpandProcessID(ctx, bob.ID, p.ID[:13]); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("another's process by prefix: got %v, want ErrNotFound", err)
 	}
-	k.RegisterNativeHandler("park", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("park", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
 	reply, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "alice@k/park", Args: map[string]any{}})
@@ -2718,5 +2718,157 @@ func TestAnIDPrefixNamesOneOfTheCallersRecords(t *testing.T) {
 	}
 	if _, err := k.ExpandTransactionID(ctx, bob.ID, reply.TxID[:13]); !errors.Is(err, kernel.ErrNotFound) {
 		t.Errorf("another's transaction by prefix: got %v, want ErrNotFound", err)
+	}
+}
+
+// partiesHTTP records what each executed HTTP action was told (D8). When composed is set, the action
+// calls it back on its capability, as a composing endpoint does, so a native beneath it runs in the
+// same process.
+type partiesHTTP struct {
+	*fakeFederationHTTP
+	k        *kernel.Kernel
+	composed string
+	told     []kernel.Parties
+}
+
+func (p *partiesHTTP) Execute(ctx context.Context, _ *kernel.Action, _ map[string]any, _ kernel.Principal, parties kernel.Parties, capability string) (map[string]any, error) {
+	p.told = append(p.told, parties)
+	if p.composed != "" {
+		trace, owner, err := p.k.VerifyCapability(ctx, capability)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.k.Subcall(ctx, kernel.SubcallRequest{CallerID: owner, ParentTraceID: trace, ActionRef: p.composed, Args: map[string]any{}}); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{}, nil
+}
+
+// Every executed action is told its immediate caller and its process owner as principals, set by the
+// kernel (D8), identically for a run begun here and for one served for another kernel: the owner of a
+// served run is the user the kernel it began on names, asked once, before funds lock, whether or not
+// the action needs a grant. A native the action composes is told the same pair, while its payer stays
+// the local process's owner — the seller, on a served call. A kernel that cannot be asked refuses the
+// call before anything is funded.
+func TestEveryActionIsToldItsCallerAndOwner(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	fake := &fakeFederationHTTP{}
+	exec := &partiesHTTP{fakeFederationHTTP: fake}
+	k := newTestKernelWithHTTP(st, exec)
+	exec.k = k
+	sys := setupSys(t, k, st)
+	self := k.SelfKey(ctx)
+	const origin = "b3JpZ2luLWtlcm5lbA"
+	if err := st.UpsertKernel(ctx, origin, "origin", "", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	seller := setupUser(t, st, "told-seller", 1000)
+	buyer := setupUser(t, st, "told-buyer", 1000)
+	a, err := k.CreateAction(ctx, seller.ID, kernel.CreateActionRequest{OwnerUserID: seller.ID, Title: "Told", Name: "told",
+		Description: "tells who", Kind: kernel.KindHTTP, Price: 10, Source: "http://example.com", InputSchema: map[string]any{"type": "object"},
+		OutputSchema: map[string]any{"type": "object"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := kernel.VisibilityPublic
+	if _, err := k.UpdateAction(ctx, seller.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.SetActive(ctx, seller.ID, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = k.ReadAction(ctx, a.ID)
+	var native []kernel.Parties
+	var payer string
+	k.RegisterNativeHandler("whoami", func(_ context.Context, _ map[string]any, _, _, ownerUserID, _, _ string, p kernel.Parties) (map[string]any, error) {
+		native, payer = append(native, p), ownerUserID
+		return map[string]any{}, nil
+	})
+	n, err := k.RegisterNativeAction(ctx, kernel.CreateActionRequest{OwnerUserID: sys.ID, Title: "Who", Name: "whoami", Kind: kernel.KindNative})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj := map[string]any{"type": "object"}
+	if err := k.ActivateNativeAction(ctx, n.ID, "Who", "whoami native", obj, obj, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	exec.composed = "sys@k/whoami"
+
+	// A run begun here: the buyer is both. The native beneath is called by the seller, for the buyer.
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: buyer.ID, ActionRef: "told-seller@k/told", Args: map[string]any{}}); err != nil {
+		t.Fatalf("local run: %v", err)
+	}
+	me, sellerP := buyer.ID+"@"+self, seller.ID+"@"+self
+	if got := exec.told[0]; got != (kernel.Parties{Caller: me, Owner: me}) {
+		t.Errorf("a local run told %+v, want the buyer as both", got)
+	}
+	if got := native[0]; got != (kernel.Parties{Caller: sellerP, Owner: me}) || payer != buyer.ID {
+		t.Errorf("the native beneath it was told %+v and paid by %s; want caller seller, owner buyer, payer buyer", got, payer)
+	}
+
+	// A run served for another kernel: the same rule, the owner as that kernel names them, asked once
+	// per call — the served call, then the native it composes, each before it is funded.
+	asked := 0
+	fake.process = func(kind, ref, regID string) (int, string) {
+		asked++
+		return 200, `{"user_id":"u-far","handle":"far"}`
+	}
+	terms := kernel.BuyerTerms{CallerUserID: "u-mid", CallerHandle: "mid", ProcessKernel: origin, ProcessRef: "r"}
+	if _, err := k.RunFederated(ctx, origin, a, map[string]any{}, "", terms); err != nil {
+		t.Fatalf("served run: %v", err)
+	}
+	far := "u-far@" + origin
+	if got := exec.told[1]; got != (kernel.Parties{Caller: "u-mid@" + origin, Owner: far}) || asked != 2 {
+		t.Errorf("a served run told %+v after asking %d times; want caller u-mid, owner u-far, asked once per call", got, asked)
+	}
+	if got := native[1]; got != (kernel.Parties{Caller: sellerP, Owner: far}) || payer != seller.ID {
+		t.Errorf("the native in a served run was told %+v and paid by %s; want owner u-far and the seller paying", got, payer)
+	}
+
+	// The kernel the run began on cannot be asked: refused before funding, for an action needing no grant.
+	fake.process = nil
+	before, _ := st.ReadUser(ctx, seller.ID)
+	if _, err := k.RunFederated(ctx, origin, a, map[string]any{}, "", terms); !errors.Is(err, kernel.ErrPeerUnreachable) {
+		t.Fatalf("served run with its origin unreachable: %v, want ErrPeerUnreachable", err)
+	}
+	if after, _ := st.ReadUser(ctx, seller.ID); after.Available != before.Available || after.Locked != 0 || len(exec.told) != 2 {
+		t.Errorf("an unreachable origin still funded or ran the call: %+v → %+v, executed %d", before, after, len(exec.told))
+	}
+}
+
+// partiesScript records what a WASM action's host tells it (D8).
+type partiesScript struct{ told kernel.Parties }
+
+func (p *partiesScript) Compile(_ context.Context, source []byte) ([]byte, string, error) {
+	return source, "fakehash", nil
+}
+
+func (p *partiesScript) Execute(_ context.Context, _ []byte, _ []byte, host kernel.HostFunctions) ([]byte, error) {
+	p.told = host.Parties()
+	return []byte(`{}`), nil
+}
+
+// A WASM action is told the same caller and process owner as every other executor (D8).
+func TestWasmActionIsToldItsCallerAndOwner(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	script := &partiesScript{}
+	k := newKernel(testConfig(), kernel.Dependencies{Store: st, Scripts: script})
+	setupSys(t, k, st)
+	owner := setupUser(t, st, "wasm-owner", 0)
+	buyer := setupUser(t, st, "wasm-buyer", 100)
+	a := &kernel.Action{ID: uuid.New().String(), OwnerUserID: owner.ID, Name: "told", Kind: kernel.KindWasm, Source: "told",
+		Active: true, Visibility: kernel.VisibilityPublic, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := st.CreateAction(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: buyer.ID, ActionRef: "wasm-owner@k/told", Args: map[string]any{}}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	me := buyer.ID + "@" + k.SelfKey(ctx)
+	if script.told != (kernel.Parties{Caller: me, Owner: me}) {
+		t.Errorf("the module was told %+v, want the buyer as both", script.told)
 	}
 }

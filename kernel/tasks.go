@@ -431,7 +431,7 @@ func (k *Kernel) requesterAt(ctx context.Context, userID, address string) (Princ
 				return Principal{}, err
 			}
 			for _, r := range listed {
-				if r.Handle == a.Handle && (r.Kernel == kr.Key || kr.Local && r.Kernel == "") {
+				if (r.Handle == a.User || r.UserID == a.User) && (r.Kernel == kr.Key || kr.Local && r.Kernel == "") {
 					return r.Principal, nil
 				}
 			}

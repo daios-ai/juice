@@ -385,7 +385,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 	newBuild := func(withWidget bool) *kernel.Kernel {
 		k := newKernel(cfg, kernel.Dependencies{Store: db})
 		if withWidget {
-			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			k.RegisterNativeHandler("widget", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return map[string]any{}, nil
 			})
 		}

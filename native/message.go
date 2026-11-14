@@ -21,7 +21,7 @@ func Message() Spec {
 		}, "to", "message"),
 		OutputSchema: obj(map[string]any{"task_id": str("ID of the created task")}),
 		Handler: func(k Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, parentTraceID string, _ kernel.Parties) (map[string]any, error) {
 				return executeMessage(ctx, args, callerID, parentTraceID, k)
 			}
 		},

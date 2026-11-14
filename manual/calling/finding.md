@@ -21,7 +21,10 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
   result: {
     "results": [
       {
-        "action": "bob@acme/echo",
+        "action": {
+          "address": "bob@acme/echo",
+          "principal": "<user-id>@<kernel-key>/echo"
+        },
         "action_id": "bb7fe1a8-…",
         "title": "Echo a message",
         "description": "Echo a message back to the caller",
@@ -49,7 +52,7 @@ call. The main fields are:
 
 | Field | Meaning |
 |---|---|
-| `action` | the reference to pass to `run` |
+| `action` | the action as an `address` for a person and a `principal` for a program; either value can be passed to `run` |
 | `title` | the short name the provider gave it |
 | `description` | what the provider says it does |
 | `input_schema`, `output_schema` | the contract: what it takes and returns, as described in [Action schemas](../reference/schemas.html) |
@@ -69,10 +72,13 @@ applied, so inaccessible local actions cannot displace accessible results.
 
 The kernel periodically learns about public actions hosted by its peers and
 includes them in search. Their references identify both the provider and the
-hosting kernel:
+hosting kernel. In these examples, the operator has named it `beta-kernel`:
 
 ```
-"action": "dave@beta-kernel/summarize",
+"action": {
+  "address": "dave@beta-kernel/summarize",
+  "principal": "<user-id>@<kernel-key>/summarize"
+},
 "price": 2205000,
 "observed_at": "2026-09-14T12:06:20Z",
 "last_seen": "2026-09-14T12:06:20Z"

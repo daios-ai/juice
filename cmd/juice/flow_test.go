@@ -202,10 +202,10 @@ func TestFlow_WebhookCompleteTask(t *testing.T) {
 	}
 	var tx struct {
 		kernel.Transaction
-		Caller string `json:"caller"`
+		Caller kernel.AddressView `json:"caller"`
 	}
 	decodeResponse(t, txResp, &tx)
-	if tx.Caller != "wh-owner@k" {
+	if tx.Caller.Address != "wh-owner@k" {
 		t.Errorf("tx caller: got %s, want wh-owner@k (the requester)", tx.Caller)
 	}
 	if tx.Status != kernel.TxSuccess {
@@ -243,7 +243,7 @@ func TestFlow_ReconcileNetAmounts(t *testing.T) {
 	ownerTxs := getTxList(t, srv, ownerTok)
 	var sumNet int64
 	for _, tx := range ownerTxs {
-		if tx["action"] == "rec-owner@k/rec-action" && tx["status"] == "success" {
+		if addressOf(tx["action"]) == "rec-owner@k/rec-action" && tx["status"] == "success" {
 			sumNet += int64(tx["net"].(float64))
 		}
 	}
@@ -448,13 +448,13 @@ func TestFlow_ThreePartyRoleLaw(t *testing.T) {
 		}
 		var tx map[string]any
 		decodeResponse(t, r, &tx)
-		if tx["owner"] != "3p-owner@k" {
+		if addressOf(tx["owner"]) != "3p-owner@k" {
 			t.Errorf("tx.owner: got %v, want 3p-owner@k", tx["owner"])
 		}
-		if tx["caller"] != "3p-owner@k" {
+		if addressOf(tx["caller"]) != "3p-owner@k" {
 			t.Errorf("tx.caller: got %v, want 3p-owner@k, the requester", tx["caller"])
 		}
-		if tx["target"] != "3p-provider@k" {
+		if addressOf(tx["target"]) != "3p-provider@k" {
 			t.Errorf("tx.target: got %v, want 3p-provider@k", tx["target"])
 		}
 		// The raw party UUIDs are no longer exposed (a user is addressed by @handle, §14).

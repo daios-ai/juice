@@ -256,9 +256,8 @@ The serving kernel is the authority on its grants.
 - `process end` makes every later check for that process fail, on every kernel. A use that was
   already approved may complete.
 - `user disconnect` deletes the consent record at once and tells the serving kernel. A direct
-  call to the disconnected action is refused by the user's kernel at once. When it was the user's
-  last grant on that kernel, the user's kernel also answers no to that kernel's checks at once.
-  Otherwise the revocation takes full effect when the serving kernel has applied it. If the
+  call to the disconnected action is refused by the user's kernel at once. A call through another
+  kernel is refused once the serving kernel has applied the revocation. If the
   serving kernel cannot be reached, the command says so and the user runs it again; it is not
   retried in the background. A disconnect of a whole account removes the local records when the
   serving kernel answers, because only that kernel knows which actions the account covers.
@@ -290,9 +289,9 @@ The serving kernel is the authority on its grants.
 5. **The reference exists for every process.** A rule with no condition is simpler. It is also
    required: a user can sign up while a run is waiting, and the run must then find the grant when
    it continues, as it does locally.
-6. **A call does not identify the user.** The user's kernel names the user only to a kernel where
-   that user holds a grant. Other kernels in the run learn which kernel started it and nothing
-   more, which keeps U41 as it is.
+6. **A call does not identify the user; the user's kernel does.** It names the user to any kernel
+   holding the run's reference, as an action on the user's own kernel would learn it. A kernel in
+   the run learns whose run it is, exactly as a local action does (U41).
 7. **The credential does not move.** The serving kernel already holds the action's OAuth
    configuration and performs the exchange and refresh. Keeping the connection there reuses that
    code.
@@ -325,7 +324,7 @@ action on a third kernel that calls `carol@k/chat/post`.
 |---|---|
 | A kernel claims a run belongs to a user of another kernel | Impossible. A call names no user. The user's kernel is asked directly and names the user itself. |
 | A kernel guesses a reference | Impossible in practice. The reference is random and is not the process id. |
-| A kernel with no grant relation learns who started a run | Impossible. The user's kernel names the user only to a kernel where that user holds a grant. |
+| A kernel in the run learns who started it | By design, as a local action does. Only a kernel holding the run's reference is told, while the process is open. |
 | A kernel outside the run uses the grant | It holds no reference. A kernel in the run could pass one on, which gives nothing beyond relaying calls for that kernel. |
 | A kernel in the run uses the grant for calls the user did not intend | Possible while the process is open. This equals the local rule: any action in the user's process can call the user's granted actions. |
 | A kernel in the run uses the reference after the process has closed | Impossible. The user's kernel answers no. |

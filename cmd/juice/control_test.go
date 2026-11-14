@@ -211,8 +211,8 @@ func TestAdminSuperuserGate(t *testing.T) {
 	}
 }
 
-// A user is addressed by handle, never by an id: only GET /v1/me answers with the caller's own
-// (D20). The operator's own routes were writing the account row verbatim.
+// A user is named by address and principal, never by a bare id field: only GET /v1/me answers with
+// the caller's own (D20). The operator's own routes were writing the account row verbatim.
 func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
 	env := newTestEnv(t)
 	suTok := bootSuperuser(t, env)
@@ -225,8 +225,11 @@ func TestOperatorRoutesWithholdAccountIDs(t *testing.T) {
 		if status != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", path, status, body)
 		}
-		if strings.Contains(string(body), u.ID) {
-			t.Errorf("%s carries the raw account id: %s", path, body)
+		if strings.Contains(string(body), `"id"`) || strings.Count(string(body), u.ID) != strings.Count(string(body), u.ID+"@") {
+			t.Errorf("%s carries the account id outside its principal: %s", path, body)
+		}
+		if !strings.Contains(string(body), `"principal":"`+u.ID+"@") {
+			t.Errorf("%s does not name the account by its principal: %s", path, body)
 		}
 		if !strings.Contains(string(body), "shown") {
 			t.Errorf("%s should still name the account: %s", path, body)

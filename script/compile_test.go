@@ -170,7 +170,7 @@ func Handle(in map[string]any) (map[string]any, error) {
 	if !hasAlloc || !hasRun {
 		t.Errorf("artifact must export alloc and run; exports=%v", exports)
 	}
-	allowed := map[string]bool{"call": true, "task_create": true, "task_complete": true, "log": true}
+	allowed := map[string]bool{"call": true, "task_create": true, "task_complete": true, "log": true, "parties": true}
 	for _, imp := range imports {
 		if imp.Module == "wasi_snapshot_preview1" {
 			continue
@@ -195,6 +195,33 @@ func Handle(in map[string]any) (map[string]any, error) {
 	}
 	if got["kind"] != "OK" {
 		t.Errorf("kind = %v, want OK", got["kind"])
+	}
+}
+
+// TestSDKToldWhoItRunsFor: a WASM action reads its immediate caller and its process owner from the
+// host (D8), exactly as the kernel resolved them. Skipped when tinygo is not installed.
+func TestSDKToldWhoItRunsFor(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not installed; skipping real-compile integration test")
+	}
+	body := `
+func Handle(in map[string]any) (map[string]any, error) {
+	caller, owner := JuiceParties()
+	return map[string]any{"caller": caller, "owner": owner}, nil
+}
+`
+	wasm, _, err := NewTinyGoCompiler(CompileConfig{TimeoutMS: 60000}).CompileSource(context.Background(), []byte(TinyGoSDK+"\n"+body))
+	if err != nil {
+		t.Fatalf("compile SDK+Handle: %v", err)
+	}
+	told := kernel.Parties{Caller: "c-id@KEY", Owner: "o-id@KEY"}
+	out, err := New(Config{TimeoutMS: 10000, MemoryBytes: 16 * 1024 * 1024}).Execute(context.Background(), wasm, []byte(`{}`), &sdkTestHost{parties: told})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var got kernel.Parties
+	if err := json.Unmarshal(out, &got); err != nil || got != told {
+		t.Errorf("the module read %s (%v); want %+v", out, err, told)
 	}
 }
 
@@ -302,9 +329,10 @@ func (h *reentrantHost) TaskComplete(context.Context, string, []byte) ([]byte, e
 	return []byte("{}"), nil
 }
 func (h *reentrantHost) Log(context.Context, string, string) error { return nil }
+func (h *reentrantHost) Parties() kernel.Parties                   { return kernel.Parties{} }
 
 // sdkTestHost is a no-op kernel.HostFunctions for the SDK compile test.
-type sdkTestHost struct{}
+type sdkTestHost struct{ parties kernel.Parties }
 
 func (sdkTestHost) Call(context.Context, string, []byte) ([]byte, error) { return []byte("{}"), nil }
 func (sdkTestHost) TaskCreate(context.Context, []byte, string, string) (string, error) {
@@ -314,6 +342,7 @@ func (sdkTestHost) TaskComplete(context.Context, string, []byte) ([]byte, error)
 	return []byte("{}"), nil
 }
 func (sdkTestHost) Log(context.Context, string, string) error { return nil }
+func (h sdkTestHost) Parties() kernel.Parties                 { return h.parties }
 
 func TestMagicByteDetection(t *testing.T) {
 	// WASM magic bytes → compileWasmSource should pass directly to ScriptExecutor.

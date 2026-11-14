@@ -36,13 +36,14 @@ type ScriptExecutor interface {
 	Execute(ctx context.Context, artifact []byte, input []byte, host HostFunctions) ([]byte, error)
 }
 
-// HTTPExecutor calls an external HTTP action endpoint. grantor is whose grant the process's calls
-// consult (D10): the executor needs it to resolve a delegated grant (§8), whose binding rule is
-// grant.grantor == grantor. capability is the trace-scoped composition token (§9)
-// the executor delivers as a header so the endpoint can call back; empty disables composition.
+// HTTPExecutor calls an external HTTP action endpoint. owner is the process owner, whose grant the
+// process's calls consult (D10): the executor needs it to resolve a delegated grant (§8), whose
+// binding rule is grant.grantor == owner. parties is what the action is told it runs for (D8), which
+// the executor delivers as headers. capability is the trace-scoped composition token (§9) the
+// executor delivers as a header so the endpoint can call back; empty disables composition.
 // kernel/ defines this interface; cmd/juice implements it.
 type HTTPExecutor interface {
-	Execute(ctx context.Context, action *Action, args map[string]any, grantor Principal, capability string) (map[string]any, error)
+	Execute(ctx context.Context, action *Action, args map[string]any, owner Principal, parties Parties, capability string) (map[string]any, error)
 }
 
 // GrantStore is the executor-facing subset of Store for the delegated-token lifecycle (§8).
@@ -158,6 +159,7 @@ type HostFunctions interface {
 	TaskCreate(ctx context.Context, partialArgs []byte, requiredCaller, action string) (string, error)
 	TaskComplete(ctx context.Context, taskID string, input []byte) ([]byte, error)
 	Log(ctx context.Context, level, msg string) error
+	Parties() Parties
 }
 
 // ---- LLM interfaces ----
@@ -288,8 +290,8 @@ type Store interface {
 	ReadAction(ctx context.Context, id string) (*Action, error)
 	ReadActionByOwnerName(ctx context.Context, ownerID, name string) (*Action, error)
 	// ReadProxyByName reads the cached copy of a peer's action by the peer's key, its owner's handle
-	// and its name (D13).
-	ReadProxyByName(ctx context.Context, peerKey, handle, name string) (*Action, error)
+	// or id, and its name (D13, D15).
+	ReadProxyByName(ctx context.Context, peerKey, owner, name string) (*Action, error)
 	// RetireProxy soft-deletes the live cached copy of a peer's action under one owner and name: the
 	// action the peer now serves there is another, which supersedes it (D13).
 	RetireProxy(ctx context.Context, peerKey, ownerID, name string) error
@@ -532,8 +534,6 @@ type Store interface {
 	CountRemoteConnections(ctx context.Context, kernelKey string) (total, ofKernel int, err error)
 	// ApplyGrantOp records a grant operation's time for a kernel's user and refuses an older one.
 	ApplyGrantOp(ctx context.Context, kernelKey, userID string, at int64) error
-	// HoldsGrantOn reports whether a user here holds a grant on an action a kernel serves.
-	HoldsGrantOn(ctx context.Context, userID, kernelKey string) (bool, error)
 	// ProcessOwnerByRef returns the owner of the open process a reference names, or ErrNotFound.
 	ProcessOwnerByRef(ctx context.Context, ref string) (string, error)
 	// Register holds the process a reference names open for a kernel's waiting work; Release ends
@@ -702,7 +702,7 @@ type Store interface {
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.
-	BindPetname(ctx context.Context, publicKey, desired string, exact bool) (string, error)
+	BindPetname(ctx context.Context, publicKey, petname string) error
 	// SetKernelSuspended suspends a kernel, making its row in the same statement when it has none, so
 	// an inbound call cannot slip between the two (D15); or lifts a suspension, ErrNotFound for a
 	// kernel nobody here knows.

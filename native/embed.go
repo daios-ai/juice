@@ -28,7 +28,7 @@ func Embed(model string, embedder kernel.Embedder) Spec {
 			}), "One embedding per input"),
 		}),
 		Handler: func(Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeEmbed(ctx, args, embedder)
 			}
 		},

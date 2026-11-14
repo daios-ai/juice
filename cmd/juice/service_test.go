@@ -112,7 +112,7 @@ func TestUserView(t *testing.T) {
 	if len(m) != 5 {
 		t.Errorf("userView: expected 5 keys, got %d", len(m))
 	}
-	if m["id"] != u.ID || m["address"] != "x@k" {
+	if m["id"] != u.ID || m["address"].(kernel.AddressView).Address != "x@k" {
 		t.Errorf("userView: unexpected values %v", m)
 	}
 }
@@ -137,13 +137,13 @@ func TestEnrichTask(t *testing.T) {
 		return &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s1", Status: status, ActionID: actionID}, RequiredCaller: rc}
 	}
 	v := enrichTask(k, ctx, entry(kernel.TaskDone, action.ID, kernel.Principal{UserID: alice.ID}), k.NewNames())
-	if v.Action != "alice@k/greet" {
+	if v.Action.Address != "alice@k/greet" {
 		t.Errorf("enrichTask: Action = %q, want alice@k/greet", v.Action)
 	}
-	if v.RequiredCaller != "alice@k" {
+	if v.RequiredCaller.Address != "alice@k" {
 		t.Errorf("enrichTask: RequiredCaller = %q, want alice@k", v.RequiredCaller)
 	}
-	if v.CreatedBy != "" {
+	if v.CreatedBy.Address != "" {
 		t.Errorf("enrichTask: CreatedBy = %q, want empty with no creating action", v.CreatedBy)
 	}
 	if v.ID != "s1" {
@@ -157,17 +157,17 @@ func TestEnrichTask(t *testing.T) {
 	// waiting_on_peer and names the kernel bare — a user always carries `@`, a kernel never does.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.BindPetname(ctx, peerKey, "peer", true); err != nil {
+	if _, err := k.BindPetname(ctx, peerKey, "peer"); err != nil {
 		t.Fatal(err)
 	}
 	v2 := enrichTask(k, ctx, entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey}), k.NewNames())
-	if v2.Action != "" {
+	if v2.Action.Address != "" {
 		t.Errorf("enrichTask(no action): Action = %q, want empty", v2.Action)
 	}
 	if !v2.WaitingOnPeer {
 		t.Error("enrichTask: WaitingOnPeer should be true")
 	}
-	if v2.RequiredCaller != "peer" {
+	if v2.RequiredCaller.Address != "peer" {
 		t.Errorf("enrichTask: RequiredCaller = %q, want peer", v2.RequiredCaller)
 	}
 
@@ -175,12 +175,12 @@ func TestEnrichTask(t *testing.T) {
 	// The handle it went by when the task was made is display; the stable id underneath is what
 	// authorises the completion, so a rename there leaves the task addressed and only this stales.
 	named := entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey, UserID: "u-9f2c", Handle: "bob"})
-	if got := enrichTask(k, ctx, named, k.NewNames()).RequiredCaller; got != "bob@peer" {
+	if got := enrichTask(k, ctx, named, k.NewNames()).RequiredCaller; got.Address != "bob@peer" {
 		t.Errorf("enrichTask: RequiredCaller = %q, want bob@peer", got)
 	}
 	// A row parked before the handle was kept still renders, by the id it does hold.
 	unnamed := entry(kernel.TaskWaiting, "", kernel.Principal{Kernel: peerKey, UserID: "u-9f2c"})
-	if got := enrichTask(k, ctx, unnamed, k.NewNames()).RequiredCaller; got != "u-9f2c@peer" {
+	if got := enrichTask(k, ctx, unnamed, k.NewNames()).RequiredCaller; got.Address != "u-9f2c@peer" {
 		t.Errorf("enrichTask(no handle): RequiredCaller = %q, want u-9f2c@peer", got)
 	}
 }
@@ -203,7 +203,7 @@ func TestEnrichProcess(t *testing.T) {
 	if v.ID != "p1" {
 		t.Errorf("embedded Process.ID = %q, want p1", v.ID)
 	}
-	if v.Owner != "owner@k" {
+	if v.Owner.Address != "owner@k" {
 		t.Errorf("owner = %q, want owner@k", v.Owner)
 	}
 
@@ -226,7 +226,7 @@ func TestEnrichAction(t *testing.T) {
 	}
 	a := &kernel.Action{ID: "a1", OwnerUserID: bob.ID, OwnerHandle: "bob", Name: "ping"}
 	r := enrichAction(ctx, k, a, k.NewNames())
-	if r.ActionRef != "bob@k/ping" {
+	if r.ActionRef.Address != "bob@k/ping" {
 		t.Errorf("enrichAction: ActionRef = %q, want bob@k/ping", r.ActionRef)
 	}
 
@@ -237,12 +237,12 @@ func TestEnrichAction(t *testing.T) {
 	if err := k.ObserveKernel(ctx, key, "provider", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.BindPetname(ctx, key, "", false); err != nil {
+	if _, err := k.BindPetname(ctx, key, "provider"); err != nil {
 		t.Fatal(err)
 	}
 	proxy := &kernel.Action{ID: "a2", OwnerKernel: key, OwnerUserID: "bob-id", OwnerHandle: "bob", Name: "greet", Kind: kernel.KindRemoteProxy}
 	r2 := enrichAction(ctx, k, proxy, k.NewNames())
-	if r2.ActionRef != "bob@provider/greet" {
+	if r2.ActionRef.Address != "bob@provider/greet" {
 		t.Errorf("proxy ActionRef = %q, want bob@provider/greet", r2.ActionRef)
 	}
 	// owner_handle is not a response field: the address names the owner.
@@ -299,7 +299,7 @@ func TestGetMe(t *testing.T) {
 	if view["id"] != id {
 		t.Errorf("getMe: id = %v, want %s", view["id"], id)
 	}
-	if view["address"] != "svc-me@k" {
+	if view["address"].(kernel.AddressView).Address != "svc-me@k" {
 		t.Errorf("getMe: address = %v, want svc-me@k", view["address"])
 	}
 	for _, key := range []string{"id", "address", "description", "available", "locked"} {
@@ -329,7 +329,7 @@ func TestCreateAction_ServiceEnrichment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createAction: %v", err)
 	}
-	if a.ActionRef != "svc-ca@k/svc-make" {
+	if a.ActionRef.Address != "svc-ca@k/svc-make" {
 		t.Errorf("ActionRef = %q, want svc-ca@k/svc-make", a.ActionRef)
 	}
 	if a.ID == "" {
@@ -355,7 +355,7 @@ func TestGetAction_EnrichesRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getAction: %v", err)
 	}
-	if got.ActionRef != "svc-ga@k/svc-lookup" {
+	if got.ActionRef.Address != "svc-ga@k/svc-lookup" {
 		t.Errorf("getAction ActionRef = %q, want svc-ga@k/svc-lookup", got.ActionRef)
 	}
 }
@@ -468,7 +468,7 @@ func TestListActions_ScopeStripAndDiscovered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := discovered(mine); d == nil || d.ActionRef != "dave@K/sum" || d.Title != "Summarize" ||
+	if d := discovered(mine); d == nil || d.ActionRef.Address != "dave@K/sum" || d.Title != "Summarize" ||
 		d.Price <= 100 || d.QuoteHash == "" || d.RemoteActionID != "r1" || !d.Active {
 		t.Errorf("discovered row = %+v, want dave@K/sum titled, priced above its serving price, quoted", d)
 	}
@@ -508,10 +508,10 @@ func TestListTasks_Enriched(t *testing.T) {
 	if len(tasks) == 0 {
 		t.Fatal("expected at least one task")
 	}
-	if tasks[0].Action != "svc-ls@k/svc-ls-action" {
+	if tasks[0].Action.Address != "svc-ls@k/svc-ls-action" {
 		t.Errorf("listTasks: action field = %q, want svc-ls@k/svc-ls-action", tasks[0].Action)
 	}
-	if tasks[0].Owner != "svc-ls@k" {
+	if tasks[0].Owner.Address != "svc-ls@k" {
 		t.Errorf("listTasks: owner = %q, want svc-ls@k (the process owner)", tasks[0].Owner)
 	}
 }
@@ -542,13 +542,13 @@ func TestGetTask_Enriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getTask: %v", err)
 	}
-	if got.Action != "svc-gs@k/svc-gs-action" {
+	if got.Action.Address != "svc-gs@k/svc-gs-action" {
 		t.Errorf("getTask action = %q, want svc-gs@k/svc-gs-action", got.Action)
 	}
 	if got.ID != view.ID {
 		t.Errorf("getTask ID = %q, want %q", got.ID, view.ID)
 	}
-	if got.Owner != "svc-gs@k" {
+	if got.Owner.Address != "svc-gs@k" {
 		t.Errorf("getTask owner = %q, want svc-gs@k (the process owner)", got.Owner)
 	}
 	// The required caller is not the owner, yet must still see the owner_handle — the resolver
@@ -560,7 +560,7 @@ func TestGetTask_Enriched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getTask as required caller: %v", err)
 	}
-	if asHook.Owner != "svc-gs@k" {
+	if asHook.Owner.Address != "svc-gs@k" {
 		t.Errorf("getTask(required caller) owner_handle = %q, want @svc-gs", asHook.Owner)
 	}
 }
@@ -589,7 +589,7 @@ func TestCreateTask_SharedBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createTask by @owner/name: %v", err)
 	}
-	if view.Action != "svc-task-owner@k/svc-notify" {
+	if view.Action.Address != "svc-task-owner@k/svc-notify" {
 		t.Errorf("action field: got %q, want %q", view.Action, "svc-task-owner@k/svc-notify")
 	}
 	if view.TaskNotice.ActionID != actID {
@@ -673,13 +673,13 @@ func TestNamesAddressFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := k.NewNames()
-	if got := names.Address(ctx, kernel.Principal{UserID: u.ID}); got != "alice@k" {
+	if got := names.Address(ctx, kernel.Principal{UserID: u.ID}); got.Address != "alice@k" {
 		t.Errorf("Address(alice) = %q, want alice@k", got)
 	}
-	if got := names.Address(ctx, kernel.Principal{UserID: "gone"}); got != "gone" {
+	if got := names.Address(ctx, kernel.Principal{UserID: "gone"}); got.Address != "gone" {
 		t.Errorf("Address(gone) = %q, want raw-id fallback", got)
 	}
-	if got := names.Address(ctx, kernel.Principal{}); got != "" {
+	if got := names.Address(ctx, kernel.Principal{}); got.Address != "" {
 		t.Errorf("Address(empty) = %q, want empty", got)
 	}
 }
@@ -702,7 +702,7 @@ func TestEnrichTxDropsUUIDs(t *testing.T) {
 		ID: "tx1", OwnerUserID: ids["owner"], CallerUserID: ids["caller"], TargetUserID: ids["target"], ActionName: "ping",
 	}}
 	v := enrichTx(ctx, tv, k.NewNames())
-	if v.Owner != "owner@k" || v.Caller != "caller@k" || v.Target != "target@k" || v.Action != "target@k/ping" {
+	if v.Owner.Address != "owner@k" || v.Caller.Address != "caller@k" || v.Target.Address != "target@k" || v.Action.Address != "target@k/ping" {
 		t.Fatalf("parties: %q/%q/%q action %q", v.Owner, v.Caller, v.Target, v.Action)
 	}
 	b, _ := json.Marshal(v)
@@ -715,7 +715,7 @@ func TestEnrichTxDropsUUIDs(t *testing.T) {
 			t.Errorf("%s must be dropped from tx JSON, got %v", k, m[k])
 		}
 	}
-	if m["owner"] != "owner@k" || m["id"] != "tx1" {
+	if addressOf(m["owner"]) != "owner@k" || m["id"] != "tx1" {
 		t.Errorf("expected owner=owner@k and id=tx1, got %v / %v", m["owner"], m["id"])
 	}
 }
@@ -779,14 +779,14 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.BindPetname(ctx, key, "kernelonly", true); err != nil {
+	if _, err := k.BindPetname(ctx, key, "kernelonly"); err != nil {
 		t.Fatal(err)
 	}
 	// The same string is both a handle and a petname here, which is exactly the case the noun
 	// settles: neither route has to ask which was meant.
 	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
-	if _, err := k.BindPetname(ctx, key2, "shared", true); err != nil {
+	if _, err := k.BindPetname(ctx, key2, "shared"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -835,13 +835,13 @@ func TestAddressRendersKernels(t *testing.T) {
 	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got != key {
+	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got.Address != key {
 		t.Errorf("unbound kernel rendered %q, want its key %s", got, key)
 	}
-	if _, err := k.BindPetname(ctx, key, "named-peer", true); err != nil {
+	if _, err := k.BindPetname(ctx, key, "named-peer"); err != nil {
 		t.Fatal(err)
 	}
-	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got != "named-peer" {
+	if got := k.Address(ctx, kernel.Principal{Kernel: key}); got.Address != "named-peer" {
 		t.Errorf("bound kernel rendered %q, want its petname", got)
 	}
 }
@@ -869,7 +869,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 
 	tv := &txView{TransactionView: &kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t",
 		ArgsJSON: json.RawMessage(`{"big":1}`), ReplyJSON: json.RawMessage(`{"big":2}`),
-		RemoteReceiptJSON: `{"charge":1}`}}, Owner: "bob@k"}
+		RemoteReceiptJSON: `{"charge":1}`}}, Owner: kernel.AddressView{Address: "bob@k", Principal: "u@K"}}
 	txDetail, _ := json.Marshal(tv)
 	txList, _ := json.Marshal(txSummary{txView: *tv})
 	for _, key := range []string{`"args"`, `"result"`} {
@@ -881,7 +881,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 		}
 	}
 	// The receipt is evidence, not payload, and stays on the row; the handle stays, the id does not.
-	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner":"bob@k"`) {
+	if !strings.Contains(string(txList), `"remote_receipt_json"`) || !strings.Contains(string(txList), `"owner":{"address":"bob@k"`) {
 		t.Error("the transaction list row lost its receipt or its handle")
 	}
 	if strings.Contains(string(txList), `"owner_user_id"`) {
@@ -893,7 +893,7 @@ func TestListProjectionsDropThePayloadsADetailReadKeeps(t *testing.T) {
 	if err := json.Unmarshal([]byte("["+string(txList)+"]"), &back); err != nil {
 		t.Fatalf("the CLI cannot decode a list row: %v", err)
 	}
-	if len(back) != 1 || back[0].ID != "t" || back[0].Owner != "bob@k" {
+	if len(back) != 1 || back[0].ID != "t" || back[0].Owner.Address != "bob@k" {
 		t.Errorf("the row did not survive the CLI round-trip: %+v", back)
 	}
 	var actions []actionSummary

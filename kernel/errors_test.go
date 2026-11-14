@@ -96,14 +96,14 @@ func TestGrantRequiredCodeAndMeta(t *testing.T) {
 	if HTTPStatusFromCode("grant_required") != 403 {
 		t.Errorf("grant_required status = %d, want 403", HTTPStatusFromCode("grant_required"))
 	}
-	// The single constructor attaches the ref both in the message and as Meta["action"], and
-	// preserves the sentinel identity (chaining must not drop it).
-	e := GrantRequiredError("a/b").(*KernelError)
-	if e.Meta["action"] != "a/b" {
-		t.Errorf("Meta[action] = %q, want @a/b", e.Meta["action"])
+	// The single constructor puts the address in the message, for a person, and the principal in
+	// Meta["action"], for a program (D20), and preserves the sentinel identity.
+	e := GrantRequiredError(AddressView{Address: "bob@k/a", Principal: "u1@KEY/a"}).(*KernelError)
+	if e.Meta["action"] != "u1@KEY/a" {
+		t.Errorf("Meta[action] = %q, want the principal u1@KEY/a", e.Meta["action"])
 	}
-	if !strings.Contains(e.Message, "a/b") {
-		t.Errorf("message = %q, want it to contain @a/b", e.Message)
+	if !strings.Contains(e.Message, "bob@k/a") || strings.Contains(e.Message, "u1@KEY") {
+		t.Errorf("message = %q, want the address bob@k/a and not the principal", e.Message)
 	}
 	if !errorsIs(e, ErrGrantRequired) {
 		t.Error("GrantRequiredError lost the error identity")
@@ -121,15 +121,16 @@ func TestPeerErrorsCodesAndMeta(t *testing.T) {
 	if HTTPStatusFromCode("peer_unfunded") != 402 {
 		t.Errorf("peer_unfunded status = %d, want 402", HTTPStatusFromCode("peer_unfunded"))
 	}
-	for _, e := range []*KernelError{PeerUnreachableError("b"), PeerUnfundedError("b")} {
-		if e.Meta["peer"] != "b" {
-			t.Errorf("Meta[peer] = %q, want @b", e.Meta["peer"])
+	peer := AddressView{Address: "beta", Principal: "KEY"}
+	for _, e := range []*KernelError{PeerUnreachableError(peer), PeerUnfundedError(peer), PeerRefusedError(peer)} {
+		if e.Meta["peer"] != "KEY" || !strings.Contains(e.Message, "beta") {
+			t.Errorf("Meta[peer] = %q, message %q: want the key in meta and the name in the message", e.Meta["peer"], e.Message)
 		}
 	}
-	if !errorsIs(PeerUnreachableError("b"), ErrPeerUnreachable) {
+	if !errorsIs(PeerUnreachableError(peer), ErrPeerUnreachable) {
 		t.Error("PeerUnreachableError lost the error identity")
 	}
-	if !errorsIs(PeerUnfundedError("b"), ErrPeerUnfunded) {
+	if !errorsIs(PeerUnfundedError(peer), ErrPeerUnfunded) {
 		t.Error("PeerUnfundedError lost the error identity")
 	}
 }

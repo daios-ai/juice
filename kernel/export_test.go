@@ -40,7 +40,7 @@ func (k *Kernel) TestCall(ctx context.Context, req TestCallRequest) (*CallReply,
 		if err != nil || owner == nil {
 			return nil, ErrNotFound.Wrap("target user not found")
 		}
-		req.ActionRef = Address{Handle: owner.Handle, Kernel: TestOwnName, Name: req.ActionName}.String()
+		req.ActionRef = Address{User: owner.Handle, Kernel: TestOwnName, Name: req.ActionName}.String()
 	}
 	caller := Principal{Kernel: req.CallerKernel, UserID: req.CallerID}
 	return k.call(ctx, callRequest{Caller: caller, ParentTraceID: req.ParentTraceID, Action: req.Action,

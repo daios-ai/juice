@@ -20,11 +20,18 @@ named `acme`, `sys/time` is called as `sys@acme/time`.
 
 ## Search
 
+**`sys/resolve`** — `{address}` → `{address, principal, nickname?}`
+
+Resolves a user's address, written with a handle or as a principal, on this
+kernel or another. The reply gives the readable address and the stable
+principal a program can store. An unknown user returns `not_found`.
+
 **`sys/lookup`** — `{query, limit=10}` → `{results: [...]}`
 
 Returns ranked candidates with `action`, `action_id`, `title`, `description`,
 `input_schema`, `output_schema`, `price`, `quote_hash`, `evidence`, and `score`.
-Evidence is the same view returned by `action show`. Remote
+The `action` field contains `address` and `principal`, with `nickname` when
+present. Evidence is the same view returned by `action show`. Remote
 results may include observation and contact timestamps. Ranking combines
 keywords with semantic matching when an embedding model is available, and
 uses keywords alone otherwise. Access filtering precedes the result limit.

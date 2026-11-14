@@ -371,8 +371,13 @@ func printIDs(body []byte, field string) error {
 		rows = []map[string]json.RawMessage{one}
 	}
 	for _, row := range rows {
+		// A resource named by a party, a user, is quiet as its address, as a command takes it back.
 		var id string
-		if json.Unmarshal(row[field], &id) == nil && id != "" {
+		var v kernel.AddressView
+		if json.Unmarshal(row[field], &id) != nil && json.Unmarshal(row[field], &v) == nil {
+			id = v.Address
+		}
+		if id != "" {
 			fmt.Println(id)
 		}
 	}
@@ -494,6 +499,16 @@ func renderValue(raw json.RawMessage) string {
 		var s string
 		if err := json.Unmarshal(raw, &s); err == nil {
 			return s
+		}
+	}
+	if r[0] == '{' {
+		// A party or an action reads as its address, with an unnamed kernel's own nickname after it
+		// (D15); its principal is for programs, under --json.
+		var v kernel.AddressView
+		dec := json.NewDecoder(bytes.NewReader(r))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&v) == nil && v.Address != "" && v.Principal != "" {
+			return v.String()
 		}
 	}
 	if r[0] == '{' || r[0] == '[' {
@@ -653,7 +668,7 @@ func userTransferCmd() *cobra.Command {
 			}
 			// One transfer action, this kernel's own, whoever the recipient is (D18).
 			req := kernel.RunRequest{
-				ActionRef:   kernel.Address{Handle: kernel.SuperuserHandle, Kernel: me.Kernel, Name: "transfer"}.String(),
+				ActionRef:   kernel.Address{User: kernel.SuperuserHandle, Kernel: me.Kernel, Name: "transfer"}.String(),
 				Args:        map[string]any{"target": args[0], "amount": amount},
 				ExternalKey: externalKey,
 			}
@@ -700,10 +715,10 @@ func userLedgerCmd() *cobra.Command {
 
 // meView is the caller's own record, the only place a client reads its own id and payout address.
 type meView struct {
-	ID                string `json:"id"`
-	Address           string `json:"address"`
-	BlockchainAddress string `json:"blockchain_address"`
-	Available         int64  `json:"available"`
+	ID                string             `json:"id"`
+	Address           kernel.AddressView `json:"address"`
+	BlockchainAddress string             `json:"blockchain_address"`
+	Available         int64              `json:"available"`
 }
 
 func readMe(ctx context.Context) (*meView, error) {
@@ -1266,7 +1281,7 @@ func actionListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				owner = me.Address
+				owner = me.Address.Address
 			}
 			q := url.Values{}
 			setLimitOffset(q, limit, offset)
@@ -1848,7 +1863,7 @@ func runCmd() *cobra.Command {
 					if cerr != nil {
 						return cerr
 					}
-					fmt.Fprintf(os.Stderr, "Connected %s.\n", strings.Join(connected, ", "))
+					fmt.Fprintf(os.Stderr, "Connected %s.\n", joinAddresses(connected))
 					err = cli.call(context.Background(), "POST", "/v1/run", reqBody, &raw)
 				}
 			}

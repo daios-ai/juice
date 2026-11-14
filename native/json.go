@@ -22,7 +22,7 @@ func JSON(model string, m kernel.JSONChatter) Spec {
 		}, "messages", "schema"),
 		OutputSchema: obj(map[string]any{"value": object("The object the schema admits")}),
 		Handler: func(Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeJSON(ctx, args, m)
 			}
 		},

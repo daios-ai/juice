@@ -34,7 +34,7 @@ func Decide(model string, chatter kernel.DecideChatter) Spec {
 			"message": object("Optional text message from the model"),
 		}, "action", "args"),
 		Handler: func(k Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, callerID, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeDecide(ctx, args, chatter, k.ReadCallableAction, k.ResolveAction, k.IsRemoteRef, callerID)
 			}
 		},

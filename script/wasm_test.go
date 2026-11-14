@@ -109,6 +109,7 @@ func (nilHost) TaskComplete(_ context.Context, _ string, _ []byte) ([]byte, erro
 	return []byte("{}"), nil
 }
 func (nilHost) Log(_ context.Context, _, _ string) error { return nil }
+func (nilHost) Parties() kernel.Parties                  { return kernel.Parties{} }
 
 var _ kernel.HostFunctions = nilHost{}
 

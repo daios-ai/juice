@@ -281,9 +281,9 @@ func (k *Kernel) payableOnThisRail(ctx context.Context, peerKey string, obligati
 	if k.peerBlockchainAddress(ctx, peerKey) != "" {
 		return nil
 	}
-	name := k.KernelName(ctx, peerKey)
+	name := k.KernelAddress(ctx, peerKey)
 	return ErrPeerUnreachable.Wrapf("%s has not proved where it is paid, so this call could not be settled", name).
-		WithMeta("peer", name)
+		WithMeta("peer", name.Principal)
 }
 
 // BuyerTerms is what a buyer fixes on a cross-kernel call before the work is done (P4, P10): its

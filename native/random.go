@@ -20,7 +20,7 @@ func Random() Spec {
 		InputSchema:  obj(map[string]any{}),
 		OutputSchema: obj(map[string]any{"value": num("Random float in [0, 1)")}),
 		Handler: func(Host) kernel.NativeFunc {
-			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeRandom()
 			}
 		},

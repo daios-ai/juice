@@ -59,27 +59,19 @@ func TestBindPetnameCollisionSuffixes(t *testing.T) {
 
 	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
 	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub3, _, _ := ed25519.GenerateKey(rand.Reader)
 	key1 := base64.RawURLEncoding.EncodeToString(pub1)
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
-	key3 := base64.RawURLEncoding.EncodeToString(pub3)
 
-	// Three kernels asking for the same name get distinct petnames: the name lives in the kernel
-	// namespace (D15).
-	for i, tc := range []struct {
-		key  string
-		want string
-	}{{key1, "remote"}, {key2, "remote-2"}, {key3, "remote-3"}} {
-		if _, err := mountKernelForTest(t, k, ctx, tc.key, "remote"); err != nil {
-			t.Fatalf("mount %d: %v", i, err)
-		}
-		rk, err := k.ReadKernel(ctx, tc.key)
-		if err != nil || rk == nil {
-			t.Fatalf("mount %d: read kernel: %v", i, err)
-		}
-		if rk.Petname != tc.want {
-			t.Errorf("mount %d: petname = %q, want %q", i, rk.Petname, tc.want)
-		}
+	// The name lives in the kernel namespace (D15) and the operator gives it exactly: a second kernel
+	// asking for a name already given is refused, never suffixed into a name nobody chose.
+	if _, err := mountKernelForTest(t, k, ctx, key1, "remote"); err != nil {
+		t.Fatalf("first mount: %v", err)
+	}
+	if _, err := mountKernelForTest(t, k, ctx, key2, "remote"); !errors.Is(err, kernel.ErrInvalidInput) {
+		t.Fatalf("second mount of the same name: want ErrInvalidInput, got %v", err)
+	}
+	if rk, _ := k.ReadKernel(ctx, key2); rk != nil && rk.Petname != "" {
+		t.Errorf("the refused kernel was named %q", rk.Petname)
 	}
 }
 
@@ -1659,12 +1651,14 @@ func TestLocalPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The inbound resolve question carries the handle bare, the request being addressed to this
-	// kernel, and is answered with the stable (id, handle). An id or a key is no handle (D15).
-	if id, handle, err := k.LocalPrincipal(ctx, "alice"); err != nil || id != u.ID || handle != "alice" {
-		t.Errorf("LocalPrincipal = (%q,%q,%v), want (%q,alice,nil)", id, handle, err, u.ID)
+	// The inbound resolve question carries the user bare, the request being addressed to this
+	// kernel, by handle or by id, and is answered with the stable (id, handle). A key is neither (D15).
+	for _, ref := range []string{"alice", u.ID} {
+		if id, handle, err := k.LocalPrincipal(ctx, ref); err != nil || id != u.ID || handle != "alice" {
+			t.Errorf("LocalPrincipal(%q) = (%q,%q,%v), want (%q,alice,nil)", ref, id, handle, err, u.ID)
+		}
 	}
-	for _, ref := range []string{"@alice", "nobody", u.ID, testKernelKey(31)} {
+	for _, ref := range []string{"@alice", "nobody", testKernelKey(31)} {
 		if _, _, err := k.LocalPrincipal(ctx, ref); err == nil {
 			t.Errorf("LocalPrincipal(%q): expected error", ref)
 		}
@@ -1732,12 +1726,12 @@ func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	}
 }
 
-// TestColdResolveIndexesAndBinds: a verified outbound resolve must leave the action USABLE, not
-// merely cached. It is indexed for lookup (§9 — otherwise buying an action removes it from search,
-// since the proxy shadows the discovery row it replaces) and it binds a petname (§13 first
-// meaningful use). Both are asserted through the real ResolveAction path, not by calling the
-// helpers directly — that is what the previous coverage missed.
-func TestColdResolveIndexesAndBinds(t *testing.T) {
+// TestColdResolveIndexesAndNamesNothing: a verified outbound resolve must leave the action USABLE,
+// not merely cached. It is indexed for lookup (§9 — otherwise buying an action removes it from
+// search, since the proxy shadows the discovery row it replaces), and it makes the peer known
+// without naming it: only the operator binds a petname (D15). Both are asserted through the real
+// ResolveAction path, not by calling the helpers directly.
+func TestColdResolveIndexesAndNamesNothing(t *testing.T) {
 	newPeer := func(t *testing.T, handle string) (kernel.ActionManifest, string) {
 		t.Helper()
 		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -1799,13 +1793,14 @@ func TestColdResolveIndexesAndBinds(t *testing.T) {
 				t.Errorf("resolved proxy %s is absent from the lexical index: %v", a.ID, ids)
 			}
 
-			// Bound: first meaningful use names the peer (§13), seeded from its valid nickname.
+			// Known, never named: only the operator binds a petname (D15), and the nickname the peer
+			// gives itself stays beside its key.
 			rk, err := k.ReadKernel(ctx, key)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rk.Petname != tc.nickname {
-				t.Errorf("petname = %q, want %q (first meaningful use must bind)", rk.Petname, tc.nickname)
+			if rk.Petname != "" || rk.Nickname != tc.nickname {
+				t.Errorf("petname = %q, nickname = %q; want no petname and the nickname %q", rk.Petname, rk.Nickname, tc.nickname)
 			}
 		})
 	}
@@ -2407,8 +2402,8 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["peer"] != "settle-peer" {
-		t.Errorf("expected Meta[peer]=settle-peer, got %+v", err)
+	if !errors.As(err, &ke) || ke.Meta["peer"] != base64.RawURLEncoding.EncodeToString(pub) {
+		t.Errorf("expected Meta[peer] to be the peer's key, got %+v", err)
 	}
 	// Settled as a failure, not parked: no pending trace, exactly one failure transaction.
 	if pend, _ := st.ListPendingRemoteTraces(ctx); len(pend) != 0 {
@@ -2536,8 +2531,8 @@ func TestSettleRemoteFailureClassification(t *testing.T) {
 			// class must never be attributed to the peer's funding or its refusal.
 			if tc.want != kernel.ErrExecutionFailed {
 				var ke *kernel.KernelError
-				if !errors.As(err, &ke) || ke.Meta["peer"] != "settle-peer" {
-					t.Errorf("expected Meta[peer]=settle-peer, got %+v", err)
+				if !errors.As(err, &ke) || ke.Meta["peer"] != base64.RawURLEncoding.EncodeToString(pub) {
+					t.Errorf("expected Meta[peer] to be the peer's key, got %+v", err)
 				}
 			} else if errors.Is(err, kernel.ErrPeerUnfunded) || errors.Is(err, kernel.ErrUnauthorized) {
 				t.Error("an executed failure must not be reported as a funding or refusal condition")
@@ -2845,7 +2840,7 @@ func knownPeer(k *kernel.Kernel, ctx context.Context, publicKey string) (string,
 // kernel known and bind a petname — what a verified action or user resolve does.
 func mountKernelForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, publicKey, petname string) (string, error) {
 	t.Helper()
-	if _, err := k.BindPetname(ctx, publicKey, petname, false); err != nil {
+	if _, err := k.BindPetname(ctx, publicKey, petname); err != nil {
 		return "", err
 	}
 	return knownPeer(k, ctx, publicKey)
@@ -2855,7 +2850,7 @@ func mountKernelForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, pub
 // (§13) — what a verified resolve does before the proxy is addressed as owner@petname/name.
 func bindPetnameForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, publicKey, petname string) {
 	t.Helper()
-	if _, err := k.BindPetname(ctx, publicKey, petname, false); err != nil {
+	if _, err := k.BindPetname(ctx, publicKey, petname); err != nil {
 		t.Fatalf("bind petname %s: %v", petname, err)
 	}
 }
@@ -2863,8 +2858,8 @@ func bindPetnameForTest(t *testing.T, k *kernel.Kernel, ctx context.Context, pub
 // ---- Kernel lifecycle and Stiegler naming (§13) ----
 
 // TestKernelLifecycleSeparation pins the three operations apart: observation names nothing and funds
-// nothing, provisioning opens an account without naming, and only our own outbound act binds a
-// petname. That separation is what keeps a nickname unable to capture a local name.
+// nothing, provisioning opens an account without naming, and only the operator binds a petname.
+// That separation is what keeps a nickname unable to capture a local name.
 func TestKernelLifecycleSeparation(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -2896,13 +2891,9 @@ func TestKernelLifecycleSeparation(t *testing.T) {
 		t.Errorf("provisioning must preserve observation: nickname=%q about=%q", rk.Nickname, rk.About)
 	}
 
-	// 3. Bind: automatic binding seeds from the cached nickname.
-	got, err := k.BindPetname(ctx, key, "", false)
-	if err != nil {
-		t.Fatalf("BindPetname: %v", err)
-	}
-	if got != "acme" {
-		t.Errorf("automatic bind seeded %q, want the cached nickname acme", got)
+	// 3. Bind: only the operator names a kernel (D15), exactly as asked.
+	if got, err := k.BindPetname(ctx, key, "acme"); err != nil || got != "acme" {
+		t.Fatalf("BindPetname = %q, %v; want acme", got, err)
 	}
 
 	// A later nickname change never retargets the bound petname (§13).
@@ -2911,35 +2902,6 @@ func TestKernelLifecycleSeparation(t *testing.T) {
 	}
 	if rk, _ = k.ReadKernel(ctx, key); rk.Petname != "acme" || rk.Nickname != "renamed" {
 		t.Errorf("nickname change retargeted the petname: petname=%q nickname=%q", rk.Petname, rk.Nickname)
-	}
-}
-
-// TestBindPetnameFallsBackToMechanical: with no usable nickname the automatic seed is k-<key8>, so a
-// cold call by raw key always ends up with something addressable.
-func TestBindPetnameFallsBackToMechanical(t *testing.T) {
-	st := newTestStore(t)
-	k := newTestKernel(st)
-	ctx := context.Background()
-	setupSys(t, k, st)
-
-	for _, tc := range []struct{ name, nickname string }{
-		{"absent", ""},
-		{"key-shaped", testKernelKey(9)},
-		{"contains slash", "bad/name"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			key := testKernelKey(20 + len(tc.name))
-			if err := k.ObserveKernel(ctx, key, tc.nickname, ""); err != nil {
-				t.Fatal(err)
-			}
-			got, err := k.BindPetname(ctx, key, "", false)
-			if err != nil {
-				t.Fatalf("BindPetname: %v", err)
-			}
-			if want := "k-" + key[:8]; got != want {
-				t.Errorf("petname = %q, want the mechanical %q", got, want)
-			}
-		})
 	}
 }
 
@@ -2952,20 +2914,15 @@ func TestBindPetnameExactRejectsCollision(t *testing.T) {
 	setupSys(t, k, st)
 	first, second := testKernelKey(3), testKernelKey(4)
 
-	if _, err := k.BindPetname(ctx, first, "taken", true); err != nil {
+	if _, err := k.BindPetname(ctx, first, "taken"); err != nil {
 		t.Fatalf("first bind: %v", err)
 	}
-	if _, err := k.BindPetname(ctx, second, "taken", true); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.BindPetname(ctx, second, "taken"); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Fatalf("explicit collision: want ErrInvalidInput, got %v", err)
-	}
-	// Automatic binding of the same seed still suffixes rather than failing.
-	got, err := k.BindPetname(ctx, second, "taken", false)
-	if err != nil || got != "taken-2" {
-		t.Errorf("automatic bind = %q (%v), want taken-2", got, err)
 	}
 	// A petname may never take a key or id shape, or the resolver's disjointness collapses (§14).
 	for _, bad := range []string{testKernelKey(5), uuid.New().String(), "with/slash", "with@at"} {
-		if _, err := k.BindPetname(ctx, testKernelKey(6), bad, true); !errors.Is(err, kernel.ErrInvalidInput) {
+		if _, err := k.BindPetname(ctx, testKernelKey(6), bad); !errors.Is(err, kernel.ErrInvalidInput) {
 			t.Errorf("BindPetname(%q): want ErrInvalidInput, got %v", bad, err)
 		}
 	}
@@ -2983,7 +2940,7 @@ func TestHandleAndPetnameShareOneString(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	key := testKernelKey(7)
-	if got, err := k.BindPetname(ctx, key, "minibox", true); err != nil || got != "minibox" {
+	if got, err := k.BindPetname(ctx, key, "minibox"); err != nil || got != "minibox" {
 		t.Fatalf("petname bind alongside an identical handle: got %q, %v", got, err)
 	}
 	u, err := k.ResolveLocalPrincipal(ctx, "minibox@k")
@@ -2996,8 +2953,8 @@ func TestHandleAndPetnameShareOneString(t *testing.T) {
 	}
 }
 
-// TestKernelMountIdempotentUnderConcurrency: concurrent first use of one key converges on one
-// petname, and concurrent binds of one seed across distinct keys stay distinct.
+// TestKernelMountIdempotentUnderConcurrency: concurrent binds of one key converge on one petname, and
+// of one name across distinct keys give it to exactly one.
 func TestKernelMountIdempotentUnderConcurrency(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
@@ -3012,7 +2969,7 @@ func TestKernelMountIdempotentUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if name, err := k.BindPetname(ctx, key, "converge", false); err == nil {
+			if name, err := k.BindPetname(ctx, key, "converge"); err == nil {
 				names[i] = name
 			}
 			if _, err := knownPeer(k, ctx, key); err != nil {
@@ -3027,26 +2984,26 @@ func TestKernelMountIdempotentUnderConcurrency(t *testing.T) {
 		}
 	}
 
-	// Distinct keys racing for one seed each get a distinct petname.
+	// Distinct keys racing for one name: exactly one is given it, the rest are refused, never suffixed.
 	var wg2 sync.WaitGroup
-	got := make([]string, n)
+	won := make([]bool, n)
 	for i := 0; i < n; i++ {
 		wg2.Add(1)
 		go func(i int) {
 			defer wg2.Done()
-			got[i], _ = k.BindPetname(ctx, testKernelKey(100+i), "rival", false)
+			_, err := k.BindPetname(ctx, testKernelKey(100+i), "rival")
+			won[i] = err == nil
 		}(i)
 	}
 	wg2.Wait()
-	seen := map[string]bool{}
-	for i, name := range got {
-		if name == "" {
-			t.Fatalf("bind %d produced no petname", i)
+	winners := 0
+	for _, w := range won {
+		if w {
+			winners++
 		}
-		if seen[name] {
-			t.Fatalf("petname %q was bound twice", name)
-		}
-		seen[name] = true
+	}
+	if winners != 1 {
+		t.Fatalf("%d kernels were given one petname, want exactly one", winners)
 	}
 }
 
@@ -3394,7 +3351,7 @@ func TestEveryReadPathReprices(t *testing.T) {
 			t.Errorf("%s price = %d, want %d", name, got.Price, want)
 		}
 	}
-	listed, err := k.Catalog(ctx, kernel.CatalogQuery{CallerID: caller.ID, Local: true, PeerKey: pubB64, PeerHandle: "bob"}, 50, 0)
+	listed, err := k.Catalog(ctx, kernel.CatalogQuery{CallerID: caller.ID, Local: true, PeerKey: pubB64, PeerUser: "bob"}, 50, 0)
 	if err != nil || len(listed) == 0 {
 		t.Fatalf("listing: %d rows, err %v", len(listed), err)
 	}
@@ -4327,5 +4284,70 @@ func TestServedCallAsksForItsGrantorOnceBeforeFunding(t *testing.T) {
 	}
 	if after, _ := st.ReadUser(ctx, owner.ID); after.Locked != 0 {
 		t.Errorf("seller has %d locked after the call settled", after.Locked)
+	}
+}
+
+// A principal reaches what an address does (D15). Here: a user and an action by the owner's id,
+// read by one reader. On a peer: the resolve request carries the id as typed, a manifest naming that
+// owner by id answers it — one naming someone else does not — and the cached copy is then found by
+// the id as well as by the handle, without asking again.
+func TestPrincipalsResolveLikeAddresses(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := base64.RawURLEncoding.EncodeToString(pub)
+	m := kernel.ActionManifest{ActionID: "ra-id", OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: "greet",
+		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
+		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now()}
+	sig, err := testNet.SignManifest(priv, &m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Signature = sig
+	fake := &fakeFederationHTTP{resolveManifest: &m, resolveUserID: "remote-bob-id", resolveHandle: "bob"}
+	k := newTestKernelWithHTTP(st, fake)
+	k.SetSecretBox(b64Box{})
+	self := k.SelfKey(ctx)
+	owner := setupUser(t, st, "id-owner", 0)
+	local := createBearerAction(t, k, owner.ID, "local", 0)
+
+	if p, err := k.ResolvePrincipal(ctx, owner.ID+"@"+self); err != nil || !p.IsUser(owner.ID) {
+		t.Errorf("a local user by principal: %+v, %v", p, err)
+	}
+	if a, err := k.ResolveAction(ctx, owner.ID+"@k/local"); err != nil || a.ID != local.ID {
+		t.Errorf("a local action by its owner's id: %v, %v", a, err)
+	}
+	if p, err := k.ResolvePrincipal(ctx, "remote-bob-id@"+key); err != nil || p.UserID != "remote-bob-id" || p.Kernel != key {
+		t.Errorf("a remote user by principal: %+v, %v", p, err)
+	}
+	// Resolving a user makes the peer known and names it nothing: only the operator does (D15).
+	if rk, err := k.ReadKernel(ctx, key); err != nil || rk == nil || rk.Petname != "" {
+		t.Errorf("a user resolve left the peer %+v, %v; want it known and unnamed", rk, err)
+	}
+
+	a, err := k.ResolveAction(ctx, "remote-bob-id@"+key+"/greet")
+	if err != nil || a.OwnerUserID != "remote-bob-id" {
+		t.Fatalf("a remote action by its owner's id: %v, %v", a, err)
+	}
+	if got := fake.resolvedRefs; len(got) != 1 || got[0] != "remote-bob-id/greet" {
+		t.Errorf("the resolve carried %v; want the owner's id as typed", got)
+	}
+	fake.resolveManifest = nil
+	for _, ref := range []string{"remote-bob-id@" + key + "/greet", "bob@" + key + "/greet"} {
+		if a2, err := k.ResolveAction(ctx, ref); err != nil || a2.ID != a.ID {
+			t.Errorf("cached copy by %s: %v, %v", ref, a2, err)
+		}
+	}
+	if len(fake.resolvedRefs) != 1 {
+		t.Errorf("the cached copy was resolved again: %v", fake.resolvedRefs)
+	}
+
+	// A manifest that names another owner by id does not answer a request for this one.
+	other := m
+	other.OwnerID, other.ActionID, other.Name = "someone-else", "ra-other", "greet2"
+	other.Signature, _ = testNet.SignManifest(priv, &other)
+	fake.resolveManifest = &other
+	if _, err := k.ResolveAction(ctx, "remote-bob-id@"+key+"/greet2"); !errors.Is(err, kernel.ErrUnauthorized) {
+		t.Errorf("a manifest for another owner was accepted: %v", err)
 	}
 }

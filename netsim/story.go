@@ -661,11 +661,11 @@ func (s *story) outstanding(seller string) ([]settlement, error) {
 	}
 	var body struct {
 		Owed []struct {
-			ID         string `json:"id"`
-			Peer       string `json:"peer"`
-			Obligation int64  `json:"obligation"`
-			Amount     int64  `json:"amount"`
-			Status     string `json:"status"`
+			ID         string                   `json:"id"`
+			Peer       struct{ Address string } `json:"peer"`
+			Obligation int64                    `json:"obligation"`
+			Amount     int64                    `json:"amount"`
+			Status     string                   `json:"status"`
 		} `json:"owed"`
 	}
 	if err := json.Unmarshal([]byte(out), &body); err != nil {
@@ -673,7 +673,7 @@ func (s *story) outstanding(seller string) ([]settlement, error) {
 	}
 	found := make([]settlement, 0, len(body.Owed))
 	for _, r := range body.Owed {
-		found = append(found, settlement{ID: r.ID, Creditor: seller, Debtor: r.Peer,
+		found = append(found, settlement{ID: r.ID, Creditor: seller, Debtor: r.Peer.Address,
 			Amount: r.Amount, Obligation: r.Obligation, Status: r.Status})
 	}
 	return found, nil

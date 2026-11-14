@@ -90,15 +90,26 @@ and, where applicable, `meta`:
 
 ```
 {"code":"schema_violation","error":"field msg: required field missing"}
-{"code":"grant_required","error":"grant required for bob@acme/mail","meta":{"action":"bob@acme/mail"}}
+{"code":"grant_required","error":"grant required for bob@acme/mail","meta":{"action":"<owner-id>@<kernel-key>/mail"}}
 ```
 
-The metadata supplies context for recovery. For example, `grant_required`
+The message names parties and actions by address; `meta` names them by
+principal, so a program can act on those values across kernels. The metadata
+supplies context for recovery. For example, `grant_required`
 identifies the action requiring consent, while peer errors identify the remote
 kernel. A pending call includes `process_id` and `pending_since`, allowing the
 program to follow its existing execution.
 A settled failure carries `tx_id` and `charge` in the error's `meta`; the charge
 is a decimal string in base units, and can be zero.
+
+## Who called an action
+
+Every action receives its immediate caller and its process owner as principals
+set by the kernel. The caller is the user who requested this call; for a child
+call, it is the composing action's owner. The process owner is the user who
+began the run, including when work continues on another kernel. HTTP and
+WebAssembly actions read these values through the interfaces described in
+[Composition](providing/composition.html).
 
 ## Units
 

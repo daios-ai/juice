@@ -79,14 +79,17 @@ causes an error, so a misspelling cannot cause the command to use the selected
 account instead. Unattended programs should always specify a login: the client
 selection may change as a person uses other accounts on the same machine.
 
-## The two names a kernel has
+## Naming a kernel
 
-A kernel has a name of its own and, on each other kernel, a petname:
+A kernel has a public key and a name of its own. On another kernel it has a
+petname only if that kernel's operator gives it one:
 
 | Name | Chosen by | Where it resolves |
 |---|---|---|
+| Public key | generated when the kernel is created | on every kernel; it is the kernel's identity |
 | Own name | the kernel's operator, at first boot (`kernel_handle`) | on that kernel, as the kernel segment of its users' and actions' addresses, `alice@acme`, `bob@acme/echo`; and on your machine, since a client records a kernel under the name it calls itself |
-| Petname | one kernel's operator, for another kernel | on that kernel only, in `owner@kernel/name` and `handle@kernel` |
+| Petname | one kernel's operator, with `admin peer rename` | on that kernel only, in `owner@kernel/name` and `handle@kernel` |
+| Nickname | the remote kernel's operator | never; shown as `~name` beside the key when no petname is bound |
 
 A kernel's own name is a petname it binds to its own key, so no peer can be given
 it there. Two kernels may call themselves the same thing; their public keys are

@@ -112,7 +112,7 @@ flow_lookup() {
     assert_eq "lookup.hit_carries_evidence" ok "$(python3 -c "
 import sys, json
 rows = (json.loads(sys.argv[1]).get('result') or {}).get('results') or []
-hit = next((r for r in rows if r.get('action') == 'alice@k/zqxwvprobe'), None)
+hit = next((r for r in rows if (r.get('action') or {}).get('address') == 'alice@k/zqxwvprobe'), None)
 assert hit is not None, rows
 assert 'evidence' in hit, sorted(hit)
 print('ok')" "$hit" 2>/dev/null)"

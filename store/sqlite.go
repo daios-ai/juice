@@ -787,21 +787,21 @@ func visibleTo(includeLocal bool) string {
 // and order are applied: a caller's own actions in every state, every other live one visible to it
 // (visibleTo), and, for a local caller, the actions discovered on peers that no live cached copy
 // already shows, keyed as the FTS mirror keys them. A superuser sees every action. An owner narrows
-// it: a local account, or one user of a peer by the handle its cached copies keep.
+// it: a local account, or one user of a peer by the handle or id its cached copies keep.
 func (s *DB) ListCatalog(ctx context.Context, q kernel.CatalogQuery, limit, offset int) ([]kernel.CatalogEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT a.id AS id, '' AS doc, a.title AS title FROM `+actionsFrom+`
 		 WHERE a.deleted_at IS NULL AND (?1 OR (a.owner_kernel='' AND a.owner_user_id=?2) OR (`+visibleTo(q.Local)+`))
 		   AND (?3='' OR (a.owner_kernel='' AND a.owner_user_id=?3))
-		   AND (?4='' OR (a.owner_kernel=?4 AND a.owner_handle=?5))
+		   AND (?4='' OR (a.owner_kernel=?4 AND (a.owner_handle=?5 OR a.owner_user_id=?5)))
 		 UNION ALL
 		 SELECT '', d.kernel_public_key||'/'||d.action_id, d.title FROM discovery_docs d
-		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel_public_key=?4 AND d.handle=?5))
+		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel_public_key=?4 AND (d.handle=?5 OR d.owner_id=?5)))
 		   AND NOT EXISTS (SELECT 1 FROM actions p
 		     WHERE p.owner_kernel=d.kernel_public_key AND p.remote_action_id=d.action_id
 		       AND p.active=1 AND p.deleted_at IS NULL)
 		 ORDER BY title, id, doc LIMIT ?7 OFFSET ?8`,
-		q.Superuser, q.CallerID, q.OwnerID, q.PeerKey, q.PeerHandle, q.Local, limit, offset)
+		q.Superuser, q.CallerID, q.OwnerID, q.PeerKey, q.PeerUser, q.Local, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list catalog")
 	}
@@ -897,13 +897,13 @@ func (s *DB) scanAction(row *sql.Row) (*kernel.Action, error) {
 	return a, nil
 }
 
-// ReadProxyByName reads a peer's cached action by its owner's handle and its name. A user renamed on
-// the peer can leave an older copy under the handle a newer owner now holds; the copy refreshed last
-// answers.
-func (s *DB) ReadProxyByName(ctx context.Context, peerKey, handle, name string) (*kernel.Action, error) {
+// ReadProxyByName reads a peer's cached action by its owner — the handle or the id, which never share
+// a shape (D15) — and its name. A user renamed on the peer can leave an older copy under the handle a
+// newer owner now holds; the copy refreshed last answers.
+func (s *DB) ReadProxyByName(ctx context.Context, peerKey, owner, name string) (*kernel.Action, error) {
 	return s.scanAction(s.db.QueryRowContext(ctx,
-		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.owner_kernel=? AND a.owner_handle=? AND a.name=? AND a.deleted_at IS NULL
-		 ORDER BY a.updated_at DESC LIMIT 1`, peerKey, handle, name))
+		`SELECT `+actionCols+` FROM `+actionsFrom+` WHERE a.owner_kernel=?1 AND (a.owner_handle=?2 OR a.owner_user_id=?2) AND a.name=?3
+		 AND a.deleted_at IS NULL ORDER BY a.updated_at DESC LIMIT 1`, peerKey, owner, name))
 }
 
 func (s *DB) RetireProxy(ctx context.Context, peerKey, ownerID, name string) error {
@@ -3363,50 +3363,28 @@ func (s *DB) ReadKernelVault(ctx context.Context, publicKey string) (string, err
 	return address, dbErr(err, "read vault")
 }
 
-// BindPetname assigns a kernel's local petname inside one transaction, so concurrent first use of
-// the same key converges on a single name (§13). Automatic binding (exact=false) preserves any
-// existing petname, else takes the desired seed, suffixing -2…-99 on collision. An explicit
-// operator bind (exact=true) is exact: an occupied petname is an error, never silently suffixed.
-// Returns the bound petname.
-func (s *DB) BindPetname(ctx context.Context, publicKey, desired string, exact bool) (string, error) {
-	var bound string
-	err := s.withTx(ctx, "bind petname", func(tx *sql.Tx) error {
-		var existing sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT petname FROM kernels WHERE public_key=?`, publicKey).Scan(&existing); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return kernel.ErrNotFound.Wrapf("kernel %s is not known", publicKey)
-			}
-			return dbErr(err, "read petname")
+// BindPetname binds a known kernel's petname exactly: a name another kernel holds is refused.
+func (s *DB) BindPetname(ctx context.Context, publicKey, petname string) error {
+	return s.withTx(ctx, "bind petname", func(tx *sql.Tx) error {
+		var known int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kernels WHERE public_key=?`, publicKey).Scan(&known); err != nil {
+			return dbErr(err, "read kernel")
 		}
-		if !exact && existing.String != "" {
-			bound = existing.String
-			return nil
+		if known == 0 {
+			return kernel.ErrNotFound.Wrapf("kernel %s is not known", publicKey)
 		}
-		for i := 0; i < 99; i++ {
-			candidate := desired
-			if i > 0 {
-				candidate = desired + "-" + strconv.Itoa(i+1)
-			}
-			var owner string
-			err := tx.QueryRowContext(ctx, `SELECT public_key FROM kernels WHERE petname=?`, candidate).Scan(&owner)
-			switch {
-			case errors.Is(err, sql.ErrNoRows) || owner == publicKey:
-			case err != nil:
-				return dbErr(err, "check petname")
-			case exact:
-				return kernel.ErrInvalidInput.Wrapf("petname %s is already bound to another kernel", candidate)
-			default:
-				continue
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE kernels SET petname=? WHERE public_key=?`, candidate, publicKey); err != nil {
-				return dbErr(err, "bind petname")
-			}
-			bound = candidate
-			return nil
+		var owner string
+		err := tx.QueryRowContext(ctx, `SELECT public_key FROM kernels WHERE petname=?`, petname).Scan(&owner)
+		switch {
+		case errors.Is(err, sql.ErrNoRows) || owner == publicKey:
+		case err != nil:
+			return dbErr(err, "check petname")
+		default:
+			return kernel.ErrInvalidInput.Wrapf("petname %s is already bound to another kernel", petname)
 		}
-		return kernel.ErrInvalidInput.Wrapf("no free petname for %s (tried 99 variants)", desired)
+		_, err = tx.ExecContext(ctx, `UPDATE kernels SET petname=? WHERE public_key=?`, petname, publicKey)
+		return dbErr(err, "bind petname")
 	})
-	return bound, err
 }
 
 // SetKernelSuspended suspends a kernel in one statement, making its row when it has none (D15), so a
@@ -3537,14 +3515,14 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,handle,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
-				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+				`INSERT INTO discovery_docs (kernel_public_key,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 				 ON CONFLICT (kernel_public_key, action_id) DO UPDATE SET
-				   handle=excluded.handle, title=excluded.title, description=excluded.description, name=excluded.name,
+				   handle=excluded.handle, owner_id=excluded.owner_id, title=excluded.title, description=excluded.description, name=excluded.name,
 				   input_schema=excluded.input_schema, output_schema=excluded.output_schema,
 				   serving_price=excluded.serving_price, embed_vec=excluded.embed_vec,
 				   generation=excluded.generation, observed_at=excluded.observed_at`,
-				kernelPublicKey, d.Handle, d.Title, d.Description, d.ActionID, d.Name,
+				kernelPublicKey, d.Handle, d.OwnerID, d.Title, d.Description, d.ActionID, d.Name,
 				string(inJSON), string(outJSON), d.ServingPrice, embed, generation,
 				timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
@@ -3633,7 +3611,7 @@ func (s *DB) CatalogScan(ctx context.Context, kernelPublicKey string) (string, i
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kernel_public_key,handle,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
+		`SELECT kernel_public_key,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
 		 FROM discovery_docs`)
 	if err != nil {
 		return nil, dbErr(err, "list discovery docs")
@@ -3642,7 +3620,7 @@ func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, err
 		var d kernel.DiscoveryDoc
 		var inJSON, outJSON, observedAt string
 		var embed sql.NullString
-		if err := scan(&d.KernelPublicKey, &d.Handle, &d.Title, &d.Description, &d.ActionID, &d.Name,
+		if err := scan(&d.KernelPublicKey, &d.Handle, &d.OwnerID, &d.Title, &d.Description, &d.ActionID, &d.Name,
 			&inJSON, &outJSON, &d.ServingPrice, &embed, &observedAt); err != nil {
 			return nil, err
 		}
@@ -4310,15 +4288,6 @@ func (s *DB) ApplyGrantOp(ctx context.Context, kernelKey, userID string, at int6
 		return kernel.ErrInvalidState.Wrap("a newer grant operation was already applied")
 	}
 	return nil
-}
-
-// HoldsGrantOn reports whether a user of this kernel holds a grant on an action a kernel serves.
-func (s *DB) HoldsGrantOn(ctx context.Context, userID, kernelKey string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM grants g JOIN actions a ON a.id=g.action_id
-		  WHERE g.grantor_kernel='' AND g.grantor_user_id=? AND a.owner_kernel=?`, userID, kernelKey).Scan(&n)
-	return n > 0, dbErr(err, "holds grant on kernel")
 }
 
 // openProcessByRef is the open process of this kernel a reference names. A process serving another

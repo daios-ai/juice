@@ -61,9 +61,11 @@ func DefaultConfig() Config {
 // URLs (loopback is permitted regardless).
 func (k *Kernel) AllowsLocalSources() bool { return k.cfg.AllowLocalSources }
 
-// NativeFunc is the signature for a registered native action handler.
-// targetID is the action's owner; callerID is the call caller; ownerUserID is the process owner.
-type NativeFunc func(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error)
+// NativeFunc is the signature for a registered native action handler. targetID is the action's
+// owner; callerID is the call caller; ownerUserID is the local process's owner, who pays; parties is
+// what every executed action is told (D8): the immediate caller and the process owner as principals,
+// the latter the user who began the run, which on a kernel serving a foreign call is not the payer.
+type NativeFunc func(ctx context.Context, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string, parties Parties) (map[string]any, error)
 
 // Kernel is the central service object.
 // It holds all dependencies and exposes operations to both the CLI and HTTP server.
@@ -444,7 +446,7 @@ func (k *Kernel) ListGrantViews(ctx context.Context, callerID string) ([]*GrantV
 	}
 	out := make([]*GrantView, 0, len(grants))
 	for _, g := range grants {
-		v := &GrantView{Action: g.ActionID, ProviderKey: connKey[g.ConnectionID], CreatedAt: g.CreatedAt}
+		v := &GrantView{Action: KeyAddress(g.ActionID), ProviderKey: connKey[g.ConnectionID], CreatedAt: g.CreatedAt}
 		if a, err := k.store.ReadAction(ctx, g.ActionID); err == nil && a != nil {
 			v.Action = k.ActionAddress(ctx, a)
 			if auth, err := k.openAuthInput(a); err == nil && auth != nil {
@@ -609,7 +611,7 @@ func (k *Kernel) selectorOwner(ctx context.Context, sel string) (owner *Account,
 	if !kr.Local {
 		return nil, "", ErrInvalidInput.Wrapf("%s is on another kernel; only actions of %s can be named here", a.String(), k.OwnName(ctx))
 	}
-	owner, err = k.store.ReadUserByHandle(ctx, a.Handle)
+	owner, err = k.readUser(ctx, a.User)
 	if err != nil || owner == nil {
 		return nil, "", ErrNotFound.Wrap("owner not found")
 	}
@@ -743,9 +745,9 @@ type ConsentGroup struct {
 
 // ConsentAction is one action within a consent group, with its current grant status.
 type ConsentAction struct {
-	ActionID string `json:"action_id"`
-	Action   string `json:"action"`
-	Granted  bool   `json:"granted"`
+	ActionID string      `json:"action_id"`
+	Action   AddressView `json:"action"`
+	Granted  bool        `json:"granted"`
 }
 
 // ConsentPlan is the grouped, per-provider result of expanding a selector — what user connect walks.
@@ -948,7 +950,7 @@ func (k *Kernel) AttachBearerGrants(ctx context.Context, caller Principal, sel, 
 
 // RevokeGrantsBySelector deletes the caller's grants whose action matches the selector (§8): grants
 // only — connections survive. Returns the revoked action refs.
-func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, caller Principal, sel string) ([]string, error) {
+func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, caller Principal, sel string) ([]AddressView, error) {
 	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
@@ -960,7 +962,7 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, caller Principal, s
 	if err != nil {
 		return nil, err
 	}
-	var revoked []string
+	var revoked []AddressView
 	for _, g := range grants {
 		a, aerr := k.store.ReadAction(ctx, g.ActionID)
 		if aerr != nil || a == nil || !a.Owner().IsUser(owner.ID) || !selectorPathMatches(path, a.Name) {
@@ -978,7 +980,7 @@ func (k *Kernel) RevokeGrantsBySelector(ctx context.Context, caller Principal, s
 
 // RevokeConnection deletes the caller's Connection for a provider and cascades its grants (§8):
 // disconnect --account. Returns the affected action refs.
-func (k *Kernel) RevokeConnection(ctx context.Context, caller Principal, providerKey string) ([]string, error) {
+func (k *Kernel) RevokeConnection(ctx context.Context, caller Principal, providerKey string) ([]AddressView, error) {
 	if err := k.requireGrantor(ctx, caller); err != nil {
 		return nil, err
 	}
@@ -987,7 +989,7 @@ func (k *Kernel) RevokeConnection(ctx context.Context, caller Principal, provide
 		return nil, err
 	}
 	grants, _ := k.store.ListGrantsByUser(ctx, caller)
-	var refs []string
+	var refs []AddressView
 	for _, g := range grants {
 		if g.ConnectionID == conn.ID {
 			refs = append(refs, k.ActionAddressByID(ctx, g.ActionID))
@@ -1881,12 +1883,12 @@ func (k *Kernel) ReadCallableAction(ctx context.Context, ref, callerID string) (
 // live one visible to it (D5), and for a local caller those discovered on peers (§13) — or one
 // owner's share of it. The superuser sees every action in every state.
 type CatalogQuery struct {
-	CallerID   string
-	Local      bool // a local session caller: local actions and discovered ones are visible to it
-	Superuser  bool
-	OwnerID    string // narrows to one account of this kernel
-	PeerKey    string // narrows to one user of a peer, with PeerHandle
-	PeerHandle string
+	CallerID  string
+	Local     bool // a local session caller: local actions and discovered ones are visible to it
+	Superuser bool
+	OwnerID   string // narrows to one account of this kernel
+	PeerKey   string // narrows to one user of a peer, with PeerUser, their handle or id
+	PeerUser  string
 }
 
 // CatalogEntry is one row of a catalog page: an action, or a discovered one by its discovery key.
@@ -1933,10 +1935,10 @@ func (k *Kernel) Catalog(ctx context.Context, q CatalogQuery, limit, offset int)
 	return out, nil
 }
 
-// DiscoveredAddress is the address a discovered action is called by (D15): its owner on its kernel,
-// named as this kernel names that kernel.
-func (k *Kernel) DiscoveredAddress(ctx context.Context, d *DiscoveryDoc) string {
-	return Address{Handle: d.Handle, Kernel: k.KernelName(ctx, d.KernelPublicKey), Name: d.Name}.String()
+// DiscoveredAddress names a discovered action (D15): its owner on its kernel, named as this kernel
+// names that kernel, and its principal from the signed manifest it was learned from.
+func (k *Kernel) DiscoveredAddress(ctx context.Context, d *DiscoveryDoc) AddressView {
+	return k.KernelAddress(ctx, d.KernelPublicKey).under(d.Handle, d.OwnerID, d.KernelPublicKey).Child(d.Name)
 }
 
 // ListAllActions returns all actions regardless of active state.
@@ -2436,15 +2438,15 @@ func (k *Kernel) validateActivation(ctx context.Context, a *Action) error {
 // and root trace via BeginRun, then executes the root call. Shared by Run and RunFederated: the
 // caller is a user here, with its account, or a peer that has been admitted, with none.
 func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, action *Action, args map[string]any, idempotencyRecordID, quoteHash string, buyer BuyerTerms, key runKey) (*CallReply, error) {
-	// Pre-funding validity gate: Call re-runs checkCallPreconditions authoritatively, but a
-	// rejection must not leave a funded process behind (a rejected call creates no transaction,
-	// §6), so the same check runs here before BeginRun parks funds. The grant check is the paying
-	// user's: a local root run's caller; for a peer, whoever the kernel the run began on names (D10).
+	// Pre-funding validity gate: a rejection must not leave a funded process behind (a rejected call
+	// creates no transaction, §6), so the precondition check runs here, before BeginRun parks funds,
+	// and Call takes its answer rather than asking again. The process owner is a local root run's
+	// caller; for a peer, whoever the kernel the run began on names (D10).
 	origin := &Process{OwnerUserID: localID(caller), OriginKernel: buyer.ProcessKernel, Ref: buyer.ProcessRef}
 	if !caller.Local() && origin.OriginKernel == "" {
 		origin.OriginKernel = caller.Kernel // a call that carries no reference began, for all we know, at its sender
 	}
-	grantor, err := k.checkCallPreconditions(ctx, caller, origin, action, args, true, quoteHash)
+	runOwner, err := k.checkCallPreconditions(ctx, caller, origin, action, args, true, quoteHash)
 	if err != nil {
 		return nil, err
 	}
@@ -2530,7 +2532,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 			// read it.
 			k.log.With(ctx).Info("call.provider_unfunded", "action", action.Name, "owner", seller.Handle,
 				"balance", seller.Available, "price", lockPrice)
-			return nil, PeerUnfundedError(k.KernelName(ctx, caller.Kernel))
+			return nil, PeerUnfundedError(k.KernelAddress(ctx, caller.Kernel))
 		}
 	} else if acct.Available < lockPrice+value {
 		return nil, ErrInsufficientFunds.Wrapf("your balance is %s and this call costs %s; ask the operator to credit your account",
@@ -2576,7 +2578,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 	}
 	if err := k.store.BeginRun(ctx, p, t, owner.ID, lockPrice, reserve, limit); err != nil {
 		if !caller.Local() && errors.Is(err, ErrInsufficientFunds) {
-			return nil, PeerUnfundedError(k.KernelName(ctx, caller.Kernel))
+			return nil, PeerUnfundedError(k.KernelAddress(ctx, caller.Kernel))
 		}
 		return nil, err
 	}
@@ -2589,7 +2591,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 		Action:              action,
 		Args:                args,
 		ExistingTraceID:     t.ID,
-		Grantor:             &grantor,
+		Owner:               &runOwner,
 		IdempotencyRecordID: idempotencyRecordID,
 	})
 	if reply != nil {

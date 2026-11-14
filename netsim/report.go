@@ -112,6 +112,10 @@ func num(m map[string]any, field string) int64 {
 }
 
 func str(m map[string]any, field string) string {
+	// A party or an action reads as its address, as a person reads it (D15).
+	if v, ok := m[field].(map[string]any); ok {
+		m, field = v, "address"
+	}
 	s, _ := m[field].(string)
 	return s
 }
@@ -440,7 +444,7 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 // the action it bought, so a call is cross-kernel when the action lives on another kernel — not
 // when the caller happened to type a reference with an @ in it.
 // catalogueKey is the story's name for the action a transaction records: its address,
-// owner@kernel/name, without the kernel, which the recording kernel names by its own petname.
+// owner@kernel/name, without the kernel, which the recording kernel names by its own petname or key.
 func catalogueKey(address string) string {
 	owner, rest, _ := strings.Cut(address, "@")
 	_, name, _ := strings.Cut(rest, "/")

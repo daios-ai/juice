@@ -71,10 +71,20 @@ $ juice user me
   ]
   connectors: [
     {
-      "directory": "bob@acme",
+      "directory": {
+        "address": "bob@acme",
+        "principal": "<user-id>@<kernel-key>"
+      },
       "connections": [ … ],
       "actions": [
-        { "action": "bob@acme/mail", "provider_key": "bearer:httpbin.org", … }
+        {
+          "action": {
+            "address": "bob@acme/mail",
+            "principal": "<user-id>@<kernel-key>/mail"
+          },
+          "provider_key": "bearer:httpbin.org",
+          …
+        }
       ]
     }
   ]
@@ -91,7 +101,10 @@ To revoke access for a selection of actions, use:
 ```console
 $ juice user disconnect bob@acme/mail
   revoked: [
-    "bob@acme/mail"
+    {
+      "address": "bob@acme/mail",
+      "principal": "<user-id>@<kernel-key>/mail"
+    }
   ]
 ```
 
@@ -113,8 +126,10 @@ stores the credential and applies it to requests to the upstream service;
 intermediate kernels and composing actions do not receive it. An action serving
 your run uses your grant, never its owner's grant.
 
-Your kernel must be reachable when an application on another kernel checks
-your grant. If it cannot be reached, that use is refused; your consent remains.
+Your kernel must be reachable for any call served elsewhere in your run,
+including actions that need no grant. If it cannot be reached, admission is
+refused; your consent remains. See [Calling an action on another
+kernel](running.html#calling-an-action-on-another-kernel).
 
 Changes to the action's source, schemas, or price revoke its grants, as do
 credential replacement and deletion. Disabling the action or changing its

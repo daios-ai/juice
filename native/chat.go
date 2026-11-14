@@ -31,7 +31,7 @@ func Chat(model string, m kernel.Chatter) Spec {
 			}), "The model's reply, as one choice"),
 		}),
 		Handler: func(Host) kernel.NativeFunc {
-			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+			return func(ctx context.Context, args map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 				return executeChat(ctx, args, m)
 			}
 		},

@@ -84,7 +84,7 @@ func TestTransferLocal(t *testing.T) {
 
 	// A beneficiary on another kernel must be resolved there before anything is charged (P11): with
 	// no federation to ask, the run is refused and alice keeps her balance.
-	if _, err := k.BindPetname(ctx, base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "other", true); err != nil {
+	if _, err := k.BindPetname(ctx, base64.RawURLEncoding.EncodeToString(make([]byte, 32)), "other"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := k.Run(ctx, kernel.RunRequest{CallerID: alice.ID, ActionRef: "sys@k/transfer", Args: map[string]any{"target": "bob@other", "amount": float64(10)}}); !errors.Is(err, kernel.ErrNotFound) {

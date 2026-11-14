@@ -266,7 +266,7 @@ flow_task_consent() {
     make_user "$db" "$hs" "$hb" bob
     _msg() { resultf "$(jj "$db" "$ha" run sys@k/message "{\"to\":\"$1\",\"message\":\"$2\"}")" task_id; }
     _sees() { jj "$db" "$hb" task list | grep -q -- "$1" && echo yes || echo no; }
-    _status() { jj "$db" "$hb" user requesters | python3 -c 'import sys,json;print(next((r["status"] for r in json.load(sys.stdin) if r["requester"]=="alice@k"),""))'; }
+    _status() { jj "$db" "$hb" user requesters | python3 -c 'import sys,json;print(next((r["status"] for r in json.load(sys.stdin) if r["requester"]["address"]=="alice@k"),""))'; }
 
     local own; own=$(_msg alice@k "a note to self")
     assert_contains "task_consent.self_addressed_visible" "$own" "$(jj "$db" "$ha" task list)"

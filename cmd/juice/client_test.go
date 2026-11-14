@@ -221,7 +221,7 @@ func TestRunCommandPostsToServer(t *testing.T) {
 			// The read the client makes before it commits money: the reference resolves to a
 			// row, and the row states the terms.
 			if r.URL.Query().Get("ref") != "" {
-				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "a@k/b"}})
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": map[string]any{"address": "a@k/b", "principal": "a@k/b"}}})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h-1", "price": 5})
@@ -270,7 +270,7 @@ func TestActionCreateBinaryWasmRoutesToArtifact(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotSource, gotArtifact = req.Source, req.WasmArtifact
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "a@k/m"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": map[string]any{"address": "a@k/m", "principal": "a@k/m"}})
 	})
 	if _, err := execTestCmd(t, actionCreateCmd(), "m",
 		"--kind", "wasm", "--source", f, "--price", "0", "--description", "d"); err != nil {
@@ -301,7 +301,7 @@ func TestArtifactFileIsEncoded(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			got = req.WasmArtifact
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": "a@k/m"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "action": map[string]any{"address": "a@k/m", "principal": "a@k/m"}})
 		})
 		if _, err := execTestCmd(t, actionCreateCmd(), "m",
 			"--kind", "wasm", "--artifact", artifact, "--price", "0", "--description", "d"); err != nil {
@@ -347,7 +347,7 @@ func TestActionUpdateSendsArtifact(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotArtifact = req.WasmArtifact
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act1", "action": "a@k/m"}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act1", "action": map[string]any{"address": "a@k/m", "principal": "a@k/m"}}})
 	})
 	if _, err := execTestCmd(t, actionUpdateCmd(), "act1", "--artifact", artifactB64); err != nil {
 		t.Fatal(err)

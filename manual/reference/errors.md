@@ -25,8 +25,8 @@ the exit status is still nonzero.
 | `insufficient_funds` | 6 | 402 | Not enough available balance. For a cross-kernel call you need the price **and** the stake. |
 | `timeout` | 7 | 504 | The call may have executed. If the first run used `--external-key`, repeat with the same key, action, and input. Otherwise, establish its outcome before running again. |
 | `grant_required` | 8 | 403 | You have not connected the upstream account this action needs. `meta.action` names what to connect. Nothing was charged and no failure was recorded against the action. |
-| `peer_unreachable` | 9 | 502 | The client cannot reach a kernel, or a federated call provably never reached its peer and was fully refunded. Exit 9 also applies to an unreachable local server. `meta.kernel` names a registered server; `meta.peer` names a federation peer. |
-| `peer_unfunded` | 10 | 402 | The other kernel will not serve on credit: either it has lent your kernel as much as it allows, or its provider cannot fund the work. `meta.peer` names it. |
+| `peer_unreachable` | 9 | 502 | The client cannot reach a kernel, or a federated call provably never reached its peer and was fully refunded. Exit 9 also applies to an unreachable local server. `meta.kernel` names a registered server; `meta.peer` names a federation peer by its public key. |
+| `peer_unfunded` | 10 | 402 | The other kernel will not serve on credit: either it has lent your kernel as much as it allows, or its provider cannot fund the work. `meta.peer` names it by its public key. |
 | `terms_changed` | 11 | 409 | The pinned contract no longer matches. Nothing was charged; the message carries the current price and hash. |
 | `invalid_state` | 1 | 409 | The operation does not apply here: completing a task that is not waiting, using a model that is not configured, editing a cached remote action. |
 | `execution_failed` | 1 | 500 | The action ran and failed. What was not consumed is refunded. |
@@ -37,8 +37,8 @@ the exit status is still nonzero.
 
 | Field | On | Contains |
 |---|---|---|
-| `action` | `grant_required` | the action reference to connect |
-| `peer` | `peer_unreachable`, `peer_unfunded`, `unauthorized` from a peer | the petname if one is bound, otherwise the public key |
+| `action` | `grant_required` | the action's principal, `<owner-id>@<kernel-key>/name` |
+| `peer` | `peer_unreachable`, `peer_unfunded`, `unauthorized` from a peer | the peer's public key; its petname, when one is bound, appears only in the message |
 | `kernel` | an unreachable registered server | its name in the client |
 | `tx_id` | a settled execution failure | the committed transaction |
 | `charge` | a settled execution failure | the amount drawn, in base units, encoded as a string |

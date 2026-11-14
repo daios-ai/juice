@@ -49,6 +49,9 @@ func hostTaskComplete(taskPtr, taskLen, inputPtr, inputLen uint32) uint64
 //go:wasmimport juice log
 func hostLog(lvlPtr, lvlLen, msgPtr, msgLen uint32)
 
+//go:wasmimport juice parties
+func hostParties() uint64
+
 // alloc must be exported so the kernel can write input bytes into WASM memory.
 // Uses TinyGo's heap allocator to avoid stomping on runtime data at address 0.
 //
@@ -90,6 +93,14 @@ func JuiceCall(action string, args []byte) ([]byte, error) {
 		return []byte("{}"), nil
 	}
 	return out, nil
+}
+
+// JuiceParties returns who this call is for, as the kernel resolved it: its immediate caller and its
+// process owner, each a principal written user_id@kernel_key, or empty for nobody.
+func JuiceParties() (caller, owner string) {
+	var p struct{ Caller, Owner string }
+	_ = json.Unmarshal(_unpack(hostParties()), &p)
+	return p.Caller, p.Owner
 }
 
 // JuiceTaskCreate creates a waiting task bound to the current process and trace,

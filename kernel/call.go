@@ -42,10 +42,10 @@ type callRequest struct {
 	// BeginRun (root call) or BeginTaskCall (task completion). Call adopts it instead of
 	// calling BeginSubcall, and uses its pre-locked amount as gross.
 	ExistingTraceID string
-	// Grantor, when non-nil, is what beginRun's precondition check found before it funded the root
-	// trace. Call takes it and does not check again: a second answer could differ from the first,
-	// and a refusal after funding would leave the funds locked under no transaction.
-	Grantor *Principal
+	// Owner, when non-nil, is the process owner beginRun's precondition check found before it funded
+	// the root trace. Call takes it and does not ask again: a second answer could differ from the
+	// first, and a refusal after funding would leave the funds locked under no transaction.
+	Owner *Principal
 	// IdempotencyRecordID, if non-empty, causes CommitCall/CommitFailedCall to atomically
 	// mark the pending idempotency record as complete. Set only by federation handlers.
 	IdempotencyRecordID string
@@ -313,7 +313,7 @@ func (k *Kernel) ResolveAction(ctx context.Context, ref string) (*Action, error)
 		return nil, ErrNotFound.Wrapf("action %s not found", ref)
 	}
 	if kr.Local {
-		a, err := k.ResolveLocalAction(ctx, r.Handle, r.Name)
+		a, err := k.ResolveLocalAction(ctx, r.User, r.Name)
 		if err != nil {
 			return nil, ErrNotFound.Wrapf("action %s not found", ref)
 		}
@@ -334,15 +334,15 @@ func indexCandidates(name string) []string {
 
 // ResolveLocalAction resolves an action of this kernel by its owner's handle and name, exact then
 // index: the local half of ResolveAction, and what the inbound resolve protocol calls, since its
-// request is addressed to this kernel and carries the owner bare. Proxies belong to a peer's user and
-// are addressable only beneath that kernel's name, never here.
-func (k *Kernel) ResolveLocalAction(ctx context.Context, ownerHandle, name string) (*Action, error) {
-	owner, err := k.store.ReadUserByHandle(ctx, ownerHandle)
-	if err != nil || owner == nil {
+// request is addressed to this kernel and carries the owner bare, by handle or id. Proxies belong to
+// a peer's user and are addressable only beneath that kernel's name, never here.
+func (k *Kernel) ResolveLocalAction(ctx context.Context, owner, name string) (*Action, error) {
+	u, err := k.readUser(ctx, owner)
+	if err != nil || u == nil {
 		return nil, ErrNotFound.Wrap("action not found")
 	}
 	for _, n := range indexCandidates(name) {
-		a, aerr := k.store.ReadActionByOwnerName(ctx, owner.ID, n)
+		a, aerr := k.store.ReadActionByOwnerName(ctx, u.ID, n)
 		if aerr == nil && a != nil {
 			return a, nil
 		}
@@ -354,7 +354,7 @@ func (k *Kernel) ResolveLocalAction(ctx context.Context, ownerHandle, name strin
 // no round trip, else one resolve on the peer (D13).
 func (k *Kernel) resolveRemote(ctx context.Context, kr KernelRef, r Address) (*Action, error) {
 	for _, name := range indexCandidates(r.Name) {
-		row, aerr := k.store.ReadProxyByName(ctx, kr.Key, r.Handle, name)
+		row, aerr := k.store.ReadProxyByName(ctx, kr.Key, r.User, name)
 		if aerr != nil || row == nil {
 			continue
 		}
@@ -390,14 +390,15 @@ func (k *Kernel) ensureBasePrice(ctx context.Context, a *Action) (*Action, error
 	if a == nil || a.Kind != KindRemoteProxy || a.BasePrice != nil {
 		return a, nil
 	}
-	return k.resolveRemote(ctx, KernelRef{Key: a.OwnerKernel}, Address{Handle: a.OwnerHandle, Kernel: a.OwnerKernel, Name: a.Name})
+	return k.resolveRemote(ctx, KernelRef{Key: a.OwnerKernel}, Address{User: a.OwnerUserID, Kernel: a.OwnerKernel, Name: a.Name})
 }
 
 // manifestAnswers reports whether a resolve reply answers the reference that was requested: same
-// owner, and either the action named or that path's index child — for a root request (empty name),
-// the index itself. The one place the index convention is read on the receiving side of the wire.
+// owner, named by handle or by id, and either the action named or that path's index child — for a
+// root request (empty name), the index itself. The one place the index convention is read on the
+// receiving side of the wire.
 func manifestAnswers(r Address, m *ActionManifest) bool {
-	if NormalizeHandle(m.OwnerHandle) != NormalizeHandle(r.Handle) {
+	if m.OwnerID != r.User && NormalizeHandle(m.OwnerHandle) != NormalizeHandle(r.User) {
 		return false
 	}
 	if r.Name == "" {
@@ -415,7 +416,7 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, r Addres
 	if resolver == nil {
 		return nil, ErrNotFound.Wrapf("action %s not found", r.String())
 	}
-	res, err := resolver.ResolveRemoteAction(ctx, peerKey, r.Handle, r.Name)
+	res, err := resolver.ResolveRemoteAction(ctx, peerKey, r.User, r.Name)
 	if err != nil {
 		return nil, err // ErrPeerUnreachable / ErrNotFound already typed by the resolver
 	}
@@ -434,13 +435,10 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, r Addres
 	if !manifestAnswers(r, m) {
 		return nil, ErrUnauthorized.Wrapf("peer served a manifest for %s/%s, not %s", m.OwnerHandle, m.Name, r.String())
 	}
-	// First meaningful use (§13): our own verified outbound act, so this is where a local petname
-	// is bound — seeded from the kernel's cached nickname when one is known, else mechanically.
-	// Naming turns on the petname being unbound, so a peer that called us first is named here too.
-	// A non-exact bind keeps any existing petname, so this is idempotent. Best-effort and must
-	// never fail the call.
-	if _, berr := k.BindPetname(ctx, peerKey, "", false); berr != nil {
-		k.log.With(ctx).Warn("kernel.petname.bind_failed", "public_key", peerKey, "error", berr.Error())
+	// First meaningful use (§13): our own verified outbound act makes the kernel known. It names it
+	// nothing — only the operator binds a petname (D15). Best-effort and must never fail the call.
+	if kerr := k.knowKernel(ctx, peerKey); kerr != nil {
+		k.log.With(ctx).Warn("kernel.know_failed", "public_key", peerKey, "error", kerr.Error())
 	}
 	// Where the peer is paid, proved by its own rail key. A buyer owes the moment it calls, so it
 	// learns this with the contract rather than waiting for a gossip pass that may not have run
@@ -562,12 +560,12 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 
 	// 5 + 6. Liveness, visibility, input-schema validation and the grant, enforced for every path:
 	// here for a subcall and a task completion, and by beginRun for a root call, on the same
-	// snapshot and before it funds (req.Grantor). A task completion (req.TaskID != "") bound
+	// snapshot and before it funds (req.Owner). A task completion (req.TaskID != "") bound
 	// visibility at creation (§10), so it skips that check.
-	var grantor Principal
-	if req.Grantor != nil {
-		grantor = *req.Grantor
-	} else if grantor, err = k.checkCallPreconditions(ctx, caller, process, action, req.Args, req.TaskID == "", ""); err != nil {
+	var owner Principal
+	if req.Owner != nil {
+		owner = *req.Owner
+	} else if owner, err = k.checkCallPreconditions(ctx, caller, process, action, req.Args, req.TaskID == "", ""); err != nil {
 		return nil, err
 	}
 
@@ -735,15 +733,17 @@ func (k *Kernel) call(ctx context.Context, req callRequest) (*CallReply, error) 
 			// that would repeat a request the peer never received. Only here — retryRemoteTrace
 			// never fail-fasts, since a parked request may already have executed. Mirrors the
 			// executor-not-configured settlement above (a funded trace must never be stranded).
-			pn := k.KernelName(ctx, action.OwnerKernel)
-			logger.Warn("remote.unreachable", "action", action.Name, "peer", pn)
+			pn := k.KernelAddress(ctx, action.OwnerKernel)
+			logger.Warn("remote.unreachable", "action", action.Name, "peer", pn.Address)
 			return fail(PeerUnreachableError(pn).Wrapf(
 				"peer %s is unreachable; the call was not sent and has been refunded", pn), latency)
 		}
 		return k.settleRemoteCall(ctx, logger, action, ktx, trace, callerWalletID, callerWalletKind, req, mp, fr, latency)
 	}
 
-	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, localID(caller), process.OwnerUserID, grantor)
+	self := k.SelfKey(ctx)
+	parties := Parties{Caller: caller.Written(self), Owner: owner.Written(self)}
+	reply, _, execErr := k.execute(ctx, action, req.Args, trace, action.OwnerUserID, localID(caller), process.OwnerUserID, owner, parties)
 	latency := time.Since(started).Seconds()
 	ktx.EndedAt = time.Now().UTC()
 
@@ -903,9 +903,9 @@ func canCall(caller Principal, action *Action) bool {
 // for every entry path, and beginRun runs it once before funding so an invalid root call never
 // creates a funded process (§6). checkVisibility is false only for a task completion, which bound
 // visibility at creation (§10): a liveness failure still resets it to waiting, a later visibility
-// change does not. The grant check stays keyed on the process: delegated consent binds to whoever
-// began the run it serves (§8), and the grantor it finds is returned for the executor. quoteHash is
-// empty on every path but a pinned root run.
+// change does not. The process owner is resolved here, on the process: delegated consent binds to
+// whoever began the run it serves (§8), and the owner found is returned for the executor. quoteHash
+// is empty on every path but a pinned root run.
 func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, p *Process, action *Action, args map[string]any, checkVisibility bool, quoteHash string) (Principal, error) {
 	if !action.Active {
 		return Principal{}, ErrInvalidState.Wrap("action is inactive")
@@ -929,46 +929,57 @@ func (k *Kernel) checkCallPreconditions(ctx context.Context, caller Principal, p
 	if err := ValidateInput(action.InputSchema, args); err != nil {
 		return Principal{}, err
 	}
-	return k.checkGrantRequired(ctx, p, action)
+	return k.checkOwner(ctx, p, action)
 }
 
-// checkGrantRequired implements §8 lazy consent: a call to an action that needs its caller's grant,
-// in a process whose grantor holds none, is rejected here — before any funds are locked and before
-// any transaction exists (a precondition rejection creates no transaction, §6, and does not dent the
-// provider's failure stats, §9). Other actions pass through untouched. It returns the grantor whose
-// credential the executor applies.
+// checkOwner resolves the process owner an executed action is told it runs for (D8, D10), and
+// implements §8 lazy consent on it: a call to an action that needs its caller's grant, in a process
+// whose owner holds none, is rejected here — before any funds are locked and before any transaction
+// exists (a precondition rejection creates no transaction, §6, and does not dent the provider's
+// failure stats, §9). The owner it returns is what the grant check read, so dispatch tells the
+// action exactly that, and nothing asks the kernel the run began on twice.
 //
-// An action here needs one by its auth scheme; an undecryptable or malformed auth payload is left
-// for the executor's fail-closed path, not treated as consent. A cached remote action needs one by
-// its manifest: in a run begun here the owner's own record of consent is read, so the refusal costs
-// nothing, while in a run begun elsewhere only the serving kernel can decide and the call goes on.
-func (k *Kernel) checkGrantRequired(ctx context.Context, p *Process, action *Action) (Principal, error) {
+// An action here needs a grant by its auth scheme; an undecryptable or malformed auth payload is
+// left for the executor's fail-closed path, not treated as consent. A cached remote action is not
+// executed here, so it is told nothing; it needs a grant by its manifest: in a run begun here the
+// owner's own record of consent is read, so the refusal costs nothing, while in a run begun
+// elsewhere only the serving kernel can decide and the call goes on.
+func (k *Kernel) checkOwner(ctx context.Context, p *Process, action *Action) (Principal, error) {
 	if action.Kind == KindRemoteProxy {
 		if !action.RequiresGrant || p.OriginKernel != "" {
 			return Principal{}, nil
 		}
-	} else if !k.isDelegatedAuth(action) {
-		return Principal{}, nil
+		return Principal{}, k.requireGrant(ctx, User(p.OwnerUserID), action)
 	}
-	grantor, err := k.grantorOf(ctx, p)
+	owner, err := k.processOwner(ctx, p)
 	if err != nil {
 		return Principal{}, err
 	}
-	if grantor.UserID != "" {
-		if _, gerr := k.store.ReadGrant(ctx, grantor, action.ID); gerr == nil {
-			return grantor, nil
-		} else if !errors.Is(gerr, ErrNotFound) {
-			return Principal{}, gerr
+	if k.isDelegatedAuth(action) {
+		if err := k.requireGrant(ctx, owner, action); err != nil {
+			return Principal{}, err
 		}
 	}
-	return Principal{}, GrantRequiredError(k.ActionAddress(ctx, action))
+	return owner, nil
 }
 
-// grantorOf is whose grants a process's calls consult (D10): the owner of a process begun here; for
-// one serving another kernel's call, the user that kernel says began the run — asked each time,
-// never remembered, since only it knows whether that process is still open (D2). It is never the
-// served action's own owner. Nobody is an answer; a kernel that cannot be reached is an error.
-func (k *Kernel) grantorOf(ctx context.Context, p *Process) (Principal, error) {
+// requireGrant refuses a call whose process owner holds no grant on the action (§8).
+func (k *Kernel) requireGrant(ctx context.Context, owner Principal, action *Action) error {
+	if owner.UserID != "" {
+		_, err := k.store.ReadGrant(ctx, owner, action.ID)
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+	}
+	return GrantRequiredError(k.ActionAddress(ctx, action))
+}
+
+// processOwner is who a process's calls run for (D10): the owner of a process begun here; for one
+// serving another kernel's call, the user that kernel says began the run — asked each time, never
+// remembered, since only it knows whether that process is still open (D2). It is never the served
+// action's own owner, who funds the work there. Nobody is an answer; a kernel that cannot be
+// reached is an error.
+func (k *Kernel) processOwner(ctx context.Context, p *Process) (Principal, error) {
 	switch {
 	case p.OriginKernel == "":
 		return User(p.OwnerUserID), nil
@@ -984,9 +995,17 @@ func (k *Kernel) grantorOf(ctx context.Context, p *Process) (Principal, error) {
 	return k.askProcess(ctx, p.OriginKernel, "check", p.Ref, "")
 }
 
+// Parties is what an executed action is told about who it runs for (D8): its immediate caller and
+// its process owner, each a principal written user_id@kernel_key, or empty for nobody. The kernel
+// resolves both once per call and hands the same pair to every executor; the caller supplies neither.
+type Parties struct {
+	Caller string `json:"caller"`
+	Owner  string `json:"owner"`
+}
+
 // execute dispatches to the correct execution backend for HTTP, WASM, and native actions.
 // KindRemoteProxy is handled separately in Call() via ExecuteFederation.
-func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string, grantor Principal) (map[string]any, string, error) {
+func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID, callerID, ownerUserID string, owner Principal, parties Parties) (map[string]any, string, error) {
 	switch action.Kind {
 	case KindHTTP:
 		if k.http == nil {
@@ -996,13 +1015,13 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 		// Signing is ready by dispatch (requireReceiptSigningReady, checked in Call); on the
 		// off chance it is not, an empty capability just disables composition for this call.
 		capability, _ := k.IssueCapability(trace.ID)
-		res, err := k.http.Execute(ctx, action, args, grantor, capability)
+		res, err := k.http.Execute(ctx, action, args, owner, parties, capability)
 		return res, "", err
 	case KindWasm:
-		res, err := k.executeWasm(ctx, action, args, trace, targetID)
+		res, err := k.executeWasm(ctx, action, args, trace, targetID, parties)
 		return res, "", err
 	case KindNative:
-		res, err := k.executeNative(ctx, action, args, targetID, callerID, ownerUserID, trace.ProcessID, trace.ID)
+		res, err := k.executeNative(ctx, action, args, targetID, callerID, ownerUserID, trace.ProcessID, trace.ID, parties)
 		return res, "", err
 	default:
 		return nil, "", ErrInvalidState.Wrapf("unknown action kind %q", action.Kind)
@@ -1010,16 +1029,16 @@ func (k *Kernel) execute(ctx context.Context, action *Action, args map[string]an
 }
 
 // executeNative dispatches to a registered native action handler.
-func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string) (map[string]any, error) {
+func (k *Kernel) executeNative(ctx context.Context, action *Action, args map[string]any, targetID, callerID, ownerUserID, processID, parentTraceID string, parties Parties) (map[string]any, error) {
 	fn, ok := k.nativeHandlers[action.Name]
 	if !ok {
 		return nil, ErrInvalidState.Wrapf("unknown native action %q", action.Name)
 	}
-	return fn(ctx, args, targetID, callerID, ownerUserID, processID, parentTraceID)
+	return fn(ctx, args, targetID, callerID, ownerUserID, processID, parentTraceID, parties)
 }
 
 // executeWasm runs a compiled WASM artifact.
-func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID string) (result map[string]any, execErr error) {
+func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[string]any, trace *Trace, targetID string, parties Parties) (result map[string]any, execErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			execErr = ErrExecutionFailed.Wrapf("wasm panic: %v", r)
@@ -1051,6 +1070,7 @@ func (k *Kernel) executeWasm(ctx context.Context, action *Action, args map[strin
 		kernel:   k,
 		traceID:  trace.ID,
 		targetID: targetID,
+		parties:  parties,
 	}
 
 	outputJSON, err := k.scripts.Execute(ctx, artifact, inputJSON, host)
@@ -1096,7 +1116,11 @@ type kernelHostFunctions struct {
 	kernel   *Kernel
 	traceID  string
 	targetID string // action owner; used as CallerID for subcalls
+	parties  Parties
 }
+
+// Parties tells the running module its caller and process owner (D8), as the kernel resolved them.
+func (h *kernelHostFunctions) Parties() Parties { return h.parties }
 
 func (h *kernelHostFunctions) Call(ctx context.Context, actionName string, argsJSON []byte) ([]byte, error) {
 	var args map[string]any

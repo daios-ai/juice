@@ -22,6 +22,11 @@ another kernel refers to a different account. Kernels also keep accounts that
 represent their peers for recording and authorizing trade; these accounts have
 no user login and hold no money.
 
+Every user account has a **principal**, written `user_id@kernel_key`. It stays
+with that account through renames and is never reused. A principal can replace
+an address wherever you name an existing user or action. Creating an account,
+renaming one, and logging in still take a handle.
+
 A **login** is the client's saved session for a user account. It is written as
 `handle@kernel` and determines both the account a command acts as and the kernel
 it contacts. The kernel name in a login is the name registered by that client,
@@ -34,7 +39,9 @@ kernel. Ordinary users see the records their own roles permit them to read.
 A **petname** is a name one kernel assigns to another for use in remote
 references. It is meaningful only on the assigning kernel. Since the remote
 kernel cannot choose this name, it cannot claim an existing local name merely
-by announcing a matching nickname.
+by announcing a matching nickname. Only the operator assigns a peer a petname,
+with `admin peer rename`. Until then, the peer is shown by its full key with
+its nickname beside it as `~name`; the nickname does not resolve.
 
 A **world** is a network with a single currency, in which a kernel counts all
 its balances, prices and payments. Kernels trade only with kernels in their own
@@ -61,7 +68,9 @@ A **reference** names an action as `owner@kernel/name`, on this kernel and on an
 other alike. The kernel is named as this kernel knows it: its own name for its own
 actions, a petname or public key for another kernel's. If the reference names no action directly, Juice tries its `index` child:
 `bob@acme` can resolve to `bob@acme/index`, and `bob@acme/mail` to `bob@acme/mail/index`. This
-convention gives a group of related actions an entry point.
+convention gives a group of related actions an entry point. Writing the owner
+by id and the kernel by key gives the action's principal,
+`user_id@kernel_key/name`, which programs can keep and use across kernels.
 
 **Visibility** determines an action's audience. A `private` action is available
 to its owner, a `local` action to users of its kernel, and a `public` action to

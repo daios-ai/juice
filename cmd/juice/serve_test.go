@@ -366,7 +366,7 @@ func TestServeCreateUser(t *testing.T) {
 	if _, ok := body["password_hash"]; ok {
 		t.Error("response must not contain password_hash")
 	}
-	if body["address"] != "http-alice@k" {
+	if addressOf(body["address"]) != "http-alice@k" {
 		t.Errorf("response address: got %v", body["address"])
 	}
 }
@@ -513,14 +513,14 @@ func TestServeCreateAndGetAction(t *testing.T) {
 	}
 	var action struct {
 		kernel.Action
-		ActionRef string `json:"action"`
+		ActionRef kernel.AddressView `json:"action"`
 	}
 	decodeResponse(t, resp, &action)
 	if action.ID == "" {
 		t.Error("expected action with ID")
 	}
 	// The owner is identified by @handle (owner_handle / action=@owner/name), never the raw UUID.
-	if action.ActionRef != "srv-actowner@k/"+action.Name {
+	if action.ActionRef.Address != "srv-actowner@k/"+action.Name {
 		t.Errorf("action owner: got ref=%q, want srv-actowner@k/%s", action.ActionRef, action.Name)
 	}
 	if action.OwnerUserID != "" {
@@ -1492,7 +1492,7 @@ func TestServeGetMe(t *testing.T) {
 	var got map[string]any
 	decodeResponse(t, resp, &got)
 
-	if got["address"] != "metest@k" {
+	if addressOf(got["address"]) != "metest@k" {
 		t.Errorf("address: got %v, want metest@k", got["address"])
 	}
 	if _, ok := got["description"]; !ok {
@@ -1887,7 +1887,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	localID, _ := makeUser(t, k, "local-caller")
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.BindPetname(ctx, peerKey, "peer-caller", false); err != nil {
+	if _, err := k.BindPetname(ctx, peerKey, "peer-caller"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1899,11 +1899,11 @@ func TestWaitingOnPeer(t *testing.T) {
 		t.Error("task addressed to a peer should be waiting_on_peer")
 	}
 	// A task addressed to the peer kernel itself names the kernel, bare: a user always carries `@`.
-	if pv.RequiredCaller != "peer-caller" {
+	if pv.RequiredCaller.Address != "peer-caller" {
 		t.Errorf("required_caller: got %q, want peer-caller", pv.RequiredCaller)
 	}
 	userTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{Kernel: peerKey, UserID: "alice-remote-id", Handle: "alice"}}
-	if got := enrichTask(k, ctx, userTask, names).RequiredCaller; got != "alice@peer-caller" {
+	if got := enrichTask(k, ctx, userTask, names).RequiredCaller; got.Address != "alice@peer-caller" {
 		t.Errorf("a task addressed to a user on the peer: got %q, want alice@peer-caller", got)
 	}
 	localTask := &kernel.TaskEntry{TaskNotice: waiting, RequiredCaller: kernel.Principal{UserID: localID}}
@@ -1911,7 +1911,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	if lv.WaitingOnPeer {
 		t.Error("task addressed to a local user should not be waiting_on_peer")
 	}
-	if !strings.HasSuffix(lv.RequiredCaller, "@"+testOwnName) {
+	if !strings.HasSuffix(lv.RequiredCaller.Address, "@"+testOwnName) {
 		t.Errorf("a local user is addressed on this kernel: got %q", lv.RequiredCaller)
 	}
 	doneTask := &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{Status: kernel.TaskDone}, RequiredCaller: kernel.Principal{Kernel: peerKey}}
@@ -2774,17 +2774,17 @@ func TestServeRendersATaskHeldByAPeer(t *testing.T) {
 	id, _ := makeUser(t, k, "peer-list-me")
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := k.BindPetname(ctx, peerKey, "holder", false); err != nil {
+	if _, err := k.BindPetname(ctx, peerKey, "holder"); err != nil {
 		t.Fatal(err)
 	}
 	v := enrichTask(k, ctx, &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s-1", UserID: id, Status: kernel.TaskWaiting},
 		HolderKey: peerKey, RequiredCaller: kernel.Principal{UserID: id}}, k.NewNames())
-	if v.RequiredCaller != "peer-list-me@"+testOwnName || v.Owner != "holder" || v.WaitingOnPeer {
+	if v.RequiredCaller.Address != "peer-list-me@"+testOwnName || v.Owner.Address != "holder" || v.WaitingOnPeer {
 		t.Fatalf("view = %+v; want required_caller peer-list-me@%s, owner holder, not waiting on a peer", v, testOwnName)
 	}
 	wire, _ := json.Marshal(v)
-	if strings.Contains(string(wire), id) {
-		t.Errorf("the view carries a raw user id: %s", wire)
+	if strings.Count(string(wire), id) != strings.Count(string(wire), id+"@") {
+		t.Errorf("the view carries a user id outside a principal: %s", wire)
 	}
 }
 
@@ -2818,7 +2818,7 @@ func TestServeRegistersABlockchainAddress(t *testing.T) {
 	}
 	resp = httpDo(t, srv, "GET", "/v1/me", nil, tok)
 	decodeResponse(t, resp, &got)
-	if got["blockchain_address"] != "0xabc" || got["address"] != "payee@"+testOwnName {
+	if got["blockchain_address"] != "0xabc" || addressOf(got["address"]) != "payee@"+testOwnName {
 		t.Errorf("me = %v; want both names apart", got)
 	}
 }

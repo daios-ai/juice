@@ -1087,7 +1087,7 @@ func TestTheCreditLimitCountsTheWholeObligation(t *testing.T) {
 	sys := setupSys(t, k, st)
 	seller := setupUser(t, st, "seller", 10000)
 	peer := peerWithAddress(t, k, st, "kpeerFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "0xbuyer")
-	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
 	})
 	act := setupAction(t, st, seller.ID, "quote", 100)
@@ -1170,7 +1170,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	ctx := context.Background()
 	seller := setupUser(t, st, "seller", 10000)
 	peer := peerWithAddress(t, k, st, "kpeerHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "")
-	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
 	})
 	act := setupAction(t, st, seller.ID, "quote", 100)
@@ -1188,7 +1188,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	if err := st.UpdateAction(ctx, free); err != nil {
 		t.Fatal(err)
 	}
-	k.RegisterNativeHandler("free", func(_ context.Context, _ map[string]any, _, _, _, _, _ string) (map[string]any, error) {
+	k.RegisterNativeHandler("free", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
 

@@ -89,5 +89,6 @@ run_flows \
     flow_fed_task_complete flow_ticket flow_ticket_too_large flow_transfer \
     flow_compose_remote_child flow_compose_partial_refund flow_compose_through_kernel flow_compose_returns_home flow_compose_ticket flow_compose_underfunded flow_compose_inner_unreachable flow_compose_middle_cannot_stake flow_compose_middle_crash flow_compose_cycle \
     flow_transaction_access flow_list_projections flow_admin_supervision flow_native_orphan_purge flow_time flow_metrics flow_message flow_task_consent flow_grant flow_grant_bearer \
-    flow_grant_remote flow_grant_remote_compose flow_grant_remote_waiting flow_grant_remote_disconnect flow_grant_remote_stale
+    flow_grant_remote flow_grant_remote_compose flow_grant_remote_waiting flow_grant_remote_disconnect flow_grant_remote_stale \
+    flow_principals_symmetric flow_caller_symmetric flow_petnames_explicit
 exit $?

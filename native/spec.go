@@ -41,7 +41,7 @@ type Spec struct {
 // this package can widen it — adding a capability is an edit here, in the open.
 type Host interface {
 	Lookup(ctx context.Context, req kernel.LookupRequest) ([]*kernel.LookupResult, error)
-	DiscoveredAddress(ctx context.Context, d *kernel.DiscoveryDoc) string
+	DiscoveredAddress(ctx context.Context, d *kernel.DiscoveryDoc) kernel.AddressView
 	OwnName(ctx context.Context) string
 	NewNames() *kernel.Names
 	ResolveAction(ctx context.Context, ref string) (*kernel.Action, error)
@@ -85,7 +85,7 @@ func All(d Deps) []Spec {
 	specs := []Spec{
 		Lookup(),
 		Chat("", d.LLM.Chat), JSON("", d.LLM.JSON), Embed("", d.LLM.Embedder), Decide("", d.LLM.Decide),
-		Time(), Sink(), Message(), Random(), Transfer(),
+		Time(), Sink(), Message(), Random(), Transfer(), Resolve(),
 		Web(d.Web), TinyGo(d.Compile, d.CompileSDK),
 	}
 	for _, m := range slices.Sorted(maps.Keys(d.LLM.Chats)) {
@@ -155,6 +155,16 @@ func objd(desc string, props map[string]any, required ...string) map[string]any 
 }
 
 func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+
+// addressSchema is how a native's reply names a party or an action (D15, D20): the address a person
+// reads, the principal a program keeps, and an unnamed kernel's own nickname.
+func addressSchema(desc string) map[string]any {
+	return objd(desc, map[string]any{
+		"address":   str("What a person reads and types, user@kernel[/name], named as this kernel names it"),
+		"principal": str("The same party on every kernel: user id @ kernel key [/name]"),
+		"nickname":  str("What a kernel without a petname here calls itself; shown after its key, never resolved"),
+	}, "address", "principal")
+}
 func integer(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }

@@ -1038,11 +1038,21 @@ func TestProcessEndReturnsBalance(t *testing.T) {
 
 // ---- task ----
 
+// addressOf reads the address a reply names a party or an action by (D15, D20).
+func addressOf(v any) string {
+	m, _ := v.(map[string]any)
+	s, _ := m["address"].(string)
+	return s
+}
+
+// assertActionRef checks a reply's action: an address a person reads, owner@kernel/name, beside the
+// principal a program keeps, owner_id@kernel_key/name.
 func assertActionRef(t *testing.T, v any) {
 	t.Helper()
-	s, ok := v.(string)
-	if !ok || s == "" {
-		t.Errorf("action field is not a non-empty string: %v", v)
+	s := addressOf(v)
+	p, _ := v.(map[string]any)["principal"].(string)
+	if s == "" || !strings.Contains(p, "@") || !strings.HasSuffix(p, s[strings.Index(s, "/"):]) {
+		t.Errorf("action field is not an address beside its principal: %v", v)
 		return
 	}
 	if strings.HasPrefix(s, "@") {
@@ -1332,7 +1342,7 @@ func TestServeCancelTask(t *testing.T) {
 	r := httpDo(t, srv, "POST", "/v1/tasks/"+sid[:8]+"/cancel", nil, callerTok)
 	var got map[string]any
 	decodeResponse(t, r, &got)
-	if got["id"] != sid || got["status"] != "cancelled" || got["owner"] != "cancel-owner@k" {
+	if got["id"] != sid || got["status"] != "cancelled" || addressOf(got["owner"]) != "cancel-owner@k" {
 		t.Errorf("decline answered %v; want the task cancelled, named by its owner", got)
 	}
 	if r := httpDo(t, srv, "POST", "/v1/tasks/"+sid+"/cancel", nil, callerTok); r.StatusCode != kernel.ErrInvalidState.HTTP {
@@ -1761,7 +1771,7 @@ func TestPrintTextParity(t *testing.T) {
 			OutputSchema: map[string]any{"type": "object"},
 		}, env.k.NewNames()),
 		&kernel.TransactionView{Transaction: &kernel.Transaction{ID: "t1", Status: "success", Gross: 10, Net: 8, Fee: 2}},
-		&taskWithAction{TaskNotice: kernel.TaskNotice{ID: "s1", Status: "waiting"}, Action: "alice/weather"},
+		&taskWithAction{TaskNotice: kernel.TaskNotice{ID: "s1", Status: "waiting"}, Action: kernel.AddressView{Address: "alice/weather", Principal: "u/weather"}},
 	}
 	for _, obj := range objects {
 		// Canonical key set from the marshaled object (what HTTP would send).
@@ -2065,7 +2075,7 @@ func TestTheFieldViewScalesOnlyTheFieldsItIsGiven(t *testing.T) {
 // writes money comes back the same way, while --json stays in the base units a program counts in.
 func TestMoneyIsShownTheWayItIsWritten(t *testing.T) {
 	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": "bob@k/echo", "price": 1500000})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "a-1", "action": map[string]any{"address": "bob@k/echo", "principal": "bob@k/echo"}, "price": 1500000})
 	})
 	for _, c := range []struct {
 		name string
@@ -2361,7 +2371,7 @@ func TestOnlyAHumanViewCostsAHealthRead(t *testing.T) {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": "bob@k/echo", "price": 1500000}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "a-1", "action": map[string]any{"address": "bob@k/echo", "principal": "bob@k/echo"}, "price": 1500000}})
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("JUICE_HOME", t.TempDir())
@@ -2397,7 +2407,7 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob@k/echo"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": map[string]any{"address": "bob@k/echo", "principal": "bob@k/echo"}}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1})
 		case r.URL.Path == "/v1/run":
@@ -2414,10 +2424,10 @@ func TestARunThatAuthorizesOnTheWayStillAnswersOnce(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(kernel.ConsentPlan{Groups: []kernel.ConsentGroup{{
 				Provider: "chat", ProviderKey: "pk", Scheme: kernel.AuthSchemeDelegatedBearer,
 				Connected: true, Covered: true,
-				Actions: []kernel.ConsentAction{{Action: "bob/echo"}},
+				Actions: []kernel.ConsentAction{{Action: kernel.AddressView{Address: "bob/echo", Principal: "u/echo"}}},
 			}}})
 		default: // POST /v1/grants
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "granted", "actions": []string{"bob/echo"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "granted", "actions": []kernel.AddressView{{Address: "bob/echo", Principal: "u@K/echo"}}})
 		}
 	})
 	// Somebody is at the terminal and says yes, which is what makes the run settle the consent
@@ -2550,7 +2560,7 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 	}
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	key := base64.RawURLEncoding.EncodeToString(pub)
-	if _, err := env.k.BindPetname(ctx, key, "shop", true); err != nil {
+	if _, err := env.k.BindPetname(ctx, key, "shop"); err != nil {
 		t.Fatal(err)
 	}
 	sys, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: kernel.SuperuserHandle + "@k", Password: "sys-pass"})
@@ -2870,7 +2880,7 @@ func TestARunAsksBeforeItSpendsAtATerminal(t *testing.T) {
 	stubKernel(t, 6, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": "bob@k/echo"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": map[string]any{"address": "bob@k/echo", "principal": "bob@k/echo"}}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 1500000})
 		default:
@@ -2973,7 +2983,7 @@ func TestATransferIsARunOfThisKernelsTransfer(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Query().Get("ref") != "":
 			refs = append(refs, r.URL.Query().Get("ref"))
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": r.URL.Query().Get("ref")}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "action": map[string]any{"address": r.URL.Query().Get("ref"), "principal": r.URL.Query().Get("ref")}}})
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/actions/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "act-1", "quote_hash": "h", "price": 0})
 		case r.Method == "POST" && r.URL.Path == "/v1/run":
@@ -3106,7 +3116,7 @@ func TestActionListNarrowsTheCatalog(t *testing.T) {
 	var asked []string
 	stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/me" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"address": "me@k"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"address": map[string]any{"address": "me@k", "principal": "u@K"}})
 			return
 		}
 		asked = append(asked, r.URL.RawQuery)
@@ -3142,7 +3152,7 @@ func TestActionTitleFlags(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": "invalid_input", "error": "title is required: a short name a person reads in a list"})
 			return
 		}
-		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "title": body["title"], "action": "bob@k/echo"}})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "act-1", "title": body["title"], "action": map[string]any{"address": "bob@k/echo", "principal": "bob@k/echo"}}})
 	})
 	if _, err := execTestCmd(t, actionCreateCmd(), "echo", "--source", "https://example.com"); err == nil ||
 		!strings.Contains(err.Error(), "title is required") {
@@ -3307,5 +3317,23 @@ func TestAdminKernelShowWritesTheRelease(t *testing.T) {
 	body["latest_release"] = "v0.17.4"
 	if out := show(); !strings.Contains(out, "Latest:     v0.17.4") || !strings.Contains(out, "NOTE: a newer release is available") {
 		t.Errorf("behind:\n%s", out)
+	}
+}
+
+// A party or an action reads as its address, with an unnamed kernel's own nickname after it (D15);
+// the principal is for programs. Any other object still reads as JSON.
+func TestRenderValueReadsAnAddress(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"address":"bob@k","principal":"u@KEY"}`:                     "bob@k",
+		`{"address":"bob@KEY","principal":"u@KEY","nickname":"acme"}`: "bob@KEY ~acme",
+	} {
+		if got := renderValue(json.RawMessage(raw)); got != want {
+			t.Errorf("renderValue(%s) = %q, want %q", raw, got, want)
+		}
+	}
+	for _, raw := range []string{`{"address":"bob@k"}`, `{"address":"bob@k","principal":"u@KEY","extra":1}`} {
+		if got := renderValue(json.RawMessage(raw)); !strings.Contains(got, "address") {
+			t.Errorf("renderValue(%s) = %q, want it left as JSON", raw, got)
+		}
 	}
 }

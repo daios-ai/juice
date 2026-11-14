@@ -534,7 +534,7 @@ func (k *Kernel) VerifyReceipt(ctx context.Context, subjectID, txID string) (*Re
 		TransactionID:         txID,
 		Unbound:               unbound,
 		Valid:                 checks.allHeld(),
-		RemoteKernelHandle:    k.KernelName(ctx, tx.RemoteSignerKey),
+		RemoteKernelHandle:    k.KernelAddress(ctx, tx.RemoteSignerKey),
 		RemoteKernelPublicKey: tx.RemoteSignerKey,
 		Checks:                checks,
 		Receipt:               &r,
@@ -805,7 +805,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 				// The remote refuses us credit: its limit is reached, or we owe it for a call it has
 				// not been paid for. Operator-actionable, so a client never renders it as the
 				// caller's own insufficient_funds.
-				failErr = PeerUnfundedError(k.KernelName(ctx, peer))
+				failErr = PeerUnfundedError(k.KernelAddress(ctx, peer))
 			case r.GrantRequired:
 				// The grantor holds no grant there. The action is as cached, so the proxy stays; this
 				// kernel's own record of the consent is what was wrong, and in a run begun here it
@@ -825,7 +825,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 			default:
 				// The peer will not serve us — suspended caller, or an action it refuses. Distinct
 				// from unreachable (retry) and unfunded (top up): a human must resolve it.
-				failErr = PeerRefusedError(k.KernelName(ctx, peer))
+				failErr = PeerRefusedError(k.KernelAddress(ctx, peer))
 			}
 		}
 		// The peer authored r.Reason; never adopt it into a record we sign (§6). Its verbatim text
@@ -1084,7 +1084,7 @@ func (k *Kernel) SelfKey(ctx context.Context) string {
 func taskReply(status int, body []byte, notDispatched bool, err error, peerKey string, out any) error {
 	if err != nil || notDispatched {
 		if notDispatched {
-			return PeerUnreachableError(peerKey)
+			return PeerUnreachableError(KeyAddress(peerKey))
 		}
 		return ErrTimeout.Wrapf(
 			"no reply from %s; the request may have executed there — retry to recover its result", peerKey).WithMeta("peer", peerKey)
@@ -1276,37 +1276,26 @@ func (k *Kernel) observeKernel(ctx context.Context, publicKey, nickname, about, 
 	return k.store.UpsertKernel(ctx, publicKey, nickname, about, blockchainAddress, blockchainProof, time.Now().UTC())
 }
 
-// BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming). Automatic binding
-// (exact=false, on our own verified outbound act) keeps any existing petname, else seeds from the
-// kernel's cached nickname when that is a valid bare name, else the mechanical k-<key8>; collisions
-// suffix locally. An explicit operator bind (exact=true) takes the requested name exactly and fails
-// if it is occupied — never silently suffixed. Petnames share the handle grammar and validator, so a
-// key- or id-shaped name is rejected and the resolver's syntactic disjointness holds (§14).
-func (k *Kernel) BindPetname(ctx context.Context, publicKey, desired string, exact bool) (string, error) {
+// BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming), exactly as asked: only
+// the operator names a kernel (D15), so an occupied name is refused, never suffixed, and nothing binds
+// one on its own. Petnames share the handle grammar and validator, so a key- or id-shaped name is
+// rejected and the resolver's syntactic disjointness holds (§14).
+func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (string, error) {
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return "", err
 	}
 	if err := k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC()); err != nil {
 		return "", err
 	}
-	seed := NormalizeHandle(desired)
-	if !exact && seed == "" {
-		if rk, err := k.store.ReadKernel(ctx, publicKey); err == nil && rk != nil {
-			seed = NormalizeHandle(rk.Nickname)
-		}
-	}
+	seed := NormalizeHandle(petname)
 	if ValidateHandle(seed) != nil {
-		if exact {
-			return "", ErrInvalidInput.Wrapf("petname %q is not a valid bare name", desired)
-		}
-		seed = "k-" + publicKey[:8] // every kernel key is 43 base64url chars
+		return "", ErrInvalidInput.Wrapf("petname %q is not a valid bare name", petname)
 	}
-	bound, err := k.store.BindPetname(ctx, publicKey, seed, exact)
-	if err != nil {
+	if err := k.store.BindPetname(ctx, publicKey, seed); err != nil {
 		return "", err
 	}
-	k.log.With(ctx).Info("kernel.petname.bound", "petname", bound, "public_key", publicKey)
-	return bound, nil
+	k.log.With(ctx).Info("kernel.petname.bound", "petname", seed, "public_key", publicKey)
+	return seed, nil
 }
 
 // knowKernel makes a kernel known on this kernel's own contact with it — an inbound call it signed,
@@ -1394,7 +1383,7 @@ func (k *Kernel) RenameKernel(ctx context.Context, operatorID, publicKey, petnam
 	if publicKey == k.SelfKey(ctx) {
 		return "", ErrInvalidInput.Wrap("that is this kernel; its name is kernel_handle in its config.json")
 	}
-	return k.BindPetname(ctx, publicKey, petname, true)
+	return k.BindPetname(ctx, publicKey, petname)
 }
 
 // OwnName is what this kernel calls itself: a petname bound to its own key, so a user here is
@@ -1419,7 +1408,7 @@ func (k *Kernel) BindOwnName(ctx context.Context, name string) error {
 	if self == "" {
 		return ErrInvalidState.Wrap("signing key not configured")
 	}
-	if _, err := k.BindPetname(ctx, self, name, true); err != nil {
+	if _, err := k.BindPetname(ctx, self, name); err != nil {
 		if errors.Is(err, ErrInvalidInput) {
 			return ErrInvalidState.Wrapf("a peer is already named %q here; rename it with `juice admin peer rename %s NEW`, or give this kernel another name in its config.json", name, name)
 		}
@@ -2040,7 +2029,7 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 // re-quotes authoritatively before money moves (§13).
 type PeerAction struct {
 	ActionID     string         `json:"action_id"`
-	Name         string         `json:"name"` // the action's address, owner@<the peer's name here>/name
+	Name         AddressView    `json:"name"` // the action, owner@<the peer's name here>/name
 	Title        string         `json:"title"`
 	Description  string         `json:"description"`
 	InputSchema  map[string]any `json:"input_schema,omitempty"`
@@ -2062,7 +2051,7 @@ func (k *Kernel) indicativePrice(serving int64) (int64, bool) {
 // "live". The source is the caller's knowledge, so the caller names it.
 func (k *Kernel) PeerCatalog(ctx context.Context, publicKey string, manifests []*ActionManifest) []*PeerAction {
 	out := make([]*PeerAction, 0, len(manifests))
-	host := k.KernelName(ctx, publicKey)
+	host := k.KernelAddress(ctx, publicKey)
 	for _, m := range manifests {
 		serving, err := k.econ.ServingPrice(m.Price, m.RemoteBPS)
 		if err != nil {
@@ -2072,7 +2061,7 @@ func (k *Kernel) PeerCatalog(ctx context.Context, publicKey string, manifests []
 		if !ok {
 			continue
 		}
-		out = append(out, &PeerAction{ActionID: m.ActionID, Name: Address{Handle: m.OwnerHandle, Kernel: host, Name: m.Name}.String(),
+		out = append(out, &PeerAction{ActionID: m.ActionID, Name: host.under(m.OwnerHandle, m.OwnerID, publicKey).Child(m.Name),
 			Title: m.Title, Description: m.Description, InputSchema: m.InputSchema, OutputSchema: m.OutputSchema, Price: price, Indicative: true})
 	}
 	return out
@@ -2087,13 +2076,13 @@ func (k *Kernel) PeerCatalogCached(ctx context.Context, publicKey string) ([]*Pe
 		return nil, err
 	}
 	out := make([]*PeerAction, 0, len(docs))
-	host := k.KernelName(ctx, publicKey)
+	host := k.KernelAddress(ctx, publicKey)
 	for _, d := range docs {
 		price, ok := k.indicativePrice(d.ServingPrice)
 		if !ok {
 			continue
 		}
-		out = append(out, &PeerAction{ActionID: d.ActionID, Name: Address{Handle: d.Handle, Kernel: host, Name: d.Name}.String(), Title: d.Title, Description: d.Description,
+		out = append(out, &PeerAction{ActionID: d.ActionID, Name: host.under(d.Handle, d.OwnerID, publicKey).Child(d.Name), Title: d.Title, Description: d.Description,
 			InputSchema: d.InputSchema, OutputSchema: d.OutputSchema, Price: price, Indicative: true})
 	}
 	return out, nil
@@ -2241,6 +2230,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		// The peer and the scan are the page's, not each document's: ApplyCatalogPage stamps them.
 		d := &DiscoveryDoc{
 			Handle:       m.OwnerHandle,
+			OwnerID:      m.OwnerID,
 			Title:        m.Title,
 			Description:  m.Description,
 			ActionID:     m.ActionID,
@@ -2855,7 +2845,7 @@ func (k *Kernel) askProcess(ctx context.Context, origin, kind, ref, regID string
 		_ = json.Unmarshal(body, &reply)
 	}
 	if status == 0 || (status != 200 && reply.Code == "") {
-		return Principal{}, PeerUnreachableError(k.KernelName(ctx, origin))
+		return Principal{}, PeerUnreachableError(k.KernelAddress(ctx, origin))
 	}
 	if status != 200 {
 		if kind == "check" && reply.Code == ErrNotFound.Code {
@@ -2867,8 +2857,8 @@ func (k *Kernel) askProcess(ctx context.Context, origin, kind, ref, regID string
 }
 
 // ProcessOwnerFor answers a kernel that asks whose run a reference names (D10): the owner of the
-// open process, and only to a kernel that serves an action the owner holds a grant on — so a kernel
-// a run merely passes through learns nothing of who began it (U41).
+// open process. Holding the reference is the authority, as it is for register: a kernel doing work
+// for the run learns its owner exactly as an action of this kernel would (U41).
 func (k *Kernel) ProcessOwnerFor(ctx context.Context, asker, ref string) (*Account, error) {
 	if k.holderSuspended(ctx, asker) {
 		return nil, ErrUnauthorized.Wrap("this kernel has suspended the peer")
@@ -2876,11 +2866,6 @@ func (k *Kernel) ProcessOwnerFor(ctx context.Context, asker, ref string) (*Accou
 	ownerID, err := k.store.ProcessOwnerByRef(ctx, ref)
 	if err != nil {
 		return nil, err
-	}
-	if holds, herr := k.store.HoldsGrantOn(ctx, ownerID, asker); herr != nil {
-		return nil, herr
-	} else if !holds {
-		return nil, ErrNotFound.Wrap("no open process has this reference")
 	}
 	return k.requireActiveUser(ctx, ownerID)
 }
@@ -3025,7 +3010,7 @@ func (k *Kernel) ForwardGrant(ctx context.Context, userID, kernelKey string, op 
 		grants, _ := k.store.ListGrantsByUser(ctx, User(userID))
 		for _, g := range grants {
 			if a, aerr := k.store.ReadAction(ctx, g.ActionID); aerr == nil && a.OwnerKernel == kernelKey &&
-				a.OwnerHandle == sel.Handle && selectorPathMatches(sel.Name, a.Name) {
+				(a.OwnerHandle == sel.User || a.OwnerUserID == sel.User) && selectorPathMatches(sel.Name, a.Name) {
 				_ = k.store.DeleteGrant(ctx, User(userID), a.ID)
 			}
 		}
@@ -3038,7 +3023,7 @@ func (k *Kernel) ForwardGrant(ctx context.Context, userID, kernelKey string, op 
 	}
 	status, raw, err := k.fedClient.SendGrant(ctx, kernelKey, op, sig)
 	if err != nil {
-		pn := k.KernelName(ctx, kernelKey)
+		pn := k.KernelAddress(ctx, kernelKey)
 		return 0, nil, PeerUnreachableError(pn).Wrapf("%s could not be reached; run the command again when it can", pn)
 	}
 	var body map[string]any
@@ -3048,11 +3033,10 @@ func (k *Kernel) ForwardGrant(ctx context.Context, userID, kernelKey string, op 
 	for _, field := range []string{"actions", "revoked"} {
 		refs, _ := body[field].([]any)
 		for i, r := range refs {
-			addr, perr := ParseAddress(fmt.Sprint(r))
-			if perr != nil {
-				continue
-			}
-			a, rerr := k.ResolveAction(ctx, addr.Handle+"@"+kernelKey+"/"+addr.Name)
+			// The serving kernel names each action by its principal, which means the same here.
+			ref, _ := r.(map[string]any)
+			principal, _ := ref["principal"].(string)
+			a, rerr := k.ResolveAction(ctx, principal)
 			if rerr != nil || a == nil {
 				continue
 			}
