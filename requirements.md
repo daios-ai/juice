@@ -4,6 +4,27 @@ Version: 0.18
 Codename: `juice`
 Copyright (C) 2026 Pedro A. Ortega <pedro.ortega@gmail.com>
 
+What Juice is
+=============
+
+Read this before answering any design question.
+
+- Juice is the kernel of Web 4.0 (the DAIOS vision paper): a web of composable,
+  priced services, where micropayments replace advertising and subscriptions.
+- Juice is a distributed operating system for that web. Kernels are its machines,
+  actions are its programs, and native actions are its system calls. A process is
+  one funded run; its owner pays, and a price bounds everything a call can spend.
+- Local and remote calls behave identically. Whether a call crosses a kernel never
+  changes what a program can see or do; only the cost may differ.
+- People read addresses; programs keep principals. A principal means the same on
+  every kernel.
+- Trust is earned after the fact. Ratings and signed trade evidence are public so
+  that anyone can vet a service; who rated, and what was traded, stay private.
+- For every design question, find the operating-system precedent first (Unix,
+  Windows, NFS, Kerberos, Ethereum), then check requirements.md, which is
+  authoritative. If the vision and the letter of the spec conflict, say so; do not
+  resolve it silently.
+
 INSTRUCTIONS FOR EDITING THIS FILE:
 - Four classes; **one owner per fact** — state each fact once at its owning entry, cross-reference by id (U/G/P/D), never restate.
 - The section structure and numbering are fixed; never restructure or split content into other files.
