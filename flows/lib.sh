@@ -414,6 +414,9 @@ exposure_of() { numfield "$(jj "$1" "$2" admin kernel show)" exposure; }
 
 # balance_of db home — the spendable balance of whoever that home is logged in as.
 balance_of() { numfield "$(jj "$1" "$2" user me)" available; }
+# price_of db home ref — what a call to the action costs, read from the kernel and never written into
+# a flow: natives are priced (D17), so an expected balance is the amount moved plus this.
+price_of() { numfield "$(jj "$1" "$2" action show "$3")" price; }
 
 # await_eq name want cmd... — poll until the command's output is want, then assert it. Settlement
 # happens on the buyer's own cadence with nobody to prod it, so what a flow can do is wait for the

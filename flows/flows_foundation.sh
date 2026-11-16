@@ -152,23 +152,25 @@ flow_transfers() {
     make_user "$db" "$hs" "$hb" bob
     j "$db" "$hs" admin user deposit alice@k "$(units 500)" --ref "$(newref)" --yes >/dev/null 2>&1
 
-    # Alice transfers 200 to bob by address; balances move by exactly the amount.
+    # Alice transfers 200 to bob by address: bob receives exactly the amount, and alice pays the
+    # amount plus the transfer action's price, the value untaxed and the price an ordinary charge (D18).
+    local fee; fee=$(price_of "$db" "$ha" sys@k/transfer)
     j "$db" "$ha" user transfer bob@k "$(units 200)" --yes >/dev/null 2>&1
-    assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available 300
+    assert_jnum "transfers.sender_debited" "$(jj "$db" "$ha" user me)" available "$(( 300 - fee ))"
     assert_jnum "transfers.recipient_credited" "$(jj "$db" "$hb" user me)" available 200
 
     # Both parties see the transfer in their ledger (alice also sees her deposit).
     assert_contains "transfers.sender_ledger" "bob" "$(jj "$db" "$ha" user ledger)"
     assert_contains "transfers.recipient_ledger" "alice" "$(jj "$db" "$hb" user ledger)"
 
-    # Pagination: alice has 2 ledger entries (deposit + transfer); --limit 1 returns one.
+    # Pagination: alice has several ledger entries (deposit, transfer, its price); --limit 1 returns one.
     assert_eq "transfers.ledger_paginated" 1 \
         "$(jj "$db" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
     # Over-balance and self transfers are rejected; balance unchanged.
     assert_fails "transfers.overdraw_rejected" "insufficient\|error" -- j "$db" "$ha" user transfer bob@k "$(units 100000)" --yes
     assert_fails "transfers.self_rejected" "yourself\|invalid\|error" -- j "$db" "$ha" user transfer alice@k "$(units 10)" --yes
-    assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available 300
+    assert_jnum "transfers.balance_unchanged" "$(jj "$db" "$ha" user me)" available "$(( 300 - fee ))"
 
     # Repeated under one key — a retry after a lost reply — the transfer happens once, the repeat
     # answers with the first one's transaction, and the key with other terms is refused.
@@ -179,7 +181,7 @@ flow_transfers() {
     assert_eq "transfers.keyed_repeat_is_the_first" "$first" "$again"
     assert_fails "transfers.keyed_other_terms_refused" "invalid\|different\|error" -- \
         j "$db" "$ha" user transfer bob@k "$(units 51)" --yes --external-key gift-1
-    assert_jnum "transfers.keyed_moved_once" "$(jj "$db" "$ha" user me)" available 250
+    assert_jnum "transfers.keyed_moved_once" "$(jj "$db" "$ha" user me)" available "$(( 250 - 2 * fee ))"
     assert_jnum "transfers.keyed_credited_once" "$(jj "$db" "$hb" user me)" available 250
     # `run` takes the key the same way.
     first=$(strfield "$(jj "$db" "$ha" run sys@k/transfer '{"target":"bob@k","amount":1}' --external-key run-1)" tx_id)

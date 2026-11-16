@@ -31,6 +31,10 @@ type Snapshot struct {
 	// Owed is what this kernel is still waiting to be paid for, each obligation naming the buyer.
 	// It is the seller's own record, which is the only side an obligation is kept on.
 	Owed []map[string]any `json:"owed"`
+	// Parked is, per process, the price of its tasks that never ran — declined or still waiting.
+	// A call pays a task's price when it parks it (D6); if nobody completes the task, that money
+	// never becomes a child call, so the refund law needs it to balance.
+	Parked map[string]int64 `json:"parked"`
 }
 
 // collect reads every kernel, and fails closed. A snapshot that could not be read is not an empty
@@ -66,6 +70,22 @@ func collect(n *Net) (map[string]Snapshot, []string) {
 		}
 		if s.Txs, err = pages(k, "sysop-"+name, "/v1/transactions"); err != nil {
 			bad("the transactions", err)
+		}
+		// Read the tasks of only the processes where a call left money unexplained: a task view
+		// names no funding trace (P8), so the process is the finest join the surface offers.
+		s.Parked = map[string]int64{}
+		for pid := range unexplained(s.Txs) {
+			var tasks []map[string]any
+			body := k.Get(op, "/v1/tasks?all=1&process_id="+pid)
+			if err := json.Unmarshal([]byte(body), &tasks); err != nil {
+				bad("the tasks of process "+pid, err)
+				continue
+			}
+			for _, t := range tasks {
+				if st := str(t, "status"); st == "waiting" || st == "cancelled" {
+					s.Parked[pid] += num(t, "price")
+				}
+			}
 		}
 		if s.Processes, err = pages(k, "sysop-"+name, "/v1/processes"); err != nil {
 			bad("the processes", err)
@@ -194,7 +214,8 @@ func Judge(n *Net, st *story, rounds int, railCost map[string]any) (*Report, err
 	w("## The refund law")
 	w("")
 	w("For every transaction, what the caller paid equals what the call kept plus what it spent on " +
-		"the calls it made: `gross - refund == fee + net + sum(children)`.")
+		"the calls it made: `gross - refund == fee + net + sum(children)`. A task price a call parked " +
+		"is spent on a child once the task runs; one never run is matched against its process's tasks.")
 	w("")
 	table(w, []string{"transactions checked", "violations", "partial refunds seen", "calls made inside another"},
 		row(checked, len(breaches), partials, composed))
@@ -541,6 +562,7 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 				composed++
 			}
 		}
+		gaps := unexplained(s.Txs)
 		for _, t := range s.Txs {
 			paid := num(t, "gross") - num(t, "refund")
 			kept := num(t, "fee") + num(t, "net")
@@ -549,7 +571,9 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 				spent += num(c, "gross") - num(c, "refund")
 			}
 			checked++
-			if paid != kept+spent {
+			// What a call paid and neither kept nor spent on a child call is a task price it parked.
+			// It is accepted only when its process's tasks that never ran account for all of it.
+			if gap := paid - kept - spent; gap != 0 && (gap < 0 || gaps[str(t, "process_id")] != s.Parked[str(t, "process_id")]) {
 				breaches = append(breaches, breach{name, str(t, "id"), str(t, "action"),
 					str(t, "status"), paid, kept, spent})
 			}
@@ -559,6 +583,25 @@ func refundLaw(snaps map[string]Snapshot) (breaches []breach, partials, composed
 		}
 	}
 	return breaches, partials, composed, checked
+}
+
+// unexplained sums, per process, what its calls paid and neither kept nor spent on a child call.
+// Only a process whose calls parked tasks that never ran should appear here.
+func unexplained(txs []map[string]any) map[string]int64 {
+	spent := map[string]int64{}
+	for _, t := range txs {
+		if p := str(t, "parent_trace_id"); p != "" {
+			spent[p] += num(t, "gross") - num(t, "refund")
+		}
+	}
+	out := map[string]int64{}
+	for _, t := range txs {
+		gap := num(t, "gross") - num(t, "refund") - num(t, "fee") - num(t, "net") - spent[str(t, "trace_id")]
+		if gap != 0 {
+			out[str(t, "process_id")] += gap
+		}
+	}
+	return out
 }
 
 // positions reads what every pair of kernels still owes each other, in both directions. An

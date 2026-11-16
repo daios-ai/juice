@@ -947,14 +947,15 @@ func (s *story) actValue() error {
 		"run", k1.At("sys/transfer"), fmt.Sprintf(`{"target":%q,"amount":%s}`, k1.At("nobody-here"), s.px(1)))
 
 	// A transfer to a user of another kernel is the same action, k1's own (D18): ana pays exactly the
-	// amount — the transfer is free here — and cara is credited exactly that once k1's payment reaches
-	// k2 and k1 has said whom it is for (P11), and not before.
+	// amount plus the action's price, and cara is credited exactly the amount once k1's payment
+	// reaches k2 and k1 has said whom it is for (P11), and not before.
 	k2 := s.k("k2")
+	fee := k1.Num("ana", "price", "action", "show", k1.At("sys/transfer"))
 	anaBefore := k1.Balance("ana")
 	sent, err := read[map[string]any](k1, "ana", "user", "transfer", "--yes", k2.At("cara"), "3")
 	if s.n.Check("value.crosses_kernels", err == nil && str(sent, "tx_id") != "", fmt.Sprintf("expected success: %v", err)) {
-		s.n.Check("value.sender_leg_exact", anaBefore-k1.Balance("ana") == 3*s.scale,
-			fmt.Sprintf("ana paid %d for a transfer of %d", anaBefore-k1.Balance("ana"), 3*s.scale))
+		s.n.Check("value.sender_leg_exact", anaBefore-k1.Balance("ana") == 3*s.scale+fee,
+			fmt.Sprintf("ana paid %d for a transfer of %d at price %d", anaBefore-k1.Balance("ana"), 3*s.scale, fee))
 		// The credit is read where k2 records it, the ledger entry naming this transfer, not off
 		// cara's balance: she also sells, and every sale paid while this waits moves it.
 		reason := "transfer " + str(sent, "tx_id")

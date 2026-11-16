@@ -489,8 +489,9 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	if a.Kind != kernel.KindNative {
 		t.Errorf("sys/tinygo/compile kind = %q, want native", a.Kind)
 	}
-	if a.Price != 5 {
-		t.Errorf("sys/tinygo/compile price = %d, want 5", a.Price)
+	// Registered at the configured price, whatever the schedule says it is.
+	if want := DefaultServerConfig().Native.PriceOf("tinygo/compile"); a.Price != want {
+		t.Errorf("sys/tinygo/compile price = %d, want the configured %d", a.Price, want)
 	}
 }
 

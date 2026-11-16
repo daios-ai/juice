@@ -3378,6 +3378,21 @@ func TestSettlementCommitRefusesOverAnUnsettledChild(t *testing.T) {
 	if ready, _ := db.ListReadyTraces(ctx); len(ready) != 1 || ready[0].ID != root.ID {
 		t.Fatalf("the parent is ready once its child settled, got %v", ready)
 	}
+	// The parent's settlement clears the outcome it waited under, so a settled call leaves the
+	// sweep's index: only outcomes still waiting are ever read again.
+	if err := db.CommitFailedCall(ctx, tx, build, root.ID, p.ID, kernel.CallerProcess, user.ID, 100, nil, "", ""); err != nil {
+		t.Fatalf("the parent's commit once its child settled: %v", err)
+	}
+	if tr, _ := db.ReadTrace(ctx, root.ID); tr.OutcomeJSON != nil {
+		t.Errorf("a settled trace still holds its deferred outcome: %s", *tr.OutcomeJSON)
+	}
+	var held int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM traces WHERE outcome_json IS NOT NULL`).Scan(&held); err != nil || held != 0 {
+		t.Errorf("outcomes still held after every call settled: %d (%v)", held, err)
+	}
+	if ready, _ := db.ListReadyTraces(ctx); len(ready) != 0 {
+		t.Errorf("nothing is ready once the parent settled, got %d", len(ready))
+	}
 }
 
 // A task's value is its requester's, reserved when the task is made (D6): the claim adds only the
@@ -6027,5 +6042,41 @@ func TestMigration061KeepsGrantsAndNamesPrincipals(t *testing.T) {
 	remote.ID, remote.ConnectionID = "g3", "no-such-connection"
 	if err := db.CreateOrReplaceGrant(ctx, remote, a.UpdatedAt); err == nil {
 		t.Errorf("a grant naming no stored connection was accepted: the rebuilt table lost its reference to connections")
+	}
+}
+
+// TestSettlementQueriesUseIndexes freezes the fix for throughput falling as the books grow: both
+// settlement queries run on every call, and a bare scan of traces costs time in proportion to
+// every call ever made. A scan through an index (the small partial one) is allowed.
+func TestSettlementQueriesUseIndexes(t *testing.T) {
+	db := openTestDB(t)
+	for name, q := range map[string]struct {
+		sql  string
+		args []any
+	}{
+		"child in flight": {childInFlightSQL, []any{"trace"}},
+		"ready traces":    {readyTracesSQL, nil},
+	} {
+		rows, err := db.db.Query("EXPLAIN QUERY PLAN "+q.sql, q.args...)
+		if err != nil {
+			t.Fatalf("%s: explain: %v", name, err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatalf("%s: scan plan: %v", name, err)
+			}
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		for _, d := range plan {
+			for _, alias := range []string{"t", "c", "p", "traces"} {
+				if d == "SCAN "+alias {
+					t.Errorf("%s scans traces without an index (%q); plan: %q", name, d, plan)
+				}
+			}
+		}
 	}
 }

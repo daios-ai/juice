@@ -95,6 +95,7 @@ flow_lookup() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "lookup.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 5000
     # sys/lookup requires "query"; missing it → schema violation.
     assert_fails "lookup.missing_query_rejected" "query\|required\|schema" -- j "$db" "$ha" run sys@k/lookup '{}'
 
@@ -123,6 +124,7 @@ flow_chat() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" || { fail "chat.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 5000
     # No chatter configured → ErrInvalidState (or a reply if one is); either is acceptable.
     local out; out=$(j "$db" "$ha" run sys@k/llm/chat '{"messages":[{"role":"user","content":"hello"}]}' 2>&1)
     case "$out" in *invalid?state*|*invalid_state*|*content*|*assistant*|*message*) ok "chat.no_chatter_or_reply";; *) fail "chat.no_chatter_or_reply" "got: $out";; esac

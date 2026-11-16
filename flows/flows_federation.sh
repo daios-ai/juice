@@ -146,6 +146,7 @@ flow_fed_verify_receipt() {
     # A local call is verifiable by the same command, against this kernel's own key: one audit
     # surface, whoever executed. The peer-only audits are absent, never true by default.
     local ltx lvr
+    deposit "$FED_DBL" "$FED_HL" sys 1000   # a native is priced, the operator's own call included
     ltx=$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-l/time '{}')" tx_id)
     lvr=$(jj "$FED_DBL" "$FED_HL" tx verify "$ltx")
     assert_json "fed_verify.local_tx_valid" "$lvr" valid True
@@ -323,6 +324,8 @@ flow_fed_gossip_discovery() {
     # discovery loop pulls gossip and indexes R's public action into T's lookup docs.
     local dbt ht; dbt="$(kdb "$dir/t")"; ht="$dir/tsys"; mkdir -p "$dir/t" "$ht/.juice"
     make_admin "$dbt" "$ht" kernel_handle=kernel-t seed="$FED_BOOT" discovery_interval_seconds=2 || { fail "fed_gossip.bootstrap_t" "T did not start"; return; }
+    # Each poll below is a priced lookup (D17), so T's operator funds them like any caller.
+    deposit "$dbt" "$ht" sys 100000
 
     # Poll T's discovery cache until R's action surfaces in sys/lookup as a kernel-qualified reference.
     local found=no
@@ -531,6 +534,8 @@ flow_fed_discovery() {
         || { fail "fed_discovery.l" "L did not start"; return; }
     know "$dbl" "$hl"
     j "$dbl" "$hl" auth login sys@kernel-l --password sys-pass >/dev/null 2>&1
+    # Each poll below is a priced lookup (D17), so L's operator funds them like any caller.
+    deposit "$dbl" "$hl" sys 100000
 
     # Poll L's discovery cache (§13): a discovery pass runs at startup then every 2s, pulling R's
     # gossip and indexing R's public action into L's lookup docs. sys/lookup then surfaces it as a
@@ -722,6 +727,8 @@ flow_fed_task_complete() {
     publish "$FED_DBR" "$FED_HR" hello --kind http --source "http://127.0.0.1:$FED_BPORT" --description "hello" --price "$(units 0)" >/dev/null
     assert_nonempty "fed_task_complete.peers_meet" "$(strfield "$(jj "$FED_DBL" "$FED_HL" run sys@kernel-r/hello '{}')" tx_id)"
 
+    # R's operator sends the messages, and pays for them like any sender (D17).
+    deposit "$FED_DBR" "$FED_HR" sys 1000
     local to="alice@$FED_LKEY" first second
     first=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"$to\",\"message\":\"approve the shipment\"}")" task_id)
     second=$(resultf "$(jj "$FED_DBR" "$FED_HR" run sys@kernel-r/message "{\"to\":\"$to\",\"message\":\"second\"}")" task_id)
@@ -870,17 +877,18 @@ flow_transfer() {
     bhome=$(home "$dir" bob); know "$FED_DBL" "$bhome"; j "$FED_DBL" "$bhome" auth login bob@kernel-l --password userpass >/dev/null 2>&1
     chome=$(home "$dir" carol); know "$FED_DBR" "$chome"; j "$FED_DBR" "$chome" auth login carol@kernel-r --password userpass >/dev/null 2>&1
 
-    # Here: the execution price (0) rides the trace, the value moves from alice's own balance to bob
+    # Here: the execution price rides the trace, the value moves from alice's own balance to bob
     # in the same commit, and the ledger entry names the call.
+    local fee; fee=$(price_of "$FED_DBL" "$ahome" sys@kernel-l/transfer)
     local tx_id; tx_id=$(strfield "$(jj "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"bob@kernel-l","amount":100}')" tx_id)
     assert_nonempty "transfer.call_succeeded" "$tx_id"
-    assert_eq "transfer.alice_charged" 900 "$(balance_of "$FED_DBL" "$ahome")"
+    assert_eq "transfer.alice_charged" "$(( 900 - fee ))" "$(balance_of "$FED_DBL" "$ahome")"
     assert_eq "transfer.bob_credited" 100 "$(balance_of "$FED_DBL" "$bhome")"
     assert_contains "transfer.sender_ledger" "bob" "$(jj "$FED_DBL" "$ahome" user ledger)"
     assert_eq "transfer.ledger_names_tx" "$tx_id" \
         "$(jj "$FED_DBL" "$bhome" user ledger | python3 -c 'import sys,json;e=json.load(sys.stdin);print(e[0]["reason"])')"
     j "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"bob@kernel-l","amount":100000}' >/dev/null 2>&1 || true
-    assert_eq "transfer.underfunded_no_charge" 900 "$(balance_of "$FED_DBL" "$ahome")"
+    assert_eq "transfer.underfunded_no_charge" "$(( 900 - fee ))" "$(balance_of "$FED_DBL" "$ahome")"
 
     # To a user of R, by `user transfer` and by `run` of the same action, carol named through L's
     # own petname for R. Carol has nothing until L's payment reaches R.
@@ -888,7 +896,7 @@ flow_transfer() {
     local rtx; rtx=$(strfield "$(jj "$FED_DBL" "$ahome" user transfer carol@kernel-r "$(units 100)" --yes)" tx_id)
     assert_nonempty "transfer.remote_ran" "$rtx"
     assert_nonempty "transfer.remote_by_run" "$(strfield "$(jj "$FED_DBL" "$ahome" run sys@kernel-l/transfer '{"target":"carol@kernel-r","amount":50}')" tx_id)"
-    assert_eq "transfer.remote_sender_pays_exactly" 750 "$(balance_of "$FED_DBL" "$ahome")"
+    assert_eq "transfer.remote_sender_pays_exactly" "$(( 750 - 3 * fee ))" "$(balance_of "$FED_DBL" "$ahome")"
 
     # Nobody acts: L pays and says whom for, R credits carol exactly, and both books close.
     await_eq "transfer.carol_credited_exactly" 150 balance_of "$FED_DBR" "$chome"
@@ -904,7 +912,7 @@ flow_transfer() {
     # R knows no such user: refused before anything moves.
     assert_fails "transfer.nobody_refused" "not found\|error" -- \
         j "$FED_DBL" "$ahome" user transfer nobody@kernel-r "$(units 10)" --yes
-    assert_eq "transfer.nobody_no_charge" 750 "$(balance_of "$FED_DBL" "$ahome")"
+    assert_eq "transfer.nobody_no_charge" "$(( 750 - 3 * fee ))" "$(balance_of "$FED_DBL" "$ahome")"
 }
 
 # The provider dies in the middle of serving a call, then comes back. This is the one crash that
@@ -1602,9 +1610,9 @@ flow_grant_remote() {
     # anything moves, and its kernel never hears of it.
     assert_contains "grant_remote.says_a_grant_is_needed" '"requires_grant": true' "$(jj "$L" "$ha" action show sys@kernel-r/vault/read | python3 -m json.tool)"
     await_eq "grant_remote.found_by_lookup" yes has_lookup "$L" "$ha" "acts on the caller" vault/read
-    local served; served=$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")
+    local served before; served=$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)"); before=$(balance_of "$L" "$ha")
     assert_fails "grant_remote.refused_before_signup" "grant" -- j "$L" "$ha" run sys@kernel-r/vault/read '{}'
-    assert_eq "grant_remote.nothing_charged" 5000 "$(balance_of "$L" "$ha")"
+    assert_eq "grant_remote.nothing_charged" "$before" "$(balance_of "$L" "$ha")"
     assert_eq "grant_remote.serving_kernel_never_asked" "$served" "$(list_len "$(jj "$R" "$FED_HR" tx list --limit 100)")"
 
     # One sign-up, by the command a local application takes, covers the directory.
@@ -1828,6 +1836,7 @@ flow_principals_symmetric() {
     await_eq "principals.dave_credited" 5050 balance_of "$R" "$hd"
 
     # A task addressed by principal from another kernel reaches alice on her own, and she answers it.
+    deposit "$R" "$FED_HR" sys 1000   # R's operator pays for its message like any sender
     local task; task=$(resultf "$(jj "$R" "$FED_HR" run sys@kernel-r/message "{\"to\":\"$alice\",\"message\":\"ping\"}")" task_id)
     assert_nonempty "principals.task_by_principal" "$task"
     j "$L" "$ha" user approve "$rsys" >/dev/null 2>&1
@@ -1841,8 +1850,9 @@ flow_principals_symmetric() {
     jj "$L" "$ha" user transfer "$bob" "$(units 10)" --yes >/dev/null
     assert_eq "principals.kept_principal_reaches_robert" 110 "$(numfield "$(jj "$L" "$FED_HL" admin user show robert@kernel-l)" available)"
     assert_eq "principals.newcomer_not_diverted" 0 "$(balance_of "$L" "$hn")"
+    # The transfer's own entry, found by bob's principal: the same commit also posts the price paid.
     assert_eq "principals.reads_by_the_new_handle" "robert@kernel-l" \
-        "$(jj "$L" "$ha" user ledger --limit 1 | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["to"]["address"])')"
+        "$(jj "$L" "$ha" user ledger --limit 5 | python3 -c 'import sys,json;print(next(e["to"]["address"] for e in json.load(sys.stdin) if (e.get("to") or {}).get("principal")==sys.argv[1]))' "$bob")"
 }
 
 # has_task db home id-prefix — 'yes' when the task is in this user's list.
@@ -1886,7 +1896,11 @@ flow_localhost_symmetric() {
     make_contractor_wasm "$dir/stamp.wasm" "sys@localhost/time"
     local dbs=("$FED_DBL" "$FED_DBR") hs=("$FED_HL" "$FED_HR") names=(kernel-l kernel-r) i out tx
     for i in 0 1; do
-        publish "${dbs[$i]}" "${hs[$i]}" stamp --kind wasm --source "$dir/stamp.wasm" --description "stamp" --price "$(units 0)" >/dev/null
+        # A composite pays for what it calls from its own price (D2), so stamp costs what time does,
+        # and each operator funds its own runs.
+        local tp; tp=$(price_of "${dbs[$i]}" "${hs[$i]}" "sys@${names[$i]}/time")
+        deposit "${dbs[$i]}" "${hs[$i]}" sys 1000
+        publish "${dbs[$i]}" "${hs[$i]}" stamp --kind wasm --source "$dir/stamp.wasm" --description "stamp" --price "$(units "$tp")" >/dev/null
         out=$(jj "${dbs[$i]}" "${hs[$i]}" run "sys@${names[$i]}/stamp" '{}')
         assert_nonempty "localhost_sym.module_runs_on_${names[$i]}" "$(resultf "$out" unix)"
         tx=$(strfield "$(jj "${dbs[$i]}" "${hs[$i]}" run sys@localhost/time '{}')" tx_id)

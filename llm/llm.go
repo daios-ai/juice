@@ -56,8 +56,9 @@ type Model struct {
 func Presets() []Model {
 	const ollama = "http://localhost:11434/v1"
 	return []Model{
-		{Name: "gemma", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "gemma4:26b", Kind: KindChat},
-		{Name: "nomic", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "nomic-embed-text", Kind: KindEmbed},
+		// Priced at their cost on one GPU (docs/native-pricing.md).
+		{Name: "gemma", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "gemma4:26b", Kind: KindChat, Price: 1200},
+		{Name: "nomic", Enabled: true, Protocol: ProtocolOpenAI, URL: ollama, ID: "nomic-embed-text", Kind: KindEmbed, Price: 150},
 	}
 }
 

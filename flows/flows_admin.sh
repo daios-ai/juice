@@ -175,12 +175,20 @@ flow_time() {
     make_admin "$db" "$hs" || { fail "time.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
 
-    # sys/time is registered active + local + free after bootstrap, so a local user may call it.
+    # sys/time is registered active + local after bootstrap, so a local user may call it.
     local acts; acts=$(jj "$db" "$hs" action list)
     assert_eq "time.registered" yes "$(has_action "$acts" time)"
 
-    # Call it (price=0): result carries a positive unix ts and an RFC-3339 iso ts.
+    # A native is priced (D17): a caller with nothing is refused before anything moves.
+    local price; price=$(price_of "$db" "$ha" sys@k/time)
+    assert_ne "time.priced" 0 "$price"
+    assert_fails "time.unfunded_refused" "your balance is" -- j "$db" "$ha" run sys@k/time '{}'
+
+    # Funded, the call charges exactly its price, and the result carries a positive unix ts and an
+    # RFC-3339 iso ts.
+    deposit "$db" "$hs" alice 1000
     local out; out=$(jj "$db" "$ha" run sys@k/time '{}')
+    assert_eq "time.charged_its_price" "$(( 1000 - price ))" "$(balance_of "$db" "$ha")"
     local unix_val; unix_val=$(resultf "$out" unix)
     assert_eq "time.returns_unix" yes "$([ -n "$unix_val" ] && [ "$unix_val" -gt 0 ] 2>/dev/null && echo yes || echo no)"
     assert_eq "time.returns_iso" ok "$(python3 -c "
@@ -224,6 +232,7 @@ flow_metrics() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     make_admin "$db" "$hs" metrics_listen_addr=127.0.0.1:0 || { fail "metrics.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 1000
     local maddr; maddr=$(sed -n 's/.*"msg":"metrics.ready".*"addr":"\([^"]*\)".*/\1/p' "$(server_log "$db")" | head -1)
     assert_nonempty "metrics.listening" "$maddr"
     # One local call settled: its count, read from the scrape by the series' exact name.
@@ -249,10 +258,13 @@ flow_message() {
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
 
-    # alice sends sys/message to bob (price=0) → a waiting task addressed to bob.
-    local task_id
+    # alice sends sys/message to bob → a waiting task addressed to bob. Its one price pays for the
+    # sink task it parks (D6), so alice is charged exactly that and nothing when bob completes it.
+    deposit "$db" "$hs" alice 1000
+    local task_id price; price=$(price_of "$db" "$ha" sys@k/message)
     task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"Please review doc"}')" task_id)
     assert_nonempty "message.task_created" "$task_id"
+    assert_eq "message.charged_its_price" "$(( 1000 - price ))" "$(balance_of "$db" "$ha")"
 
     # bob sees who asks, and nothing else, until he approves alice (U52); then the task and completes it.
     assert_not_contains "message.withheld_until_approved" "$task_id" "$(jj "$db" "$hb" task list)"
@@ -264,6 +276,8 @@ flow_message() {
     local ctx; ctx=$(strfield "$(jj "$db" "$hb" task complete "$task_id" '{}')" tx_id)
     assert_nonempty "message.bob_completes_task" "$ctx"
     assert_json "message.task_done" "$(jj "$db" "$ha" task show "$task_id")" status done
+    assert_eq "message.completion_charges_nothing" "$(( 1000 - price ))" "$(balance_of "$db" "$ha")"
+    assert_eq "message.completer_pays_nothing" 0 "$(balance_of "$db" "$hb")"
 
     # A person names a record by the first groups of its id, which is how a list shows it; a
     # finished task leaves the default list and is there under --all (D15, D20).
@@ -292,6 +306,7 @@ flow_task_consent() {
     make_admin "$db" "$hs" || { fail "task_consent.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" alice 1000
     _msg() { resultf "$(jj "$db" "$ha" run sys@k/message "{\"to\":\"$1\",\"message\":\"$2\"}")" task_id; }
     _sees() { jj "$db" "$hb" task list | grep -q -- "$1" && echo yes || echo no; }
     _status() { jj "$db" "$hb" user requesters | python3 -c 'import sys,json;print(next((r["status"] for r in json.load(sys.stdin) if r["requester"]["address"]=="alice@k"),""))'; }

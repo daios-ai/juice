@@ -82,8 +82,9 @@ flow_task_success() {
     make_admin "$db" "$hs" || { fail "task_success.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" alice 1000
 
-    # alice → bob message creates a waiting task (next_action=sys/sink, price 0).
+    # alice → bob message creates a waiting task on sys/sink, its price parked from alice's run.
     local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"review"}')" task_id)
     j "$db" "$hb" user approve alice@k >/dev/null
     assert_nonempty "task_success.create_returns_id" "$task_id"
@@ -110,6 +111,7 @@ flow_task_failure() {
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
     make_user "$db" "$hs" "$hc" carol
+    deposit "$db" "$hs" alice 1000
 
     # Completing an already-done task → ErrInvalidState.
     j "$db" "$hb" user approve alice@k >/dev/null
@@ -128,6 +130,7 @@ flow_task_restart() {
     make_admin "$db" "$hs" || { fail "task_restart.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
     make_user "$db" "$hs" "$hb" bob
+    deposit "$db" "$hs" alice 1000
 
     local task_id; task_id=$(resultf "$(jj "$db" "$ha" run sys@k/message '{"to":"bob@k","message":"restart"}')" task_id)
     j "$db" "$hb" user approve alice@k >/dev/null
@@ -149,8 +152,8 @@ flow_locked_funds_recovery() {
     make_admin "$db" "$hs" || { fail "locked_funds.boot" "server did not start"; return; }
     j "$db" "$hs" admin user deposit sys@k "$(units 200)" --ref "$(newref)" --yes >/dev/null 2>&1
 
-    # Inject (server stopped) an orphan process+trace: a root call for sys/tinygo/compile (price 5)
-    # that crashed before settling — 5 parked in user.locked and process.locked, trace has
+    # Inject (server stopped) an orphan process+trace: a root call for sys/tinygo/compile, with 5
+    # allocated, that crashed before settling — 5 parked in user.locked and process.locked, trace has
     # no tx (idempotency_key NULL). Not producible through the public API.
     stop_server "$db"
     local proc_id; proc_id=$(python3 - "$db" <<'PYEOF'

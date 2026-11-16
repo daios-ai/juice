@@ -221,9 +221,16 @@ func DefaultServerConfig() ServerConfig {
 		Native: NativeConfig{
 			LLM: NativeLLMConfig{Chat: "gemma", JSON: "gemma", Decide: "gemma", Embed: "nomic",
 				Models: llm.Presets()},
-			Lookup: NativeLookupConfig{DefaultLimit: 10, Price: 0},
-			Web:    NativeWebConfig{Price: 0},
-			TinyGo: NativePriceConfig{Price: 5},
+			// Cost-derived (docs/native-pricing.md): a bare call is 50, the cost of keeping its
+			// records; a native adds what it stores and computes beyond that.
+			Lookup:   NativeLookupConfig{DefaultLimit: 10, Price: 250},
+			Time:     NativePriceConfig{Price: 50},
+			Sink:     NativePriceConfig{Price: 50},
+			Message:  NativePriceConfig{Price: 110},
+			Random:   NativePriceConfig{Price: 50},
+			Web:      NativeWebConfig{Price: 600},
+			TinyGo:   NativePriceConfig{Price: 2500},
+			Transfer: NativePriceConfig{Price: 50},
 		},
 		ScriptTimeoutMS:            10000,
 		ScriptMemoryBytes:          64 * 1024 * 1024,

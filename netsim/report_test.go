@@ -60,6 +60,38 @@ func TestRefundLawAcceptsWhatBalancesAndRejectsWhatDoesNot(t *testing.T) {
 	}
 }
 
+// A call that parks a task pays its price at once (D6). Completed, the task is a child call; never
+// run, its price stays out of every child, and the law balances only if the process's tasks that
+// never ran account for exactly what is missing.
+func TestRefundLawCountsTasksThatNeverRan(t *testing.T) {
+	msg := func() map[string]any {
+		m := tx("m", "", "M", "success", 110, 12, 48, 0) // kept 60 of 110: 50 parked for a task
+		m["process_id"] = "p1"
+		return m
+	}
+	for _, c := range []struct {
+		name    string
+		parked  map[string]int64
+		wantBad int
+	}{
+		{"its task was declined", map[string]int64{"p1": 50}, 0},
+		{"no task accounts for it", nil, 1},
+		{"its tasks account for too little", map[string]int64{"p1": 40}, 1},
+		{"its tasks account for too much", map[string]int64{"p1": 60}, 1},
+	} {
+		b, _, _, _ := refundLaw(map[string]Snapshot{"k": {Txs: []map[string]any{msg()}, Parked: c.parked}})
+		if len(b) != c.wantBad {
+			t.Errorf("%s: found %d violations, want %d", c.name, len(b), c.wantBad)
+		}
+	}
+	// A completed task is its own child call, and needs no parked price to balance.
+	m, done := msg(), tx("c", "M", "C", "success", 50, 10, 40, 0)
+	done["process_id"] = "p1"
+	if b, _, _, _ := refundLaw(map[string]Snapshot{"k": {Txs: []map[string]any{m, done}}}); len(b) != 0 {
+		t.Errorf("a completed task: found %d violations, want 0", len(b))
+	}
+}
+
 // A run that collected nothing must not report a pass. The check that enforces this is the one
 // most likely to be quietly weakened, because a passing report is what everyone wants to see.
 func TestAnEmptyRunCannotPass(t *testing.T) {

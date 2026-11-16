@@ -9,15 +9,18 @@ flow_process_lifecycle() {
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 1000
 
-    # sys/message (price 0) creates a process + a waiting task addressed to alice.
-    local msg tx_id task_id proc
+    # sys/message creates a process + a waiting task addressed to alice. Its price is charged at
+    # once, and the part that funds the sink task stays parked in the open process (D6).
+    local msg tx_id task_id proc mprice sprice
+    mprice=$(price_of "$db" "$ha" sys@k/message); sprice=$(price_of "$db" "$ha" sys@k/sink)
     msg=$(jj "$db" "$ha" run sys@k/message '{"to":"alice@k","message":"lifecycle"}')
     tx_id=$(strfield "$msg" tx_id)
     task_id=$(pathf "$msg" result.task_id)
     proc=$(strfield "$(jj "$db" "$ha" tx show "$tx_id")" process_id)
     assert_nonempty "process_lifecycle.started" "$proc"
     assert_nonempty "process_lifecycle.root_trace" "$(strfield "$msg" trace_id)"
-    assert_jnum "process_lifecycle.balance_unchanged" "$(jj "$db" "$ha" user me)" available 1000
+    assert_jnum "process_lifecycle.charged_the_price" "$(jj "$db" "$ha" user me)" available "$(( 1000 - mprice ))"
+    assert_jnum "process_lifecycle.task_price_parked" "$(jj "$db" "$ha" user me)" locked "$sprice"
 
     # Process open with an outstanding task, funds parked (available 0).
     local ps; ps=$(jj "$db" "$ha" process show "$proc")
@@ -28,9 +31,11 @@ flow_process_lifecycle() {
     assert_eq "process_lifecycle.task_created_by" "sys@k/message" \
         "$(jj "$db" "$ha" task list | python3 -c "import sys,json;print(next(((s.get('created_by') or {}).get('address','') for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)"
 
-    # End the process: waiting task cancelled, funds returned, process closed.
+    # End the process: waiting task cancelled, its parked price returned, process closed. What the
+    # message itself did stays paid (U13).
     j "$db" "$ha" process end "$proc" >/dev/null 2>&1
-    assert_jnum "process_lifecycle.funds_restored" "$(jj "$db" "$ha" user me)" available 1000
+    assert_jnum "process_lifecycle.parked_returned" "$(jj "$db" "$ha" user me)" available "$(( 1000 - mprice + sprice ))"
+    assert_jnum "process_lifecycle.nothing_locked" "$(jj "$db" "$ha" user me)" locked 0
     assert_json "process_lifecycle.status_closed" "$(jj "$db" "$ha" process show "$proc")" status closed
     local st; st=$(jj "$db" "$ha" task list --all | python3 -c "import sys,json;print(next((s['status'] for s in json.load(sys.stdin) if s.get('id')=='$task_id'),''))" 2>/dev/null)
     assert_eq "process_lifecycle.task_cancelled" cancelled "$st"

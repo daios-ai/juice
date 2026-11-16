@@ -90,8 +90,32 @@ func TestDefaultServerConfig(t *testing.T) {
 	if cfg.TokenTTL == "" {
 		t.Error("TokenTTL should have a default")
 	}
-	if cfg.Native.TinyGo.Price != 5 {
-		t.Errorf("Native.TinyGo.Price default = %d, want 5", cfg.Native.TinyGo.Price)
+	// The shipped schedule keeps the rules it is derived by (D17), not particular numbers, so a
+	// repricing that keeps them passes: the base is a bare call, sink's price; a native that does
+	// nothing more costs the base; message pays for the sink task it parks; nothing costs less.
+	price := cfg.Native.PriceOf
+	base := price("sink")
+	if base <= 0 {
+		t.Fatalf("the base charge (sink) = %d, want a positive price", base)
+	}
+	for _, name := range []string{"time", "random", "transfer"} {
+		if price(name) != base {
+			t.Errorf("%s = %d, want the base charge %d: it does no more than a bare call", name, price(name), base)
+		}
+	}
+	if price("message") < base+price("sink") {
+		t.Errorf("message = %d, want at least %d: its own call plus the sink task it pays for", price("message"), base+price("sink"))
+	}
+	for _, name := range []string{"lookup", "web", "tinygo/compile", "llm/chat", "llm/json", "llm/decide", "llm/embed"} {
+		if price(name) < base {
+			t.Errorf("%s = %d, below the base charge %d", name, price(name), base)
+		}
+	}
+	// A model's natives cost what the model is priced at, bound or named.
+	for bound, model := range map[string]string{"llm/chat": "llm/gemma/chat", "llm/embed": "llm/nomic/embed"} {
+		if price(bound) != price(model) {
+			t.Errorf("%s = %d but %s = %d, want the model's one price", bound, price(bound), model, price(model))
+		}
 	}
 	// The written-out file shows the operator the connection limits an ordinary kernel runs under,
 	// so raising them for a kernel that carries the network is an edit, not a discovery.

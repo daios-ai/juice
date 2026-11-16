@@ -1292,6 +1292,11 @@ func (s *DB) finalizeTx(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction
 	if err := s.upsertActionStats(ctx, tx, stats, ktx.Status == kernel.TxSuccess, label); err != nil {
 		return err
 	}
+	// A deferred outcome is held only until its settlement (D4): the transaction now states it, and
+	// clearing it here keeps the sweep's index to the outcomes still waiting.
+	if _, err := tx.ExecContext(ctx, `UPDATE traces SET outcome_json=NULL WHERE id=? AND outcome_json IS NOT NULL`, ktx.TraceID); err != nil {
+		return dbErr(err, label+": clear settled outcome")
+	}
 	// The lock is released by the commit that writes the outcome, in the same transaction: from
 	// here on the receipt is the answer to a repeat of that request, so nothing else need be kept
 	// and nothing can be left half-finished (P4).
@@ -2740,11 +2745,28 @@ func refundCaller(ctx context.Context, tx *sql.Tx, kind, walletID, processID str
 // A refusal is a COMMITTED transaction — the record must persist — so the guard reports it with
 // a flag the commit returns as ErrSettlementDeferred after committing, never as an error inside
 // the transaction, which would roll the record back.
+// childInFlightSQL and readyTracesSQL run on every settlement, so both must be index lookups:
+// a scan of traces grows with every call ever made (TestSettlementQueriesUseIndexes).
+const childInFlightSQL = `SELECT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=?
+		   AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=c.id))`
+
+const readyTracesSQL = `SELECT ` + traceCols + ` FROM traces t
+		 WHERE t.outcome_json IS NOT NULL
+		 AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=t.id)
+		 AND NOT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=t.id
+		   AND NOT EXISTS (SELECT 1 FROM transactions y WHERE y.trace_id=c.id))
+		 ORDER BY (
+		   WITH RECURSIVE depth(id, d) AS (
+		     SELECT t.id, 0
+		     UNION ALL
+		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
+		   )
+		   SELECT MAX(d) FROM depth
+		 ) ASC`
+
 func settleGuard(ctx context.Context, tx *sql.Tx, ktx *kernel.Transaction, taskID string) (deferred bool, err error) {
 	var inFlight int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=?
-		   AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=c.id))`, ktx.TraceID).Scan(&inFlight); err != nil {
+	if err := tx.QueryRowContext(ctx, childInFlightSQL, ktx.TraceID).Scan(&inFlight); err != nil {
 		return false, dbErr(err, "settle guard")
 	}
 	if inFlight == 0 {
@@ -2775,20 +2797,7 @@ func deferredOr(deferred bool, err error) error {
 // trace beneath them still unsettled: settleable at any moment, since a recorded outcome means
 // the call's execution has ended. Deepest first, so one pass climbs.
 func (s *DB) ListReadyTraces(ctx context.Context) ([]*kernel.Trace, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+traceCols+` FROM traces t
-		 WHERE t.outcome_json IS NOT NULL
-		 AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id=t.id)
-		 AND NOT EXISTS (SELECT 1 FROM traces c WHERE c.parent_trace_id=t.id
-		   AND NOT EXISTS (SELECT 1 FROM transactions y WHERE y.trace_id=c.id))
-		 ORDER BY (
-		   WITH RECURSIVE depth(id, d) AS (
-		     SELECT t.id, 0
-		     UNION ALL
-		     SELECT p.id, d+1 FROM traces p JOIN depth ON depth.id=p.parent_trace_id
-		   )
-		   SELECT MAX(d) FROM depth
-		 ) ASC`)
+	rows, err := s.db.QueryContext(ctx, readyTracesSQL)
 	if err != nil {
 		return nil, dbErr(err, "list ready traces")
 	}
