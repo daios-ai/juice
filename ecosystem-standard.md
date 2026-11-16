@@ -219,6 +219,46 @@ makes it the index. An owner may instead make the index the application's main a
 composite that calls the others and charges one price. Programs must not depend on any of these
 forms, and must not expect the index to list the members; the members are found by their prefix.
 
+A provider sets each action's price, and may set any price. What follows is a guide, not a rule. It
+gives the price at which an action pays for itself, as a place to start; what the action then sells
+for is the market's to decide.
+
+```
+price = sub-calls + 1.25 × own cost + margin
+```
+
+- **Sub-calls** — the prices of the actions it calls, at the worst case, since they are paid from
+  the one call's price.
+- **Own cost** — what one average call uses on the provider's own machines, at the rates below.
+- **1.25** — the operator's fee is 20% of what is left after the sub-calls, so the provider keeps
+  80% of it.
+- **Margin** — the provider's choice.
+
+Round the result up to two figures, since its inputs are estimates.
+
+| What a call uses | AWS price | Units |
+|---|---|---|
+| Compute | $0.0000167 per GB-second (Lambda) | 17 per GB-second |
+| GPU | $0.80 per hour (`g6.xlarge`) | 220 per second |
+| Data kept | $0.08 per GB-month (EBS), over 100 months | 8 per KB |
+| Data sent out | $0.09 per GB | 90 per MB |
+| An outside bill | | 1,000,000 per dollar |
+
+The rates are AWS's on-demand prices in US East as of November 2026, AWS being the reference most
+providers know. On the shipped worlds a unit is a millionth of the token, so where the token is a
+dollar 10,000 units are one cent. The fee is the shipped default, and an operator may set another.
+
+Compute and storage rarely matter: a call that runs for one second at 1 GB costs 17 units. GPU time,
+outside bills and large replies do.
+
+Two examples.
+
+- A WASM action runs one `lookup` (250) and asks the kernel's model once (1,800). It runs on the
+  kernel, so its own cost is zero, and its price is 2,050 before margin.
+- An HTTP action runs one `lookup` (250), asks a hosted model once for $0.0175 (17,500), and runs
+  for one second at 1 GB (17). Its own cost is 17,517, and its price is 250 + 1.25 × 17,517 =
+  22,146: 23,000 units, or 2.3 cents, before margin.
+
 An application that relays several conversations to one agent sets `thread_id` in the task's
 `partial_args`: a string the application chooses, one per conversation. The receiving action
 declares `thread_id` in its input schema; `sys/sink` accepts any object, while `sys/message`

@@ -11,19 +11,18 @@ unit is $0.000001.
 
 A native's price is the operator's charge for the use of its own machine. It is derived from cost.
 
-- Every call costs the operator the same base amount, whatever the native does. The proposed base
-  charge is 50 units.
+- Every call costs the operator the same base amount, whatever the native does. The base charge
+  is 50 units.
 - A native that uses more than a bare call adds that use at a published rate.
 - No native is free. A free native lets one caller take the whole kernel at no cost.
-- Four prices hold only with a size limit that does not exist today. One price, a transfer to
-  another kernel, is not determined.
+- Four prices hold only with a size limit that does not exist today.
 
 ## 2. The problem
 
 Natives are the kernel's system calls (D17). Their owner is `sys`, so the whole price goes to the
 operator. They are `local`, so no other kernel sells them.
 
-Today every native ships at price 0, except `tinygo/compile` at 5 units. D17 itself notes that they
+Before this schedule every native shipped at price 0, except `tinygo/compile` at 5 units. D17 itself notes that they
 are "backed by scarce local resources unbounded at price 0".
 
 Three properties make the choice matter.
@@ -124,14 +123,18 @@ One small program compiled in 4 seconds of processor time and produced a 175 KB 
 | Resource | Rate | Basis |
 |---|---|---|
 | Storage | 8 units per KB | Quoted: AWS block storage at $0.08 per GB per month. Assumed: paid for 100 months |
-| Processor | 11 units per second | Assumed: $0.04 per core per hour. Not checked |
-| GPU | 140 units per second | Quoted: an RTX 4090 rents for $0.34 to $0.69 per hour; $0.50 taken |
+| Processor | 12 units per second | Quoted: an AWS `c7i.large`, two cores, at $0.0892 per hour |
+| GPU | 220 units per second | Quoted: an AWS `g6.xlarge`, one GPU, at $0.8048 per hour |
+
+The rates are AWS's on-demand prices in US East, AWS being the reference most operators know.
 
 The storage rate decides the base charge, and the 100 months is a choice. Other disks give other
 rates: Hetzner volumes about 5 units per KB, AWS object storage 2.3.
 
 The GPU rate is the rental price. It includes the hardware and it is a public figure. Electricity
-alone is about 27 units per second, assuming 320 W for the whole machine at $0.30 per kWh.
+alone is about 27 units per second, assuming 320 W for the whole machine at $0.30 per kWh. The GPU
+in a `g6.xlarge` is slower than the RTX 4090 the seconds were measured on, and AWS rents no RTX
+4090, so the rate is applied to the measured seconds as they are.
 
 ## 7. The base charge
 
@@ -155,12 +158,11 @@ zero it costs nothing.
 | `resolve` | 50 | $0.00005 | Base charge. A round trip to another kernel adds almost nothing |
 | `message` | 110 | $0.00011 | Base + the `sink` task it pays for (50) + the stored task |
 | `lookup` | 250 | $0.00025 | Base + about 20 KB of stored results + one query embedding |
-| `transfer`, same kernel | 50 | $0.00005 | Base charge |
-| `transfer`, to another kernel | not determined | | Base + one chain payment (section 10) |
+| `transfer` | 50 | $0.00005 | Base charge. A chain payment to another kernel is the operator's fuel (D23) |
 | `web` | 600 | $0.0006 | Base + a stored page of up to 64 KB |
 | `tinygo/compile` | 2,500 | $0.0025 | Base + 233 KB stored + 4 s of processor |
 | `llm/embed` on `nomic-embed-text` | 150 | $0.00015 | Base + the stored 10 KB vector + GPU time |
-| `llm/chat`, `llm/json`, `llm/decide` on `gemma4:26b` | 1,200 | $0.0012 | Base + stored messages + 7 s of GPU |
+| `llm/chat`, `llm/json`, `llm/decide` on `gemma4:26b` | 1,800 | $0.0018 | Base + stored messages + 7 s of GPU |
 
 A per-model native such as `llm/gemma/chat` carries the price of its model.
 
@@ -169,7 +171,7 @@ Two derivations need a note.
 - **`message`** creates a `sink` task and pays its price from its own budget when the task is made
   (D6). Its price must therefore cover `sink` in full.
 - **`llm/chat` on `gemma4:26b`** assumes a call of 3,000 tokens in and 1,000 out. That takes 7
-  seconds of GPU, almost all of it writing the output, which is 980 units. The stored messages add
+  seconds of GPU, almost all of it writing the output, which is 1,540 units. The stored messages add
   about 130. Commercial hosts charge about 400 units for the same call on a comparable model,
   since they run many requests on one GPU at once.
 
@@ -188,7 +190,7 @@ for output.
 
 The kernel caps the reply at 4,096 tokens and does not cap the input. With input capped at 8,000
 tokens the worst call costs 61,000 units, and a price of 25,000 to 30,000 would be reasonable. The
-same medium call on the shipped local model costs about a fifteenth as much.
+same medium call on the shipped local model costs about a tenth as much.
 
 ## 9. Prices that depend on a limit
 
@@ -205,32 +207,27 @@ Adding a limit changes the native's contract. That is a separate decision.
 
 ## 10. Open questions
 
-1. **Transfer to another kernel.** The operator pays one chain payment for it (D23). No mainnet
-   payment cost has been recorded. `economic-simplification.md` puts a rail payment at one to
-   fifty cents, which is 10,000 to 500,000 units. One price also cannot fit a transfer that costs
-   50 units and one that costs a chain fee.
-2. **The storage rate.** A disk the operator owns costs far less than a rented one. On that basis
+1. **The storage rate.** A disk the operator owns costs far less than a rented one. On that basis
    the base charge is 2 to 5 units.
-3. **Free actions.** U18 lets a zero-price action run without funds, and such a call still costs
+2. **Free actions.** U18 lets a zero-price action run without funds, and such a call still costs
    the operator one base charge. For any action the operator earns only `fee_bps` of the margin,
    so at the shipped 20% an action covers its base charge only with a margin of 250 units or more.
    Pricing the natives does not change this.
-4. **One GPU.** A kernel serves about 500 medium chat calls an hour on one GPU. The kernel itself
+3. **One GPU.** A kernel serves about 500 medium chat calls an hour on one GPU. The kernel itself
    handles 150 calls a second. The model is the bottleneck.
-5. **The spec.** D17 states that natives cost 0 unless noted, and marks it as policy. Adopting this
-   schedule changes that entry and the shipped defaults.
 
 ## 11. Not verified
 
 - Typical model usage. The kernel records none. The "medium call" is an assumption, and the model
   prices move in proportion to it.
 - The size of a lookup result. The 20 KB for ten results is an estimate.
-- The processor rate, quoted from memory.
 - How much `llm/decide` adds by sending the candidates' schemas.
 - The cost of a cold compile, or of a compile with the SDK prelude.
 - Calls between kernels and composed calls. Throughput was measured with one user calling one
   native on one machine.
-- The disk and GPU prices come from price guides and one vendor page, not from live rate cards.
+- The disk, processor and GPU prices come from price guides and one vendor page, not from live rate
+  cards.
+- How long the medium call takes on the GPU of a `g6.xlarge`.
 
 ## 12. Sources
 
@@ -239,6 +236,7 @@ Adding a limit changes the native's contract. That is a separate decision.
 - AWS S3 pricing, 2026: https://upstash.com/blog/aws-s3-pricing-explained-2026
 - Hetzner volumes: https://docs.hetzner.com/cloud/volumes/overview
 - Gemma 3 27B, hosted: https://openrouter.ai/google/gemma-3-27b-it
-- RTX 4090 rental: https://www.spheron.network/blog/runpod-vs-vastai-2026/
+- AWS `c7i.large`: https://calculator.holori.com/aws/ec2/c7i.large/us-east-1
+- AWS `g6.xlarge`: https://calculator.holori.com/aws/ec2/g6.xlarge
 - OpenAI embeddings pricing, 2026:
   https://www.activepieces.com/blog/openai-embeddings-api-pricing-in-2026-dated-and-checked.md
