@@ -19,6 +19,7 @@ import (
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/llm"
+	"github.com/daios-ai/juice/native"
 	"github.com/daios-ai/juice/rail"
 )
 
@@ -98,7 +99,7 @@ func TestDefaultServerConfig(t *testing.T) {
 	if base <= 0 {
 		t.Fatalf("the base charge (sink) = %d, want a positive price", base)
 	}
-	for _, name := range []string{"time", "random", "transfer"} {
+	for _, name := range []string{"time", "random", "resolve", "transfer"} {
 		if price(name) != base {
 			t.Errorf("%s = %d, want the base charge %d: it does no more than a bare call", name, price(name), base)
 		}
@@ -109,6 +110,13 @@ func TestDefaultServerConfig(t *testing.T) {
 	for _, name := range []string{"lookup", "web", "tinygo/compile", "llm/chat", "llm/json", "llm/decide", "llm/embed"} {
 		if price(name) < base {
 			t.Errorf("%s = %d, below the base charge %d", name, price(name), base)
+		}
+	}
+	// Every native the build registers is priced, so a native without a price setting cannot ship
+	// free: the rule covers the whole stdlib, not a list kept beside it.
+	for _, spec := range native.All(native.Deps{}) {
+		if price(spec.Name) < base {
+			t.Errorf("native %s = %d, below the base charge %d: does it have a price setting?", spec.Name, price(spec.Name), base)
 		}
 	}
 	// A model's natives cost what the model is priced at, bound or named.

@@ -102,6 +102,7 @@ type NativeConfig struct {
 	Sink     NativePriceConfig  `json:"sink" doc:"The sink action (a no-op task target)."`
 	Message  NativePriceConfig  `json:"message" doc:"The message action (a task a user acknowledges)."`
 	Random   NativePriceConfig  `json:"random" doc:"The random action."`
+	Resolve  NativePriceConfig  `json:"resolve" doc:"The resolve action (an address to its principal)."`
 	Web      NativeWebConfig    `json:"web" doc:"The web action (a public GET)."`
 	TinyGo   NativePriceConfig  `json:"tinygo" doc:"The tinygo/compile action."`
 	Transfer NativePriceConfig  `json:"transfer" doc:"The transfer action (sending credits to a user)."`
@@ -129,6 +130,8 @@ func (c NativeConfig) PriceOf(name string) int64 {
 		return c.Message.Price
 	case "random":
 		return c.Random.Price
+	case "resolve":
+		return c.Resolve.Price
 	case "transfer":
 		return c.Transfer.Price
 	case "web":
@@ -228,6 +231,7 @@ func DefaultServerConfig() ServerConfig {
 			Sink:     NativePriceConfig{Price: 50},
 			Message:  NativePriceConfig{Price: 110},
 			Random:   NativePriceConfig{Price: 50},
+			Resolve:  NativePriceConfig{Price: 50},
 			Web:      NativeWebConfig{Price: 600},
 			TinyGo:   NativePriceConfig{Price: 2500},
 			Transfer: NativePriceConfig{Price: 50},
