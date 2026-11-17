@@ -29,12 +29,12 @@ type Economy struct {
 }
 
 // DefaultEconomy is the shipped money rules, whole: a domestic fee of 20%, serving and import
-// markups of 5% each, a ticket of one unit drawn against a maximum of five, and fifty of
-// unpaid delivered service. The two ticket figures are this kernel's own, not the world's — every
-// shipped world counts in millionths, so one number means the same amount on all of them.
+// markups of 5% each, a ticket of a tenth of a unit drawn against a maximum of half a unit, and
+// fifty of unpaid delivered service. The two ticket figures are this kernel's own, not the world's
+// — every shipped world counts in millionths, so one number means the same amount on all of them.
 func DefaultEconomy() Economy {
 	return Economy{FeeBPS: 2000, RemoteBPS: 500, ImportBPS: 500,
-		Lottery: 1_000_000, LotteryMax: 5_000_000, CreditLimit: 50_000_000}
+		Lottery: 100_000, LotteryMax: 500_000, CreditLimit: 50_000_000}
 }
 
 // Fee splits a taxable amount into what the provider keeps and what the operator takes.

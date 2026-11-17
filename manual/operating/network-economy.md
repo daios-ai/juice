@@ -39,7 +39,7 @@ call. The import rate is local accounting information and is not part of the
 remote receipt.
 
 The buyer's final charge also depends on the ticket mechanism below. The
-[0.10 example](../money/funds.html#what-an-action-costs) shows how the quoted
+[0.01 example](../money/funds.html#what-an-action-costs) shows how the quoted
 price, ticket payment, and final charge differ.
 
 ## The seller advances the work
@@ -150,7 +150,7 @@ No operator payment is needed, consistent with `play` having no cash backing.
 ### The settings
 
 ```
-Tickets:    this kernel draws for 1.00 fUSD, and accepts tickets up to 5.00 fUSD
+Tickets:    this kernel draws for 0.10 fUSD, and accepts tickets up to 0.50 fUSD
 ```
 
 The `lottery` setting determines the face value your local callers stake.

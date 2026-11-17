@@ -73,42 +73,42 @@ use **basis points**: `100` means 1%, `500` means 5%, and `2000` means 20%.
 Fees are rounded up to the nearest base unit. The keys and instructions for
 changing them are in [Configuration](../reference/config.html#money).
 
-Suppose an action costs `0.10`, calls no other actions, and succeeds. On its
-own kernel, the buyer pays `0.10`. The local execution fee is `0.02`, leaving
-`0.08` for the provider. When the buyer uses another kernel, that kernel
+Suppose an action costs `0.01`, calls no other actions, and succeeds. On its
+own kernel, the buyer pays `0.01`. The local execution fee is `0.002`, leaving
+`0.008` for the provider. When the buyer uses another kernel, that kernel
 applies the same execution fee to the provider's price. It is already included
-in `0.10`. The buyer's remote price adds the export and import fees:
+in `0.01`. The buyer's remote price adds the export and import fees:
 
 | Part of the remote price | Amount |
 |---|---:|
-| Action price | 0.10 |
-| Export fee: 5% of 0.10 | 0.005 |
-| Amount owed to the remote provider | 0.105 |
-| Import fee: 5% of 0.105 | 0.00525 |
-| **Price shown to the buyer** | **0.11025** |
+| Action price | 0.01 |
+| Export fee: 5% of 0.01 | 0.0005 |
+| Amount owed to the remote provider | 0.0105 |
+| Import fee: 5% of 0.0105 | 0.000525 |
+| **Price shown to the buyer** | **0.011025** |
 
-The `0.11025` is the successful call's **average cost**, not necessarily what
+The `0.011025` is the successful call's **average cost**, not necessarily what
 leaves your balance on that one call. Small amounts are settled with a
 **ticket** so the kernels need not make a rail payment for every purchase.
 The ticket has a **face value**, set by your kernel's ticket size (`lottery`). For
-this example, take its default of `1.00`. The remote provider is owed `0.105`,
-so a draw pays the provider `1.00` on 10.5% of successful calls and pays
+this example, take its default of `0.10`. The remote provider is owed `0.0105`,
+so a draw pays the provider `0.10` on 10.5% of successful calls and pays
 nothing on the other 89.5%. Both kernels contribute to the draw; neither can
 choose its result.
 
 | Result | Rail payment | Import fee | **What you pay** |
 |---|---:|---:|---:|
-| No payment drawn (89.5% chance) | 0 | 0.00525 | **0.00525** |
-| Ticket pays (10.5% chance) | 1.00 | 0.00525 | **1.00525** |
-| Expected amount per call | 0.105 | 0.00525 | **0.11025** |
+| No payment drawn (89.5% chance) | 0 | 0.000525 | **0.000525** |
+| Ticket pays (10.5% chance) | 0.10 | 0.000525 | **0.100525** |
+| Expected amount per call | 0.0105 | 0.000525 | **0.011025** |
 
-The expected cost is `89.5% × 0.00525 + 10.5% × 1.00525 = 0.11025`.
+The expected cost is `89.5% × 0.000525 + 10.5% × 0.100525 = 0.011025`.
 Individual calls can cost more than the price you approved when their ticket
 pays. The `charge` in a `run` reply records what was charged when the call
-finished: `0.00525` or `1.00525` in this example.
+finished: `0.000525` or `0.100525` in this example.
 
-Before the call, you need both the `0.11025` execution budget and a `1.00`
-**stake** available, `1.11025` in all. The stake holds enough to pay a winning
+Before the call, you need both the `0.011025` execution budget and a `0.10`
+**stake** available, `0.111025` in all. The stake holds enough to pay a winning
 ticket. These are reservations, not two charges: settlement returns the unused
 budget and releases the stake, then reserves any payment the draw requires.
 If a rail payment fails, the money remains committed and the kernel retries it.
@@ -117,7 +117,7 @@ When the amount owed is at least the ticket's face value, the kernel pays the
 exact amount instead of drawing. A paid call still needs its stake available
 before it starts, because it might fail after some work and owe less than the
 face value. Setting `lottery` to zero pays every amount exactly and requires
-no stake: this example would then cost exactly `0.11025`. The serving kernel
+no stake: this example would then cost exactly `0.011025`. The serving kernel
 also limits the ticket sizes it accepts; operators set that limit in
 [Configuration](../reference/config.html#money).
 
@@ -130,12 +130,12 @@ for how to follow it.
 
 ### What the serving provider receives
 
-The provider puts up the `0.10` execution budget. Its kernel later credits
-`0.08` to the provider and takes `0.02` as the local execution fee. The whole
+The provider puts up the `0.01` execution budget. Its kernel later credits
+`0.008` to the provider and takes `0.002` as the local execution fee. The whole
 ticket payment, when there is one, goes to the provider. Ticket payments bring
-in `0.105` per call on average. That leaves an expected net of
-`0.08 − 0.10 + 0.105 = 0.085`: the `0.08` it would earn from a local buyer
-plus the `0.005` export fee. On a losing draw, the provider receives no rail
+in `0.0105` per call on average. That leaves an expected net of
+`0.008 − 0.01 + 0.0105 = 0.0085`: the `0.008` it would earn from a local buyer
+plus the `0.0005` export fee. On a losing draw, the provider receives no rail
 payment. The export fee compensates for that risk over many calls; it does
 not guarantee payment for any one call.
 

@@ -81,8 +81,8 @@ units.
 | `fee_bps` | `2000` | local execution fee on each provider's margin, in hundredths of a percent: 20% |
 | `remote_bps` | `500` | export fee added when serving another kernel: 5% |
 | `import_bps` | `500` | fee retained when a local user calls another kernel: 5% |
-| `lottery` | `1000000` | the face value this kernel's buyers stake per cross-kernel call. `0` pays every debt exactly |
-| `lottery_max` | `5000000` | the largest face value accepted from somebody else's buyer |
+| `lottery` | `100000` | the face value this kernel's buyers stake per cross-kernel call. `0` pays every debt exactly |
+| `lottery_max` | `500000` | the largest face value accepted from somebody else's buyer |
 | `credit_limit` | `50000000` | the ceiling on work delivered to other kernels and not yet paid for, across all peers together |
 
 See [What an action costs](../money/funds.html#what-an-action-costs) for the
