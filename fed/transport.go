@@ -104,19 +104,22 @@ func stdListenAddrs(port int) []string {
 // sockets with SO_REUSEPORT, so its own bind of a held port SUCCEEDS and two kernels share it, each
 // taking a share of the other's connections; the collision has to be detected before libp2p binds.
 // These two sockets are plain, without that option, so the operating system refuses them whenever
-// the port is held at all, and they are closed again immediately.
+// the port is held at all, and they are closed again immediately. They are IPv4 sockets, the family
+// libp2p binds (stdListenAddrs): Go opens "tcp" or "udp" on 0.0.0.0 as a dual-stack IPv6 socket,
+// which macOS binds beside an IPv4 socket holding the same port, so that probe would find a held
+// port free there.
 func claimPort(port int) error {
 	held := func(what string, err error) error {
 		return fmt.Errorf("fed: %s port %d is already in use by another program; give this kernel "+
 			"its own federation addresses (fed_listen_addrs in config.json, or --fed-listen-addrs): %w",
 			what, port, err)
 	}
-	l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
+	l, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		return held("tcp", err)
 	}
 	_ = l.Close()
-	pc, err := net.ListenPacket("udp", fmt.Sprintf("0.0.0.0:%d", port))
+	pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
 		return held("udp", err)
 	}
