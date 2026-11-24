@@ -7,9 +7,7 @@
   "decimals": 6,
   "symbol": "USDT0",
   "description": "USDT0 on Arbitrum One",
-  "seeds": [
-    "/dns4/daios.ai/tcp/31313/p2p/12D3KooWGi5252vn6HJU4Wrkq6ovHKgPHS1vWCgfkfpMjsDFhjJQ"
-  ],
+  "seeds": [],
   "finality": "finalized",
   "venue": {
     "router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",

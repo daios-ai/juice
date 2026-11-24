@@ -320,7 +320,7 @@ the records and keys needed to resolve them.
 
 The world file's `seeds` are addresses of kernels to contact when joining the
 network. Through them, kernels find peers and exchange public catalogues.
-`play`, `polygon` and `arbitrum-one` include project seeds. On
+`play` and `polygon` include project seeds. On `arbitrum-one` and
 `arbitrum-sepolia`, add the address of a kernel already serving that world.
 To use a different seed on any world, edit `seeds` in its world file. Eligible
 public actions then become available to remote callers without another

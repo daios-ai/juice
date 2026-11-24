@@ -46,8 +46,8 @@ starts.
 The network itself is not configured here. It is the world named on
 `juice kernel serve`, whose file in `~/.juice/worlds/` carries the money, the
 node a chain world is reached through (`rpc`), and the `seeds` where peers are
-met. The `play`, `polygon` and `arbitrum-one` files Juice comes with include
-project seeds. For `arbitrum-sepolia`, add the address of a kernel already
+met. The `play` and `polygon` files Juice comes with include project seeds.
+For `arbitrum-one` and `arbitrum-sepolia`, add the address of a kernel already
 serving that world. The network a kernel was created on is recorded in its database, and
 a boot offering it another is refused.
 See [Configuring worlds](../operating/worlds.html) for the file's contents and
