@@ -216,7 +216,7 @@ start_server() {
     # only once the background child runs, and on a restart the wait loop could otherwise grep this
     # server's predecessor's `server.ready` line and lock onto its now-dead port.
     : >"$log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$home" JUICE_HOME="$(khome "$db")" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$(khome "$db")" "$world")" HOME="$home" JUICE_HOME="$(khome "$db")" \
         "$JUICE" kernel serve "$world" --listen-addr 127.0.0.1:0 >>"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local addr deadline=$(( $(date +%s) + 20 ))
@@ -275,8 +275,50 @@ j()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"
 jj() { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --json "$@" 2>/dev/null; }
 q()  { local db="$1" home="$2"; shift 2; local a=(); mapfile -t a < <(_srv "$db"); HOME="$home" "$JUICE" "${a[@]}" --quiet "$@" 2>/dev/null; }
 
+# kphrase root world — the recovery phrase of the kernel the installation at root serves on world.
+# A kernel is created from a phrase, and a boot with no terminal is handed it (D9). Every kernel
+# gets its own from this list, so no two test kernels are one kernel; it is kept beside the
+# installation so that a later boot — a restart, or a restore after the home is deleted — names the
+# same kernel. The count is a file because this is called inside a command substitution.
+KERNEL_PHRASES=(
+    "circle peasant balcony myth tell prison release fiscal number wire cancel tattoo"
+    "churn win brush grab hockey leisure bench obey meadow first couple birth"
+    "differ sunny panther cage senior rural brisk chase family sail develop tattoo"
+    "napkin weekend busy feed young unique sugar blur churn vacuum build inform"
+    "seek vast about crouch salad visual figure horror submit pond lamp alien"
+    "aspect skull obvious during shoot dignity danger empty leg dragon suspect hybrid"
+    "grab gun topic duty harbor logic mushroom umbrella lab organ hurry divide"
+    "picture camera gift opinion measure trip become glory scrap elite hint can"
+    "ozone unknown pepper music love valve assume cotton broken bacon merit turtle"
+    "enrich release attitude mean please cousin book guess hair under diamond erode"
+    "fee safe tomato divorce alpha help spin memory glow burst obtain junior"
+    "list model okay trend chief fence latin leader razor display egg jump"
+    "note limit chest absorb wagon bar rent tongue chimney spin half surround"
+    "soon distance spare shell sad rail price bird little curtain tortoise now"
+    "employ brief capable produce clown reduce blur eyebrow wonder square island end"
+    "divide other tank month fuel negative primary pole border promote fine slice"
+    "pluck dragon portion laugh sand message magnet two diagram pledge fork answer"
+    "use same crash void wall stomach sunny valve sauce parent when claw"
+    "flee actor wine lesson diamond jewel fish exchange duck lend inflict problem"
+    "height senior shoulder inmate wave evolve sick opinion music carpet kick unaware"
+    "rural provide century decade warrior gasp pull soon penalty card affair long"
+    "toy crazy top yellow alone minor forum topple tube chronic cute brass"
+    "spin process cycle latin sunset tennis width divorce magic basket virtual kiwi"
+    "bid hub spare derive village panic acid gather vehicle seven crunch trash"
+)
+kphrase() {
+    local root="$1" f="$1.${2:-play}.phrase" n
+    if [ ! -f "$f" ]; then
+        n=$(cat "$_RUNROOT/phrases" 2>/dev/null || echo 0)
+        echo $(( n + 1 )) >"$_RUNROOT/phrases"
+        mkdir -p "$(dirname "$root")"
+        echo "${KERNEL_PHRASES[$(( n % ${#KERNEL_PHRASES[@]} ))]}" >"$f"
+    fi
+    cat "$f"
+}
+
 # kdb root [world] — the database of the kernel this installation serves on a world. One kernel is
-# one world's, in kernels/<world>/, holding the ledger, the config, the rail key and the
+# one world's, in kernels/<world>/, holding the ledger, the config, the kernel's key and the
 # single-server lock (D23); the flows serve `play` unless they are about another network.
 kdb() { echo "$1/kernels/${2:-play}/juice.db"; }
 

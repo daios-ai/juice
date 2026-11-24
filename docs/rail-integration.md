@@ -164,11 +164,9 @@ must know.
   address. A stolen session can already move the funds by transferring them to another account
   it controls, so freezing withdrawals protected nothing; step-up authentication, if ever
   wanted, must cover transfers and withdrawals together.
-- A chain-railed kernel identity **mandates** a proven blockchain address: an EIP-191 signature by
-  the rail key over `(kernel key, address)`, domain-qualified. It authenticates the settlement
-  destination; without it the identity is invalid on a chain rail. Juice custodies `rail.key`
-  and hands it to the rail at construction, so producing this signature is plain cryptography,
-  not chain access.
+- A kernel is paid at the address of its own key (P1): one secp256k1 key is its identity and its
+  chain account, so the settlement destination is computed from the identity and nothing about it
+  is sent or proven. Juice custodies `kernel.key` and hands it to the rail at construction.
 - Unrecognized senders sit on `sys`, listed, until the operator assigns an owner by transfer —
   a custodial support decision by the ledger authority, not cryptographic attribution. `sys`
   registers the operator's address like any user.
@@ -220,7 +218,7 @@ tx_hash, refill_id, refill_tx, created_at, finalized_at`).
 
 ## Trust
 
-The operator holds the rail key: users' backing money is in operator custody. "No operator" is
+The operator holds the kernel's key: users' backing money is in operator custody. "No operator" is
 a property of `juice-rail`, not of a chain-railed juice — juice's operator was always the ledger
 authority; the rail extends that same trusted role to custody of the backing. Users additionally
 carry the operator's credit decisions: up to X of backing is peer IOUs.
@@ -263,7 +261,7 @@ adaptors (the manual one trivially; for the chain: verb sequencing, `sys` gate a
 booking, deposit attribution), and the storage implementation supplied to the rail. Amount
 handling and deposit observation stay in
 `juice-rail` — logic juice would have to rewrite is logic the rail already owns. `juice-rail`
-owns everything on-chain, state in `$JUICE_HOME/kernel/rail.db`, key in `rail.key`. Outbound
+owns everything on-chain, state in `rail.db` beside the ledger, key in `kernel.key`. Outbound
 intent id = `SHA-256("juice-rail-op|" ‖ record id)`, so retries carry the rail's at-most-once
 end-to-end. Kernel core untouched; existing idempotent ledger ops reused; signature prefix and
 identity fields change lockstep.

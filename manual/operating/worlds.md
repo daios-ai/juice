@@ -30,7 +30,7 @@ Obtain an address from that kernel's `juice admin kernel show`, or from the
 reachable from the joining machine and copy it in full, including its peer id:
 
 ```json
-"seeds": ["/ip4/203.0.113.10/tcp/31313/p2p/12D3KooW…"]
+"seeds": ["/ip4/203.0.113.10/tcp/31313/p2p/16Uiu2HAm…"]
 ```
 
 The address above is illustrative. Replace it with the seed's actual address

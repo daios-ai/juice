@@ -611,7 +611,7 @@ var unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
 	 WHERE ` + unresolved("ot", "ox", "orc")
 
 // reservedDeposit says a deposit d is a peer kernel's to explain, so nobody else may be handed it: it
-// comes from a peer's proven vault, whose money is a ticket or a transfer and waits for the reveal or
+// comes from a peer's address, whose money is a ticket or a transfer and waits for the reveal or
 // the `paid` naming it (P10, P11), or from an address some unresolved foreign call named as its payer.
 // Both can land before the message naming them. A world with no addresses reserves nothing: there
 // the message is itself the payment (D23).

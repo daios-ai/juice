@@ -166,7 +166,7 @@ flow_rail_world_mismatch() {
     local root; root=$(khome "$db")
     mv "$root/kernels/play" "$root/kernels/arbitrum-sepolia"
     local log="$dir/mismatch.log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$root" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" arbitrum-sepolia)" HOME="$hs" JUICE_HOME="$root" \
         "$JUICE" kernel serve arbitrum-sepolia --listen-addr 127.0.0.1:0 >"$log" 2>&1
     assert_ne "rail_world_mismatch.refused" 0 "$?"
     assert_contains "rail_world_mismatch.says_why" "bound to network" "$(cat "$log")"
@@ -187,7 +187,7 @@ flow_rail_lock() {
     make_admin "$db" "$hs" || { fail "rail_lock.boot" "server did not start"; return; }
 
     local log="$(dirname "$db")/second.log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass HOME="$hs" JUICE_HOME="$(khome "$db")" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$(khome "$db")" "$(basename "$(dirname "$db")")")" HOME="$hs" JUICE_HOME="$(khome "$db")" \
         "$JUICE" kernel serve "$(basename "$(dirname "$db")")" --listen-addr 127.0.0.1:0 >"$log" 2>&1
     assert_ne "rail_lock.second_refused" 0 "$?"
     assert_contains "rail_lock.says_why" "another server" "$(cat "$log")"
@@ -364,7 +364,7 @@ flow_first_boot() {
 
     # A world nobody ships and nobody wrote: refused, naming the file that would have said what the
     # network is, and leaving no kernel behind.
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve nope 2>&1)
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" nope)" JUICE_HOME="$root" "$JUICE" kernel serve nope 2>&1)
     assert_contains "first_boot.unknown_world_refused" "$root/worlds/nope.json" "$out"
     assert_eq "first_boot.nothing_written" "no" "$([ -d "$root/kernels/nope" ] && echo yes || echo no)"
     # Looking for it installed the worlds this build does ship, so what an operator can serve, and
@@ -375,7 +375,7 @@ flow_first_boot() {
 
     # A world with nobody to ask: creating a kernel is the operator's act, and the one answer no
     # world can give is what this kernel calls itself on the network.
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve play 2>&1)
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" play)" JUICE_HOME="$root" "$JUICE" kernel serve play 2>&1)
     assert_contains "first_boot.unnamed_kernel_refused" "no kernel on play here" "$out"
     assert_contains "first_boot.refusal_says_what_to_write" "--kernel-handle" "$out"
     assert_eq "first_boot.no_home" "no" "$([ -d "$root/kernels/play" ] && echo yes || echo no)"
@@ -383,7 +383,7 @@ flow_first_boot() {
     # A misspelled key is not a key: the setting the operator meant keeps its default otherwise.
     mkdir -p "$root/kernels/play"
     echo '{"kernle_handle":"acme"}' > "$root/kernels/play/config.json"
-    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 2>&1)
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" play)" JUICE_HOME="$root" "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 2>&1)
     assert_contains "first_boot.unknown_key_refused" "kernle_handle" "$out"
 
     # Named kernel on a named world: it boots, and says which kernel on which network.
@@ -391,7 +391,7 @@ flow_first_boot() {
     local log="$dir/first.log"
     # Its own federation addresses: this machine may already be running a kernel on the standard
     # port, and a second kernel is refused it rather than given a share of it.
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" play)" JUICE_HOME="$root" HOME="$dir" \
         "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 >"$log" 2>&1 &
     local pid=$!; track_pid "$pid"
     local i
@@ -419,7 +419,7 @@ flow_first_boot() {
     # operator's own, which is a file and nothing else — no registration, no name in the program.
     printf '{"rail":"manual","decimals":6,"symbol":"MINE","description":"a network of my own","seeds":[]}\n' > "$root/worlds/mine.json"
     local log4="$dir/cli.log"
-    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" HOME="$dir" \
+    JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" mine)" JUICE_HOME="$root" HOME="$dir" \
         "$JUICE" kernel serve mine --kernel-handle cli --listen-addr 127.0.0.1:0 \
         --fed-listen-addrs /ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/udp/0/quic-v1 \
         --log-format json --relay-slots 7 >"$log4" 2>&1 &
@@ -437,6 +437,75 @@ flow_first_boot() {
     # A world this installation does not know is told what it does hold.
     out=$(JUICE_HOME="$root" "$JUICE" kernel serve arbitrum-one 2>&1)
     assert_contains "first_boot.lists_what_exists" "Kernels here: mine, play" "$out"
+}
+
+# A kernel is its recovery phrase (D9). Lose the home, give the phrase, and the same kernel is back:
+# the same key, so every peer still knows it, with a ledger that starts again. Another phrase is
+# another kernel. A boot with no terminal is handed the phrase and never invents one, since the only
+# place it could show it is a log; and a home whose database has lost its key is refused untouched.
+flow_restore_from_phrase() {
+    echo "=== FLOW restore_from_phrase ==="
+    local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
+    local root; root=$(khome "$db")
+    make_admin "$db" "$hs" || { fail "restore.boot" "server did not start"; return; }
+    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
+    assert_eq "restore.key_is_the_compressed_point" 44 "${#key}"
+    make_user "$db" "$hs" "$ha" alice
+    deposit "$db" "$hs" alice 500
+    assert_contains "restore.alice_exists" "alice" "$(j "$db" "$hs" admin user list)"
+
+    # The key is one file beside the database, readable by its owner only, and not in the database.
+    assert_eq "restore.key_file_mode" 600 "$(stat -c %a "$root/kernels/play/kernel.key" 2>/dev/null)"
+    assert_eq "restore.no_key_in_the_database" 0 \
+        "$(sqlite3 "$db" "select count(*) from config where key='signing_private_key'" 2>/dev/null || echo -1)"
+    # The phrase is never printed by a boot that was handed it.
+    assert_not_contains "restore.phrase_not_logged" "$(kphrase "$root" play)" "$(cat "$(server_log "$db")")"
+    stop_server "$db"
+
+    # A database that has lost its key is not a kernel this build can serve. It is refused before
+    # the database is opened, so nothing in it changes.
+    mv "$root/kernels/play/kernel.key" "$dir/kernel.key.aside"
+    local sum; sum=$(sha256sum "$db" | cut -d' ' -f1)
+    local out; out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" play)" JUICE_HOME="$root" \
+        "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 2>&1 </dev/null)
+    assert_contains "restore.keyless_database_refused" "kernel.key" "$out"
+    assert_eq "restore.refused_database_untouched" "$sum" "$(sha256sum "$db" | cut -d' ' -f1)"
+
+    # The disk is lost.
+    rm -rf "$root/kernels/play"
+
+    # With no terminal and no phrase nothing is created, and the refusal names what to set.
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" \
+        "$JUICE" kernel serve play --kernel-handle "$KERNEL_NAME" --listen-addr 127.0.0.1:0 2>&1 </dev/null)
+    assert_contains "restore.no_phrase_refused" "JUICE_BOOTSTRAP_PHRASE" "$out"
+    assert_eq "restore.refusal_created_nothing" "no" "$([ -d "$root/kernels/play" ] && echo yes || echo no)"
+    out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="twelve words that are not a phrase at all in any way" JUICE_HOME="$root" \
+        "$JUICE" kernel serve play --kernel-handle "$KERNEL_NAME" --listen-addr 127.0.0.1:0 2>&1 </dev/null)
+    assert_contains "restore.bad_phrase_refused" "JUICE_BOOTSTRAP_PHRASE" "$out"
+    assert_eq "restore.bad_phrase_created_nothing" "no" "$([ -d "$root/kernels/play" ] && echo yes || echo no)"
+
+    # The phrase: the same kernel, saying so, with a ledger of its own.
+    start_server "$db" "$hs" || { fail "restore.restored" "server did not start"; return; }
+    assert_eq "restore.same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
+    assert_contains "restore.says_which_kernel" "That phrase is kernel $key" "$(cat "$(server_log "$db")")"
+    j "$db" "$hs" auth login "sys@$(kname "$db")" --password sys-pass >/dev/null 2>&1
+    assert_not_contains "restore.ledger_starts_again" "alice" "$(j "$db" "$hs" admin user list)"
+    stop_server "$db"
+
+    # The phrase also resets the superuser's password: it is the one thing an operator keeps.
+    start_server "$db" "$hs" || { fail "restore.restart" "server did not start"; return; }
+    j "$db" "$hs" auth recover "sys@$(kname "$db")" --phrase "$(kphrase "$root" play)" --password another-pass >/dev/null 2>&1
+    assert_eq "restore.phrase_resets_sys_password" 0 "$?"
+    j "$db" "$hs" auth login "sys@$(kname "$db")" --password another-pass >/dev/null 2>&1
+    assert_eq "restore.new_password_works" 0 "$?"
+    j "$db" "$hs" auth login "sys@$(kname "$db")" --password sys-pass >/dev/null 2>&1
+    assert_ne "restore.old_password_refused" 0 "$?"
+    stop_server "$db"
+
+    # Another phrase is another kernel.
+    rm -rf "$root/kernels/play" "$root.play.phrase"
+    start_server "$db" "$hs" || { fail "restore.another_kernel" "server did not start"; return; }
+    assert_ne "restore.another_phrase_is_another_kernel" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
 }
 
 # Money is written one way. What a command takes is what it shows, and an amount is never rendered

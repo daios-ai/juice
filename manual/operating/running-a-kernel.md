@@ -57,7 +57,8 @@ What will this kernel call itself on the network? Other operators see this name.
 Name: acme
 Superuser password:
 Confirm password:
-sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+Recovery phrase (Enter to create a new kernel):
+Recovery phrase (write this down; it is shown only once and cannot be recovered):
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
@@ -91,9 +92,11 @@ configuration; what belongs to the network — its chain endpoint and its meetin
 points — is in the world file.
 
 {: .warning }
-> Save the recovery phrase before pressing Enter. It is shown once, it is the only
-> way to reset the `sys` password (`juice auth recover sys@acme`), and nobody can
-> recover it for you.
+> Save the recovery phrase before pressing Enter and keep it private. Anyone
+> with it can restore the kernel's identity, spend its coins on a chain network,
+> and reset the `sys` password with `juice auth recover sys@acme`.
+> Use a fresh phrase for each kernel. The same phrase gives the same identity
+> even on another machine or in another world.
 
 With setup complete, later starts use the saved state and print a ready line
 identifying the kernel, network, and public key.
@@ -135,9 +138,9 @@ token and decimals match the world file, and that the venue supports refills.
 Creating a kernel fixes its world for life, publishes the address people pay to,
 and records the block from which it watches for payments, which cannot be
 guessed afterwards. A first boot that cannot reach the chain, or finds any of
-these wrong, therefore creates no kernel: no superuser, nothing serving. What it
-had already written, including its chain key, stays where it is, so fixing the
-cause and starting again continues from there.
+these wrong, therefore creates no kernel: no superuser, nothing serving. If the
+kernel has already written its key, correct the problem and supply the same
+phrase to finish first boot.
 
 Once the kernel exists, an unreachable node or a broken venue only delays money:
 the kernel serves, and the payment commands wait and say what is not ready.
@@ -148,13 +151,10 @@ the kernel serves, and the payment commands wait and say what is not ready.
 $ juice kernel serve polygon
 ```
 
-First boot generates `rail.key` in the kernel's home. This key controls the
-kernel's address on the chain.
-
-{: .warning }
-> `rail.key` controls the kernel's money on the chain. It is created once and
-> never regenerated. Back it up with the rest of the home: lose it and you lose
-> what the kernel holds.
+First boot derives the signing key from the recovery phrase and saves it in
+`kernel.key` in the kernel's home. The same key controls its blockchain address.
+A compatible Ethereum wallet opens that address from the phrase as its first
+account.
 
 **3. Read the kernel's address.** The serving machine's client already knows
 the kernel. Log in as `sys` and inspect its blockchain address:
@@ -232,10 +232,10 @@ the distinction between funding the payment and paying its blockchain fee.
 ## Starting without a terminal
 
 For unattended first boot, name the kernel on the command line and provide the
-superuser password through `JUICE_BOOTSTRAP_PASSWORD`:
+superuser password and the 12-word recovery phrase through the environment:
 
 ```console
-$ JUICE_BOOTSTRAP_PASSWORD=… juice kernel serve play --kernel-handle acme --listen-addr :4040
+$ JUICE_BOOTSTRAP_PASSWORD=… JUICE_BOOTSTRAP_PHRASE="…" juice kernel serve play --kernel-handle acme --listen-addr :4040
 ```
 
 Naming settings is consent to create the kernel, so nothing is asked. Writing
@@ -243,20 +243,9 @@ them to `config.json` beforehand does the same, and the two can be mixed. On a
 first boot the effective settings are written to that file as the new kernel's
 configuration; on every later boot an option applies to that run alone.
 
-The kernel prints the `sys` recovery phrase once on stderr. A program that
-boots the kernel for someone generates the phrase itself and passes only its
-public key, the same value `POST /v1/users` takes as `recovery_public_key`:
-
-```console
-$ JUICE_BOOTSTRAP_PASSWORD=… JUICE_BOOTSTRAP_RECOVERY_KEY=… juice kernel serve play --kernel-handle acme
-```
-
-The kernel then enrolls that key and prints no phrase.
-
-If required configuration is missing and no terminal is available, startup
-fails with a message identifying the missing setting. A missing or short
-password, or a malformed recovery key, fails the same way, naming its
-variable, before anything is written.
+Unattended first boot requires a phrase and never prints it. If a required
+setting is missing, the password is too short, or the phrase is invalid, the
+kernel names the setting and refuses to start.
 
 ## The kernel's home
 
@@ -264,14 +253,15 @@ Each kernel has a home directory containing the state needed to run it:
 
 ```
 ~/.juice/kernels/play/
-  juice.db        accounts, actions, ledger, and the signing key
+  juice.db        accounts, actions, ledger, and the kernel's public key
+  kernel.key      the kernel's private signing key
   config.json     configuration, written once at first boot
   serve.lock      held by the running server, and holding its process id
   cache/          regenerable; safe to delete
 ```
 
-On a chain network, the directory also contains the rail key and payment
-records. Keep these files together when moving or backing up the kernel: the
+On a chain network, the directory also contains the payment records in `rail.db`.
+Keep these files together when moving or backing up the kernel: the
 account ledger, signing identity, and external payments belong to the same
 installation state.
 
@@ -297,6 +287,20 @@ current work, and exits. Juice has no separate stop command.
 For a consistent backup, stop the server and copy the complete home directory.
 Copying individual files while the server is running is not a supported backup
 procedure.
+
+If the home is lost, start the kernel in an empty home on the same world and
+enter its recovery phrase at first boot. Check the kernel id printed after
+`That phrase is kernel` and, on a chain network, the address after `paid at`.
+Peers still know the kernel by the same identity. Its ledger starts again.
+On a chain network, the kernel credits the token balance already at its address
+to `sys`. Recovering
+the old accounts, balances and actions requires a backup of the home. Stop the
+old instance before starting the restored one.
+
+A kernel created by a version that kept its signing key in `juice.db` must be
+created anew. This version refuses the old database. Keep the old home to read
+its records with the version that created it. On a chain network, its
+`rail.key` still controls the coins at the old address.
 
 To upgrade, coordinate with the other operators on your network. Stop new
 cross-kernel calls and let all existing calls settle on every kernel before
@@ -336,7 +340,7 @@ and nowhere else. You can inspect the local transport addresses with:
 $ juice admin kernel show
 …
 Listen addresses:
-  /ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…
+  /ip4/127.0.0.1/tcp/31313/p2p/16Uiu2HAm…
 ```
 
 From another machine, request `GET /health` at the kernel's HTTP address. Its

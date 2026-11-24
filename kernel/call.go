@@ -170,13 +170,13 @@ func quoteHashOf(t quoteTerms) string {
 	return sha256Hex(string(payload))
 }
 
-// IsPublicKey reports whether s has the syntactic form of a base64url Ed25519 public key. Exported
+// IsPublicKey reports whether s has the syntactic form of a kernel's base64url public key. Exported
 // for the service/CLI layer's shape-based peer resolution (§14 productions).
 func IsPublicKey(s string) bool { return looksLikeKey(s) }
 
-// looksLikeKey reports whether s is a base64url Ed25519 public key (43 chars → 32 bytes).
+// looksLikeKey reports whether s is a kernel's key (44 chars → the 33-byte compressed point).
 func looksLikeKey(s string) bool {
-	if len(s) != 43 {
+	if len(s) != 44 {
 		return false
 	}
 	_, err := decodeRemotePublicKey(s)
@@ -439,13 +439,6 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, r Addres
 	// nothing — only the operator binds a petname (D15). Best-effort and must never fail the call.
 	if kerr := k.knowKernel(ctx, peerKey); kerr != nil {
 		k.log.With(ctx).Warn("kernel.know_failed", "public_key", peerKey, "error", kerr.Error())
-	}
-	// Where the peer is paid, proved by its own rail key. A buyer owes the moment it calls, so it
-	// learns this with the contract rather than waiting for a gossip pass that may not have run
-	// (P10). An unproven address is simply not learned: the peer stays unpayable, and the call that
-	// would take on a debt is refused rather than settled into a payment nobody can send.
-	if _, verr := k.ObservePeerVault(ctx, peerKey, res.BlockchainAddress, res.BlockchainProof); verr != nil {
-		k.log.With(ctx).Warn("kernel.blockchain_address.store_failed", "public_key", peerKey, "error", verr.Error())
 	}
 	return k.ImportPeerAction(ctx, peerKey, *m)
 }

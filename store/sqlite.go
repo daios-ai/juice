@@ -1500,7 +1500,7 @@ func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, sys, traceID, tx
 // reserveTransferPayment turns a transfer's value into the rail payment that carries it to the
 // beneficiary's kernel (D18): C's lock is released and the same amount reserved from C into the
 // operator's hold, in this one commit, so C is debited once. The payment is named by the transaction,
-// which is what the beneficiary's kernel will be told (P11), and goes to that kernel's proven vault —
+// which is what the beneficiary's kernel will be told (P11), and goes to that kernel's address —
 // empty where the world has no addresses, where the rail pays no address at all.
 func reserveTransferPayment(ctx context.Context, tx *sql.Tx, sys, callerC string, value int64, peer, txID string, at time.Time) error {
 	var vault string
@@ -3327,49 +3327,21 @@ func ftsMatchQuery(query string) string {
 // outbound act) NOR gossip_cursor/last_seen, each of which has its own narrow path that
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
-func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string, now time.Time) error {
+func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress string, now time.Time) error {
 	return s.withTx(ctx, "upsert kernel", func(tx *sql.Tx) error {
-		if err := vaultUnchanged(ctx, tx, publicKey, blockchainAddress); err != nil {
-			return err
-		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO kernels (public_key,nickname,about,blockchain_address,blockchain_proof,first_seen,updated_at)
-		 VALUES (?,?,?,?,?,?,?)
+			`INSERT INTO kernels (public_key,nickname,about,blockchain_address,first_seen,updated_at)
+		 VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(public_key) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
 		   blockchain_address=CASE WHEN excluded.blockchain_address != '' THEN excluded.blockchain_address ELSE kernels.blockchain_address END,
-		   blockchain_proof=CASE WHEN excluded.blockchain_proof != '' THEN excluded.blockchain_proof ELSE kernels.blockchain_proof END,
 		   forgotten_at=NULL,
 		   updated_at=excluded.updated_at`,
-			publicKey, nickname, about, blockchainAddress, blockchainProof, timeToStr(now), timeToStr(now),
+			publicKey, nickname, about, blockchainAddress, timeToStr(now), timeToStr(now),
 		)
 		return dbErr(err, "upsert kernel")
 	})
-}
-
-// vaultUnchanged refuses a proven vault other than the one a kernel proved before (D16): the address
-// derives from a rail key that is created once and never overwritten (D9).
-func vaultUnchanged(ctx context.Context, tx *sql.Tx, publicKey, address string) error {
-	var known string
-	err := tx.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, publicKey).Scan(&known)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return dbErr(err, "read vault")
-	}
-	if address != "" && known != "" && known != address {
-		return kernel.ErrInvalidState.Wrapf("kernel %s proved vault %s before; a different vault is refused", publicKey, known)
-	}
-	return nil
-}
-
-// ReadKernelVault is where a peer proved it is paid, or empty when it never proved one.
-func (s *DB) ReadKernelVault(ctx context.Context, publicKey string) (string, error) {
-	var address string
-	err := s.db.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, publicKey).Scan(&address)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return address, dbErr(err, "read vault")
 }
 
 // BindPetname binds a known kernel's petname exactly: a name another kernel holds is refused.
@@ -3466,9 +3438,9 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	var firstSeen, updatedAt string
 	var lastSeen, failedAt, suspendedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,blockchain_proof,gossip_cursor,last_seen,last_contact_failed_at,suspended_at,first_seen,updated_at
+		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,gossip_cursor,last_seen,last_contact_failed_at,suspended_at,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
-		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.BlockchainAddress, &k.BlockchainProof, &k.GossipCursor,
+		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.BlockchainAddress, &k.GossipCursor,
 			&lastSeen, &failedAt, &suspendedAt, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

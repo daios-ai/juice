@@ -74,7 +74,8 @@ What will this kernel call itself on the network? Other operators see this name.
 Name: acme
 Superuser password:
 Confirm password:
-sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+Recovery phrase (Enter to create a new kernel):
+Recovery phrase (write this down; it is shown only once and cannot be recovered):
   bomb buffalo march shock slim obvious stairs time usage grace habit window
 Press Enter once you have written it down:
 Superuser "sys" created.
@@ -82,28 +83,34 @@ INF action.registered_native name=lookup
 INF action.native_enabled name=lookup
 …
 INF client.self_registered kernel=acme outcome=added
-INF server.ready handle=acme network=play addr=[::]:4040 public_key=Kl8eObRJ…
+INF server.ready handle=acme network=play addr=[::]:4040 public_key=AhRCQfpF…
 ```
 
 Declining, or interrupting before those answers, leaves nothing behind.
 
-**Write the phrase down**: it is the only way to reset the superuser password
-(`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
+**Write the phrase down**: it is the kernel. Its identity on the network and, on a chain,
+its payment address both come from it, and it is the only thing you need to keep. If the
+disk is lost, serve the same world on a new machine and type the phrase at that prompt: the
+same kernel comes back, with the same key and the coins its address holds. Its ledger does
+not come back with it — accounts, balances and history live in the database, which you
+back up by copying the kernel's directory while it is stopped. The phrase also resets the
+superuser password (`juice auth recover sys`). Later boots ask nothing at all — the network is recorded in
 the kernel's own database, and a kernel offered another one refuses — and print only the
 ready line, which is where the kernel says which nickname, which network and which key
 answered. The pair of lines per standard action belongs to the boot that installs them.
 
-To boot without a terminal, name the kernel on the command line and set the password in
-the environment. Saying what the kernel is, is the consent a machine with no terminal can
-give, so `serve` creates it without asking:
+To boot without a terminal, name the kernel on the command line and set the password and
+the recovery phrase in the environment. Saying what the kernel is, is the consent a machine
+with no terminal can give, so `serve` creates it without asking:
 
 ```bash
-JUICE_BOOTSTRAP_PASSWORD=… ./juice kernel serve play --kernel-handle acme
+JUICE_BOOTSTRAP_PASSWORD=… JUICE_BOOTSTRAP_PHRASE='twelve words …' \
+  ./juice kernel serve play --kernel-handle acme
 ```
 
-The recovery phrase is then printed once on stderr. A program that boots the kernel for
-someone generates the phrase itself and passes only its public key, as
-`JUICE_BOOTSTRAP_RECOVERY_KEY`, and the kernel prints no phrase.
+A boot with no terminal is always handed the phrase and never makes one up, because the
+only place it could show it is a log. The phrase is twelve BIP-39 words; a phrase that
+already belongs to a kernel restores that kernel.
 
 To join a network juice does not ship, put its file in `~/.juice/worlds/` and serve it by
 that file's name. Writing one of your own gives an economy of its own: its money is its
@@ -386,7 +393,7 @@ The ones you are most likely to touch:
 
 Environment variables are bootstrap overrides only: `JUICE_HOME`, `JUICE_SECRET_KEY`,
 `JUICE_LOG_LEVEL`, `JUICE_CREDENTIALS_KEY`, `JUICE_BOOTSTRAP_PASSWORD`,
-`JUICE_BOOTSTRAP_RECOVERY_KEY`, `JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
+`JUICE_BOOTSTRAP_PHRASE`, `JUICE_ALLOW_LOCAL_SOURCES`, and `JUICE_AS` for the client.
 
 ## HTTP API
 
@@ -448,8 +455,8 @@ Before spending anything, a rail prices what the story will ask of it and refuse
 fit, rather than running a cheaper economy under the same name.
 
 A run directory is git-ignored, and **it is not safe to hand to anyone**. Alongside the logs — which
-are redacted as they are written — it contains each kernel's whole home: its database, its signing
-key, its rail key and its issued tokens. Read it in place; publish `report.md` and `metrics.json`
+are redacted as they are written — it contains each kernel's whole home: its database, its key,
+its recovery phrase and its issued tokens. Read it in place; publish `report.md` and `metrics.json`
 if you need to share something, and delete the directory when you are done with it.
 
 Two release gates are opt-in and need more than a laptop: `JUICE_RAIL_FLOWS=1` for the local-chain

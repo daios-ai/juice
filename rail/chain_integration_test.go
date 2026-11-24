@@ -305,9 +305,21 @@ func (f *chainFixture) open(w World, home string) (*Chain, error) {
 	if home == "" {
 		home = f.home
 	}
+	// The kernel's key is in its home before the rail is opened, written once: a second open of
+	// the same home finds the same key, as a kernel does.
+	path := filepath.Join(home, KeyFile)
+	key, err := LoadKey(path)
+	if os.IsNotExist(err) {
+		if key, err = crypto.GenerateKey(); err == nil {
+			err = StoreKey(path, key)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	// A home with no rail database is a first boot: the scan is seeded at the head before anything
 	// serves, which is what the kernel does.
-	return OpenChain(context.Background(), w, home, true)
+	return OpenChain(context.Background(), w, home, key, true)
 }
 
 func pack(t *testing.T, method string, args ...any) []byte {
@@ -340,8 +352,8 @@ func ether(n int64) *big.Int {
 	return new(big.Int).Mul(big.NewInt(n), big.NewInt(1_000_000_000_000_000_000))
 }
 
-// A kernel's rail key is its own and is minted on first use; a world that does not describe this
-// chain is not one the kernel may hold money on.
+// A kernel's key is the chain account; a world that does not describe this chain is not one the
+// kernel may hold money on.
 func TestChainOpensOnARealChain(t *testing.T) {
 	f := newChainFixture(t)
 
@@ -349,7 +361,7 @@ func TestChainOpensOnARealChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	for _, name := range []string{"rail.key", "rail.db"} {
+	for _, name := range []string{KeyFile, "rail.db"} {
 		if _, err := os.Stat(filepath.Join(f.home, name)); err != nil {
 			t.Fatalf("%s was not created: %v", name, err)
 		}
@@ -524,8 +536,8 @@ func TestChainPaysOnceAndConfirmsAtFinality(t *testing.T) {
 	}
 }
 
-// A kernel proves its own address with its own key, and a signature by anyone else proves nothing.
-func TestChainSignsWithItsRealKey(t *testing.T) {
+// A wallet's signature proves its own address, and a signature by anyone else proves nothing.
+func TestChainVerifiesOnlyTheSignersAddress(t *testing.T) {
 	f := newChainFixture(t)
 	c, err := f.open(f.world(), "")
 	if err != nil {
@@ -537,20 +549,13 @@ func TestChainSignsWithItsRealKey(t *testing.T) {
 	}
 
 	msg := []byte("juice kernel blockchain address\nkernel: k\nnetwork: n\naddress: " + c.Address())
-	sig, err := c.Sign(msg)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
+	sig := walletSign(t, c.key, msg)
 	got, err := c.Verify(msg, c.Address(), sig)
 	if err != nil || got != c.Address() {
 		t.Fatalf("own signature did not verify: %q %v", got, err)
 	}
 
-	theirs, err := other.Sign(msg)
-	if err != nil {
-		t.Fatalf("sign as another kernel: %v", err)
-	}
-	if _, err := c.Verify(msg, c.Address(), theirs); err == nil {
+	if _, err := c.Verify(msg, c.Address(), walletSign(t, other.key, msg)); err == nil {
 		t.Fatal("a signature by another key was accepted for this address")
 	}
 }

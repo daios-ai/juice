@@ -4,8 +4,6 @@ package kernel_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -230,7 +228,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 
-	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, peerPriv, _ := kernel.GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 
 	good := &kernel.ActionManifest{
@@ -422,7 +420,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, peerPriv, _ := kernel.GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 
 	manifest := func(id string) *kernel.ActionManifest {
@@ -498,7 +496,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 func TestABuyerSeesTheEvidenceAboutARemoteAction(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	providerPub, providerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	providerPub, providerPriv, _ := kernel.GenKey()
 	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
 	const otherBuyer, remoteAction = "kernelM", "remote-1"
 
@@ -661,7 +659,7 @@ func TestAGossipPageOverTheProtocolsSizeIsRefusedWhole(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, peerPriv, _ := kernel.GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 
 	manifest := func(id string) *kernel.ActionManifest {
@@ -699,7 +697,7 @@ func TestTheRatingsSurfaceAndTheActionRecordAgree(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	providerPub, providerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	providerPub, providerPriv, _ := kernel.GenKey()
 	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
 	const buyer, remoteAction = "BUYER", "remote-1"
 
@@ -758,7 +756,7 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	providerPub, providerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	providerPub, providerPriv, _ := kernel.GenKey()
 	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
 	const buyer, elsewhere, action = "BUYER", "OTHER-KERNEL", "act-1"
 
@@ -812,7 +810,7 @@ func TestGossipIndexesOnlyHoldableContracts(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, peerPriv, _ := kernel.GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 	manifest := func(id, title string, in map[string]any) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
@@ -864,7 +862,7 @@ func TestPeerCatalogCarriesTitles(t *testing.T) {
 	st := newTestStore(t)
 	k := newTestKernel(st)
 	ctx := context.Background()
-	peerPub, peerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, peerPriv, _ := kernel.GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
 	m := &kernel.ActionManifest{
 		ActionID: "a1", OwnerID: "u1", OwnerHandle: "prov", Name: "translate", Title: "Translate a contract",

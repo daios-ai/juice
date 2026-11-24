@@ -5,7 +5,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -219,7 +219,7 @@ func cacheDir() string { return filepath.Join(kernelHome(), "cache") }
 func initConfig() error {
 	dbPath = filepath.Join(kernelHome(), "juice.db")
 	resolvedConfigPath = filepath.Join(kernelHome(), "config.json")
-	// The home holds the config (credentials key), the DB (signing key), and the rail key.
+	// The home holds the config (credentials key), the database, and the kernel's key.
 	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
 		return kernel.ErrInvalidState.Wrapf("create %s: %v", kernelHome(), err)
 	}
@@ -361,7 +361,7 @@ func kernelSecret(db *store.DB) string {
 	return stored
 }
 
-func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, error) {
+func openKernel(world rail.World, key *ecdsa.PrivateKey) (*kernel.Kernel, *store.DB, *log.Logger, *httpActionExecutor, *fedAdapter, []native.Spec, error) {
 	if err := initConfig(); err != nil {
 		return nil, nil, nil, nil, nil, nil, err
 	}
@@ -426,7 +426,7 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	// Federation is a separate adapter, constructed around the kernel's own signer and attached
 	// after (§13): it holds neither the kernel nor the private key, and its transport arrives at
 	// serve time via SetTransport. Signing goes live when bootstrap calls SetSigningKey.
-	fedAdapter := newFedAdapter("", k.SignFederation, k.BlockchainIdentity)
+	fedAdapter := newFedAdapter("", k.SignFederation)
 	k.SetFederation(fedAdapter)
 
 	// Credential encryption. The key is minted at first boot and only read here; one that cannot be
@@ -469,11 +469,9 @@ func openKernel(world rail.World) (*kernel.Kernel, *store.DB, *log.Logger, *http
 	}
 
 	// Load signing key if present (best-effort; no error if not yet bootstrapped).
-	if privB64, _ := db.GetConfig(context.Background(), configKeySigningPrivate); privB64 != "" {
-		if privBytes, err := base64.RawURLEncoding.DecodeString(privB64); err == nil && len(privBytes) == ed25519.PrivateKeySize {
-			if su, err := db.ReadUserByHandle(context.Background(), "sys"); err == nil {
-				k.SetSigningKey(ed25519.PrivateKey(privBytes), su.ID)
-			}
+	if key != nil {
+		if su, err := db.ReadUserByHandle(context.Background(), "sys"); err == nil {
+			k.SetSigningKey(key, su.ID)
 		}
 	}
 

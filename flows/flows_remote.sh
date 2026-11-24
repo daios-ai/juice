@@ -179,7 +179,7 @@ flow_llm_models() {
     # A binding to the disabled model is a configuration that cannot mean what it says.
     local root="$dir/refused"; mkdir -p "$root/kernels/play"
     printf '{"kernel_handle":"acme","native":{"llm":%s}}' "${llm/\"chat\":\"gemma\"/\"chat\":\"cloud\"}" >"$root/kernels/play/config.json"
-    local out; out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_HOME="$root" timeout 30 "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 \
+    local out; out=$(JUICE_BOOTSTRAP_PASSWORD=sys-pass JUICE_BOOTSTRAP_PHRASE="$(kphrase "$root" play)" JUICE_HOME="$root" timeout 30 "$JUICE" kernel serve play --listen-addr 127.0.0.1:0 \
         --fed-listen-addrs /ip4/127.0.0.1/tcp/0 2>&1)
     assert_contains "llm.disabled_binding_refused" 'native.llm.chat names "cloud", which is not enabled' "$out"
 }

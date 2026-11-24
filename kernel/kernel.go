@@ -4,7 +4,7 @@ package kernel
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -30,9 +30,9 @@ type Config struct {
 	TokenSecret       string        // HMAC secret for JWT signing
 	TokenTTL          time.Duration // token validity window
 	ScriptTimeout     time.Duration
-	ScriptMemory      int64              // bytes
-	AllowLocalSources bool               // permit private/LAN/reserved URLs as action sources (loopback is allowed by default)
-	SigningKey        ed25519.PrivateKey // Ed25519 private key for receipt/manifest signatures; nil until bootstrap
+	ScriptMemory      int64             // bytes
+	AllowLocalSources bool              // permit private/LAN/reserved URLs as action sources (loopback is allowed by default)
+	SigningKey        *ecdsa.PrivateKey // the kernel's one key (P1): signs every payload, holds its coins; nil until bootstrap
 	// Network is the one network this kernel serves for life (D23); its fingerprint rides in every
 	// signature prefix and in the discovery namespace.
 	Network      Network
@@ -1027,8 +1027,8 @@ func (k *Kernel) ListConnectionViews(ctx context.Context, callerID string) ([]*C
 	return out, nil
 }
 
-// SetSigningKey stores the Ed25519 signing key and issuer user ID after bootstrap completes.
-func (k *Kernel) SetSigningKey(priv ed25519.PrivateKey, issuerUserID string) {
+// SetSigningKey stores the kernel's key and issuer user ID after bootstrap completes.
+func (k *Kernel) SetSigningKey(priv *ecdsa.PrivateKey, issuerUserID string) {
 	k.cfg.SigningKey = priv
 	k.cfg.IssuerUserID = issuerUserID
 	k.cfg.FeeRecipientID = issuerUserID
@@ -1979,21 +1979,21 @@ func (k *Kernel) SetConfig(ctx context.Context, key, value string) error {
 	return k.store.SetConfig(ctx, key, value)
 }
 
-// FirstBoot atomically creates the @sys superuser account, generates an Ed25519 signing
-// keypair, and stores all three config entries in a single SQLite transaction.
-// Safe to call on a database that was already initialized — user INSERT is skipped.
-// recoveryPublicKey is @sys's own recovery key (D9), the public half of a phrase its client holds.
-func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey string) error {
+// FirstBoot atomically creates the @sys superuser account and records whose database this is —
+// the public half of key, the kernel's one key (P1), which the caller holds and this never stores —
+// in a single SQLite transaction. Safe to call on a database that was already initialized — the
+// user INSERT is skipped — and refused on one that belongs to another key.
+// recoveryPublicKey is @sys's own recovery key (D9), the public half of the phrase the key came from.
+func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey string, key *ecdsa.PrivateKey) error {
 	if err := ValidateCredentials(password, recoveryPublicKey); err != nil {
 		return err
+	}
+	if key == nil {
+		return ErrInvalidInput.Wrap("a kernel is created with its key")
 	}
 	hash, err := HashPassword(password)
 	if err != nil {
 		return ErrInvalidInput.Wrapf("could not hash password: %v", err)
-	}
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return ErrInternal.Wrapf("generate signing key: %v", err)
 	}
 	now := time.Now().UTC()
 	u := &Account{
@@ -2009,10 +2009,9 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 		return ErrInternal.Wrapf("generate jwt secret: %v", err)
 	}
 	configs := map[string]string{
-		"superuser_handle":    SuperuserHandle,
-		"signing_public_key":  base64.RawURLEncoding.EncodeToString(pub),
-		"signing_private_key": base64.RawURLEncoding.EncodeToString(priv),
-		"jwt_secret":          hex.EncodeToString(jwtRaw),
+		"superuser_handle":   SuperuserHandle,
+		"signing_public_key": PublicKey(key),
+		"jwt_secret":         hex.EncodeToString(jwtRaw),
 	}
 	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
 		return err
@@ -2021,19 +2020,13 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	if err != nil {
 		return err
 	}
-	// Read persisted values rather than using in-memory generated ones.
-	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the stored values may differ
-	// from those generated above. Using stored values ensures the kernel always
-	// matches what is in the database.
-	storedPrivB64, err := k.store.GetConfig(ctx, "signing_private_key")
-	if err != nil {
-		return ErrInternal.Wrapf("read stored signing key: %v", err)
+	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the database keeps the key it was made
+	// for. A different key is another kernel's: signing as it here would speak for a ledger it
+	// never kept.
+	if stored := k.SelfKey(ctx); stored != PublicKey(key) {
+		return ErrInvalidState.Wrapf("this database is kernel %s; the key given is kernel %s", stored, PublicKey(key))
 	}
-	storedPriv, err := base64.RawURLEncoding.DecodeString(storedPrivB64)
-	if err != nil {
-		return ErrInternal.Wrapf("decode stored signing key: %v", err)
-	}
-	k.SetSigningKey(ed25519.PrivateKey(storedPriv), su.ID)
+	k.SetSigningKey(key, su.ID)
 	// Only apply the stored secret when no secret was provided at construction
 	// (e.g. no JUICE_SECRET_KEY env var). If one was already configured, it takes
 	// precedence and the stored value serves as the fallback for future startups.
@@ -2490,6 +2483,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 	owner := acct
 	var limit, reserve int64
 	var servingTerms *string
+	var payer string
 	if !caller.Local() {
 		seller, serr := k.store.ReadUser(ctx, action.OwnerUserID)
 		if serr != nil {
@@ -2507,20 +2501,12 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 			return nil, ErrInvalidInput.Wrapf("a ticket of %d is above the %d this kernel accepts",
 				buyer.Lottery, k.econ.LotteryMax)
 		}
-		// Where a winning ticket will be paid from is proven now and frozen with the call: on a
-		// world with addresses a priced call from a buyer that proves none could never be paid, and
-		// a payer learned only later could be mistaken for somebody else's in the meantime (P10).
-		var payer string
-		if buyer.BlockchainAddress != "" {
-			var perr error
-			if payer, perr = k.verifyBlockchainIdentity(caller.Kernel, buyer.BlockchainAddress, buyer.BlockchainProof); perr != nil {
-				return nil, ErrUnauthorized.Wrap("the caller's paying address is not proven")
-			}
+		// Where a winning ticket will be paid from is the buyer's own key's address, frozen with the
+		// call, so a payment that lands ahead of its reveal is never mistaken for somebody else's (P10).
+		// A call that can owe nothing names no payer.
+		if dmax > 0 {
+			payer = k.peerVault(caller.Kernel)
 		}
-		if dmax > 0 && payer == "" && k.hasAddresses() {
-			return nil, ErrInvalidInput.Wrap("a paid call must say where it will be paid from on this world")
-		}
-		buyer.BlockchainAddress = payer
 		owner, limit, reserve = seller, k.econ.CreditLimit, dmax
 		// Every admitted call records what it answers and what it was sold under, so any path that
 		// later signs its receipt — settlement, crash recovery — can name the request the buyer
@@ -2578,7 +2564,7 @@ func (k *Kernel) beginRun(ctx context.Context, caller Principal, acct *Account, 
 	// and the receipt's own arithmetic all recoverable from the one record (P10, D19). Written
 	// before any dispatch, which prepareDispatch then refuses over it: a served call never asks a peer.
 	if servingTerms != nil {
-		t.DispatchJSON, t.OwedBlockchainAddress = servingTerms, buyer.BlockchainAddress
+		t.DispatchJSON, t.OwedBlockchainAddress = servingTerms, payer
 	}
 	if action.Kind == KindRemoteProxy {
 		if err := k.prepareDispatch(ctx, t, action, args, "", lockPrice, k.econ.ImportBPS, acct); err != nil {
@@ -3567,21 +3553,21 @@ func (k *Kernel) buildReceipt(tx *Transaction, charge, premium, value int64, val
 }
 
 func (k *Kernel) requireReceiptSigningReady() error {
-	if k.cfg.IssuerUserID == "" || len(k.cfg.SigningKey) != ed25519.PrivateKeySize {
+	if k.cfg.IssuerUserID == "" || k.cfg.SigningKey == nil {
 		return ErrInvalidState.Wrap("kernel cannot issue signed receipts")
 	}
 	return nil
 }
 
 // signReceipt signs the canonical Receipt object (with Signature cleared) under the receipt domain.
-func signReceipt(net Network, key ed25519.PrivateKey, r *Receipt) (string, error) {
+func signReceipt(net Network, key *ecdsa.PrivateKey, r *Receipt) (string, error) {
 	cp := *r
 	cp.Signature = ""
 	return net.sign(key, sigDomainReceipt, cp)
 }
 
 // signRating signs the canonical Rating object (with Signature cleared) under the rating domain.
-func signRating(net Network, key ed25519.PrivateKey, r *Rating) (string, error) {
+func signRating(net Network, key *ecdsa.PrivateKey, r *Rating) (string, error) {
 	cp := *r
 	cp.Signature = ""
 	return net.sign(key, sigDomainRating, cp)

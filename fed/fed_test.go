@@ -4,8 +4,6 @@ package fed
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
@@ -76,7 +74,7 @@ func (f *fakeHandlers) OnTransfer(_ context.Context, peerKey string, req Transfe
 
 func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 	t.Helper()
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	tr, err := New(context.Background(), Config{
 		Namespace:         testNamespace,
 		SigningKey:        priv,
@@ -97,7 +95,7 @@ func newTestTransport(t *testing.T, h Handlers, bootstrap []string) *Transport {
 // exactly the configuration that masked the client-mode discovery regression (§15).
 func newTestTransportMode(t *testing.T, h Handlers, bootstrap []string, mode dht.ModeOpt) *Transport {
 	t.Helper()
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	tr, err := newTransport(context.Background(), Config{
 		Namespace:         testNamespace,
 		SigningKey:        priv,
@@ -179,7 +177,7 @@ func TestTransportRoundTrip(t *testing.T) {
 	// Transfer (P11): whom a payment is for reaches the handler with the sender's proven key and
 	// every field intact.
 	tr := TransferRequest{Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z", Signature: "sig",
-		ID: "tx-9", BeneficiaryID: "u-1", Amount: 40, TxHash: "0xabc", BlockchainAddress: "0xvault", BlockchainProof: "proof"}
+		ID: "tx-9", BeneficiaryID: "u-1", Amount: 40, TxHash: "0xabc"}
 	if tResp, err := b.Transfer(ctx, a.PublicKey(), tr); err != nil || tResp.Status != 200 {
 		t.Fatalf("Transfer: %v %+v", err, tResp)
 	}
@@ -213,7 +211,7 @@ func TestTransportRoundTrip(t *testing.T) {
 // Resolving an unknown key with no route must fail rather than hang forever.
 func TestTransportUnresolvableKey(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	unknown := base64.RawURLEncoding.EncodeToString(pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

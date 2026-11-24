@@ -4,8 +4,7 @@ package kernel
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -197,6 +196,14 @@ type stubRail struct {
 
 func (r stubRail) Address() string { return r.addr }
 
+// AddressOf gives every key an address of its own wherever the world has addresses.
+func (r stubRail) AddressOf(key string) string {
+	if r.addr == "" {
+		return ""
+	}
+	return "0xof-" + key
+}
+
 func (stubRail) Witness(_ context.Context, ref string, amount int64) (RailDeposit, error) {
 	return RailDeposit{Key: "rail:ref:" + ref, TxHash: ref, Amount: amount}, nil
 }
@@ -204,9 +211,9 @@ func (stubRail) Witness(_ context.Context, ref string, amount int64) (RailDeposi
 // revealFixture builds a seller holding one obligation, and the buyer's key to sign with. The terms
 // the draw runs under come from the call's frozen record, exactly as the store hands them over; an
 // unsettled call is one whose commit has not happened yet.
-func revealFixture(t *testing.T, obligation, lottery int64, secret, status string, settled bool) (*Kernel, *owedStore, ed25519.PrivateKey, string) {
+func revealFixture(t *testing.T, obligation, lottery int64, secret, status string, settled bool) (*Kernel, *owedStore, *ecdsa.PrivateKey, string) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := GenKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +230,7 @@ func revealFixture(t *testing.T, obligation, lottery int64, secret, status strin
 }
 
 // reveal signs and delivers one reveal, exactly as the buyer's kernel would.
-func reveal(t *testing.T, k *Kernel, priv ed25519.PrivateKey, peerKey string, p RevealPayload) (*Owed, error) {
+func reveal(t *testing.T, k *Kernel, priv *ecdsa.PrivateKey, peerKey string, p RevealPayload) (*Owed, error) {
 	t.Helper()
 	sig, err := k.cfg.Network.sign(priv, sigDomainReveal, p)
 	if err != nil {
@@ -255,7 +262,7 @@ func TestARevealIsRecomputedNotBelieved(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			k, _, priv, peerKey := revealFixture(t, 40, 0, "aabb", "", c.settled)
 			if c.wrongPK {
-				_, priv, _ = ed25519.GenerateKey(rand.Reader)
+				_, priv, _ = GenKey()
 			}
 			_, err := reveal(t, k, priv, peerKey, payload(peerKey, c.secret))
 			if err == nil {
@@ -431,7 +438,7 @@ func (s *paidStore) RecordIncomingTransfer(_ context.Context, _ string, it *Inco
 	return nil
 }
 
-func (s *paidStore) UpsertKernel(_ context.Context, _, _, _, address, _ string, _ time.Time) error {
+func (s *paidStore) UpsertKernel(_ context.Context, _, _, _, address string, _ time.Time) error {
 	s.vault = address
 	return nil
 }
@@ -440,25 +447,15 @@ func (s *paidStore) ReconcileDeposits(context.Context, string, int) ([]*LedgerEn
 	return nil, nil
 }
 
-// provingRail is a world with addresses whose proofs are checked: "good" proves, anything else does not.
-type provingRail struct{ stubRail }
-
-func (provingRail) Verify(_ []byte, address, proof string) (string, error) {
-	if proof != "good" {
-		return "", errors.New("bad proof")
-	}
-	return address, nil
-}
-
 // A transfer announcement is believed only from the kernel that paid, addressed to this one, signed
-// by it, complete, and naming a vault it proves (P11). On a world without addresses the announcement
-// is itself the payment and is booked with it; on one with addresses the payer is the proven vault
-// and the payment is observed on the rail.
+// by it and complete (P11). On a world without addresses the announcement is itself the payment and
+// is booked with it; on one with addresses the payer is the address of the sender's own key, which
+// nothing in the message can change, and the payment is observed on the rail.
 func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
-	_, own, _ := ed25519.GenerateKey(rand.Reader)
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, own, _ := GenKey()
+	pub, priv, _ := GenKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	ownKey := base64.RawURLEncoding.EncodeToString(own.Public().(ed25519.PublicKey))
+	ownKey := base64.RawURLEncoding.EncodeToString(PubBytes(own))
 	good := func() TransferPaidPayload {
 		return TransferPaidPayload{Amount: 50, BeneficiaryID: "bob-id", Counterparty: peerKey, ID: "tx-1",
 			Recipient: ownKey, Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: "0xhash"}
@@ -467,20 +464,17 @@ func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
 		name   string
 		rail   Rail
 		edit   func(*TransferPaidPayload)
-		signer ed25519.PrivateKey
-		proof  string
+		signer *ecdsa.PrivateKey
 		want   error
 	}{
-		{"accepted where there are no addresses", stubRail{}, nil, priv, "", nil},
-		{"accepted with a proven vault", provingRail{stubRail{addr: "0xme"}}, func(p *TransferPaidPayload) { p.BlockchainAddress = "0xsender" }, priv, "good", nil},
-		{"an unproven vault", provingRail{stubRail{addr: "0xme"}}, func(p *TransferPaidPayload) { p.BlockchainAddress = "0xsender" }, priv, "bad", ErrUnauthorized},
-		{"no vault where there are addresses", provingRail{stubRail{addr: "0xme"}}, nil, priv, "", ErrUnauthorized},
-		{"from another kernel", stubRail{}, func(p *TransferPaidPayload) { p.Counterparty = ownKey }, priv, "", ErrUnauthorized},
-		{"addressed elsewhere", stubRail{}, func(p *TransferPaidPayload) { p.Recipient = peerKey }, priv, "", ErrUnauthorized},
-		{"signed by someone else", stubRail{}, nil, own, "", nil},
-		{"naming no payment", stubRail{}, func(p *TransferPaidPayload) { p.TxHash = "" }, priv, "", ErrInvalidInput},
-		{"naming no beneficiary", stubRail{}, func(p *TransferPaidPayload) { p.BeneficiaryID = "" }, priv, "", ErrInvalidInput},
-		{"of nothing", stubRail{}, func(p *TransferPaidPayload) { p.Amount = 0 }, priv, "", ErrInvalidInput},
+		{"accepted where there are no addresses", stubRail{}, nil, priv, nil},
+		{"accepted where there are addresses", stubRail{addr: "0xme"}, nil, priv, nil},
+		{"from another kernel", stubRail{}, func(p *TransferPaidPayload) { p.Counterparty = ownKey }, priv, ErrUnauthorized},
+		{"addressed elsewhere", stubRail{}, func(p *TransferPaidPayload) { p.Recipient = peerKey }, priv, ErrUnauthorized},
+		{"signed by someone else", stubRail{}, nil, own, nil},
+		{"naming no payment", stubRail{}, func(p *TransferPaidPayload) { p.TxHash = "" }, priv, ErrInvalidInput},
+		{"naming no beneficiary", stubRail{}, func(p *TransferPaidPayload) { p.BeneficiaryID = "" }, priv, ErrInvalidInput},
+		{"of nothing", stubRail{}, func(p *TransferPaidPayload) { p.Amount = 0 }, priv, ErrInvalidInput},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := &paidStore{}
@@ -493,7 +487,7 @@ func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = k.HandleTransferPaid(context.Background(), peerKey, p, c.proof, sig)
+			err = k.HandleTransferPaid(context.Background(), peerKey, p, sig)
 			accepted := c.signer.Equal(priv) && c.want == nil
 			if !accepted {
 				if err == nil || (c.want != nil && !errors.Is(err, c.want)) {
@@ -510,8 +504,8 @@ func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
 			if st.got == nil || st.got.Amount != 50 || st.got.BeneficiaryID != "bob-id" || st.got.Counterparty != peerKey || st.got.TxHash != "0xhash" {
 				t.Fatalf("kept %+v", st.got)
 			}
-			if st.got.Payer != p.BlockchainAddress || st.vault != p.BlockchainAddress {
-				t.Errorf("payer %q, vault recorded %q, want the proven %q", st.got.Payer, st.vault, p.BlockchainAddress)
+			if want := c.rail.AddressOf(peerKey); st.got.Payer != want || st.vault != want {
+				t.Errorf("payer %q, vault recorded %q, want the address of the sender's key %q", st.got.Payer, st.vault, want)
 			}
 			if wantPayment := c.rail.Address() == ""; (st.payment != nil) != wantPayment {
 				t.Errorf("payment booked with the word: %+v, want %v", st.payment, wantPayment)

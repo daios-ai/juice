@@ -5,14 +5,21 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/native"
@@ -26,7 +33,6 @@ const (
 	configKeyWorldFingerprint = "world_fingerprint"
 	configKeySuperuser        = "superuser_handle"
 	configKeySigningPublic    = "signing_public_key"
-	configKeySigningPrivate   = "signing_private_key"
 	superuserHandle           = "sys"
 )
 
@@ -137,22 +143,81 @@ func checkNetwork(ctx context.Context, db *store.DB, w rail.World) error {
 	return nil
 }
 
-// bootCredentials are the superuser's: its password, and the public half of a recovery phrase its
-// client holds — empty when the kernel, being its own client, is to generate the phrase (D9).
-type bootCredentials struct{ password, recoveryKey string }
+// bootCredentials are what a kernel is created with: the superuser's password, and the recovery
+// phrase everything else comes from — the kernel's one key (P1) and the public half of the
+// superuser's own recovery key (D9).
+type bootCredentials struct {
+	password    string
+	key         *ecdsa.PrivateKey
+	recoveryKey string
+}
 
 const (
-	envBootstrapPassword    = "JUICE_BOOTSTRAP_PASSWORD"
-	envBootstrapRecoveryKey = "JUICE_BOOTSTRAP_RECOVERY_KEY"
+	envBootstrapPassword = "JUICE_BOOTSTRAP_PASSWORD"
+	envBootstrapPhrase   = "JUICE_BOOTSTRAP_PHRASE"
 )
 
-// firstBootCredentials gathers the superuser's credentials and checks them by the rule every
+// kernelKeyPath is the one place a kernel's key is kept (D9).
+func kernelKeyPath() string { return filepath.Join(kernelHome(), rail.KeyFile) }
+
+// deriveKernelKey turns a recovery phrase into the kernel's one key: the BIP-39 seed, no
+// passphrase, walked down the BIP-32 path m/44'/60'/0'/0/0 — the first account of an Ethereum
+// wallet, so a compatible wallet given the same phrase opens the same address. The path is the
+// protocol's and never changes: a phrase must mean one kernel forever (P1).
+func deriveKernelKey(mnemonic string) (*ecdsa.PrivateKey, error) {
+	seed, err := phraseSeed(mnemonic)
+	if err != nil {
+		return nil, err
+	}
+	const hardened = 0x80000000
+	order := ethcrypto.S256().Params().N
+	mac := hmac.New(sha512.New, []byte("Bitcoin seed"))
+	mac.Write(seed)
+	node := mac.Sum(nil)
+	key, chain := new(big.Int).SetBytes(node[:32]), node[32:]
+	for _, index := range []uint32{44 + hardened, 60 + hardened, hardened, 0, 0} {
+		if key.Sign() == 0 || key.Cmp(order) >= 0 {
+			return nil, kernel.ErrInvalidInput.Wrap("this recovery phrase yields no key; use another")
+		}
+		raw := key.FillBytes(make([]byte, 32))
+		var data []byte
+		if index >= hardened {
+			data = append([]byte{0}, raw...)
+		} else {
+			parent, err := ethcrypto.ToECDSA(raw)
+			if err != nil {
+				return nil, kernel.ErrInternal.Wrapf("derive key: %v", err)
+			}
+			data = ethcrypto.CompressPubkey(&parent.PublicKey)
+		}
+		data = binary.BigEndian.AppendUint32(data, index)
+		mac = hmac.New(sha512.New, chain)
+		mac.Write(data)
+		node = mac.Sum(nil)
+		tweak := new(big.Int).SetBytes(node[:32])
+		if tweak.Cmp(order) >= 0 {
+			return nil, kernel.ErrInvalidInput.Wrap("this recovery phrase yields no key; use another")
+		}
+		key, chain = tweak.Add(tweak, key).Mod(tweak, order), node[32:]
+	}
+	if key.Sign() == 0 {
+		return nil, kernel.ErrInvalidInput.Wrap("this recovery phrase yields no key; use another")
+	}
+	return ethcrypto.ToECDSA(key.FillBytes(make([]byte, 32)))
+}
+
+// firstBootCredentials gathers what a kernel is created with and checks it by the rule every
 // account is created under, writing nothing, so a boot refused here leaves nothing behind. Each
 // has one source off a terminal, its variable, and a refusal names that variable; at a terminal
-// the password is asked. A recovery key is never asked: without one the phrase is generated at
-// creation, where it can be shown.
-func firstBootCredentials() (bootCredentials, error) {
-	c := bootCredentials{password: os.Getenv(envBootstrapPassword), recoveryKey: os.Getenv(envBootstrapRecoveryKey)}
+// each is asked.
+//
+// The phrase is the kernel: a phrase given restores the kernel it belongs to, and none, at a
+// terminal, creates a new one, whose phrase is shown once and acknowledged before anything is
+// written. Off a terminal a phrase is never made up, because the only place it could be shown is a
+// log. A home that already holds a key — a boot that stopped before it finished — takes only the
+// phrase that key came from: the key alone cannot rebuild the superuser's recovery key.
+func firstBootCredentials(w rail.World) (bootCredentials, error) {
+	c := bootCredentials{password: os.Getenv(envBootstrapPassword)}
 	source := envBootstrapPassword
 	if c.password == "" {
 		if !interactiveTTY() {
@@ -167,32 +232,90 @@ func firstBootCredentials() (bootCredentials, error) {
 	if err := kernel.ValidateCredentials(c.password, ""); err != nil {
 		return c, fmt.Errorf("%s: %w", source, err)
 	}
-	if err := kernel.ValidateCredentials(c.password, c.recoveryKey); err != nil {
-		return c, fmt.Errorf("%s: %w", envBootstrapRecoveryKey, err)
+	held, herr := rail.LoadKey(kernelKeyPath())
+	if herr != nil && !os.IsNotExist(herr) {
+		return c, herr
+	}
+	phrase, source := os.Getenv(envBootstrapPhrase), envBootstrapPhrase
+	if phrase == "" {
+		if !interactiveTTY() {
+			return c, fmt.Errorf("no %s, and no terminal to ask for the recovery phrase.\n"+
+				"       A kernel is created from a 12-word recovery phrase, and it is never printed to a log:\n"+
+				"       set the variable, or create the kernel at a terminal", envBootstrapPhrase)
+		}
+		ask := "Recovery phrase (Enter to create a new kernel): "
+		if held != nil {
+			ask = "This kernel was not finished being created. Its recovery phrase: "
+		}
+		p, err := promptMnemonic(ask)
+		if err != nil {
+			return c, fmt.Errorf("reading recovery phrase: %w", err)
+		}
+		phrase, source = p, "recovery phrase"
+	}
+	restored := phrase != ""
+	if !restored {
+		if held != nil {
+			return c, fmt.Errorf("%s holds a kernel's key, so only that kernel's recovery phrase finishes creating it", kernelHome())
+		}
+		fresh, _, err := generateRecovery()
+		if err != nil {
+			return c, err
+		}
+		if err := showPhrase("Recovery phrase", fresh); err != nil {
+			return c, err
+		}
+		phrase = fresh
+	}
+	key, err := deriveKernelKey(phrase)
+	if err != nil {
+		return c, fmt.Errorf("%s: %w", source, err)
+	}
+	recovery, err := deriveRecoveryKey(phrase)
+	if err != nil {
+		return c, fmt.Errorf("%s: %w", source, err)
+	}
+	if held != nil && !held.Equal(key) {
+		return c, fmt.Errorf("%s: that is the phrase of kernel %s, and %s holds the key of kernel %s",
+			source, kernel.PublicKey(key), kernelHome(), kernel.PublicKey(held))
+	}
+	c.key = key
+	c.recoveryKey = base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey))
+	if restored {
+		fmt.Fprintf(os.Stderr, "That phrase is kernel %s", kernel.PublicKey(key))
+		if w.Rail == rail.RailEVM {
+			fmt.Fprintf(os.Stderr, ", paid at %s", strings.ToLower(ethcrypto.PubkeyToAddress(key.PublicKey).Hex()))
+		}
+		fmt.Fprintln(os.Stderr, ".")
 	}
 	return c, nil
 }
 
-// firstBoot creates the superuser. A recovery key it was given is enrolled as it stands and no
-// phrase exists here; without one the kernel is the client and runs the ceremony a client runs —
-// generate the phrase, show it, enroll the public half — on the terminal when there is one.
+// firstBoot creates the superuser of the kernel the credentials are for, and records whose
+// database this is.
 func firstBoot(ctx context.Context, k *kernel.Kernel, c bootCredentials) error {
-	commit := func(recoveryPub string) error { return k.FirstBoot(ctx, c.password, recoveryPub) }
-	var err error
-	if c.recoveryKey != "" {
-		err = commit(c.recoveryKey)
-	} else {
-		err = enrollRecovery("sys recovery phrase", commit)
-	}
-	if err != nil {
+	if err := k.FirstBoot(ctx, c.password, c.recoveryKey, c.key); err != nil {
 		return fmt.Errorf("first boot: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Superuser %q created.\n", superuserHandle)
 	return nil
 }
 
+// loadKernelKey reads the key of a kernel that exists. It is read once, by serve: the signer, the
+// network identity and the rail all take what it returns.
+func loadKernelKey() (*ecdsa.PrivateKey, error) {
+	key, err := rail.LoadKey(kernelKeyPath())
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("%s holds a kernel but not its key (%s).\n"+
+			"       A kernel made by a juice before one key served as its identity and its payment address\n"+
+			"       cannot be carried over: serve it with the juice that made it, or create a new kernel.\n"+
+			"       If the file was lost, put it back from your backup", kernelHome(), rail.KeyFile)
+	}
+	return key, err
+}
+
 // bootstrap runs the idempotent startup tasks of a kernel whose superuser exists.
-func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, net kernel.Network) error {
+func bootstrap(k *kernel.Kernel, key *ecdsa.PrivateKey, nativeCfg NativeConfig, specs []native.Spec, net kernel.Network) error {
 	ctx := context.Background()
 
 	handle, err := k.GetConfig(ctx, configKeySuperuser)
@@ -200,34 +323,17 @@ func bootstrap(k *kernel.Kernel, nativeCfg NativeConfig, specs []native.Spec, ne
 		return fmt.Errorf("superuser_handle missing from config; the first boot did not complete")
 	}
 
-	// Verify both signing keys are present, valid, and consistent.
-	privKeyB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
-	if privKeyB64 == "" {
-		return fmt.Errorf("signing_private_key missing from config; re-run on a fresh database or restore the key")
+	// The key on disk and the database must be one kernel: signing as one over the other's ledger
+	// would speak for books it never kept.
+	if stored := k.SelfKey(ctx); key == nil || stored != kernel.PublicKey(key) {
+		return fmt.Errorf("%s is the key of kernel %s, and this database is kernel %s",
+			kernelKeyPath(), kernel.PublicKey(key), stored)
 	}
-	privKeyBytes, err := base64.RawURLEncoding.DecodeString(privKeyB64)
-	if err != nil || len(privKeyBytes) != ed25519.PrivateKeySize {
-		return fmt.Errorf("signing_private_key in config is invalid")
-	}
-	pubKeyB64 := k.SelfKey(ctx)
-	if pubKeyB64 == "" {
-		return fmt.Errorf("signing_public_key missing from config")
-	}
-	pubKeyBytes, err := base64.RawURLEncoding.DecodeString(pubKeyB64)
-	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("signing_public_key in config is invalid")
-	}
-	derivedPub := ed25519.PrivateKey(privKeyBytes).Public().(ed25519.PublicKey)
-	if !derivedPub.Equal(ed25519.PublicKey(pubKeyBytes)) {
-		return fmt.Errorf("signing_public_key does not match signing_private_key")
-	}
-
-	// Load the signing key and issuer user ID into the kernel.
 	su, err := k.ReadUserByHandle(ctx, handle)
 	if err != nil {
 		return fmt.Errorf("read superuser: %w", err)
 	}
-	k.SetSigningKey(ed25519.PrivateKey(privKeyBytes), su.ID)
+	k.SetSigningKey(key, su.ID)
 
 	// The kernel's own name is a petname on its own key (D15): what its users are addressed by,
 	// what gossip and /health say, and what no peer can be given.

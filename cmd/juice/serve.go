@@ -4,8 +4,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,7 +245,7 @@ func runServer(name string) error {
 		if cfg, err = firstBootConfig(world, kernelHome()); err != nil {
 			return err
 		}
-		c, err := firstBootCredentials()
+		c, err := firstBootCredentials(world)
 		if err != nil {
 			return err
 		}
@@ -264,9 +263,21 @@ func runServer(name string) error {
 		if err := writeConfig(filepath.Join(kernelHome(), "config.json"), cfg); err != nil {
 			return err
 		}
+		// The key is on disk before the database or the rail exists, and is never overwritten: a
+		// boot that stops anywhere after this can only be finished as this same kernel (D9).
+		if err := rail.StoreKey(kernelKeyPath(), creds.key); err != nil {
+			return err
+		}
+	}
+	// One key serves as this kernel's identity and its payment address (P1). A home whose
+	// database exists without it is not a kernel this build can serve, and is refused before the
+	// database is opened, so nothing in it is touched.
+	key, err := loadKernelKey()
+	if err != nil {
+		return err
 	}
 
-	k, db, logger, httpExec, fedAdapter, specs, err := openKernel(world)
+	k, db, logger, httpExec, fedAdapter, specs, err := openKernel(world, key)
 	if err != nil {
 		return err
 	}
@@ -284,7 +295,7 @@ func runServer(name string) error {
 	if err != nil && !errors.Is(err, kernel.ErrNotFound) {
 		return err
 	}
-	railway, err := rail.Open(context.Background(), world, kernelHome(), made == "")
+	railway, err := rail.Open(context.Background(), world, kernelHome(), key, made == "")
 	if err != nil {
 		return fmt.Errorf("rail: %w", err)
 	}
@@ -300,7 +311,7 @@ func runServer(name string) error {
 	// credentials rule as a fresh one.
 	if made == "" {
 		if creds == nil {
-			c, err := firstBootCredentials()
+			c, err := firstBootCredentials(world)
 			if err != nil {
 				return err
 			}
@@ -310,8 +321,17 @@ func runServer(name string) error {
 			return err
 		}
 	}
-	if err := bootstrap(k, globalCfg.Native, specs, world.Network()); err != nil {
+	if err := bootstrap(k, key, globalCfg.Native, specs, world.Network()); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
+	}
+	// What the address held before this ledger began is booked before anything scans for payments:
+	// the scan starts at the block after, so until this has run a payment could be counted twice.
+	// It is read at a block already settled, which a node keeps only for a while, so a kernel left
+	// unfinished long enough is created again rather than served: it has served nothing.
+	if err := k.BookOpeningBalance(context.Background()); err != nil {
+		return fmt.Errorf("book the balance this kernel's address already holds: %w\n"+
+			"       This kernel has served nothing yet. Run this again; if it keeps failing, delete %s\n"+
+			"       and create the kernel again from its recovery phrase", err, kernelHome())
 	}
 	// Prune natives the build no longer ships (e.g. after a native action is removed): a
 	// kind=native row with no registered handler is soft-deleted so it stops being listed and
@@ -384,7 +404,7 @@ func runServer(name string) error {
 		k.SetMetrics(m)
 		observe = m.observeRequest
 	}
-	fedTransport, ferr := startFedTransport(context.Background(), k, logger, world, srv.oauth, observe)
+	fedTransport, ferr := startFedTransport(context.Background(), k, key, logger, world, srv.oauth, observe)
 	// Every outbound contact records whether the peer answered (§13). Two integration points reach
 	// all of it: the adapter below (calls, resolves, tasks, settlement) and the discovery pass
 	// (gossip, which holds the transport directly). `admin inspect` stays out — inspection writes
@@ -848,8 +868,7 @@ const fedOpTimeout = 8 * time.Second
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
 // blockchainAddress is where this kernel is paid, empty on a world with no addresses.
 func (s *server) blockchainAddress(ctx context.Context) string {
-	addr, _ := s.kernel.BlockchainIdentity(ctx)
-	return addr
+	return s.kernel.BlockchainAddress()
 }
 
 // getHealth is the identity banner (unauthenticated) every client reads before it trusts a server:
@@ -1925,19 +1944,17 @@ func writeErr(w http.ResponseWriter, err error) {
 // protocol streams are answered by fedHandlers, which reuses the same verification and settlement
 // logic (handleFederationCall, etc.); outbound remote-proxy calls go out over the transport.
 
-// startFedTransport builds and starts the federation transport for a serving kernel. It reads the
-// platform signing key from config (the same key bootstrap loaded) so the libp2p identity is the
-// kernel's Ed25519 identity (§12). AllowPrivateAddrs mirrors allow_local_sources so the flow
-// harness can run a whole network on loopback.
-func startFedTransport(ctx context.Context, k *kernel.Kernel, logger *log.Logger, world rail.World, oauth *grantBroker, observe func(protocol, direction string, ok bool)) (*fed.Transport, error) {
-	privB64, _ := k.GetConfig(ctx, configKeySigningPrivate)
-	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
-	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
+// startFedTransport builds and starts the federation transport for a serving kernel. It takes the
+// kernel's one key (the same key bootstrap loaded) so the libp2p identity is the kernel's own (P1).
+// AllowPrivateAddrs mirrors allow_local_sources so the flow harness can run a whole network on
+// loopback.
+func startFedTransport(ctx context.Context, k *kernel.Kernel, key *ecdsa.PrivateKey, logger *log.Logger, world rail.World, oauth *grantBroker, observe func(protocol, direction string, ok bool)) (*fed.Transport, error) {
+	if key == nil {
 		return nil, kernel.ErrInvalidState.Wrap("signing key unavailable for federation transport")
 	}
 	handlers := &fedHandlers{kernel: k, log: logger, callLimiter: newKeyLimiter(ctx, 50, 100), oauth: oauth}
 	tr, err := fed.New(ctx, fed.Config{
-		SigningKey:        ed25519.PrivateKey(privBytes),
+		SigningKey:        key,
 		BootstrapPeers:    world.Seeds,
 		ListenAddrs:       globalCfg.FedListenAddrs,
 		Handlers:          handlers,

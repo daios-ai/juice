@@ -4,14 +4,15 @@ package native
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/store"
@@ -47,7 +48,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	issuerID := uuid.New().String()
 	hash, _ := kernel.HashPassword("pw")
 	_ = db.CreateUser(context.Background(), &kernel.Account{
@@ -61,7 +62,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	cfg.SigningKey = priv
 	k := kernel.New(kernel.Dependencies{Store: db, Embedder: &fakeEmbedder{}, Config: cfg})
 	// The test kernel calls itself `k`, so a test address reads alice@k (D15).
-	_ = db.SetConfig(context.Background(), "signing_public_key", base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	_ = db.SetConfig(context.Background(), "signing_public_key", base64.RawURLEncoding.EncodeToString(ethcrypto.CompressPubkey(&priv.PublicKey)))
 	if err := k.BindOwnName(context.Background(), "k"); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	owner := seedOwner(t, st, "alice")
 	seedAction(t, st, owner.ID, "weather", "forecast the weather for a city")
 
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	observed := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
 	doc := &kernel.DiscoveryDoc{
@@ -330,4 +331,13 @@ func TestExecuteLookupHitsCarryTheirEvidence(t *testing.T) {
 	if record["observed_by_others"] == nil {
 		t.Error("an action nobody else has reported on must say so with an empty list, not a null")
 	}
+}
+
+// genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
+func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	return ethcrypto.CompressPubkey(&key.PublicKey), key, nil
 }

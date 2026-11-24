@@ -5,8 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -21,8 +20,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -86,14 +88,38 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	// each take the other's users for their own.
 	ctx := context.Background()
 	if key, _ := k.GetConfig(ctx, configKeySigningPublic); key == "" {
-		_, priv, _ := ed25519.GenerateKey(rand.Reader)
-		_ = k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)))
-		_ = k.SetConfig(ctx, configKeySigningPrivate, base64.RawURLEncoding.EncodeToString(priv))
+		_, priv, _ := genKey()
+		_ = k.SetConfig(ctx, configKeySigningPublic, kernel.PublicKey(priv))
 	}
 	if err := k.BindOwnName(ctx, testOwnName); err != nil {
 		panic(err)
 	}
 	return k
+}
+
+// testKeys holds the key of every kernel a test made, by its public half: a kernel's key lives in
+// a file beside its database, which a test kernel does not have.
+var testKeys sync.Map
+
+// genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
+func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	testKeys.Store(kernel.PublicKey(key), key)
+	return pubBytes(key), key, nil
+}
+
+// pubBytes is a key's public half as payloads carry it, before base64url.
+func pubBytes(key *ecdsa.PrivateKey) []byte { return ethcrypto.CompressPubkey(&key.PublicKey) }
+
+// testKeyOf is the key of a test kernel, which its fixture made.
+func testKeyOf(k *kernel.Kernel) *ecdsa.PrivateKey {
+	if key, ok := testKeys.Load(k.SelfKey(context.Background())); ok {
+		return key.(*ecdsa.PrivateKey)
+	}
+	panic("this test kernel was given no key")
 }
 
 // newRef mints the reference a deposit records. Every crossing names the payment it stands for, so
@@ -128,12 +154,12 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("newTestEnv: seed issuer: %v", err)
 	}
 
-	_, signingKey, _ := ed25519.GenerateKey(rand.Reader)
+	_, signingKey, _ := genKey()
 	// A real kernel answers /health with its key and its network, and a client reads that banner
 	// before it will scale money or release a credential. A test kernel that cannot is not standing
 	// in for one.
 	if err := db.SetConfig(context.Background(), configKeySigningPublic,
-		base64.RawURLEncoding.EncodeToString(signingKey.Public().(ed25519.PublicKey))); err != nil {
+		base64.RawURLEncoding.EncodeToString(pubBytes(signingKey))); err != nil {
 		t.Fatalf("newTestEnv: signing public key: %v", err)
 	}
 
@@ -1621,7 +1647,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 	t.Setenv("JUICE_SECRET_KEY", "remote-test-secret")
 	k := newKernel(testConfig("remote-test-secret"), kernel.Dependencies{Store: db})
 
-	if err := k.FirstBoot(t.Context(), "sys-pass", ""); err != nil {
+	if err := k.FirstBoot(t.Context(), "sys-pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	return k, db
@@ -1630,7 +1656,7 @@ func newRemoteTestKernel(t *testing.T) (*kernel.Kernel, *store.DB) {
 func TestRemoteImport(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2558,7 +2584,7 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 	if _, err := env.k.CreateUser(ctx, kernel.CreateUserRequest{Handle: "carol@k", Password: "password123"}); err != nil {
 		t.Fatal(err)
 	}
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	key := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := env.k.BindPetname(ctx, key, "shop"); err != nil {
 		t.Fatal(err)

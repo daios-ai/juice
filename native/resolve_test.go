@@ -4,8 +4,6 @@ package native
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"testing"
@@ -34,7 +32,7 @@ func TestResolveTurnsAUsersAddressIntoTheirPrincipal(t *testing.T) {
 	k.SetFederation(peer)
 	self := k.SelfKey(ctx)
 	alice := seedOwner(t, st, "alice")
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	far := base64.RawURLEncoding.EncodeToString(pub)
 	resolve := Resolve().Handler(k)
 	run := func(address string) (map[string]any, error) {

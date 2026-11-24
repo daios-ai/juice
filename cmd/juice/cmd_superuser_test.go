@@ -66,7 +66,7 @@ func TestAdminSuspendUnsuspend(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
+	if err := k.FirstBoot(ctx, "pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := k.ReadUserByHandle(ctx, "sys")
@@ -105,7 +105,7 @@ func TestAdminDeposit(t *testing.T) {
 	ctx := context.Background()
 	k := newAdminTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
+	if err := k.FirstBoot(ctx, "pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	admin, err := k.ReadUserByHandle(ctx, "sys")

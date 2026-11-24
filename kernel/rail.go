@@ -54,16 +54,31 @@ type Rail interface {
 	FinalizedBalances(ctx context.Context) (token int64, gas string, block uint64, ok bool, err error)
 	// DepositsScannedTo is how far payments have been observed; false before any scan has run.
 	DepositsScannedTo() (uint64, bool, error)
-	// Sign proves control of this kernel's own blockchain address. Empty where there are no addresses.
-	Sign(msg []byte) (string, error)
+	// AddressOf is the address a kernel's key holds on this rail, in the form the rail reports
+	// senders in; empty where the world has no addresses, or for a key that is none. A kernel is
+	// paid at its key's own address and pays from it, so nothing about it is told or proven (P1).
+	AddressOf(kernelKey string) string
+	// OpeningBalance is what this kernel's address held at the block its payment scan starts
+	// after: money that was there before this ledger existed, which no scan will ever report.
+	// ok is false where the world has no chain to read.
+	OpeningBalance(ctx context.Context) (amount int64, ok bool, err error)
 	// Verify checks a signature by address over msg and returns the address in canonical form —
 	// the only form the kernel stores or compares, so a differently-cased duplicate cannot exist.
 	Verify(msg []byte, address, sig string) (string, error)
 }
 
+// BlockchainAddress is where this kernel is paid: its own key's address on this world's rail, empty
+// where the world has none.
+func (k *Kernel) BlockchainAddress() string {
+	if k.rail == nil {
+		return ""
+	}
+	return k.rail.Address()
+}
+
 // hasAddresses reports whether this kernel's world pays to addresses (D23). Every payment rule that
-// differs between the two kinds of world — a payer proved at admission, a vault proved before a
-// transfer, a reveal or a paid that is itself the payment — asks here.
+// differs between the two kinds of world — a payer frozen at admission, a reveal or a paid that is
+// itself the payment — asks here.
 func (k *Kernel) hasAddresses() bool { return k.rail != nil && k.rail.Address() != "" }
 
 // RailStatus is where an external movement stands. Only finalized facts are confirmed or failed.
@@ -410,12 +425,6 @@ func BlockchainAddressMessage(kernelKey, userID, address string) []byte {
 	return []byte("juice address registration\nkernel: " + kernelKey + "\nuser: " + userID + "\naddress: " + address)
 }
 
-// blockchainIdentityMessage is what a kernel signs with its rail key to prove the address it advertises is
-// its own. Without it a kernel could name a third party's address and claim their payment.
-func blockchainIdentityMessage(kernelKey, network, address string) []byte {
-	return []byte("juice kernel blockchain address\nkernel: " + kernelKey + "\nnetwork: " + network + "\naddress: " + address)
-}
-
 // SetBlockchainAddress registers where a user is paid, against a signature proving they control it
 // and the account's password: the signature is made by whoever holds the address, so alone it
 // would let any holder of a session send the account's withdrawals to themselves. The
@@ -461,62 +470,6 @@ func (k *Kernel) SetBlockchainAddress(ctx context.Context, callerID, currentPass
 	u.BlockchainAddress = canonical
 	k.log.With(ctx).Info("rail.address.registered", "caller_user_id", u.ID, "attributed", len(attributed))
 	return u, attributed, nil
-}
-
-// BlockchainIdentity is this kernel's own address and the proof it controls it, for gossip (P9).
-func (k *Kernel) BlockchainIdentity(ctx context.Context) (address, proof string) {
-	if k.rail == nil {
-		return "", ""
-	}
-	address = k.rail.Address()
-	if address == "" {
-		return "", ""
-	}
-	self := k.SelfKey(ctx)
-	if self == "" {
-		return "", ""
-	}
-	proof, err := k.rail.Sign(blockchainIdentityMessage(self, k.cfg.Network.Fingerprint, address))
-	if err != nil {
-		return "", ""
-	}
-	return address, proof
-}
-
-// verifyBlockchainIdentity checks a peer's advertised address. On a world without addresses both must be
-// empty; on one with them the signature must prove control, or the peer could name a stranger's.
-// verifyBlockchainIdentity checks a peer's claim to a blockchain address and returns the address in the form
-// the rail itself reports senders in — the form a payment from it will carry, and so the only form
-// worth freezing against one.
-func (k *Kernel) verifyBlockchainIdentity(peerKey, address, proof string) (string, error) {
-	if k.rail == nil {
-		return address, nil
-	}
-	return k.rail.Verify(blockchainIdentityMessage(peerKey, k.cfg.Network.Fingerprint, address), address, proof)
-}
-
-// ObservePeerVault verifies a peer's proof that it is paid at address and records it (D16), returning
-// the address in the rail's own form. It is the one path every proven vault takes — an action or user
-// resolve reply, a user resolve request, a `paid` (P11) — so the vault a payment from the peer will
-// come from is known here before any does. An unproven claim records nothing; a proven one different
-// from the vault this peer proved before is refused by the store, since the rail key it derives from
-// is created once (D9). Where the world has addresses a missing one is refused like an unproven one,
-// since a payment from the peer could never be recognised; where it has none, nothing is recorded.
-func (k *Kernel) ObservePeerVault(ctx context.Context, peerKey, address, proof string) (string, error) {
-	if address == "" {
-		if k.hasAddresses() {
-			return "", ErrUnauthorized.Wrap("the peer proved no blockchain address")
-		}
-		return "", nil
-	}
-	canonical, err := k.verifyBlockchainIdentity(peerKey, address, proof)
-	if err != nil {
-		return "", ErrUnauthorized.Wrap("the peer's blockchain address is unproven")
-	}
-	if err := k.store.UpsertKernel(ctx, peerKey, "", "", canonical, proof, time.Now().UTC()); err != nil {
-		return "", err
-	}
-	return canonical, nil
 }
 
 // ---- The worker (D23) ----
@@ -770,6 +723,38 @@ func (k *Kernel) scanRailDeposits(ctx context.Context) {
 	}
 }
 
+// railOpeningKey marks that the opening balance has been settled, whether or not there was one.
+const railOpeningKey = "rail_opening_booked"
+
+// BookOpeningBalance books to the operator what this kernel's address already held when its ledger
+// began (D23): a kernel restored from its phrase holds the coins of the ledger it lost, and the
+// payment scan, which starts at the block after, will never report them. It runs at boot, before
+// the first scan, and exactly once: the balance is read at a block that never moves, the row has
+// one fixed id, so a boot interrupted anywhere repeats to the same books, and the mark is written
+// last. A new key holds nothing and books nothing.
+func (k *Kernel) BookOpeningBalance(ctx context.Context) error {
+	if k.rail == nil {
+		return nil
+	}
+	if done, _ := k.store.GetConfig(ctx, railOpeningKey); done != "" {
+		return nil
+	}
+	amount, ok, err := k.rail.OpeningBalance(ctx)
+	if err != nil {
+		return err
+	}
+	if ok && amount > 0 {
+		sys := k.cfg.FeeRecipientID
+		row := &RailTransfer{ID: "rail:opening", Kind: RailKindDeposit, Amount: amount, Credit: amount,
+			Status: RailStatusHeld, Reason: "opening balance", CreatedAt: time.Now().UTC()}
+		if _, err := k.store.CreateRailDeposit(ctx, sys, row, sys); err != nil {
+			return err
+		}
+		k.log.With(ctx).Info("rail.opening_balance", "amount", amount)
+	}
+	return k.store.SetConfig(ctx, railOpeningKey, "1")
+}
+
 // railBookedBlockKey marks how far the kernel has booked, which is its own question and not the
 // rail's: the rail records a payment before the kernel commits it.
 const railBookedBlockKey = "rail_booked_block"
@@ -787,16 +772,6 @@ func (k *Kernel) reconcileDeposits(ctx context.Context) {
 	if len(closed) > 0 {
 		k.log.With(ctx).Info("rail.reconciled", "count", len(closed))
 	}
-}
-
-// peerBlockchainAddress is where a peer proved it is paid from — the sender a payment of theirs must
-// carry. Empty when unknown, which matches nothing.
-func (k *Kernel) peerBlockchainAddress(ctx context.Context, peerKey string) string {
-	kern, err := k.store.ReadKernel(ctx, peerKey)
-	if err != nil || kern == nil || kern.BlockchainAddress == "" {
-		return ""
-	}
-	return kern.BlockchainAddress
 }
 
 // RailHoldings is what the rail itself holds at a block that can no longer change — the only

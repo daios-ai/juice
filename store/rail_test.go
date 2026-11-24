@@ -1371,7 +1371,7 @@ func transferFixture(t *testing.T) (db *DB, sys string, bob, collider *kernel.Ac
 		t.Fatal(err)
 	}
 	peer = newPeer(t, db, "sender", "ksenderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", time.Now().UTC())
-	if err := db.UpsertKernel(ctx, peer, "", "", "0xsender", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, peer, "", "", "0xsender", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return db, sys, bob, collider, peer
@@ -1531,26 +1531,23 @@ func TestAnIncomingTransferIsKeyedByItsSenderAndId(t *testing.T) {
 	}
 }
 
-// A kernel's proven vault is recorded once on its Kernel row: a different address for the same key is
-// refused. Forgetting the kernel — as a peer, or as a stale directory entry — keeps the key and the
-// address, listed nowhere and not swept again, so a payment from that vault still waits for its word
-// whatever retention is set to; seeing the kernel again brings it back.
-func TestAPeerVaultIsWrittenOnceAndOutlivesThePeer(t *testing.T) {
+// A kernel's address — its key's own (P1) — is kept on its Kernel row. Forgetting the kernel — as a
+// peer, or as a stale directory entry — keeps the key and the address, listed nowhere and not swept
+// again, so a payment from that address still waits for its word whatever retention is set to;
+// seeing the kernel again brings it back.
+func TestAPeersAddressOutlivesThePeer(t *testing.T) {
 	db, sys, _, collider, peer := transferFixture(t)
 	ctx := context.Background()
-	if err := db.UpsertKernel(ctx, peer, "", "", "0xmoved", "", time.Now().UTC()); !errors.Is(err, kernel.ErrInvalidState) {
-		t.Errorf("a second address for one key: %v, want ErrInvalidState", err)
-	}
-	if err := db.UpsertKernel(ctx, peer, "renamed", "", "0xsender", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, peer, "renamed", "", "0xsender", time.Now().UTC()); err != nil {
 		t.Errorf("the same address again: %v", err)
 	}
 	// A directory-only kernel with a proven vault, gone stale, and one with none.
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	stranger, plain := "kstrangerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kplainAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	if err := db.UpsertKernel(ctx, stranger, "stranger", "", "0xstranger", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, stranger, "stranger", "", "0xstranger", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, plain, "plain", "", "", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, plain, "plain", "", "", old); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.PurgePeer(ctx, peer); err != nil {
@@ -1564,8 +1561,14 @@ func TestAPeerVaultIsWrittenOnceAndOutlivesThePeer(t *testing.T) {
 		t.Errorf("a forgotten kernel was swept again: %d %v", n, err)
 	}
 	for key, want := range map[string]string{peer: "0xsender", stranger: "0xstranger", plain: ""} {
-		if v, err := db.ReadKernelVault(ctx, key); err != nil || v != want {
-			t.Errorf("vault of %s after forgetting: %q %v, want %q", key, v, err, want)
+		var v string
+		// A kernel that held no address is gone altogether, which reads as none.
+		err := db.db.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, key).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		}
+		if err != nil || v != want {
+			t.Errorf("address of %s after forgetting: %q %v, want %q", key, v, err, want)
 		}
 	}
 	if listed, err := db.ListKernels(ctx, "self", true, 0, 0); err != nil || len(listed) != 0 {
@@ -1593,7 +1596,7 @@ func TestAPeerVaultIsWrittenOnceAndOutlivesThePeer(t *testing.T) {
 		}
 	}
 	// Seen again, the kernel is listed again, under the same vault.
-	if err := db.UpsertKernel(ctx, stranger, "back", "", "0xstranger", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, stranger, "back", "", "0xstranger", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if listed, _ := db.ListKernels(ctx, "self", true, 0, 0); len(listed) != 1 || listed[0].PublicKey != stranger {

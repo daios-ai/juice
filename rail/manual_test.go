@@ -72,8 +72,11 @@ func TestManualRefusesAddresses(t *testing.T) {
 	if _, err := m.Verify(nil, "", ""); err != nil {
 		t.Errorf("having no address is the normal case here: %v", err)
 	}
-	if sig, err := m.Sign([]byte("anything")); err != nil || sig != "" {
-		t.Errorf("there is no key to prove anything with: %q %v", sig, err)
+	if got := m.AddressOf("any-key"); got != "" {
+		t.Errorf("no kernel has an address here, got %q", got)
+	}
+	if amount, ok, err := m.OpeningBalance(context.Background()); err != nil || ok || amount != 0 {
+		t.Errorf("there is no chain holding money from before the ledger: %d %v %v", amount, ok, err)
 	}
 	// A withdrawal is paid to the account itself: the operator moves the money and records it.
 	if dest, err := m.Destination(""); err != nil || dest != "" {

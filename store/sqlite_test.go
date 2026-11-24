@@ -528,7 +528,7 @@ func newProcess(ownerID string) *kernel.Process {
 // returns its key: a peer is its kernel row and holds nothing else here (D4).
 func newPeer(t *testing.T, db *DB, handle, key string, createdAt time.Time) string {
 	t.Helper()
-	if err := db.UpsertKernel(context.Background(), key, handle, "", "", "", createdAt); err != nil {
+	if err := db.UpsertKernel(context.Background(), key, handle, "", "", createdAt); err != nil {
 		t.Fatalf("upsert kernel %s: %v", handle, err)
 	}
 	if err := db.BindPetname(context.Background(), key, handle); err != nil {
@@ -3663,7 +3663,7 @@ func TestPurgePeer(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC()
-	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3710,7 +3710,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 
 	// A stale never-peer kernel with a discovery doc and an evidence row (both must be evicted).
-	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", "", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", "", old); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.ApplyCatalogPage(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}, "", 0); err != nil {
@@ -3720,7 +3720,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A fresh never-peer kernel survives.
-	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", "", "", fresh); err != nil {
+	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", "", fresh); err != nil {
 		t.Fatal(err)
 	}
 	// A stale counterparty survives here (peer retention governs it, not this sweep), and so does a
@@ -3777,7 +3777,7 @@ func TestListPurgeablePeers(t *testing.T) {
 	newPeer(t, db, "stranger", "k-stranger", old) // excluded: no record names it; discovery evicts it
 	counterparty("recent", "k-recent", now)       // excluded: first seen within the window
 	counterparty("gossip", "k-gossip", old)       // excluded: a recent gossip mention keeps it live
-	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetKernelSuspended(ctx, counterparty("banned", "k-banned", old), true, old); err != nil {
@@ -4338,10 +4338,10 @@ func TestListKernelsRoster(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Discovery-only: a kernel row with a nickname, no petname, and no record naming it.
-	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, "SELF", "me", "", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "SELF", "me", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4384,7 +4384,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	now := time.Now().UTC()
 	const key = "narrowkey"
 
-	if err := db.UpsertKernel(ctx, key, "nick", "about", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, key, "nick", "about", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetGossipCursor(ctx, key, "cursor-1"); err != nil {
@@ -4395,7 +4395,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	}
 	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)
 	// must not reset any of it.
-	if err := db.UpsertKernel(ctx, key, "", "", "", "", now.Add(time.Minute)); err != nil {
+	if err := db.UpsertKernel(ctx, key, "", "", "", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	rk, err := db.ReadKernel(ctx, key)
@@ -4604,10 +4604,10 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 
 	// Stale eviction of k1 (never a peer) must not clear k2's rows either.
 	old := now.Add(-100 * 24 * time.Hour)
-	if err := db.UpsertKernel(ctx, k1, "one", "", "", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, k1, "one", "", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, k2, "two", "", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, k2, "two", "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour), ""); err != nil {
@@ -4699,7 +4699,6 @@ func TestMigration053RenamesInPlace(t *testing.T) {
 	for _, tc := range []struct{ table, old, renamed string }{
 		{"accounts", "rail_address", "blockchain_address"},
 		{"kernels", "rail_address", "blockchain_address"},
-		{"kernels", "rail_proof", "blockchain_proof"},
 		{"traces", "owed_rail_address", "owed_blockchain_address"},
 	} {
 		cols := map[string]bool{}
@@ -5692,7 +5691,7 @@ func TestBindPetnameIsExact(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	newPeer(t, db, "taken", "K1", time.Now().UTC())
-	if err := db.UpsertKernel(ctx, "K2", "", "", "", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, "K2", "", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.BindPetname(ctx, "K1", "taken"); err != nil {

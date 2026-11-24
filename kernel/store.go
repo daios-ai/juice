@@ -58,7 +58,7 @@ type GrantStore interface {
 }
 
 // FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
-// transport (§13), addressing the peer by its Ed25519 public key. actionID is the action's stable
+// transport (§13), addressing the peer by its public key. actionID is the action's stable
 // id on that peer; expectedContractHash is the cached contract hash the call
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
 // resolves peerPublicKey to a live path (direct / hole-punched / relayed).
@@ -105,7 +105,7 @@ type RemoteResolver interface {
 // /juice/fed/transfer/1 (P11): whom the payment is for. Like TicketRevealer, the kernel owns the
 // payload and its signature; the adapter owns the wire shape and its deadline.
 type TransferAnnouncer interface {
-	AnnounceTransfer(ctx context.Context, peerPublicKey string, payload TransferPaidPayload, proof, signature string) error
+	AnnounceTransfer(ctx context.Context, peerPublicKey string, payload TransferPaidPayload, signature string) error
 }
 
 // TaskRequest is one signed /juice/fed/task/1 request (P8): a holder's notice, or a completion or
@@ -667,9 +667,6 @@ type Store interface {
 	// whose beneficiary's kernel has not yet acknowledged them, and the acknowledgement (P11).
 	ListTransfersToAnnounce(ctx context.Context, limit int) ([]*OutgoingTransfer, error)
 	MarkTransferAnnounced(ctx context.Context, id string) error
-	// ReadKernelVault is where a peer proved it is paid, or empty; recorded once by UpsertKernel and
-	// never replaced or purged (D16, D23).
-	ReadKernelVault(ctx context.Context, publicKey string) (string, error)
 	// ReconcileDeposits is the one path every observed payment takes: obligations whose money has
 	// arrived are closed first — the join is the rule, so no caller can credit a payment from the
 	// wrong sender, amount or transaction — and whatever no obligation claimed is then attributed to
@@ -698,7 +695,7 @@ type Store interface {
 	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
 	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen, each of which
 	// advances only after its own work is verified and committed (§13).
-	UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string, now time.Time) error
+	UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress string, now time.Time) error
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.

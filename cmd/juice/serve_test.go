@@ -5,8 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -47,23 +46,15 @@ func newTestHTTPServerFull(t *testing.T) (*httptest.Server, *kernel.Kernel, *sto
 }
 
 // bootstrapSigning installs the signing key and superuser config on an already-FirstBooted
-// kernel, returning the platform Ed25519 private key. Shared by the test server builders.
-func bootstrapSigning(t *testing.T, k *kernel.Kernel) ed25519.PrivateKey {
+// kernel, returning the kernel's key. Shared by the test server builders.
+func bootstrapSigning(t *testing.T, k *kernel.Kernel) *ecdsa.PrivateKey {
 	t.Helper()
 	ctx := context.Background()
 	sys, err := k.ReadUserByHandle(ctx, "sys")
 	if err != nil {
 		t.Fatal(err)
 	}
-	privB64, err := k.GetConfig(ctx, configKeySigningPrivate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	privBytes, err := base64.RawURLEncoding.DecodeString(privB64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv := ed25519.PrivateKey(privBytes)
+	priv := testKeyOf(k)
 	k.SetSigningKey(priv, sys.ID)
 	if err := k.SetConfig(ctx, configKeySuperuser, "sys"); err != nil {
 		t.Fatal(err)
@@ -220,14 +211,14 @@ func httpDoWithHeaders(t *testing.T, srv *httptest.Server, method, path string, 
 // existing status/body assertions carry over. The signature covers the exact args bytes, so the
 // receiver's args_hash matches (the same contract the transport preserves). `action` is the
 // serving kernel's stable action id, exactly as the wire carries it (§13).
-func fedCall(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, action, idempKey string, args map[string]any) *http.Response {
+func fedCall(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, action, idempKey string, args map[string]any) *http.Response {
 	t.Helper()
 	if args == nil {
 		args = map[string]any{}
 	}
 	body, _ := json.Marshal(args)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
 	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
@@ -329,7 +320,7 @@ func TestServeHealthCarriesTheWorldsToken(t *testing.T) {
 	cfg := testConfig("health-token-secret")
 	cfg.Network = net
 	k := newKernel(cfg, kernel.Dependencies{Store: db})
-	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)
@@ -1638,7 +1629,7 @@ func TestFederationCall(t *testing.T) {
 	}
 
 	// Generate a real keypair for the calling remote kernel.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1709,7 +1700,7 @@ func TestFederationCall(t *testing.T) {
 
 	// The caller is one principal (P4): a validly signed request naming half of one is refused
 	// with a signed rejection before anything runs, and nothing is recorded under the half name.
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
 	for i, half := range []kernel.BuyerTerms{{CallerUserID: "u-1"}, {CallerHandle: "alice"}} {
 		ts, key := time.Now().UTC().Format(time.RFC3339), fmt.Sprintf("idem-half-%d", i)
@@ -1741,7 +1732,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
@@ -1808,7 +1799,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	}
 
 	// Generate a keypair and register a remote peer.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1885,7 +1876,7 @@ func TestWaitingOnPeer(t *testing.T) {
 	ctx := context.Background()
 
 	localID, _ := makeUser(t, k, "local-caller")
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.BindPetname(ctx, peerKey, "peer-caller"); err != nil {
 		t.Fatal(err)
@@ -2086,7 +2077,7 @@ func TestFederationCallAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2118,7 +2109,7 @@ func TestFederationCallAuth(t *testing.T) {
 	}
 
 	action := a.ID
-	cpKey := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cpKey := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 
 	// No counterparty (empty key) → 401.
@@ -2130,8 +2121,8 @@ func TestFederationCallAuth(t *testing.T) {
 
 	// Unknown but signature-valid counterparty → handshake-free subscription (§13): the caller's
 	// kernel becomes known and the price-0 call succeeds.
-	_, unknownPriv, _ := ed25519.GenerateKey(rand.Reader)
-	unknownKey := base64.RawURLEncoding.EncodeToString(unknownPriv.Public().(ed25519.PublicKey))
+	_, unknownPriv, _ := genKey()
+	unknownKey := base64.RawURLEncoding.EncodeToString(pubBytes(unknownPriv))
 	r2 := fedCall(t, k, unknownPriv, action, "idem-auth-2", map[string]any{})
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
@@ -2189,7 +2180,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_ = k.KnowKernel(ctx, pubB64)
 
@@ -2466,7 +2457,7 @@ func TestFederationReplay(t *testing.T) {
 	pubAll := kernel.VisibilityPublic
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_ = k.KnowKernel(ctx, pubB64)
 
@@ -2490,7 +2481,7 @@ func TestFederationReplay(t *testing.T) {
 	_, _ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
 		ID:             uuid.New().String(),
 		IdempotencyKey: ikey2,
-		Counterparty:   base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
+		Counterparty:   base64.RawURLEncoding.EncodeToString(pubBytes(priv)),
 		CreatedAt:      now,
 	})
 	r3 := fedCall(t, k, priv, a.ID, ikey2, map[string]any{})
@@ -2515,7 +2506,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 	ctx := context.Background()
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_ = k.KnowKernel(ctx, pubB64)
 
@@ -2579,7 +2570,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 	ctx := context.Background()
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	_ = k.KnowKernel(ctx, pubB64)
 
@@ -2630,7 +2621,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	if err := k.KnowKernel(ctx, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
 		t.Fatal(err)
 	}
@@ -2676,7 +2667,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 	ctx := context.Background()
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
@@ -2692,7 +2683,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 
 	// Sign over the empty body {} but deliver a different body — the receiver hashes the bytes
 	// it actually got, so the signature no longer matches and the call is rejected (401).
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
 	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
@@ -2772,7 +2763,7 @@ func TestServeRendersATaskHeldByAPeer(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 	id, _ := makeUser(t, k, "peer-list-me")
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.BindPetname(ctx, peerKey, "holder"); err != nil {
 		t.Fatal(err)
@@ -3729,7 +3720,7 @@ func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
 	}
 	served, refused := mk("lock-served", true), mk("lock-refused", false)
 
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
@@ -3921,7 +3912,7 @@ func TestServeBuildsTheTransportWithTheConfiguredLimits(t *testing.T) {
 	globalCfg.RelaySlots, globalCfg.MaxInboundPeers = 1, 2
 	globalCfg.AllowLocalSources = true
 	globalCfg.FedListenAddrs = []string{"/ip4/127.0.0.1/tcp/0"}
-	tr, err := startFedTransport(context.Background(), k, log.Discard(), rail.World{}, nil, nil)
+	tr, err := startFedTransport(context.Background(), k, testKeyOf(k), log.Discard(), rail.World{}, nil, nil)
 	if err != nil {
 		t.Fatalf("startFedTransport: %v", err)
 	}

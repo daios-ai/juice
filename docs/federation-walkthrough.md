@@ -25,11 +25,11 @@ network fingerprint twice in passing. Whether they belong in the manual at all i
 
 ## 1. What a kernel is on the network
 
-**One key, and nothing else.** A kernel makes one Ed25519 keypair at first boot and keeps it for
-life. There is no second identity: the address peers dial is derived from that same public key, by
+**One key, and nothing else.** A kernel has one secp256k1 keypair, derived from its recovery
+phrase at first boot, and keeps it for life; on a chain the same key is its payment address. There is no second identity: the address peers dial is derived from that same public key, by
 a deterministic one-to-one mapping (`fed.PeerIDFromKey`, `fed/transport.go:53`). So dialing a
 kernel and verifying what it signed rest on the same secret, and a kernel that loses the key loses
-both. Keys are written as 43 characters of base64url. Key rotation is not supported.
+both. Keys are written as 44 characters of base64url. Key rotation is not supported.
 
 **One network, named by a fingerprint.** The network is 32 bytes: SHA-256 over the canonical JSON
 of the world's four defining fields — `chain_id`, `name`, `rail`, `token` (`rail/world.go`,
@@ -94,7 +94,7 @@ Not on the wire:
 - `recovery` — the only one a kernel does not sign: the user's recovery key, derived from the seed
   phrase, signs a challenge the kernel issued (`kernel/auth.go:277`).
 
-The separation is required because all twelve are Ed25519 signatures by one key over JSON objects,
+The separation is required because all twelve are signatures by one key over JSON objects,
 and several share fields. `task_complete` and `task_cancel` sign the same fields — a decline is a
 completion without input — so without the domain in the signed bytes, a captured completion would
 also read as a decline of the same task.
@@ -303,7 +303,7 @@ instead of holding it open for retry (`fed/fed.go:21`). A write that succeeded a
 failed are not that case: the peer may have the request, so the call stays pending.
 
 **What it tells the kernel about the sender.** Just the peer's public key, recovered from the
-connection (`fed/transport.go:479`). Ed25519 peer ids carry the key inside them, so this needs no
+connection (`fed/transport.go:479`). A kernel's peer id carries the key inside it, so this needs no
 lookup and cannot be forged: it is the key the connection's encryption was negotiated with. Every
 further question — is this peer suspended, does it owe us, may it call this action — is the
 kernel's, answered from the key.
@@ -840,7 +840,7 @@ same link. No score: the numbers are shown with their provenance and the reader 
 
 - `bob/translate` — an action on this kernel.
 - `bob@brick/translate` — `bob`'s action on the kernel A calls `brick`. The part after `@` is
-  either a petname A chose for that kernel or the peer's 43-character key itself.
+  either a petname A chose for that kernel or the peer's 44-character key itself.
 - a bare action id, which is an object rather than a path and is never extended.
 
 A reference with no action name means the group's index: `bob@brick` resolves `bob/index` on

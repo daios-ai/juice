@@ -240,8 +240,7 @@ value named in its arguments.
 | password prompt on `auth login`, `user create` | `--password` |
 | password prompt on `user blockchain-address` | `--password` (with `--signature`) |
 | recovery prompt on `auth recover` | `--phrase` and `--password` |
-| first-boot questions | a `config.json` written in advance, plus `JUICE_BOOTSTRAP_PASSWORD` |
-| the `sys` recovery phrase shown at first boot | `JUICE_BOOTSTRAP_RECOVERY_KEY`, the public key of a phrase you generate |
+| first-boot questions | a `config.json` written in advance, with `JUICE_BOOTSTRAP_PASSWORD` and `JUICE_BOOTSTRAP_PHRASE` supplied through the environment |
 | confirmation on a money command | `--yes` |
 | the selected login | `--as` or `JUICE_AS` |
 
@@ -285,7 +284,7 @@ the key and network you expect:
 
 ```console
 $ curl -s localhost:4040/health
-{"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/12D3KooWJHdK…"],
+{"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/16Uiu2HAm…"],
  "handle":"acme","network":"play","network_fingerprint":"baed18ae…",
  "public_key":"fdlMi64P…","blockchain_address":"","status":"ok","symbol":"fUSD","token":"","version":"v0.14.46"}
 ```

@@ -5,6 +5,7 @@ package rail
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -49,6 +50,8 @@ type lib interface {
 	// everything below that block is empty, and walking it is work that grows by a day every day.
 	SeedScan(ctx context.Context) (uint64, error)
 	SettledBalances(ctx context.Context) (*big.Int, *big.Int, uint64, error)
+	// TokenBalanceAt is what the account held of the world's token at one block.
+	TokenBalanceAt(ctx context.Context, block uint64) (*big.Int, error)
 	// The three below are how a purchase the ledger never recorded is found again: unresolved ones
 	// the rail still holds, and, once resolved, the nonce each intent owns.
 	Pending() ([]jrail.Intent, error)
@@ -108,6 +111,25 @@ func (l railLib) SeedScan(ctx context.Context) (uint64, error) {
 	return at, nil
 }
 
+// TokenBalanceAt reads the token's own balanceOf for this account at one block.
+func (l railLib) TokenBalanceAt(ctx context.Context, block uint64) (*big.Int, error) {
+	token, account := l.Domain().Token, l.Account()
+	data := append(crypto.Keccak256([]byte("balanceOf(address)"))[:4], common.LeftPadBytes(account.Bytes(), 32)...)
+	out, err := l.client.CallContract(ctx, ethereum.CallMsg{To: &token, Data: data}, new(big.Int).SetUint64(block))
+	if err != nil {
+		return nil, fmt.Errorf("read balance at block %d: %w", block, err)
+	}
+	// No answer at all is a block from before the token existed, when nobody held any of it. That
+	// it is the token the world names was settled against the present chain before this is asked.
+	if len(out) == 0 {
+		return new(big.Int), nil
+	}
+	if len(out) != common.HashLength {
+		return nil, fmt.Errorf("token %s does not answer balanceOf", token)
+	}
+	return new(big.Int).SetBytes(out), nil
+}
+
 // Chain is the adaptor over juice-rail. It translates the rail's outcomes and adds none of its own:
 // every fact it reports came from a finalized chain read.
 type Chain struct {
@@ -122,27 +144,26 @@ type Chain struct {
 
 // Open builds the rail a world calls for. The world says which one it settles on, so nothing
 // anywhere infers it from which fields the file happens to carry.
-func Open(ctx context.Context, w World, home string, firstBoot bool) (kernel.Rail, error) {
+func Open(ctx context.Context, w World, home string, key *ecdsa.PrivateKey, firstBoot bool) (kernel.Rail, error) {
 	switch w.Rail {
 	case RailManual:
 		return NewManual(), nil
 	case RailEVM:
-		return OpenChain(ctx, w, home, firstBoot)
+		return OpenChain(ctx, w, home, key, firstBoot)
 	}
 	return nil, fmt.Errorf("world %q names rail %q", w.Name, w.Rail)
 }
 
-// OpenChain wires juice-rail to this kernel's own key and records, both kept beside the ledger they
-// belong to. A domain that is wrong rather than merely unreachable refuses the boot: money sent on
-// the wrong chain is simply gone.
-func OpenChain(ctx context.Context, w World, home string, firstBoot bool) (*Chain, error) {
+// OpenChain wires juice-rail to the kernel's one key (P1) and to its records, kept beside the ledger
+// they belong to. A domain that is wrong rather than merely unreachable refuses the boot: money sent
+// on the wrong chain is simply gone.
+func OpenChain(ctx context.Context, w World, home string, key *ecdsa.PrivateKey, firstBoot bool) (*Chain, error) {
 	domain, err := w.Domain()
 	if err != nil {
 		return nil, err
 	}
-	key, err := loadOrCreateKey(filepath.Join(home, "rail.key"))
-	if err != nil {
-		return nil, err
+	if key == nil {
+		return nil, fmt.Errorf("a chain world needs the kernel's key")
 	}
 	store, err := jsqlite.Open(filepath.Join(home, "rail.db"), jrail.DomainKey(domain.ChainID, domain.Token))
 	if err != nil {
@@ -209,37 +230,43 @@ func newChain(l lib, key *ecdsa.PrivateKey) *Chain {
 	return &Chain{rail: l, key: key, addr: crypto.PubkeyToAddress(key.PublicKey)}
 }
 
-// loadOrCreateKey reads the rail key, minting one on first use. The new key is written to a
-// temporary file and linked into place, which fails if a key is already there: a key silently
-// overwritten would strand every coin the old one held.
-func loadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
-	if b, err := os.ReadFile(path); err == nil {
-		return jrail.ParseKey(strings.TrimSpace(string(b)), path)
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	key, err := crypto.GenerateKey()
+// KeyFile is the name of the file a kernel's one key is kept in, in its home (D9).
+const KeyFile = "kernel.key"
+
+// LoadKey reads a kernel's key from its file.
+func LoadKey(path string) (*ecdsa.PrivateKey, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return jrail.ParseKey(strings.TrimSpace(string(b)), path)
+}
+
+// StoreKey writes a kernel's key once. The key is written to a temporary file and linked into
+// place, which fails if a key is already there: a key silently overwritten would strand the
+// identity and every coin the old one held. A key already there is left alone, and refused if it
+// is not this one.
+func StoreKey(path string, key *ecdsa.PrivateKey) error {
 	// The key reaches the disk before it has a name: a file that exists but is empty after a power
-	// cut would be indistinguishable from a key, and every coin the vault holds would be stranded.
+	// cut would be indistinguishable from a key.
 	tmp := path + ".new"
 	if err := writeSynced(tmp, hex.EncodeToString(crypto.FromECDSA(key))); err != nil {
-		return nil, err
+		return err
 	}
 	defer os.Remove(tmp)
 	if err := os.Link(tmp, path); err != nil {
-		// Somebody else created it between the read and now; theirs wins.
-		b, rerr := os.ReadFile(path)
+		held, rerr := LoadKey(path)
 		if rerr != nil {
-			return nil, err
+			return err
 		}
-		return jrail.ParseKey(strings.TrimSpace(string(b)), path)
+		if !held.Equal(key) {
+			return fmt.Errorf("%s holds another kernel's key", path)
+		}
+		return nil
 	}
 	// The name is a directory entry of its own; until the directory is flushed the key could exist
 	// on disk under no name at all.
-	return key, syncDir(filepath.Dir(path))
+	return syncDir(filepath.Dir(path))
 }
 
 // syncDir waits for a directory's entries to reach the disk.
@@ -599,15 +626,34 @@ func (c *Chain) FinalizedBalances(ctx context.Context) (int64, string, uint64, b
 // covered or whether money has arrived that nobody has looked for yet.
 func (c *Chain) DepositsScannedTo() (uint64, bool, error) { return c.rail.DepositsScannedTo() }
 
-// Sign proves this kernel controls its own address, in the ordinary personal-message form a wallet
-// produces, so anyone can check it the same way.
-func (c *Chain) Sign(msg []byte) (string, error) {
-	sig, err := crypto.Sign(accountsHash(msg), c.key)
+// AddressOf is the address a kernel's key holds: a kernel is paid at its own key's address and pays
+// from it, so the address is computed and never told (P1). Empty for a key that is none.
+func (c *Chain) AddressOf(kernelKey string) string {
+	raw, err := base64.RawURLEncoding.DecodeString(kernelKey)
 	if err != nil {
-		return "", err
+		return ""
 	}
-	sig[64] += 27 // the V value wallets use
-	return "0x" + hex.EncodeToString(sig), nil
+	pub, err := crypto.DecompressPubkey(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(crypto.PubkeyToAddress(*pub).Hex())
+}
+
+// OpeningBalance is what the account held at the block the payment scan starts after. The scan
+// reports every payment from the next block on, so a payment is in this balance or in the scan and
+// never both. It is read before the first scan, while the cursor is still where it was seeded.
+func (c *Chain) OpeningBalance(ctx context.Context) (int64, bool, error) {
+	at, err := c.rail.SeedScan(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	held, err := c.rail.TokenBalanceAt(ctx, at)
+	if err != nil {
+		return 0, false, err
+	}
+	amount, err := toInt64(held)
+	return amount, err == nil, err
 }
 
 // Verify recovers the signer and reports the address in canonical form — the only form stored or

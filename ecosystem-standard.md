@@ -13,7 +13,7 @@ keeps clusters apart from users. Only the terms are ours.
 
 - **Installation** — one machine's Juice state, rooted at `$JUICE_HOME` (default `~/.juice`). One
   per operating-system user. Several people on one machine are several installations.
-- **Kernel** — one server: its database and signing key, rail key, configuration and lock, in one
+- **Kernel** — one server: its database, its key, configuration and lock, in one
   directory named for the world it serves. One installation runs one kernel per world.
 - **Account** — a principal on one kernel. `sys` is one account per kernel.
 - **Login** — one account at one kernel, written `handle@kernel` — the account's address, the kernel
@@ -29,7 +29,7 @@ $JUICE_HOME/
   bin/                   the family's executables, where the installer puts them and runs each one's setup
   worlds/<world>.json    one network's definition: its money, and the servers to meet it through
   schemas/               one JSON Schema per configuration file and for world files, rewritten by setup
-  kernels/<world>/       one kernel: juice.db, config.json, the rail key and its records,
+  kernels/<world>/       one kernel: juice.db, config.json, kernel.key, the rail's records,
                          serve.lock, cache/
   client/config.json     the kernels this client knows, and which login is selected
   client/credentials/    one file per login, named handle@kernel, 0600, holding its tokens
@@ -38,8 +38,8 @@ $JUICE_HOME/
   ui/                    the interface's own state
 ```
 
-A kernel's home is one directory because everything in it binds to everything else: the ledger, the
-signing key its receipts are signed with, and the rail key that settles them. The world those three
+A kernel's home is one directory because everything in it binds to everything else: the ledger, and
+the one key its receipts are signed with and its payments are made from. The world they
 are valid on is not in it — it is the network's, shared by every kernel on it and held once per
 installation in `worlds/`, which is why the home is named for it. The home backs up, moves and locks
 as a unit; `cache/` is regenerable and safe to delete.
@@ -100,9 +100,11 @@ A kernel is created by its first boot, and only on the operator's word: a `confi
 advance, or an answer given at a terminal after they are told which kernels are here. It then asks
 for what the kernel cannot revise — the name it goes by on the network — and refuses off a terminal,
 naming the key and the file that would have answered. The superuser's password is
-`JUICE_BOOTSTRAP_PASSWORD` or asked; a program that performs the boot generates the recovery phrase
-itself and passes its public key as `JUICE_BOOTSTRAP_RECOVERY_KEY`, so the kernel shows no phrase,
-and without one the kernel generates the phrase and prints it once. That first boot is the only writer of
+`JUICE_BOOTSTRAP_PASSWORD` or asked, and the kernel's recovery phrase is `JUICE_BOOTSTRAP_PHRASE` or
+asked. The phrase is the kernel: its key comes from it, so one given restores the kernel it belongs
+to, and none, at a terminal, creates a kernel whose phrase is shown once. A program that performs
+the boot generates the phrase itself and passes it in that variable, since a boot with no terminal
+never makes one up. That first boot is the only writer of
 `config.json`, and it writes nothing until the answers are in hand, so a boot that is declined or
 unanswered leaves nothing behind. The network is recorded once the rail has verified it, and from
 then on a boot offering that kernel another world is refused before anything is opened.
@@ -121,7 +123,7 @@ never as a step in switching kernels.
   "kernels": {
     "work": {
       "endpoint": "http://localhost:4040",
-      "public_key": "<43-char base64url Ed25519 key>",
+      "public_key": "<44-char base64url key>",
       "world_fingerprint": "…", "network": "play", "decimals": 0
     }
   }

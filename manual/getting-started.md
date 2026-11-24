@@ -62,7 +62,8 @@ What will this kernel call itself on the network? Other operators see this name.
 Name: acme
 Superuser password:
 Confirm password:
-sys recovery phrase (write this down; it is shown only once and cannot be recovered):
+Recovery phrase (Enter to create a new kernel):
+Recovery phrase (write this down; it is shown only once and cannot be recovered):
   depart motion moon climb useless hole learn usage delay fish brand window
 Press Enter once you have written it down:
 Superuser "sys" created.
@@ -72,8 +73,9 @@ INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
 ```
 
 {: .warning }
-> Write the recovery phrase down before pressing Enter. It is shown once and is the
-> only way to reset the superuser password.
+> Write the recovery phrase down before pressing Enter and keep it private.
+> Anyone with the phrase can restore the kernel's identity, spend its coins on
+> a chain network, and reset the superuser password.
 
 {: .warning }
 > The network is fixed when the kernel is created. To use another one later, serve

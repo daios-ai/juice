@@ -76,7 +76,7 @@ func TestOwnNameIsAPetnameOnTheOwnKey(t *testing.T) {
 	}
 
 	// The sweep past the retention age evicts account-less rows, which the self row is by design.
-	if err := st.UpsertKernel(ctx, self, "", "", "", "", time.Now().Add(-48*time.Hour)); err != nil {
+	if err := st.UpsertKernel(ctx, self, "", "", "", time.Now().Add(-48*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.(*store.DB).PurgeStaleDiscovery(ctx, time.Now(), self); err != nil {

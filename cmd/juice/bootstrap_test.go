@@ -3,15 +3,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/spf13/pflag"
 
@@ -172,12 +178,12 @@ func TestFirstBootAtomic(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+	if err := k.FirstBoot(ctx, "secret", "", testKeyOf(k)); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 
 	// All config entries must be present.
-	for _, key := range []string{"superuser_handle", "signing_public_key", "signing_private_key", "jwt_secret"} {
+	for _, key := range []string{"superuser_handle", "signing_public_key", "jwt_secret"} {
 		v, err := k.GetConfig(ctx, key)
 		if err != nil || v == "" {
 			t.Errorf("config %q missing after FirstBoot: %v", key, err)
@@ -197,7 +203,7 @@ func TestFirstBootAtomic(t *testing.T) {
 	}
 
 	// Second call must be a no-op (idempotent) and preserve the same secret.
-	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+	if err := k.FirstBoot(ctx, "secret", "", testKeyOf(k)); err != nil {
 		t.Errorf("second FirstBoot should be idempotent, got: %v", err)
 	}
 	jwtSecret2, _ := k.GetConfig(ctx, "jwt_secret")
@@ -307,20 +313,23 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 	ctx := context.Background()
 	k := newTestKernel(t)
 
-	// Run first boot to generate a valid key pair.
-	if err := k.FirstBoot(ctx, "pass", ""); err != nil {
+	key := testKeyOf(k)
+	if err := k.FirstBoot(ctx, "pass", "", key); err != nil {
 		t.Fatal(err)
 	}
 
-	// Tamper: store a different public key (32 zero bytes, base64url).
-	badPub := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	if err := k.SetConfig(ctx, configKeySigningPublic, badPub); err != nil {
+	// Tamper: the database now says it is another kernel.
+	other, _, _ := genKey()
+	if err := k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(other)); err != nil {
 		t.Fatal(err)
 	}
 
-	// bootstrap must reject the mismatch.
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
+	// bootstrap must reject the mismatch, and a kernel given no key at all.
+	if err := bootstrap(k, key, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
 		t.Error("expected error for mismatched signing keys, got nil")
+	}
+	if err := bootstrap(k, nil, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
+		t.Error("a kernel was served with no key")
 	}
 }
 
@@ -405,7 +414,7 @@ func TestBootstrapReRegistersPrunedNative(t *testing.T) {
 
 	// Build 1 ships "widget".
 	k := newBuild(true)
-	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+	if err := k.FirstBoot(ctx, "secret", "", testKeyOf(k)); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
 	su, err := k.ReadUserByHandle(ctx, "sys")
@@ -468,10 +477,10 @@ func TestBootstrapRegistersTinyGoCompile(t *testing.T) {
 	k := newTestKernel(t)
 	namedKernel(t, "test-kernel")
 
-	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+	if err := k.FirstBoot(ctx, "secret", "", testKeyOf(k)); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
+	if err := bootstrap(k, testKeyOf(k), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -503,10 +512,10 @@ func TestBootstrapNativesAreLocalAndNotGossiped(t *testing.T) {
 	k := newTestKernel(t)
 	namedKernel(t, "test-kernel")
 
-	if err := k.FirstBoot(ctx, "secret", ""); err != nil {
+	if err := k.FirstBoot(ctx, "secret", "", testKeyOf(k)); err != nil {
 		t.Fatalf("FirstBoot: %v", err)
 	}
-	if err := bootstrap(k, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
+	if err := bootstrap(k, testKeyOf(k), DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
@@ -623,115 +632,259 @@ func headless(t *testing.T) {
 	t.Cleanup(func() { interactiveTTY = old })
 }
 
-// testRecoveryKey is the public half of a fresh recovery phrase, as a client enrolling one sends it.
-func testRecoveryKey(t *testing.T) string {
+// testPhrase is the phrase every BIP-39 implementation is tested against, and the one a local
+// development chain funds: its first account is published, so a derivation that reaches it is the
+// standard one.
+const testPhrase = "test test test test test test test test test test test junk"
+
+// freshHome gives a test a kernel home of its own, so nothing it reads or writes is the machine's.
+func freshHome(t *testing.T) {
 	t.Helper()
-	_, pub, err := generateRecovery()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pub
+	t.Setenv("JUICE_HOME", t.TempDir())
+	old := worldName
+	worldName = "play"
+	t.Cleanup(func() { worldName = old })
 }
 
-// TestFirstBootCredentials: off a terminal each of the superuser's credentials has one source, its
-// variable, and is held to the rule every account is created under; a refusal names the variable.
+// TestDeriveKernelKey: a phrase yields one key forever, by the path every Ethereum wallet uses for
+// its first account, so the same phrase opens the same address there (P1).
+func TestDeriveKernelKey(t *testing.T) {
+	for phrase, want := range map[string]string{
+		testPhrase: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+		"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+	} {
+		key, err := deriveKernelKey(phrase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ethcrypto.PubkeyToAddress(key.PublicKey).Hex(); got != want {
+			t.Errorf("%q derives %s, want %s", phrase, got, want)
+		}
+	}
+	key, _ := deriveKernelKey(testPhrase)
+	if got := hex.EncodeToString(ethcrypto.FromECDSA(key)); got != "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" {
+		t.Errorf("the test phrase's key is %s", got)
+	}
+	// Spacing is not part of a phrase: the same words give the same kernel key and the same
+	// recovery key however they are spaced. A word that is not one is refused.
+	const respaced = "  test test test test test test\ttest test test test test   junk "
+	spaced, err := deriveKernelKey(respaced)
+	if err != nil || !spaced.Equal(key) {
+		t.Errorf("the same words spaced differently are another key: %v", err)
+	}
+	plain, _ := deriveRecoveryKey(testPhrase)
+	if got, err := deriveRecoveryKey(respaced); err != nil || !got.Equal(plain) {
+		t.Errorf("the same words spaced differently are another recovery key: %v", err)
+	}
+	for _, bad := range []string{"", "test test test", "test test test test test test test test test test test test"} {
+		if _, err := deriveKernelKey(bad); !errors.Is(err, kernel.ErrInvalidInput) {
+			t.Errorf("deriveKernelKey(%q) = %v, want ErrInvalidInput", bad, err)
+		}
+	}
+	// The superuser's recovery key comes from the same phrase and is not the kernel's key.
+	recovery, err := deriveRecoveryKey(testPhrase)
+	if err != nil || bytes.Equal(recovery.Seed(), ethcrypto.FromECDSA(key)) {
+		t.Errorf("the recovery key must be its own key: %v", err)
+	}
+}
+
+// TestFirstBootCredentials: off a terminal each thing a kernel is created with has one source, its
+// variable, and a refusal names the variable. The phrase is the kernel: it is never made up where
+// the only place to show it is a log, and a home that already holds a key takes only the phrase
+// that key came from.
 func TestFirstBootCredentials(t *testing.T) {
 	headless(t)
 	kernel.SetMinPasswordLenForTesting(8)
 	t.Cleanup(func() { kernel.SetMinPasswordLenForTesting(1) })
-	key := testRecoveryKey(t)
+	want, _ := deriveKernelKey(testPhrase)
+	other, _, _ := genKey()
+	_ = other
+	_, another, _ := genKey()
 
 	cases := []struct {
-		name, password, key, refusal string
+		name, password, phrase string
+		held                   *ecdsa.PrivateKey
+		refusal                string
 	}{
-		{"no password", "", "", envBootstrapPassword},
-		{"short password", "short12", "", envBootstrapPassword},
-		{"malformed key", "pass1234", "not-a-key", envBootstrapRecoveryKey},
-		{"wrong-length key", "pass1234", "AAAA", envBootstrapRecoveryKey},
-		{"password alone", "pass1234", "", ""},
-		{"password and key", "pass1234", key, ""},
+		{"no password", "", testPhrase, nil, envBootstrapPassword},
+		{"short password", "short12", testPhrase, nil, envBootstrapPassword},
+		{"no phrase", "pass1234", "", nil, envBootstrapPhrase},
+		{"not a phrase", "pass1234", "eleven words are not a phrase at all in any language", nil, envBootstrapPhrase},
+		{"a phrase", "pass1234", testPhrase, nil, ""},
+		{"an unfinished kernel and its phrase", "pass1234", testPhrase, want, ""},
+		{"an unfinished kernel and another phrase", "pass1234", testPhrase, another, envBootstrapPhrase},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			freshHome(t)
+			if c.held != nil {
+				if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := rail.StoreKey(kernelKeyPath(), c.held); err != nil {
+					t.Fatal(err)
+				}
+			}
 			t.Setenv(envBootstrapPassword, c.password)
-			t.Setenv(envBootstrapRecoveryKey, c.key)
-			got, err := firstBootCredentials()
+			t.Setenv(envBootstrapPhrase, c.phrase)
+			var got bootCredentials
+			var err error
+			shown := captureStderr(t, func() { got, err = firstBootCredentials(rail.World{Name: "play", Rail: rail.RailManual}) })
+			if strings.Contains(shown, c.phrase) && c.phrase != "" {
+				t.Errorf("the phrase was printed: %q", shown)
+			}
 			if c.refusal != "" {
 				if err == nil || !strings.Contains(err.Error(), c.refusal) {
 					t.Fatalf("want a refusal naming %s, got %v", c.refusal, err)
 				}
 				return
 			}
-			if err != nil || got.password != c.password || got.recoveryKey != c.key {
+			recovery, _ := deriveRecoveryKey(testPhrase)
+			if err != nil || got.password != c.password || !got.key.Equal(want) ||
+				got.recoveryKey != base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey)) {
 				t.Fatalf("got %+v, %v", got, err)
+			}
+			if !strings.Contains(shown, kernel.PublicKey(want)) {
+				t.Errorf("a restore must say which kernel the phrase is: %q", shown)
 			}
 		})
 	}
 }
 
-// TestFirstBootRecoveryKey: a recovery key the boot is given is the superuser's, and no phrase is
-// made or shown; without one the kernel generates the phrase, shows it, and enrolls its public half,
-// so the superuser is always recoverable.
-func TestFirstBootRecoveryKey(t *testing.T) {
-	ctx := context.Background()
+// TestFirstBootAtATerminal: at a terminal the phrase is asked. None creates a new kernel, whose
+// phrase is shown once before anything is written and is the one its key and its superuser's
+// recovery key come from; one given restores the kernel it belongs to, and on a chain the boot
+// says the address that kernel is paid at.
+func TestFirstBootAtATerminal(t *testing.T) {
+	freshHome(t)
+	old := interactiveTTY
+	interactiveTTY = func() bool { return true }
+	oldAsk, oldShow := promptMnemonic, showPhrase
+	t.Cleanup(func() { interactiveTTY, promptMnemonic, showPhrase = old, oldAsk, oldShow })
+	t.Setenv(envBootstrapPassword, "secret")
+	t.Setenv(envBootstrapPhrase, "")
 
-	key := testRecoveryKey(t)
-	k := newTestKernel(t)
-	out := captureStderr(t, func() {
-		if err := firstBoot(ctx, k, bootCredentials{password: "secret", recoveryKey: key}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if sys, err := k.ReadUserByHandle(ctx, superuserHandle); err != nil || sys.RecoveryPublicKey != key {
-		t.Fatalf("the given key was not enrolled: %+v %v", sys, err)
-	}
-	if strings.Contains(out, "recovery phrase") {
-		t.Errorf("a phrase was shown although the boot was given its key: %q", out)
-	}
-
-	k = newTestKernel(t)
-	out = captureStderr(t, func() {
-		if err := firstBoot(ctx, k, bootCredentials{password: "secret"}); err != nil {
-			t.Fatal(err)
-		}
-	})
-	sys, err := k.ReadUserByHandle(ctx, superuserHandle)
-	if err != nil || sys.RecoveryPublicKey == "" {
-		t.Fatalf("a superuser was created with no recovery key: %+v %v", sys, err)
-	}
-	lines := strings.Split(out, "\n")
-	var phrase string
-	for n, l := range lines {
-		if strings.Contains(l, "sys recovery phrase") && n+1 < len(lines) {
-			phrase = strings.TrimSpace(lines[n+1])
-		}
-	}
-	priv, err := deriveRecoveryKey(phrase)
+	var asked, shown string
+	promptMnemonic = func(prompt string) (string, error) { asked = prompt; return "", nil }
+	showPhrase = func(_, mnemonic string) error { shown = mnemonic; return nil }
+	created, err := firstBootCredentials(rail.World{Name: "play", Rail: rail.RailManual})
 	if err != nil {
-		t.Fatalf("no phrase shown (%q): %v", out, err)
+		t.Fatal(err)
 	}
-	if got := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)); got != sys.RecoveryPublicKey {
-		t.Error("the phrase shown is not the one enrolled")
+	if !strings.Contains(asked, "Enter to create a new kernel") {
+		t.Errorf("asked %q", asked)
+	}
+	key, kerr := deriveKernelKey(shown)
+	recovery, rerr := deriveRecoveryKey(shown)
+	if kerr != nil || rerr != nil || !created.key.Equal(key) ||
+		created.recoveryKey != base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey)) {
+		t.Fatalf("the phrase shown (%q) is not the one the kernel was made from: %v %v", shown, kerr, rerr)
+	}
+	if _, err := os.Stat(kernelHome()); !os.IsNotExist(err) {
+		t.Errorf("asking wrote the home: %v", err)
+	}
+
+	shown = ""
+	promptMnemonic = func(string) (string, error) { return testPhrase, nil }
+	var restored bootCredentials
+	said := captureStderr(t, func() {
+		restored, err = firstBootCredentials(rail.World{Name: "polygon", Rail: rail.RailEVM})
+	})
+	want, _ := deriveKernelKey(testPhrase)
+	if err != nil || !restored.key.Equal(want) || shown != "" {
+		t.Fatalf("restore: %v, a phrase shown %q", err, shown)
+	}
+	if !strings.Contains(said, kernel.PublicKey(want)) || !strings.Contains(said, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266") {
+		t.Errorf("a restore on a chain must say the kernel and its address: %q", said)
+	}
+
+	// A home that holds a key was not finished being created: it is not offered a new kernel.
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := rail.StoreKey(kernelKeyPath(), want); err != nil {
+		t.Fatal(err)
+	}
+	promptMnemonic = func(prompt string) (string, error) { asked = prompt; return "", nil }
+	if _, err := firstBootCredentials(rail.World{Name: "play", Rail: rail.RailManual}); err == nil || strings.Contains(asked, "create a new kernel") {
+		t.Errorf("an unfinished kernel was offered a new one (asked %q): %v", asked, err)
 	}
 }
 
-// TestFirstBootRefusalWritesNothing: a credential refused at a first boot is refused before the
-// home is written, as a missing name is, so the boot can be run again as if it never happened.
+// TestFirstBootRecordsTheKernel: first boot enrolls the superuser's recovery key and binds the
+// database to the kernel's key, and to no other afterwards.
+func TestFirstBootRecordsTheKernel(t *testing.T) {
+	ctx := context.Background()
+	k := newTestKernel(t)
+	key := testKeyOf(k)
+	recovery, _ := deriveRecoveryKey(testPhrase)
+	recoveryKey := base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey))
+	captureStderr(t, func() {
+		if err := firstBoot(ctx, k, bootCredentials{password: "secret", key: key, recoveryKey: recoveryKey}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if sys, err := k.ReadUserByHandle(ctx, superuserHandle); err != nil || sys.RecoveryPublicKey != recoveryKey {
+		t.Fatalf("the phrase's recovery key was not enrolled: %+v %v", sys, err)
+	}
+	if got := k.SelfKey(ctx); got != kernel.PublicKey(key) {
+		t.Errorf("the database is kernel %s, want %s", got, kernel.PublicKey(key))
+	}
+	if v, _ := k.GetConfig(ctx, "signing_private_key"); v != "" {
+		t.Error("the key was written into the database")
+	}
+	_, stranger, _ := genKey()
+	if err := k.FirstBoot(ctx, "secret", recoveryKey, stranger); !errors.Is(err, kernel.ErrInvalidState) {
+		t.Errorf("a database was booted under another kernel's key: %v", err)
+	}
+	if err := bootstrap(k, stranger, DefaultServerConfig().Native, native.All(native.Deps{}), testNet); err == nil {
+		t.Error("a database was served under another kernel's key")
+	}
+}
+
+// TestFirstBootRefusalWritesNothing: what a kernel is created with is refused before the home is
+// written, as a missing name is, so the boot can be run again as if it never happened.
 func TestFirstBootRefusalWritesNothing(t *testing.T) {
 	headless(t)
 	t.Setenv("JUICE_HOME", t.TempDir())
 	t.Setenv(envBootstrapPassword, "secret")
-	t.Setenv(envBootstrapRecoveryKey, "not-a-key")
+	t.Setenv(envBootstrapPhrase, "not a phrase")
 	old := worldName
 	t.Cleanup(func() { worldName = old })
 	t.Cleanup(bindServeFlags(t, "--kernel-handle", "acme"))
 
 	err := runServer("play")
-	if err == nil || !strings.Contains(err.Error(), envBootstrapRecoveryKey) {
-		t.Fatalf("want a refusal naming %s, got %v", envBootstrapRecoveryKey, err)
+	if err == nil || !strings.Contains(err.Error(), envBootstrapPhrase) {
+		t.Fatalf("want a refusal naming %s, got %v", envBootstrapPhrase, err)
 	}
 	if entries, rerr := os.ReadDir(kernelHome()); !os.IsNotExist(rerr) {
 		t.Errorf("the refused boot wrote its home: %v %v", entries, rerr)
+	}
+}
+
+// TestAKernelWithoutItsKeyIsRefusedUntouched: a home whose database exists without the key file is
+// a kernel made before one key served as identity and address, or one whose key was lost. Either
+// way it is refused before the database is opened, so nothing in it changes.
+func TestAKernelWithoutItsKeyIsRefusedUntouched(t *testing.T) {
+	headless(t)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	old := worldName
+	t.Cleanup(func() { worldName = old })
+	t.Cleanup(bindServeFlags(t))
+	worldName = "play"
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(kernelHome(), "juice.db")
+	if err := os.WriteFile(db, []byte("an older kernel's database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runServer("play")
+	if err == nil || !strings.Contains(err.Error(), rail.KeyFile) {
+		t.Fatalf("want a refusal naming %s, got %v", rail.KeyFile, err)
+	}
+	if got, _ := os.ReadFile(db); string(got) != "an older kernel's database" {
+		t.Errorf("the refused boot touched the database: %q", got)
 	}
 }
 

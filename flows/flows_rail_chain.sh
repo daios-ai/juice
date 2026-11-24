@@ -120,8 +120,8 @@ PYEOF
     assert_eq "rail_chain.refused_boot_made_no_superuser" 0 \
         "$(sqlite3 "$db" "select count(*) from accounts" 2>/dev/null || echo -1)"
 
-    # The same home, the chain now reachable: the rail key it already made is kept, and this time
-    # the scan start is fixed and the kernel serves.
+    # The same home and the same phrase, the chain now reachable: the key it already wrote is kept,
+    # and this time the scan start is fixed and the kernel serves.
     install_world "$db" "$CHAIN_WORLD"
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.boot" "server did not start"; return; }
     make_user "$db" "$hs" "$ha" alice
@@ -175,6 +175,34 @@ print(rows[0]['status'], rows[0].get('tx_hash', '-')) if rows else print('- -')"
     assert_eq "rail_chain.books_balance" 0 "$(pathf "$ident" solvency.gap)"
     assert_eq "rail_chain.custody_checked" True "$(pathf "$ident" custody.checked)"
     assert_eq "rail_chain.custody_within_bounds" True "$(pathf "$ident" custody.ok)"
+
+    # The disk is lost and the kernel restored from its phrase (D9, D23). It is the same kernel at
+    # the same address, and the coins that address still holds — every one of them, with the ledger
+    # that said whose they were gone — are booked to the operator once, so the books and the chain
+    # agree from the first pass and a payment after the restore is counted once.
+    anvil_mine 8
+    local held; held=$(anvil_uint "$token" "balanceOf(address)(uint256)" "$vault")
+    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
+    stop_server "$db"
+    rm -rf "$(dirname "$db")"
+    make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.restored" "server did not start"; return; }
+    assert_eq "rail_chain.restored_same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
+    assert_eq "rail_chain.restored_same_address" "$vault" "$(vault_of "$db")"
+    assert_contains "rail_chain.restore_says_the_address" "paid at $vault" "$(cat "$(server_log "$db")")"
+    assert_jnum "rail_chain.restored_coins_are_the_operators" "$(jj "$db" "$hs" user me)" available "$held"
+    make_user "$db" "$hs" "$ha" alice
+    _chain_pay_in "$db" "$ha" "$akey" 3000000 >/dev/null
+    assert_jnum "rail_chain.payment_after_restore_counted_once" "$(jj "$db" "$ha" user me)" available 3000000
+    deadline=$(( $(date +%s) + 30 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        anvil_mine 2
+        ident=$(jj "$db" "$hs" admin kernel show)
+        [ "$(pathf "$ident" custody.checked)" = True ] && break
+        sleep 0.5
+    done
+    assert_eq "rail_chain.restored_books_balance" 0 "$(pathf "$ident" solvency.gap)"
+    assert_eq "rail_chain.restored_vault_is_the_chains" $((held + 3000000)) "$(pathf "$ident" solvency.vault)"
+    assert_eq "rail_chain.restored_custody_within_bounds" True "$(pathf "$ident" custody.ok)"
 }
 
 # Two kernels settle a real debt over the chain (§8): the debtor pays from its own account, names

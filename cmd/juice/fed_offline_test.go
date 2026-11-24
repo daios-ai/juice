@@ -5,8 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -88,7 +86,7 @@ func (f *fakeFed) Close() error          { return nil }
 func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := genKey()
 	key := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)
@@ -318,7 +316,7 @@ func TestInspectLocalUserRejected(t *testing.T) {
 // never a hang or opaque error.
 func TestInspectOfflineStranger(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
 
 	out := inspectResp(t, srv, base64.RawURLEncoding.EncodeToString(pub))
@@ -330,7 +328,7 @@ func TestInspectOfflineStranger(t *testing.T) {
 // TestInspectOnlineLive: a reachable peer yields live identity/actions with source=live.
 func TestInspectOnlineLive(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	livekey := base64.RawURLEncoding.EncodeToString(pub)
 	doc, _ := json.Marshal(kernel.GossipResponse{
 		Handle: "live-peer", PublicKey: livekey,
@@ -398,7 +396,7 @@ func peerTaskServer(t *testing.T, f *fakeFed) (*server, string, func(taskID stri
 	// The outbound task protocol runs kernel-side over kernel.TaskCaller (P8), so the fake backs a
 	// real fedAdapter: these tests exercise the whole path, not a stub of it.
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil, nil)
+	adapter := newFedAdapter(self, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 	deliver := func(taskID string) string {
@@ -534,7 +532,7 @@ func TestCompletePeerTask_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil, nil)
+	adapter := newFedAdapter(self, nil)
 	const key = "k-offline-peer"
 
 	// No transport at all, and a transport that cannot reach the peer, are both "unreachable".

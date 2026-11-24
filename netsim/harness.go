@@ -33,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	bip39 "github.com/tyler-smith/go-bip39"
+
 	"github.com/daios-ai/juice/rail"
 )
 
@@ -393,6 +395,23 @@ func (n *Net) installWorld(dir, boot string) (string, error) {
 	return name, os.WriteFile(path, b, 0o600)
 }
 
+// kernelPhrase is the recovery phrase of the kernel installed in dir: made once, then read back.
+func kernelPhrase(dir string) (string, error) {
+	path := filepath.Join(dir, "phrase")
+	if b, err := os.ReadFile(path); err == nil {
+		return strings.TrimSpace(string(b)), nil
+	}
+	entropy, err := bip39.NewEntropy(128)
+	if err != nil {
+		return "", err
+	}
+	phrase, err := bip39.NewMnemonic(entropy)
+	if err != nil {
+		return "", err
+	}
+	return phrase, os.WriteFile(path, []byte(phrase+"\n"), 0o600)
+}
+
 // Boot starts (or restarts) a kernel that outlives the call. Restarting on the same directory is
 // how the story kills and revives a provider, so the two paths are one function.
 func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
@@ -418,8 +437,16 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A kernel is created from its recovery phrase, which a boot with no terminal is handed and
+	// never prints. Each participant has its own, kept beside its installation so that a restart
+	// names the same kernel; it is a secret like any other the run holds.
+	phrase, err := kernelPhrase(dir)
+	if err != nil {
+		return nil, err
+	}
+	n.Secret(phrase, "<phrase:"+name+"-sys>")
 	cmd := exec.Command(n.Binary, "kernel", "serve", world, "--listen-addr", "127.0.0.1:0")
-	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass",
+	cmd.Env = append(os.Environ(), "JUICE_BOOTSTRAP_PASSWORD=sys-pass", "JUICE_BOOTSTRAP_PHRASE="+phrase,
 		"JUICE_HOME="+dir, "HOME="+n.home("sysop-"+name))
 	cmd.Stdout, cmd.Stderr = lf, lf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -443,14 +470,6 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	}
 	k.URL = "http://" + addr
 
-	// First boot prints the superuser's recovery phrase to this log. Register it for redaction and
-	// remove it from the file: the run directory is an artifact people share.
-	if ph, err := waitFor(logPath, `recovery phrase[^\n]*\n\s*([a-z][a-z ]{40,})`, 2*time.Second); err == nil {
-		n.Secret(strings.TrimSpace(ph), "<phrase:"+name+"-sys>")
-		if raw, err := os.ReadFile(logPath); err == nil {
-			_ = os.WriteFile(logPath, rePhrase.ReplaceAll(raw, []byte("<recovery-phrase>")), 0o644)
-		}
-	}
 	// The superuser signs in here rather than at each call site: every boot needs it, including the
 	// restarts the story uses to kill and revive a provider, and a kernel whose operator is not
 	// signed in fails every administrative command with a message about logging in.

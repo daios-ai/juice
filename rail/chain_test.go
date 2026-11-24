@@ -4,6 +4,9 @@ package rail
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"os"
@@ -21,20 +24,22 @@ import (
 // fakeLib stands for juice-rail: the test chooses what the rail answers, so the adaptor's
 // sequencing and its translation of shortages can be exercised with no chain.
 type fakeLib struct {
-	prepareErr error
-	sendErr    error
-	refillErr  error
-	refillID   jrail.ID // what the library hands back with refillErr: set when the intent was recorded
-	status     jrail.Status
-	fact       jrail.Fact
-	settled    bool
-	costErr    error
-	cost       *big.Int
-	deposits   []jrail.Deposit
-	intent     jrail.Intent
-	pending    []jrail.Intent
-	nonce      uint64
-	byNonce    map[uint64]jrail.Intent
+	balanceAt    map[uint64]int64 // what the account held at a block
+	balanceAsked uint64
+	prepareErr   error
+	sendErr      error
+	refillErr    error
+	refillID     jrail.ID // what the library hands back with refillErr: set when the intent was recorded
+	status       jrail.Status
+	fact         jrail.Fact
+	settled      bool
+	costErr      error
+	cost         *big.Int
+	deposits     []jrail.Deposit
+	intent       jrail.Intent
+	pending      []jrail.Intent
+	nonce        uint64
+	byNonce      map[uint64]jrail.Intent
 
 	// The scan cursor as the rail keeps it: absent until something seeds it, and what the chain
 	// would answer if asked for its settled head.
@@ -126,6 +131,15 @@ func (f *fakeLib) SeedScan(context.Context) (uint64, error) {
 }
 func (f *fakeLib) SettledBalances(context.Context) (*big.Int, *big.Int, uint64, error) {
 	return big.NewInt(500), big.NewInt(1), 9, nil
+}
+
+// TokenBalanceAt answers with the balance the test put at that block, and remembers the block asked.
+func (f *fakeLib) TokenBalanceAt(_ context.Context, block uint64) (*big.Int, error) {
+	f.balanceAsked = block
+	if held, ok := f.balanceAt[block]; ok {
+		return big.NewInt(held), nil
+	}
+	return big.NewInt(0), nil
 }
 func (f *fakeLib) Pending() ([]jrail.Intent, error)      { return f.pending, nil }
 func (f *fakeLib) Nonce(context.Context) (uint64, error) { return f.nonce, nil }
@@ -396,16 +410,25 @@ func TestChainWitnessNamesExactlyOnePayment(t *testing.T) {
 	}
 }
 
+// walletSign signs a message the way a wallet does, which is what a user registering an address
+// sends.
+func walletSign(t *testing.T, key *ecdsa.PrivateKey, msg []byte) string {
+	t.Helper()
+	raw, err := crypto.Sign(accountsHash(msg), key)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	raw[64] += 27 // the V value wallets use
+	return "0x" + hex.EncodeToString(raw)
+}
+
 // Proving control of an address is the ordinary wallet signature, and what is stored is the
 // canonical form — so one address cannot be registered twice under different spellings.
 func TestChainSignsAndVerifiesAnAddress(t *testing.T) {
 	c, _ := testChain(t)
 	msg := kernel.BlockchainAddressMessage("kernel-key", "user-1", c.Address())
 
-	sig, err := c.Sign(msg)
-	if err != nil || sig == "" {
-		t.Fatalf("sign: %q %v", sig, err)
-	}
+	sig := walletSign(t, c.key, msg)
 	canonical, err := c.Verify(msg, strings.ToUpper(c.Address()[2:]), sig)
 	if err == nil {
 		// An address without its prefix is not an address; the library refuses it.
@@ -442,29 +465,67 @@ func TestChainRefusesAnUnregisteredDestination(t *testing.T) {
 	}
 }
 
-// The key is minted once and never overwritten: a key silently replaced would strand every coin the
-// old one held.
-func TestRailKeyIsCreatedOnceAndNeverOverwritten(t *testing.T) {
+// The key is written once and never overwritten: a key silently replaced would strand the identity
+// and every coin the old one held. Writing the same key again changes nothing; another is refused.
+func TestTheKernelKeyIsWrittenOnceAndNeverOverwritten(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "rail.key")
-
-	first, err := loadOrCreateKey(path)
-	if err != nil {
+	path := filepath.Join(dir, KeyFile)
+	if _, err := LoadKey(path); !os.IsNotExist(err) {
+		t.Fatalf("a home with no key: %v, want it reported absent", err)
+	}
+	first, _ := crypto.GenerateKey()
+	if err := StoreKey(path, first); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("a key must be readable only by its owner: %v %v", info.Mode().Perm(), err)
 	}
-	second, err := loadOrCreateKey(path)
-	if err != nil {
-		t.Fatal(err)
+	if err := StoreKey(path, first); err != nil {
+		t.Fatalf("writing the same key again: %v", err)
 	}
-	if crypto.PubkeyToAddress(first.PublicKey) != crypto.PubkeyToAddress(second.PublicKey) {
-		t.Fatal("opening the same home twice minted a second key")
+	other, _ := crypto.GenerateKey()
+	if err := StoreKey(path, other); err == nil {
+		t.Fatal("another key was written over the first")
+	}
+	held, err := LoadKey(path)
+	if err != nil || !held.Equal(first) {
+		t.Fatalf("the key on disk is not the first one written: %v", err)
 	}
 	if _, err := os.Stat(path + ".new"); !os.IsNotExist(err) {
 		t.Error("the temporary file must not survive")
+	}
+}
+
+// A kernel is paid at the address of its own key, which anyone computes from the key alone: the
+// same address the key signs for, in the form the rail reports senders in. A key that is none has
+// no address.
+func TestAKernelsAddressIsComputedFromItsKey(t *testing.T) {
+	c, _ := testChain(t)
+	own := base64.RawURLEncoding.EncodeToString(crypto.CompressPubkey(&c.key.PublicKey))
+	if got := c.AddressOf(own); got != c.Address() {
+		t.Errorf("the address of this kernel's key is %q, and it is paid at %q", got, c.Address())
+	}
+	for _, bad := range []string{"", "not base64!", base64.RawURLEncoding.EncodeToString(make([]byte, 33))} {
+		if got := c.AddressOf(bad); got != "" {
+			t.Errorf("AddressOf(%q) = %q, want none", bad, got)
+		}
+	}
+}
+
+// What the address held before the ledger began is read at the block the scan was seeded at. The
+// scan reports payments from the next block on, so every payment is in one of the two and never both.
+func TestTheOpeningBalanceIsReadAtTheBlockTheScanStartsAfter(t *testing.T) {
+	c, l := testChain(t)
+	l.head, l.balanceAt = 700, map[uint64]int64{699: 1, 700: 250, 701: 9999}
+	got, ok, err := c.OpeningBalance(context.Background())
+	if err != nil || !ok || got != 250 || l.balanceAsked != 700 {
+		t.Fatalf("opening balance = %d (ok %v, %v) read at block %d, want 250 at block 700", got, ok, err, l.balanceAsked)
+	}
+	// The cursor is seeded once: a later head does not move where the balance is read.
+	l.head = 900
+	if got, _, _ := c.OpeningBalance(context.Background()); got != 250 || l.balanceAsked != 700 {
+		t.Errorf("a repeat read %d at block %d, want the same 250 at 700", got, l.balanceAsked)
 	}
 }
 

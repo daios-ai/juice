@@ -224,10 +224,6 @@ func (k *Kernel) ResolvePrincipal(ctx context.Context, ref string) (Principal, e
 	if res == nil || res.UserID == "" {
 		return Principal{}, ErrInvalidInput.Wrapf("peer resolved %q to no user id", ref)
 	}
-	// Where the peer is paid, proved by its own rail key: a transfer to this user pays there (P11).
-	if _, verr := k.ObservePeerVault(ctx, kr.Key, res.BlockchainAddress, res.BlockchainProof); verr != nil {
-		return Principal{}, verr
-	}
 	if err := k.knowKernel(ctx, kr.Key); err != nil {
 		return Principal{}, err
 	}

@@ -7,12 +7,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -33,7 +34,7 @@ func newCapabilityKernel(t *testing.T) (*httptest.Server, *kernel.Kernel, *store
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, allowLocal: true, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout)}
 	k := newKernel(cfg, kernel.Dependencies{Store: db, HTTP: httpExec})
 	k.SetSecretBox(box)
-	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)
@@ -306,7 +307,7 @@ func TestCapabilityCannotDriveFederation(t *testing.T) {
 	// A recording transport behind a real adapter: any federation dispatch shows up in lastTask.
 	f := &fakeFed{taskBody: json.RawMessage(`{"tx_id":"tx-peer"}`), taskStatus: 200}
 	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
-	adapter := newFedAdapter(self, nil, nil)
+	adapter := newFedAdapter(self, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
 

@@ -510,10 +510,8 @@ type RemoteKernel struct {
 	PublicKey string `json:"public_key"`
 	Petname   string `json:"petname,omitempty"`
 	Nickname  string `json:"nickname,omitempty"`
-	// BlockchainAddress is where this peer is paid, with BlockchainProof its signature proving control of it.
-	// A merely declared address could name a stranger's and claim their payment (D23).
+	// BlockchainAddress is where this peer is paid: its key's own address on this world's rail (P1).
 	BlockchainAddress   string     `json:"blockchain_address,omitempty"`
-	BlockchainProof     string     `json:"-"`
 	About               string     `json:"about,omitempty"`
 	GossipCursor        string     `json:"gossip_cursor,omitempty"`
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
@@ -750,30 +748,22 @@ type ActionManifest struct {
 	Kind         ActionKind     `json:"kind"`
 	ArtifactHash string         `json:"artifact_hash"`
 	UpdatedAt    time.Time      `json:"updated_at"`
-	Signature    string         `json:"signature"` // base64url Ed25519 signature
+	Signature    string         `json:"signature"` // base64url signature
 	// RequiresGrant says a caller must hold a grant for the action on the serving kernel (P6). Absent
 	// when false, so a manifest signed before the field existed still verifies.
 	RequiresGrant bool `json:"requires_grant,omitempty"`
 }
 
-// ResolvedAction is what a resolve reply carries: the signed manifest, and where the serving kernel
-// is paid with its own proof of that address. The two are separate because they answer separate
-// questions — what the action is, and how its kernel is paid — and only the first is the contract a
-// buyer pins. A world without payment addresses carries neither.
+// ResolvedAction is what a resolve reply carries: the signed manifest.
 type ResolvedAction struct {
-	Manifest          *ActionManifest `json:"manifest"`
-	BlockchainAddress string          `json:"blockchain_address,omitempty"`
-	BlockchainProof   string          `json:"blockchain_proof,omitempty"`
+	Manifest *ActionManifest `json:"manifest"`
 }
 
 // ResolvedUser is what a user resolve answers (P11): the user's stable id and current handle on the
-// peer, and where the peer is paid with its own proof, as an action resolve carries it — so a kernel
-// about to pay a user there knows where the money goes before any moves.
+// peer.
 type ResolvedUser struct {
-	UserID            string `json:"user_id"`
-	Handle            string `json:"handle"`
-	BlockchainAddress string `json:"blockchain_address,omitempty"`
-	BlockchainProof   string `json:"blockchain_proof,omitempty"`
+	UserID string `json:"user_id"`
+	Handle string `json:"handle"`
 }
 
 // PublicRating is the market-facing projection of one rating (§11, U39): value, note, when — and
@@ -922,15 +912,12 @@ type GossipResponse struct {
 	Handle    string `json:"handle"`
 	// Network and NetworkFingerprint name the world this kernel serves. A reply from another network is
 	// not accumulated: its artifacts could never verify here anyway (P9, D23).
-	Network            string `json:"network,omitempty"`
-	NetworkFingerprint string `json:"network_fingerprint,omitempty"`
-	// BlockchainAddress is where this kernel is paid, with BlockchainProof its own rail key's signature over it.
-	BlockchainAddress string            `json:"blockchain_address,omitempty"`
-	BlockchainProof   string            `json:"blockchain_proof,omitempty"`
-	About             string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
-	ActionManifests   []*ActionManifest `json:"action_manifests,omitempty"`
-	Evidence          []EvidenceBundle  `json:"evidence,omitempty"`
-	NextCursor        string            `json:"next_cursor,omitempty"`
+	Network            string            `json:"network,omitempty"`
+	NetworkFingerprint string            `json:"network_fingerprint,omitempty"`
+	About              string            `json:"about,omitempty"` // @sys's description: the kernel's self-description (§13)
+	ActionManifests    []*ActionManifest `json:"action_manifests,omitempty"`
+	Evidence           []EvidenceBundle  `json:"evidence,omitempty"`
+	NextCursor         string            `json:"next_cursor,omitempty"`
 	// NextCatalogCursor is the last action id of this page, empty when the page ends the catalogue
 	// — which is what completes the requester's scan (P9).
 	NextCatalogCursor string `json:"next_catalog_cursor,omitempty"`

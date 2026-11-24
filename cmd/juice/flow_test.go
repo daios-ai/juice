@@ -66,7 +66,7 @@ func newFlowKernel(t *testing.T, exec kernel.ScriptExecutor) (*httptest.Server, 
 	k := newKernel(cfg, kernel.Dependencies{Store: db, Scripts: exec, HTTP: httpExec})
 	k.SetSecretBox(box)
 
-	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", "", testKeyOf(k)); err != nil {
 		t.Fatal(err)
 	}
 	bootstrapSigning(t, k)

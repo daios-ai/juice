@@ -4,7 +4,7 @@
 // single-action resolution, gossip, and tasks (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.
 //
-// Peers are addressed only by Ed25519 public key. The transport resolves a key to a live
+// Peers are addressed only by public key. The transport resolves a key to a live
 // libp2p connection — direct when the peer is publicly reachable, hole-punched through NAT
 // when possible, relayed as a last resort — and carries opaque JSON payloads that the
 // caller (cmd/juice) signs and verifies with the §13 rules. The transport knows nothing
@@ -13,7 +13,7 @@ package fed
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 )
@@ -59,10 +59,6 @@ type ResolveRequest struct {
 	Owner string `json:"owner,omitempty"` // action owner handle (kind=action)
 	Name  string `json:"name,omitempty"`  // action name (kind=action)
 	User  string `json:"user,omitempty"`  // user reference: handle or id (kind=user)
-	// BlockchainAddress and BlockchainProof are the asker's proven vault on a user resolve (P11): a
-	// kernel about to pay one of the answerer's users says first where the money will come from.
-	BlockchainAddress string `json:"blockchain_address,omitempty"`
-	BlockchainProof   string `json:"blockchain_proof,omitempty"`
 }
 
 // Response is the shape every protocol reply takes: a status plus an opaque JSON body. Status
@@ -81,20 +77,18 @@ type ResolveResponse = Response
 // CallRequest is the wire form of an inbound federation call (§13). Args carries the exact
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
-	Action               string `json:"action"`                       // the action's stable id on the serving kernel
-	Counterparty         string `json:"counterparty"`                 // caller's base64url Ed25519 public key
-	ExpectedContractHash string `json:"expected_contract_hash"`       // contract hash the caller cached (§8 If-Match)
-	IdempotencyKey       string `json:"idempotency_key"`              //
-	Timestamp            string `json:"timestamp"`                    // RFC3339
-	Commitment           string `json:"commitment,omitempty"`         // hash of the caller's half of the settlement draw (P10)
-	Lottery              int64  `json:"lottery,omitempty"`            // the ticket face value this call is dispatched under (P10)
-	BlockchainAddress    string `json:"blockchain_address,omitempty"` // where a winning ticket will be paid from, proven by the rail key
-	BlockchainProof      string `json:"blockchain_proof,omitempty"`   // that address's own signature over the caller's key (D23)
-	CallerUserID         string `json:"caller_user_id,omitempty"`     // the buyer's own user the call is made for: their stable id there (P4)
-	CallerHandle         string `json:"caller_handle,omitempty"`      // and the handle they go by, so the seller records who called
-	ProcessKernel        string `json:"process_kernel,omitempty"`     // where the run began, and its process there (D10): unsigned,
-	ProcessRef           string `json:"process_ref,omitempty"`        // since the seller asks that kernel itself and takes nothing on trust
-	// Signature is Ed25519 over JCS({action,args_hash,caller_handle,caller_user_id,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
+	Action               string `json:"action"`                   // the action's stable id on the serving kernel
+	Counterparty         string `json:"counterparty"`             // caller's base64url public key
+	ExpectedContractHash string `json:"expected_contract_hash"`   // contract hash the caller cached (§8 If-Match)
+	IdempotencyKey       string `json:"idempotency_key"`          //
+	Timestamp            string `json:"timestamp"`                // RFC3339
+	Commitment           string `json:"commitment,omitempty"`     // hash of the caller's half of the settlement draw (P10)
+	Lottery              int64  `json:"lottery,omitempty"`        // the ticket face value this call is dispatched under (P10)
+	CallerUserID         string `json:"caller_user_id,omitempty"` // the buyer's own user the call is made for: their stable id there (P4)
+	CallerHandle         string `json:"caller_handle,omitempty"`  // and the handle they go by, so the seller records who called
+	ProcessKernel        string `json:"process_kernel,omitempty"` // where the run began, and its process there (D10): unsigned,
+	ProcessRef           string `json:"process_ref,omitempty"`    // since the seller asks that kernel itself and takes nothing on trust
+	// Signature is over JCS({action,args_hash,caller_handle,caller_user_id,commitment,counterparty,expected_contract_hash,idempotency_key,lottery,recipient,timestamp}).
 	// recipient (the serving kernel's key) is bound into the signature but not carried on the wire: the signer
 	// signs the key it dialed, the receiver verifies with its own key, so a captured request cannot be replayed
 	// to a third kernel (§13, matching the task protocol).
@@ -112,9 +106,9 @@ type CallResponse = Response
 // input_hash matches byte-for-byte.
 type TaskRequest struct {
 	Kind           string          `json:"kind"`                      // "notice" | "complete" | "cancel"
-	Counterparty   string          `json:"counterparty"`              // caller's base64url Ed25519 public key
+	Counterparty   string          `json:"counterparty"`              // caller's base64url public key
 	Timestamp      string          `json:"timestamp"`                 // RFC3339
-	Signature      string          `json:"signature"`                 // Ed25519 over the kind's canonical payload
+	Signature      string          `json:"signature"`                 // over the kind's canonical payload
 	TaskID         string          `json:"task_id,omitempty"`         // complete, cancel
 	IdempotencyKey string          `json:"idempotency_key,omitempty"` // complete only
 	Input          json.RawMessage `json:"input,omitempty"`           // complete only; exact request bytes
@@ -132,9 +126,9 @@ type TaskResponse = Response
 // the seller already holds; a paying reveal also names the payment and proves the address it comes
 // from, since the seller credits cash by its finalized sender.
 type RevealRequest struct {
-	Counterparty string `json:"counterparty"`      // buyer's base64url Ed25519 public key
+	Counterparty string `json:"counterparty"`      // buyer's base64url public key
 	Timestamp    string `json:"timestamp"`         // RFC3339
-	Signature    string `json:"signature"`         // Ed25519 over the scoped canonical payload
+	Signature    string `json:"signature"`         // over the scoped canonical payload
 	TicketID     string `json:"ticket_id"`         // the call's idempotency key, naming the obligation
 	Secret       string `json:"secret"`            // the buyer's committed randomness, revealed
 	TxHash       string `json:"tx_hash,omitempty"` // paying only: the payment that settles it
@@ -144,18 +138,15 @@ type RevealRequest struct {
 type RevealResponse = Response
 
 // TransferRequest is the wire form of a /juice/fed/transfer/1 request (P11): the sender tells the
-// kernel a payment went to whom it is for. Signature covers every field but itself and the proof,
-// which is the rail key's own signature over the vault, as on a call.
+// kernel a payment went to whom it is for. Signature covers every field but itself.
 type TransferRequest struct {
-	Counterparty      string `json:"counterparty"`       // sender's base64url Ed25519 public key
-	Timestamp         string `json:"timestamp"`          // RFC3339
-	Signature         string `json:"signature"`          // Ed25519 over the scoped canonical payload
-	ID                string `json:"id"`                 // the transaction that made the payment
-	BeneficiaryID     string `json:"beneficiary_id"`     // the user it is for, by stable id on the receiver
-	Amount            int64  `json:"amount"`             // what the payment carries
-	TxHash            string `json:"tx_hash"`            // the payment on the rail
-	BlockchainAddress string `json:"blockchain_address"` // the sender's vault the payment comes from
-	BlockchainProof   string `json:"blockchain_proof"`   // the rail key's proof of that vault
+	Counterparty  string `json:"counterparty"`   // sender's base64url public key
+	Timestamp     string `json:"timestamp"`      // RFC3339
+	Signature     string `json:"signature"`      // over the scoped canonical payload
+	ID            string `json:"id"`             // the transaction that made the payment
+	BeneficiaryID string `json:"beneficiary_id"` // the user it is for, by stable id on the receiver
+	Amount        int64  `json:"amount"`         // what the payment carries
+	TxHash        string `json:"tx_hash"`        // the payment on the rail
 }
 
 // TransferResponse acknowledges the word stored, or carries an error.
@@ -164,8 +155,8 @@ type TransferResponse = Response
 // GrantRequest is the wire form of a /juice/fed/grant/1 request (D10): one grant operation a kernel
 // forwards for a user of its own. Op is the operation exactly as signed.
 type GrantRequest struct {
-	Counterparty string          `json:"counterparty"` // sender's base64url Ed25519 public key
-	Signature    string          `json:"signature"`    // Ed25519 over the operation
+	Counterparty string          `json:"counterparty"` // sender's base64url public key
+	Signature    string          `json:"signature"`    // over the operation
 	Op           json.RawMessage `json:"op"`
 }
 
@@ -211,10 +202,10 @@ type Handlers interface {
 
 // Config configures a transport host.
 type Config struct {
-	SigningKey     ed25519.PrivateKey // platform key; also the libp2p identity (§12)
-	ListenAddrs    []string           // multiaddrs to listen on; empty = sensible defaults
-	BootstrapPeers []string           // seed multiaddrs (incl. /p2p/<id>); DHT bootstrap + discovery seed (§13)
-	Handlers       Handlers           // inbound protocol handlers (from cmd/juice)
+	SigningKey     *ecdsa.PrivateKey // the kernel's one key; also the libp2p identity (P1)
+	ListenAddrs    []string          // multiaddrs to listen on; empty = sensible defaults
+	BootstrapPeers []string          // seed multiaddrs (incl. /p2p/<id>); DHT bootstrap + discovery seed (§13)
+	Handlers       Handlers          // inbound protocol handlers (from cmd/juice)
 	// AllowPrivateAddrs keeps loopback/private multiaddrs usable so the flow harness can run a
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).
 	AllowPrivateAddrs bool

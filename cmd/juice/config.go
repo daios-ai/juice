@@ -147,8 +147,8 @@ func (c NativeConfig) PriceOf(name string) int64 {
 }
 
 // ServerConfig holds all non-secret runtime configuration.
-// Secrets (JUICE_SECRET_KEY) and the superuser's first-boot credentials (JUICE_BOOTSTRAP_PASSWORD,
-// JUICE_BOOTSTRAP_RECOVERY_KEY) are read from environment variables.
+// Secrets (JUICE_SECRET_KEY) and what a kernel is created with (JUICE_BOOTSTRAP_PASSWORD,
+// JUICE_BOOTSTRAP_PHRASE) are read from environment variables.
 // All other settings come from this struct, populated from the JSON config file.
 type ServerConfig struct {
 	Schema                     string       `json:"$schema,omitempty" doc:"The JSON Schema describing this file, for editors."`
@@ -529,8 +529,8 @@ func validateLocalName(kind, name string) error {
 	return nil
 }
 
-// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<world>/, holding the database
-// (and with it the signing key), config.json, the rail key and its records, the single-server lock
+// kernelHome is one kernel's whole home: $JUICE_HOME/kernels/<world>/, holding the database,
+// config.json, the kernel's key, the rail's records, the single-server lock
 // and the purgeable cache. Everything that binds a kernel to its identity sits in this one
 // directory, so it backs up, moves and locks as a unit, and a second kernel on the machine is a
 // sibling of the first rather than a second installation.

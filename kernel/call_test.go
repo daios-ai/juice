@@ -1759,7 +1759,7 @@ func TestCallRemoteProxyMissingExecutorSettlesFailure(t *testing.T) {
 	ctx := context.Background()
 
 	caller := setupUser(t, st, "rpme-caller", 100)
-	if err := st.UpsertKernel(ctx, testKernelKey(70), "rpme-peer", "", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, testKernelKey(70), "rpme-peer", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	base := int64(50)
@@ -1833,7 +1833,7 @@ func TestRunFederatedFailureReturnsCommittedReceiptWithCharge(t *testing.T) {
 	ctx := context.Background()
 
 	const peer = "ZmVkLWNhbGxlcg" // the buying kernel
-	if err := st.UpsertKernel(ctx, peer, "fed-caller", "", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, peer, "fed-caller", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	provider := setupUser(t, st, "provider", 0)
@@ -1914,7 +1914,7 @@ func TestResolveLocalPrincipal(t *testing.T) {
 
 	alice := setupUser(t, st, "alice", 0)
 	// A peer named like a user: the two namespaces never meet (D15).
-	pub := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	pub := testKernelKey(201)
 	if _, err := k.BindPetname(ctx, pub, "peer"); err != nil {
 		t.Fatal(err)
 	}
@@ -2761,7 +2761,7 @@ func TestEveryActionIsToldItsCallerAndOwner(t *testing.T) {
 	sys := setupSys(t, k, st)
 	self := k.SelfKey(ctx)
 	const origin = "b3JpZ2luLWtlcm5lbA"
-	if err := st.UpsertKernel(ctx, origin, "origin", "", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, origin, "origin", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	seller := setupUser(t, st, "told-seller", 1000)

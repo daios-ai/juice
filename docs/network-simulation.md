@@ -209,7 +209,7 @@ duration), `checkpoints/final.json` (the state read from every kernel), `metrics
 `report.md`.
 
 **The run directory is not safe to hand to anyone.** Alongside the logs — which are redacted as they
-are written — it contains each kernel's whole home: its database, its signing key, its rail key and
+are written — it contains each kernel's whole home: its database, its key, its recovery phrase and
 its issued tokens. Read it in place; share `report.md` and `metrics.json`; delete the directory when
 you are done.
 

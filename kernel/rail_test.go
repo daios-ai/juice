@@ -4,8 +4,7 @@ package kernel_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,7 +36,7 @@ type fakeRail struct {
 	refill    int64
 	refillSt  kernel.RailStatus
 	verifyErr error
-	signErr   error // this kernel cannot prove its own address
+	opening   int64 // what the address held before the ledger began
 	// needRefill makes the next Pay say fuel is short; refills counts purchases; found is what
 	// FindRefill answers, the purchase a crash may have interrupted; refillErr is fuel the operator
 	// cannot afford.
@@ -171,7 +170,25 @@ func (f *fakeRail) FinalizedBalances(context.Context) (int64, string, uint64, bo
 	return 0, "", 0, false, nil
 }
 func (f *fakeRail) DepositsScannedTo() (uint64, bool, error) { return f.scanned, true, nil }
-func (f *fakeRail) Sign([]byte) (string, error)              { return "proof", f.signErr }
+
+// AddressOf gives every key an address of its own wherever the world has addresses: the one a test
+// chose for it, else one made from the key.
+func (f *fakeRail) AddressOf(key string) string {
+	if f.addr == "" {
+		return ""
+	}
+	if a, ok := fakeVaults.Load(key); ok {
+		return a.(string)
+	}
+	return strings.ToLower("0xof-" + key)
+}
+
+// fakeVaults is the address a test gave a peer's key, for every fake rail in the package.
+var fakeVaults sync.Map
+
+func (f *fakeRail) OpeningBalance(context.Context) (int64, bool, error) {
+	return f.opening, f.addr != "", nil
+}
 
 func (f *fakeRail) Verify(_ []byte, address, _ string) (string, error) {
 	if f.verifyErr != nil {
@@ -193,6 +210,63 @@ func railFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *fakeRail, *kernel
 	fr := newFakeRail()
 	k.SetRail(fr)
 	return k, st, fr, sys
+}
+
+// A kernel restored from its phrase holds the coins of the ledger it lost, which no scan will ever
+// report. They are booked to the operator once, as spendable money the books account for; a repeat —
+// after a boot interrupted anywhere — changes nothing, and so does a later change in what the rail
+// would answer. A new key holds nothing and books nothing.
+func TestTheOpeningBalanceIsBookedToTheOperatorOnce(t *testing.T) {
+	k, st, fr, sys := railFixture(t)
+	ctx := context.Background()
+	before, _ := balanceOf(t, st, sys.ID)
+	fr.opening = 700
+
+	// The row is written and the boot dies before the mark is: the next boot finds the same
+	// balance at the same block and the same row.
+	for range 2 {
+		if err := k.BookOpeningBalance(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetConfig(ctx, "rail_opening_booked", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := k.BookOpeningBalance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, l := balanceOf(t, st, sys.ID); a != before+700 || l != 0 {
+		t.Fatalf("the operator has %d available and %d locked, want %d and 0", a, l, before+700)
+	}
+	// Once marked, nothing the rail says afterwards is booked again.
+	fr.opening = 9999
+	if err := k.BookOpeningBalance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := balanceOf(t, st, sys.ID); a != before+700 {
+		t.Errorf("the opening balance was booked again: the operator has %d", a)
+	}
+	rep, err := k.RailInspect(ctx, sys.ID)
+	if err != nil || rep.Gap != 0 || rep.Position.Vault != 700 {
+		t.Errorf("the books do not account for the coins found: gap %d, vault %d (%v)", rep.Gap, rep.Position.Vault, err)
+	}
+
+	// A new key: nothing there, nothing booked, and the question is not asked again.
+	k2, st2, fr2, sys2 := railFixture(t)
+	was, _ := balanceOf(t, st2, sys2.ID)
+	if err := k2.BookOpeningBalance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fr2.opening = 5
+	if err := k2.BookOpeningBalance(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := balanceOf(t, st2, sys2.ID); a != was {
+		t.Errorf("a kernel with nothing at its address booked %d", a-was)
+	}
+	if rows, _ := st2.ListRailTransfers(ctx, kernel.RailKindDeposit, "", "", 10, 0); len(rows) != 0 {
+		t.Errorf("a new key wrote a deposit: %+v", rows)
+	}
 }
 
 func balanceOf(t *testing.T, st kernel.Store, id string) (int64, int64) {
@@ -388,7 +462,7 @@ func TestBacklogReadsTheOpenWorkAndTheHalt(t *testing.T) {
 	}
 
 	fst := newTestStore(t)
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := kernel.GenKey()
 	fake := &fakeFederationHTTP{} // no receipt: the call parks awaiting one
 	fk := newKernel(testConfig(), kernel.Dependencies{Store: fst, HTTP: fake})
 	_, _, caller := setupSettleProxyWithKernel(t, fst, fk, fake, priv, pub, "parked-action", 1000)
@@ -526,10 +600,10 @@ func TestUnverifiedRailStopsEverything(t *testing.T) {
 	}
 }
 
-// A peer that merely declares an address could name a stranger's and claim their payment, so gossip
-// carrying an unproven one is not accumulated. A reply from another network is refused outright.
-func TestGossipRefusesForeignNetworkAndUnprovenAddress(t *testing.T) {
-	k, _, fr, _ := railFixture(t)
+// A reply from another network is refused outright. A peer names no address at all: where it is
+// paid is the address of its own key, so a reply can neither claim a stranger's nor move its own.
+func TestGossipRefusesAForeignNetworkAndRecordsAPeerAtItsOwnKeysAddress(t *testing.T) {
+	k, st, fr, _ := railFixture(t)
 	ctx := context.Background()
 
 	foreign := &kernel.GossipResponse{PublicKey: "k", Handle: "peer",
@@ -544,11 +618,14 @@ func TestGossipRefusesForeignNetworkAndUnprovenAddress(t *testing.T) {
 		t.Error("a reply naming no network must not be accumulated")
 	}
 
-	fr.verifyErr = kernel.ErrUnauthorized.Wrap("signature was not made by that address")
-	unproven := &kernel.GossipResponse{PublicKey: "k", Handle: "peer",
-		NetworkFingerprint: testNet.Fingerprint, BlockchainAddress: "0xsomeone", BlockchainProof: "bad"}
-	if _, err := k.AccumulateGossip(ctx, unproven, ""); err == nil {
-		t.Error("a peer's unproven blockchain address must not be accumulated")
+	pub, _, _ := kernel.GenKey()
+	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	ours := &kernel.GossipResponse{PublicKey: peerKey, Handle: "peer", NetworkFingerprint: testNet.Fingerprint}
+	if _, err := k.AccumulateGossip(ctx, ours, ""); err != nil {
+		t.Fatal(err)
+	}
+	if kr, err := st.ReadKernel(ctx, peerKey); err != nil || kr == nil || kr.BlockchainAddress != fr.AddressOf(peerKey) {
+		t.Errorf("the peer is recorded as %+v (%v), want it paid at its key's address %s", kr, err, fr.AddressOf(peerKey))
 	}
 }
 
@@ -584,11 +661,12 @@ func TestSolvencyNamesABrokenRecord(t *testing.T) {
 	}
 }
 
-// peerWithAddress makes known a peer that has proved it is paid from addr, and returns its key.
+// peerWithAddress makes known a peer whose key is paid from addr, and returns its key.
 func peerWithAddress(t *testing.T, k *kernel.Kernel, st kernel.Store, key, addr string) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := st.UpsertKernel(ctx, key, "peer", "", addr, "proof", time.Now().UTC()); err != nil {
+	fakeVaults.Store(key, addr)
+	if err := st.UpsertKernel(ctx, key, "peer", "", addr, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	peer, err := knownPeer(k, ctx, key)
@@ -639,7 +717,7 @@ func announcedOwed(t *testing.T, st kernel.Store, id, peer, sellerID, from, txHa
 func TestASellersTransactionNamesItsObligation(t *testing.T) {
 	k, st, _, _ := railFixture(t)
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", "0xdebtor")
+	peer := peerWithAddress(t, k, st, testKernelKey(401), "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
 	announcedOwed(t, st, "tk-view", peer, seller.ID, "0xdebtor", "0xpaid-view", 40)
 
@@ -664,7 +742,7 @@ func TestASellersTransactionNamesItsObligation(t *testing.T) {
 func TestTicketMatchesOnlyTheBuyersOwnPayment(t *testing.T) {
 	k, st, fr, sys := railFixture(t)
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "0xdebtor")
+	peer := peerWithAddress(t, k, st, testKernelKey(402), "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
 	announcedOwed(t, st, "tk-1", peer, seller.ID, "0xdebtor", "0xpaid", 40)
 
@@ -863,7 +941,7 @@ func TestUnaffordableFuelBlocksThePayment(t *testing.T) {
 func TestTicketMatchesWithinAMultiPaymentTransaction(t *testing.T) {
 	k, st, fr, _ := railFixture(t)
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "0xdebtor")
+	peer := peerWithAddress(t, k, st, testKernelKey(403), "0xdebtor")
 	seller := setupUser(t, st, "seller", 0)
 	announcedOwed(t, st, "tk-3", peer, seller.ID, "0xdebtor", "0xshared", 40)
 	fr.deposits = []kernel.RailDeposit{
@@ -920,7 +998,7 @@ func TestALostRevealIsSentAgain(t *testing.T) {
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
 	k.SetRail(newFakeRail())
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "0xcreditor")
+	peer := peerWithAddress(t, k, st, testKernelKey(404), "0xcreditor")
 	buyer := setupUser(t, st, "buyer", 0)
 
 	// A draw that lost: no payment was made, and the seller still has to be told so.
@@ -998,7 +1076,7 @@ func TestAWonDrawIsAnnouncedOnlyOnceItsPaymentIsFinal(t *testing.T) {
 	fr.stall = true // the payment is submitted but not yet final
 	k.SetRail(fr)
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", "0xcreditor")
+	peer := peerWithAddress(t, k, st, testKernelKey(405), "0xcreditor")
 	buyer := setupUser(t, st, "buyer", 0)
 	if _, err := k.Deposit(ctx, sys.ID, buyer.ID, 100, "", "earn"); err != nil {
 		t.Fatal(err)
@@ -1086,7 +1164,7 @@ func TestTheCreditLimitCountsTheWholeObligation(t *testing.T) {
 	ctx := context.Background()
 	sys := setupSys(t, k, st)
 	seller := setupUser(t, st, "seller", 10000)
-	peer := peerWithAddress(t, k, st, "kpeerFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "0xbuyer")
+	peer := peerWithAddress(t, k, st, testKernelKey(406), "0xbuyer")
 	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
 	})
@@ -1161,15 +1239,14 @@ func TestARevertedObligationPaymentIsPresentedAgainUnderAFreshName(t *testing.T)
 	}
 }
 
-// Where a buyer pays from is proven and frozen when its call is admitted, not learned later: an
-// unproven address is refused, a priced call from a buyer proving none is refused on a world with
-// addresses, and an accepted one names the payer on the obligation from that moment — before any
-// payment can land, and for a buyer this kernel had never pulled.
-func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
+// Where a buyer pays from is its own key's address, frozen when its call is admitted, not learned
+// later: the obligation names its payer from that moment — before any payment can land, and for a
+// buyer this kernel had never pulled. A call that can owe nothing names none.
+func TestABuyersPayerIsItsKeysAddressFrozenAtAdmission(t *testing.T) {
 	k, st, fr, sys := railFixture(t)
 	ctx := context.Background()
 	seller := setupUser(t, st, "seller", 10000)
-	peer := peerWithAddress(t, k, st, "kpeerHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "")
+	peer := peerWithAddress(t, k, st, testKernelKey(407), "0xbuyer")
 	k.RegisterNativeHandler("quote", func(_ context.Context, _ map[string]any, _, _, _, _, _ string, _ kernel.Parties) (map[string]any, error) {
 		return map[string]any{"ok": true}, nil
 	})
@@ -1192,12 +1269,7 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 		return map[string]any{}, nil
 	})
 
-	fr.verifyErr = errors.New("bad proof")
-	if err := run(kernel.BuyerTerms{Commitment: "cm", BlockchainAddress: "0xbuyer", BlockchainProof: "forged"}); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Fatalf("an unproven payer must be refused, got %v", err)
-	}
-	// A free call owes nothing, names no payer, and is verified against nothing — even by a rail
-	// that would reject an empty address if asked.
+	// A free call owes nothing and names no payer.
 	rec := &kernel.IdempotencyRecord{ID: uuid.NewString(), IdempotencyKey: "free-1", Counterparty: peer, CreatedAt: time.Now().UTC()}
 	if _, err := st.InsertPendingIdempotencyRecord(ctx, rec); err != nil {
 		t.Fatal(err)
@@ -1227,12 +1299,8 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 	if named != 1 {
 		t.Error("an admitted call must record the buyer it answers, priced or not")
 	}
-	fr.verifyErr = nil
-	if err := run(kernel.BuyerTerms{Commitment: "cm"}); !errors.Is(err, kernel.ErrInvalidInput) {
-		t.Fatalf("a priced call naming no payer must be refused on a world with addresses, got %v", err)
-	}
-	if err := run(kernel.BuyerTerms{Commitment: "cm", BlockchainAddress: "0xBUYER", BlockchainProof: "ok"}); err != nil {
-		t.Fatalf("a proven payer must be admitted: %v", err)
+	if err := run(kernel.BuyerTerms{Commitment: "cm"}); err != nil {
+		t.Fatalf("a priced call must be admitted: %v", err)
 	}
 	var id string
 	if err := st.(*store.DB).QueryRowForTest(ctx,
@@ -1240,9 +1308,9 @@ func TestABuyersPayerIsProvenAndFrozenAtAdmission(t *testing.T) {
 		t.Fatalf("no trace froze the payer: %v", err)
 	}
 	if id != "0xbuyer" {
-		t.Errorf("frozen payer = %q, want the canonical form the rail verified", id)
+		t.Errorf("frozen payer = %q, want the address of the buyer's key", id)
 	}
-	_ = sys
+	_, _ = sys, fr
 }
 
 // A seller that answers "I have no such obligation" has repudiated it. No message can make it
@@ -1258,7 +1326,7 @@ func TestARepudiatedRevealIsRetired(t *testing.T) {
 	k := newKernel(cfg, kernel.Dependencies{Store: st, Logger: log.Discard(), Federation: fed})
 	k.SetRail(newFakeRail())
 	ctx := context.Background()
-	peer := peerWithAddress(t, k, st, "kpeerRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "0xcreditor")
+	peer := peerWithAddress(t, k, st, testKernelKey(408), "0xcreditor")
 	buyer := setupUser(t, st, "repudiated-buyer", 0)
 	trace := dispatchedCall(t, st, buyer.ID, peer, "tk-repudiated", "aa")
 
@@ -1306,7 +1374,7 @@ func transferAbroadFixture(t *testing.T) (*kernel.Kernel, kernel.Store, *fakeRai
 		t.Fatal(err)
 	}
 	alice := setupUser(t, st, "alice", 1000)
-	peerKey := "kpeerTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+	peerKey := testKernelKey(409)
 	if _, err := knownPeer(k, context.Background(), peerKey); err != nil {
 		t.Fatal(err)
 	}
@@ -1318,12 +1386,10 @@ func transferTo(k *kernel.Kernel, callerID, target string, amount int64) (*kerne
 		Args: map[string]any{"target": target, "amount": float64(amount)}})
 }
 
-// On a world with addresses a transfer abroad is paid to the vault the beneficiary's kernel proved
-// when it resolved the recipient, and to no other: a kernel that proves none, or proves it badly, is
-// refused before anything moves. Once the payment is final the beneficiary's kernel is told whom it
-// is for, with this kernel's own proven vault, until it acknowledges, and the transaction's audit
-// checks the payment against the vault.
-func TestATransferAbroadPaysTheProvenVaultAndSaysWhoItIsFor(t *testing.T) {
+// On a world with addresses a transfer abroad is paid to the address of the beneficiary's kernel's
+// own key, and to no other. Once the payment is final the beneficiary's kernel is told whom it is
+// for until it acknowledges, and the transaction's audit checks the payment against that address.
+func TestATransferAbroadPaysTheKernelsOwnAddressAndSaysWhoItIsFor(t *testing.T) {
 	k, st, fr, fake, alice, peerKey := transferAbroadFixture(t)
 	ctx := context.Background()
 	unmoved := func(when string) {
@@ -1333,17 +1399,7 @@ func TestATransferAbroadPaysTheProvenVaultAndSaysWhoItIsFor(t *testing.T) {
 		}
 	}
 
-	if _, err := transferTo(k, alice.ID, "bob@"+peerKey, 300); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("a kernel that proved no vault: %v, want ErrUnauthorized", err)
-	}
-	unmoved("no vault")
-	fake.resolveBlockchainAddress, fake.resolveBlockchainProof = "0xBOBKERNEL", "proof"
-	fr.verifyErr = errors.New("bad proof")
-	if _, err := transferTo(k, alice.ID, "bob@"+peerKey, 300); !errors.Is(err, kernel.ErrUnauthorized) {
-		t.Errorf("a vault proved badly: %v, want ErrUnauthorized", err)
-	}
-	unmoved("unproven vault")
-	fr.verifyErr = nil
+	unmoved("before the transfer")
 
 	reply, err := transferTo(k, alice.ID, "bob@"+peerKey, 300)
 	if err != nil {
@@ -1353,19 +1409,11 @@ func TestATransferAbroadPaysTheProvenVaultAndSaysWhoItIsFor(t *testing.T) {
 		t.Errorf("alice has %d available, %d locked, want 700/0", a, l)
 	}
 	row, _ := st.ReadRailTransfer(ctx, reply.TxID)
-	if row == nil || row.Kind != kernel.RailKindTransfer || row.Amount != 300 || row.Destination != "0xbobkernel" {
-		t.Fatalf("the payment = %+v, want 300 to the proven vault", row)
+	if row == nil || row.Kind != kernel.RailKindTransfer || row.Amount != 300 || row.Destination != fr.AddressOf(peerKey) {
+		t.Fatalf("the payment = %+v, want 300 to the address of the peer's key", row)
 	}
 
-	// Unable to prove its own vault, this kernel announces nothing: an announcement naming no vault
-	// could never be matched to the payment, and would be acknowledged all the same.
-	fr.signErr = errors.New("rail key unavailable")
 	k.RailPass(ctx)
-	k.RevealPending(ctx)
-	if len(fake.announced) != 0 {
-		t.Fatalf("announced without a proven vault: %+v", fake.announced)
-	}
-	fr.signErr = nil
 	fake.announceErr = errors.New("peer offline")
 	k.RevealPending(ctx)
 	if len(fake.announced) != 0 {
@@ -1378,7 +1426,7 @@ func TestATransferAbroadPaysTheProvenVaultAndSaysWhoItIsFor(t *testing.T) {
 	}
 	p := fake.announced[0]
 	if p.ID != reply.TxID || p.Amount != 300 || p.BeneficiaryID != "bob-id" || p.Recipient != peerKey ||
-		p.Counterparty != k.PublicKeyB64() || p.BlockchainAddress != fr.addr || p.TxHash != "tx:"+reply.TxID {
+		p.Counterparty != k.PublicKeyB64() || p.TxHash != "tx:"+reply.TxID {
 		t.Errorf("announced %+v", p)
 	}
 	k.RevealPending(ctx)

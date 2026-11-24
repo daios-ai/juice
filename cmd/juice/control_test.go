@@ -5,8 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -25,7 +23,7 @@ import (
 func bootSuperuser(t *testing.T, env *testEnv) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := env.k.FirstBoot(ctx, "sys-pass", ""); err != nil {
+	if err := env.k.FirstBoot(ctx, "sys-pass", "", testKeyOf(env.k)); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.k.SetConfig(ctx, configKeySuperuser, "sys"); err != nil {
@@ -126,7 +124,7 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	ctx := context.Background()
 	suTok := bootSuperuser(t, env)
 
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if err := env.k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
@@ -137,7 +135,7 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	}
 
 	// A key this kernel has never seen: the refusal must leave no kernel row behind it.
-	stranger, _, _ := ed25519.GenerateKey(rand.Reader)
+	stranger, _, _ := genKey()
 	strangerKey := base64.RawURLEncoding.EncodeToString(stranger)
 	if body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+strangerKey+"/deposit",
 		map[string]any{"amount": 300, "ref": "test-payment-2"}); status == http.StatusOK {

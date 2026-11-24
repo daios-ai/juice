@@ -4,8 +4,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,9 +25,9 @@ import (
 // session token here, and the federation protocols carried `run` but not `complete`.
 
 // fedPeer registers a peer with a fresh keypair and returns its key and private key.
-func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, ed25519.PrivateKey) {
+func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,9 +114,9 @@ func derivedTaskKey(t *testing.T, k *kernel.Kernel, taskID string, input []byte)
 	return kernel.TaskIdempotencyKey(selfKey(t, k), taskID, sha256HexBytes(input))
 }
 
-func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, taskID, idempKey string, input []byte) (int, map[string]any, error) {
+func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, taskID, idempKey string, input []byte) (int, map[string]any, error) {
 	t.Helper()
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input), "", false)
 	if err != nil {
@@ -129,9 +128,9 @@ func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, ta
 // fedTaskCompleteAs completes as one principal of the peer: the task payload signed by the peer
 // kernel with userID inside it — and, when superuser, its word that userID is its operator — as
 // the wire carries them (P8).
-func fedTaskCompleteAs(t *testing.T, k *kernel.Kernel, priv ed25519.PrivateKey, taskID, idempKey string, input []byte, userID string, superuser bool) (int, map[string]any, error) {
+func fedTaskCompleteAs(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, taskID, idempKey string, input []byte, userID string, superuser bool) (int, map[string]any, error) {
 	t.Helper()
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	self := selfKey(t, k)
 	ts := time.Now().UTC().Format(time.RFC3339)
 	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, self, idempKey, ts, sha256HexBytes(input), userID, superuser)
@@ -251,54 +250,54 @@ func TestFedTask_RequestsAreRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// run performs the rejected request. keyA/privA are the peer the task is parked for.
-		run func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error
+		run func(t *testing.T, k *kernel.Kernel, keyA string, privA *ecdsa.PrivateKey, taskID string) error
 	}{
-		{"bad cancel signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, taskID string) error {
+		{"bad cancel signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ *ecdsa.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			_, _, err := handleFederationTaskCancel(k, ctx, keyA, ts, taskID, "bogus", "", false)
 			return err
 		}},
-		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ ed25519.PrivateKey, taskID string) error {
+		{"bad complete signature", func(t *testing.T, k *kernel.Kernel, keyA string, _ *ecdsa.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			_, _, err := handleFederationTaskComplete(k, ctx, keyA, ts, "idem-1", taskID, "bogus", []byte("{}"), "", false)
 			return err
 		}},
-		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
+		{"stale timestamp", func(t *testing.T, k *kernel.Kernel, keyA string, privA *ecdsa.PrivateKey, taskID string) error {
 			stale := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
 			sig, _ := testNet.SignTaskPayload(privA, "cancel", taskID, keyA, selfKey(t, k), "", stale, "", "", false)
 			_, _, err := handleFederationTaskCancel(k, ctx, keyA, stale, taskID, sig, "", false)
 			return err
 		}},
-		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
+		{"input does not match input_hash", func(t *testing.T, k *kernel.Kernel, keyA string, privA *ecdsa.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			sig, _ := testNet.SignTaskPayload(privA, "complete", taskID, keyA, selfKey(t, k), "idem-t", ts, sha256HexBytes([]byte(`{"ok":true}`)), "", false)
 			_, _, err := handleFederationTaskComplete(k, ctx, keyA, ts, "idem-t", taskID, sig, []byte(`{"ok":false}`), "", false)
 			return err
 		}},
-		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
+		{"signed for another kernel", func(t *testing.T, k *kernel.Kernel, keyA string, privA *ecdsa.PrivateKey, taskID string) error {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			sig, _ := testNet.SignTaskPayload(privA, "cancel", taskID, keyA, "some-other-kernels-key", "", ts, "", "", false)
 			_, _, err := handleFederationTaskCancel(k, ctx, keyA, ts, taskID, sig, "", false)
 			return err
 		}},
-		{"a decline by a known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, taskID string) error {
+		{"a decline by a known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ *ecdsa.PrivateKey, taskID string) error {
 			keyB, privB := fedPeer(t, k, "peer-b")
 			ts := time.Now().UTC().Format(time.RFC3339)
 			sig, _ := testNet.SignTaskPayload(privB, "cancel", taskID, keyB, selfKey(t, k), "", ts, "", "", false)
 			_, _, err := handleFederationTaskCancel(k, ctx, keyB, ts, taskID, sig, "", false)
 			return err
 		}},
-		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, taskID string) error {
+		{"known peer that is not the required caller", func(t *testing.T, k *kernel.Kernel, _ string, _ *ecdsa.PrivateKey, taskID string) error {
 			_, privB := fedPeer(t, k, "peer-b")
 			_, _, err := fedTaskComplete(t, k, privB, taskID, "idem-b", []byte("{}"))
 			return err
 		}},
-		{"unknown key", func(t *testing.T, k *kernel.Kernel, _ string, _ ed25519.PrivateKey, taskID string) error {
-			_, privX, _ := ed25519.GenerateKey(rand.Reader)
+		{"unknown key", func(t *testing.T, k *kernel.Kernel, _ string, _ *ecdsa.PrivateKey, taskID string) error {
+			_, privX, _ := genKey()
 			_, _, err := fedTaskComplete(t, k, privX, taskID, "idem-x", []byte("{}"))
 			return err
 		}},
-		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA ed25519.PrivateKey, taskID string) error {
+		{"suspended peer", func(t *testing.T, k *kernel.Kernel, keyA string, privA *ecdsa.PrivateKey, taskID string) error {
 			sys, _ := k.ReadUserByHandle(ctx, "sys")
 			if err := k.SuspendKernel(ctx, sys.ID, keyA); err != nil {
 				t.Fatalf("suspend: %v", err)
@@ -506,8 +505,8 @@ func TestFedTask_ReplayOfSettledFailureKeepsErrorStatus(t *testing.T) {
 
 // The task payloads must not verify as any other signed Juice payload, and vice versa (§12).
 func TestFedTask_SignatureDomainsAreDisjoint(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	cp := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	_, priv, _ := genKey()
+	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	const hash = "abc123"
 

@@ -5,9 +5,11 @@ package kernel
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 // Test-only seam (the standard export_test.go idiom): the call engine and its request are private,
@@ -75,23 +77,58 @@ const TestOwnName = "k"
 // key when no signing key is configured yet, so ResolveKernel knows "this kernel" from the start.
 func (k *Kernel) BindOwnNameForTest(ctx context.Context) {
 	if k.SelfKey(ctx) == "" {
-		_ = k.store.SetConfig(ctx, "signing_public_key", base64.RawURLEncoding.EncodeToString(testOwnKey.Public().(ed25519.PublicKey)))
+		_ = k.store.SetConfig(ctx, "signing_public_key", PublicKey(testOwnKey))
 	}
 	if err := k.BindOwnName(ctx, TestOwnName); err != nil {
 		panic(err)
 	}
 }
 
-var testOwnKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+var testOwnKey = KeyFromSeed(bytes.Repeat([]byte{7}, 32))
+
+// TestOwnKey is the key every test kernel's database is bound to.
+var TestOwnKey = testOwnKey
+
+// GenKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
+func GenKey() ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	return PubBytes(key), key, nil
+}
+
+// PubBytes is a key's public half as payloads carry it, before base64url.
+func PubBytes(key *ecdsa.PrivateKey) []byte { return ethcrypto.CompressPubkey(&key.PublicKey) }
+
+// KeyFromSeed is the key whose secret is seed, for a test that needs the same kernel every run.
+func KeyFromSeed(seed []byte) *ecdsa.PrivateKey {
+	key, err := ethcrypto.ToECDSA(seed)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+// SignRaw signs bytes the way a kernel signs a payload (P1), for a test that builds the payload
+// itself.
+func SignRaw(key *ecdsa.PrivateKey, payload []byte) []byte {
+	digest := sha256.Sum256(payload)
+	sig, err := ethcrypto.Sign(digest[:], key)
+	if err != nil {
+		panic(err)
+	}
+	return sig[:64]
+}
 
 // CanCall exposes the visibility predicate so an external test can hold the store's SQL copy of it
 // to the same answers.
 var CanCall = canCall
 
 // SignTaskNoticeForTest signs a notice as the holder whose key is priv would, addressed to k (P8).
-func (k *Kernel) SignTaskNoticeForTest(priv ed25519.PrivateKey, n TaskNotice) *SignedTaskNotice {
+func (k *Kernel) SignTaskNoticeForTest(priv *ecdsa.PrivateKey, n TaskNotice) *SignedTaskNotice {
 	ts := time.Now().UTC().Format(time.RFC3339)
-	holder := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	holder := PublicKey(priv)
 	sig, _ := k.cfg.Network.sign(priv, sigDomainTaskNotice, taskNoticePayload{Counterparty: holder, Notice: n, Recipient: k.ourKeyB64(), Timestamp: ts})
 	return &SignedTaskNotice{Notice: n, Timestamp: ts, Signature: sig}
 }

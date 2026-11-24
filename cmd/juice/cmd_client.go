@@ -617,15 +617,24 @@ var promptMnemonic = func(prompt string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-// deriveRecoveryKey turns a BIP-39 mnemonic into the account's Ed25519 recovery keypair. The seed's
-// first 32 bytes are the Ed25519 seed (no passphrase), so the same phrase always rederives the same
-// key; the server only ever stores the public half (§12).
-func deriveRecoveryKey(mnemonic string) (ed25519.PrivateKey, error) {
-	mnemonic = strings.TrimSpace(mnemonic)
+// phraseSeed is the one reading of a recovery phrase: its words joined by single spaces, checked,
+// and stretched to the BIP-39 seed with no passphrase. Every key a phrase yields comes from this
+// seed, so the same words always give the same keys however they were spaced.
+func phraseSeed(mnemonic string) ([]byte, error) {
+	mnemonic = strings.Join(strings.Fields(mnemonic), " ")
 	if !bip39.IsMnemonicValid(mnemonic) {
 		return nil, kernel.ErrInvalidInput.Wrap("invalid recovery phrase")
 	}
-	seed := bip39.NewSeed(mnemonic, "")
+	return bip39.NewSeed(mnemonic, ""), nil
+}
+
+// deriveRecoveryKey turns a recovery phrase into the account's Ed25519 recovery keypair: the
+// seed's first 32 bytes are the Ed25519 seed. The server only ever stores the public half (§12).
+func deriveRecoveryKey(mnemonic string) (ed25519.PrivateKey, error) {
+	seed, err := phraseSeed(mnemonic)
+	if err != nil {
+		return nil, err
+	}
 	return ed25519.NewKeyFromSeed(seed[:32]), nil
 }
 
@@ -658,6 +667,19 @@ func runRecoveryCeremony(out io.Writer, ack io.Reader, label string, commit func
 	if err != nil {
 		return err
 	}
+	if err := presentPhrase(out, ack, label, mnemonic); err != nil {
+		return err
+	}
+	if err := commit(recoveryPub); err != nil {
+		fmt.Fprintln(out, "the recovery phrase shown above was NOT enrolled; discard it")
+		return err
+	}
+	return nil
+}
+
+// presentPhrase shows a phrase once and, when ack is non-nil, waits for the reader to say they
+// have it.
+func presentPhrase(out io.Writer, ack io.Reader, label, mnemonic string) error {
 	fmt.Fprintf(out, "%s (write this down; it is shown only once and cannot be recovered):\n", label)
 	fmt.Fprintf(out, "  %s\n", mnemonic)
 	if ack != nil {
@@ -666,11 +688,17 @@ func runRecoveryCeremony(out io.Writer, ack io.Reader, label string, commit func
 			return err
 		}
 	}
-	if err := commit(recoveryPub); err != nil {
-		fmt.Fprintln(out, "the recovery phrase shown above was NOT enrolled; discard it")
-		return err
-	}
 	return nil
+}
+
+// showPhrase presents a phrase on the controlling terminal, so it is acknowledged before any
+// further output and never enters a redirected stderr. It is called only where a terminal exists.
+var showPhrase = func(label, mnemonic string) error {
+	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+		defer tty.Close()
+		return presentPhrase(tty, tty, label, mnemonic)
+	}
+	return presentPhrase(os.Stderr, os.Stdin, label, mnemonic)
 }
 
 // enrollRecovery runs the ceremony on the controlling terminal when there is one, so the phrase

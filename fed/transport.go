@@ -4,7 +4,7 @@ package fed
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,38 +38,42 @@ import (
 
 // ---- Identity ----
 //
-// The federation network identity is derived deterministically from the platform Ed25519 signing
-// key — there is no second key (§12). A peer's base64url Ed25519 public key is simultaneously its
-// Juice identity (§13) and its address on this transport.
+// The federation network identity is derived deterministically from the kernel's one secp256k1
+// key — there is no second key (P1). A peer's base64url public key is simultaneously its Juice
+// identity (§13) and its address on this transport.
 
-// deriveHostKey converts a standard library ed25519 private key into a libp2p private key. The
-// mapping is deterministic and 1:1, so the libp2p peer ID is a pure function of the signing key.
-func deriveHostKey(priv ed25519.PrivateKey) (libp2pcrypto.PrivKey, error) {
-	if len(priv) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("fed: signing key must be a %d-byte ed25519 private key, got %d", ed25519.PrivateKeySize, len(priv))
+// publicKeySize is a kernel's key as every payload names it: the compressed secp256k1 point.
+const publicKeySize = 33
+
+// deriveHostKey converts the kernel's key into a libp2p private key. The mapping is deterministic
+// and 1:1, so the libp2p peer ID is a pure function of the signing key.
+func deriveHostKey(priv *ecdsa.PrivateKey) (libp2pcrypto.PrivKey, error) {
+	if priv == nil || priv.D == nil {
+		return nil, fmt.Errorf("fed: the kernel's key is not configured")
 	}
-	return libp2pcrypto.UnmarshalEd25519PrivateKey(priv)
+	return libp2pcrypto.UnmarshalSecp256k1PrivateKey(priv.D.FillBytes(make([]byte, 32)))
 }
 
-// PeerIDFromKey maps a base64url Ed25519 public key (the identity used everywhere in §13) to the
+// PeerIDFromKey maps a kernel's base64url public key (the identity used everywhere in §13) to the
 // libp2p peer ID the transport dials. Deterministic and 1:1.
 func PeerIDFromKey(publicKeyB64 string) (peer.ID, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(publicKeyB64)
 	if err != nil {
 		return "", fmt.Errorf("fed: public key must be base64url: %w", err)
 	}
-	if len(raw) != ed25519.PublicKeySize {
-		return "", fmt.Errorf("fed: public key must be %d bytes, got %d", ed25519.PublicKeySize, len(raw))
+	if len(raw) != publicKeySize {
+		return "", fmt.Errorf("fed: public key must be %d bytes, got %d", publicKeySize, len(raw))
 	}
-	pub, err := libp2pcrypto.UnmarshalEd25519PublicKey(raw)
+	pub, err := libp2pcrypto.UnmarshalSecp256k1PublicKey(raw)
 	if err != nil {
-		return "", fmt.Errorf("fed: invalid ed25519 public key: %w", err)
+		return "", fmt.Errorf("fed: invalid secp256k1 public key: %w", err)
 	}
 	return peer.IDFromPublicKey(pub)
 }
 
-// KeyFromPeerID recovers the base64url Ed25519 public key from a libp2p peer ID. Ed25519 peer IDs
-// embed the public key inline, so this never needs the network.
+// KeyFromPeerID recovers a kernel's base64url public key from a libp2p peer ID. A secp256k1 peer
+// ID embeds the public key inline, so this never needs the network. Any other kind of key is not a
+// kernel's and is refused.
 func KeyFromPeerID(id peer.ID) (string, error) {
 	pub, err := id.ExtractPublicKey()
 	if err != nil || pub == nil {
@@ -78,6 +82,9 @@ func KeyFromPeerID(id peer.ID) (string, error) {
 	raw, err := pub.Raw()
 	if err != nil {
 		return "", err
+	}
+	if pub.Type() != libp2pcrypto.Secp256k1 || len(raw) != publicKeySize {
+		return "", fmt.Errorf("fed: peer ID does not embed a kernel's key")
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
@@ -296,7 +303,7 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	return t, nil
 }
 
-// PublicKey returns this host's base64url Ed25519 public key — its §13 identity.
+// PublicKey returns this host's base64url public key — its §13 identity.
 func (t *Transport) PublicKey() string {
 	k, _ := KeyFromPeerID(t.host.ID())
 	return k
@@ -424,8 +431,8 @@ func (t *Transport) DiscoverProviders(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// BootstrapKeys returns the base64url Ed25519 keys of the configured bootstrap peers — the same
-// key format inspect/gossip take. The libp2p peer ID inlines the Ed25519 key (KeyFromPeerID), so
+// BootstrapKeys returns the base64url keys of the configured bootstrap peers — the same
+// key format inspect/gossip take. The libp2p peer ID inlines the key (KeyFromPeerID), so
 // this is the whole peer-ID→key bridge: the discovery loop seeds from, and an operator can inspect,
 // a bootstrap node addressed only by its multiaddr.
 func (t *Transport) BootstrapKeys() []string {

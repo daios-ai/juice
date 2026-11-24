@@ -4,7 +4,6 @@ package kernel
 
 import (
 	"context"
-	"crypto/ed25519"
 	"strings"
 )
 
@@ -14,7 +13,7 @@ import (
 // owner, and composition then runs under the ordinary role law (§4/§6) as that owner. The token
 // is a header credential, never serialized into args, replies, receipts, or logs (R9).
 //
-// Format: "<trace_id>.<sigB64>", where sig is the Ed25519 signature over the JCS-canonical
+// Format: "<trace_id>.<sigB64>", where sig is the kernel's signature over the JCS-canonical
 // object {"cap": trace_id}. That object's key set is disjoint from receipts, manifests, and
 // federation payloads, keeping the capability in its own signature domain (§12).
 
@@ -40,8 +39,8 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	}
 	traceID, sig := token[:dot], token[dot+1:]
 
-	pub, ok := k.cfg.SigningKey.Public().(ed25519.PublicKey)
-	if !ok {
+	pub, err := decodeRemotePublicKey(PublicKey(k.cfg.SigningKey))
+	if err != nil {
 		return "", "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	if err := k.cfg.Network.verify(pub, sigDomainCapability, capPayload(traceID), sig); err != nil {

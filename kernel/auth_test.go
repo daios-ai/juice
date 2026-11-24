@@ -92,7 +92,7 @@ func TestPasswordMinLength(t *testing.T) {
 	}
 
 	// FirstBoot rejects a short superuser password.
-	if err := newTestKernel(newTestStore(t)).FirstBoot(ctx, "short12", ""); !errors.Is(err, kernel.ErrInvalidInput) {
+	if err := newTestKernel(newTestStore(t)).FirstBoot(ctx, "short12", "", kernel.TestOwnKey); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("FirstBoot short password: got %v, want ErrInvalidInput", err)
 	}
 }
@@ -122,7 +122,7 @@ func TestValidateCredentials(t *testing.T) {
 		_, cerr := newTestKernel(newTestStore(t)).CreateUser(ctx, kernel.CreateUserRequest{
 			Handle: "u@k", Password: c.password, RecoveryPublicKey: c.key,
 		})
-		ferr := newTestKernel(newTestStore(t)).FirstBoot(ctx, c.password, c.key)
+		ferr := newTestKernel(newTestStore(t)).FirstBoot(ctx, c.password, c.key, kernel.TestOwnKey)
 		if (cerr == nil) != c.ok || (ferr == nil) != c.ok {
 			t.Errorf("case %d: CreateUser %v, FirstBoot %v disagree with the rule", n, cerr, ferr)
 		}

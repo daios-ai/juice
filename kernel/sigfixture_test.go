@@ -3,7 +3,6 @@
 package kernel
 
 import (
-	"crypto/ed25519"
 	"testing"
 	"time"
 )
@@ -23,11 +22,11 @@ var playNet = Network{Name: "play", Fingerprint: playNetworkFingerprint}
 // network fingerprint the prefix carries. A failure here is a protocol break, not a test to update.
 func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	net := playNet
-	seed := make([]byte, ed25519.SeedSize)
+	seed := make([]byte, 32)
 	for i := range seed {
 		seed[i] = byte(i + 1)
 	}
-	key := ed25519.NewKeyFromSeed(seed)
+	key := KeyFromSeed(seed)
 
 	const (
 		cp        = "counterparty-key"
@@ -45,6 +44,11 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	)
 	fixedTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
+	// The key itself is part of the contract: how a kernel is named in every payload (P1).
+	if got, want := PublicKey(key), "AoS_dWImK71pQAhXSPO-avpSrjFxVRgezjG2Y1HM_6Sw"; got != want {
+		t.Errorf("the key renders as %s, want %s", got, want)
+	}
+
 	check := func(name, want string, got string, err error) {
 		t.Helper()
 		if err != nil {
@@ -59,35 +63,35 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	// signature — are exactly what they were before the lottery existed.
 	call := OutboundCall{ActionID: actionID, ExpectedContractHash: contract, IdempotencyKey: ikey}
 	sig, err := net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
-	check("fed_call", "7nvN8-uTEDnPSjjxUvSNBp-pfbUIgtKe3SvSRWv2hPCoELwhjoz_Z3TrRkde8c08qCyGnCy4HbZcUb2V7B-zCw", sig, err)
+	check("fed_call", "Q4dRcb0v0DS59IInWzLmQna_1jBg5Lic0XTKwJl9pjpJ4g00SEGlu4xj0LCg6gTlc0chxGhquCTsJiN_XZs6qA", sig, err)
 
 	call.Commitment, call.Lottery = "cm-1", 100
 	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
-	check("fed_call_ticket", "0m14WxVaIc55g7LlT_qXVVaS9bS8dj8LewbnbAdivDoH_3XIjfT_aubuDv1p0yzgZimyXgKjbSrX4UL08yfjBQ", sig, err)
+	check("fed_call_ticket", "Z-kVR46r9rZUePZX1x5mSgMuf6c5GpTxwtOwkBDgH6JbD8bdCslJZ_yl89HE58non811LPpwwRy8tpxV9gKT0g", sig, err)
 
 	// The caller the buyer attests rides in the same payload (P4); a call for no user of the
 	// buyer's omits both fields, so the two forms above are what they were.
 	call.CallerUserID, call.CallerHandle = userID, "alice"
 	sig, err = net.SignFederationPayload(key, call, cp, recipient, ts, argsHash)
-	check("fed_call_caller", "vLBwQW1n2e916IxZ8diC0HF5QEPjDiKg4YqPGolxOps-TLcsSoC7HLzZPfNz6eN0SNi2oYSNFkFQFE4fQJybAQ", sig, err)
+	check("fed_call_caller", "Ey-Tpz9pYHNMJVIPLL1FDdhLKQ2lVxxCUKH_k_RkEEsyvQB9-2vSigaXOVtvOoLT57XHu878AD33mHcphZjpLA", sig, err)
 
 	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, "", false)
-	check("task_complete", "pQgMwIylyms1yyzW95MqbooLqNe7VtlzVLIQnSs2JIgjRrBN2iyYNwzgFqfdIHtgJtNoK4aCk4B2CeuommkNDg", sig, err)
+	check("task_complete", "_pZH5HNzNaPNmWrj34llicHh8cO-8wWUXSxyiWykMNtFqToaVJOdYEh5bzuzIWuUrOjmLWmizCkj3H9c9XNCsA", sig, err)
 
 	// A completion as a user signs the user into the same payload (P8), superuser or not.
 	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, userID, false)
-	check("task_complete_user", "VaTWccPhR88m1r1NXbXjG2fjPckeAjdWoFMa7uzcUisy0SLOKh0qKRir-6X70z2_jTK89lItwo3gqKQsmS8LCw", sig, err)
+	check("task_complete_user", "Cf1mHiMmvueoiEcGxi8UDOUkS9ueJueyuxil5wuOH1Z9SuenYgtloloTPHYwSbA8zvXV72fX-cjtw3yNkdAZjQ", sig, err)
 	sig, err = net.SignTaskPayload(key, "complete", taskID, cp, recipient, ikey, ts, inputHash, userID, true)
-	check("task_complete_operator", "dSk8b4X90DqGB9n2z3bT5uuGGe94B_Y--aw2ERg36qlWBPIioLLK-JhW6ovjz-Xp_bGYQTXI7MKuzrKP7SIcCw", sig, err)
+	check("task_complete_operator", "EERyDj7PDQ8UE81fUVGCCBj99fB8BcUaq9O6iATbRuExxrONFfwg9JQAvUHYFpFJrFHya_0YfVokBCkt2bZ-pQ", sig, err)
 
 	// A decline is a completion without input, in its own domain (P8).
 	sig, err = net.SignTaskPayload(key, "cancel", taskID, cp, recipient, "", ts, "", userID, false)
-	check("task_cancel", "PisQ2rh8G6awtrg33arenLFDQrX_3toEDRcNfF4nBWPGSMkg6FXWTrdSvOhLbLJ1YKv7s1lB9wcLyGAjbukRDw", sig, err)
+	check("task_cancel", "2p5vX1koJkEmM39EJiSSyISxx0osb2ipc0Q4H2GpZU4ygNJKmJKmcxLFgHgAZtgcVkQ1T4qJJDB2cnNvVGNBFg", sig, err)
 
 	sig, err = net.sign(key, sigDomainTaskNotice, taskNoticePayload{Counterparty: cp, Recipient: recipient, Timestamp: ts,
 		Notice: TaskNotice{ID: taskID, Revision: 2, Status: TaskWaiting, UserID: userID, PartialArgs: []byte(`{"message":"hi"}`),
 			AllowedInput: map[string]any{"type": "object"}, Price: 10, CreatedAt: fixedTime}})
-	check("task_notice", "3ErE3GKK8vh9XUmeScYrjpGtTlLvoKYyuaHKDjuAwxjKg0rEb_72lOgd-6UQMnOkDZQocikPothpV0-1lhhZAw", sig, err)
+	check("task_notice", "Y4k1tVpgrDP0ELdnVlwMmaT0z5AM-pHLWjGBnkl5i4MVToBqfBSjn8R_EtmoVnQ-b381RhNLReMlKpbCJcInDg", sig, err)
 
 	// The completion key is derived, and every stored completion is found again by it (P8): its
 	// derivation string is frozen, whatever the protocol is called.
@@ -97,7 +101,7 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 	sig, err = net.sign(key, sigDomainReveal, RevealPayload{
 		Counterparty: cp, Recipient: recipient, Secret: "s", TicketID: settleID, Timestamp: ts, TxHash: "tx-1",
 	})
-	check("reveal", "hjdLt6kUB26CIp1ODDCEtfsjYQUGZ4ymN6duaxbur9BicucTq3cKqNJJlc_DfcehEnfd-oYxEAPMfSD4v5n3CA", sig, err)
+	check("reveal", "lKDPIJcyIpdy-P3-NIZw7gHLs02lFsHTdlSQ_uHXvFoMoAmt6inq64-7sZ2sHLeHn6-Yv4a_4LdmIluaRnYrgg", sig, err)
 
 	m := &ActionManifest{
 		ActionID: actionID, OwnerID: "owner-1", OwnerHandle: "alice", Title: "Greet a caller", Name: "greet",
@@ -106,6 +110,6 @@ func TestSignedPayloadGoldenFixtures(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
 	sig, err = net.SignManifest(key, m)
-	check("manifest", "V3RnuJwK7EqEAYfBNc0NLWPYpfiYpPS5E3XqguPwVTBHv06iLhbIntdXJY14mKW5rD99ihkkjrqvvWPZssefDw", sig, err)
+	check("manifest", "wl6HcKGQAaLHs8Ww4ydDC2nRouI25OpNrM02k5waPcd5uE03dsZYHgp0tczuu1YJmDkRKMVsAVAjoQXBAZGa0g", sig, err)
 
 }

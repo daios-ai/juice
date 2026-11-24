@@ -4,6 +4,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -47,7 +48,7 @@ func ValidateCredentials(password, recoveryPublicKey string) error {
 		return err
 	}
 	if recoveryPublicKey != "" {
-		if _, err := decodeRemotePublicKey(recoveryPublicKey); err != nil {
+		if _, err := decodeRecoveryKey(recoveryPublicKey); err != nil {
 			return ErrInvalidInput.Wrap("invalid recovery public key")
 		}
 	}
@@ -356,11 +357,15 @@ func (k *Kernel) CompleteRecovery(ctx context.Context, addr, nonce, signatureB64
 	if err != nil || challengedUserID != u.ID {
 		return ErrUnauthorized.Wrap("recovery challenge invalid or expired")
 	}
-	pub, err := decodeRemotePublicKey(u.RecoveryPublicKey)
+	pub, err := decodeRecoveryKey(u.RecoveryPublicKey)
 	if err != nil {
 		return ErrInvalidState.Wrap("stored recovery key is invalid")
 	}
-	if err := k.cfg.Network.verify(pub, sigDomainRecovery, RecoveryChallenge{Challenge: nonce}, signatureB64); err != nil {
+	payload, err := k.cfg.Network.payload(sigDomainRecovery, RecoveryChallenge{Challenge: nonce})
+	if err != nil {
+		return err
+	}
+	if sig, derr := base64.RawURLEncoding.DecodeString(signatureB64); derr != nil || !ed25519.Verify(pub, payload, sig) {
 		return ErrUnauthorized.Wrap("recovery signature is invalid")
 	}
 	hash, err := HashPassword(newPassword)
@@ -374,4 +379,14 @@ func (k *Kernel) CompleteRecovery(ctx context.Context, addr, nonce, signatureB64
 	}
 	k.log.With(ctx).Info("user.recover", "user_id", u.ID)
 	return nil
+}
+
+// decodeRecoveryKey reads an account's recovery key: Ed25519, the public half of the account's
+// own phrase (D9). It is a client's key and never a kernel's, which is why it is not held to P1.
+func decodeRecoveryKey(publicKey string) (ed25519.PublicKey, error) {
+	key, err := base64.RawURLEncoding.DecodeString(publicKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return nil, ErrInvalidInput.Wrap("recovery key must be a base64url 32-byte Ed25519 public key")
+	}
+	return ed25519.PublicKey(key), nil
 }

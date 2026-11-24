@@ -87,8 +87,11 @@ func (m *Manual) FinalizedBalances(context.Context) (int64, string, uint64, bool
 // DepositsScannedTo has no cursor: nothing is scanned.
 func (m *Manual) DepositsScannedTo() (uint64, bool, error) { return 0, false, nil }
 
-// Sign produces nothing: with no address there is nothing to prove control of.
-func (m *Manual) Sign([]byte) (string, error) { return "", nil }
+// AddressOf is empty: no kernel has an address here.
+func (m *Manual) AddressOf(string) string { return "" }
+
+// OpeningBalance is nothing: there is no chain holding money from before the ledger.
+func (m *Manual) OpeningBalance(context.Context) (int64, bool, error) { return 0, false, nil }
 
 // Verify accepts only the absence of an address. A kernel or a user claiming one on a world that has
 // none is claiming something this rail could never check.

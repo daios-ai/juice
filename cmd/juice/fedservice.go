@@ -146,7 +146,7 @@ func (h *fedHandlers) OnCall(ctx context.Context, peerKey string, req fed.CallRe
 	}
 	status, body, err := handleFederationCall(h.kernel, ctx, req.Counterparty, req.ExpectedContractHash,
 		req.Timestamp, req.IdempotencyKey, req.Action, req.Signature, kernel.BuyerTerms{
-			Commitment: req.Commitment, Lottery: req.Lottery, BlockchainAddress: req.BlockchainAddress, BlockchainProof: req.BlockchainProof,
+			Commitment: req.Commitment, Lottery: req.Lottery,
 			CallerUserID: req.CallerUserID, CallerHandle: req.CallerHandle,
 			ProcessKernel: req.ProcessKernel, ProcessRef: req.ProcessRef,
 		}, []byte(req.Args))
@@ -305,9 +305,9 @@ func (h *fedHandlers) OnTransfer(ctx context.Context, peerKey string, req fed.Tr
 		return fedError(err)
 	}
 	if err := h.kernel.HandleTransferPaid(ctx, req.Counterparty, kernel.TransferPaidPayload{
-		Amount: req.Amount, BeneficiaryID: req.BeneficiaryID, BlockchainAddress: req.BlockchainAddress,
+		Amount: req.Amount, BeneficiaryID: req.BeneficiaryID,
 		Counterparty: req.Counterparty, ID: req.ID, Recipient: h.kernel.SelfKey(ctx), Timestamp: req.Timestamp, TxHash: req.TxHash,
-	}, req.BlockchainProof, req.Signature); err != nil {
+	}, req.Signature); err != nil {
 		return fedError(err)
 	}
 	return fedOK(http.StatusOK, map[string]string{"id": req.ID})
@@ -336,25 +336,19 @@ func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.Res
 		if err != nil {
 			return fedError(err)
 		}
-		// The reply carries where this kernel is paid, with its own proof. A buyer takes on an
-		// obligation the moment it calls, so it must know how to pay before it does — and one cold
-		// resolve is all a first call has (P10). It rides beside the manifest rather than inside it:
-		// the contract is what the action is, not where its kernel banks.
-		addr, proof := h.kernel.BlockchainIdentity(ctx)
-		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m, BlockchainAddress: addr, BlockchainProof: proof})
+		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m})
 	case "user":
-		// A kernel about to pay one of our users says where the money will come from, proven by its rail
-		// key, and is refused if it cannot prove it: its payment must be recognised as its own when it
-		// arrives, before the word naming it does (P11, D23). The reply carries our own vault.
-		if _, err := h.kernel.ObservePeerVault(ctx, peerKey, req.BlockchainAddress, req.BlockchainProof); err != nil {
+		// A kernel about to pay one of our users is made known here first, and with it the address
+		// its key pays from: its payment must be recognised as its own when it arrives, before the
+		// word naming it does (P11, D23).
+		if err := h.kernel.KnowKernel(ctx, peerKey); err != nil {
 			return fedError(err)
 		}
 		id, handle, err := h.kernel.LocalPrincipal(ctx, req.User)
 		if err != nil {
 			return fedError(kernel.ErrNotFound.Wrap("user not found"))
 		}
-		addr, proof := h.kernel.BlockchainIdentity(ctx)
-		return fedOK(http.StatusOK, kernel.ResolvedUser{UserID: id, Handle: handle, BlockchainAddress: addr, BlockchainProof: proof})
+		return fedOK(http.StatusOK, kernel.ResolvedUser{UserID: id, Handle: handle})
 	default:
 		return fedError(kernel.ErrInvalidInput.Wrap("unknown resolve kind"))
 	}

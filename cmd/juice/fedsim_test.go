@@ -16,7 +16,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -128,14 +128,14 @@ type simNode struct {
 	name     string
 	key      string // base64url Ed25519 public key
 	k        *kernel.Kernel
-	db       *store.DB          // the real store, unwrapped: assertions read through this
-	faults   *faultStore        // the decorator the kernel sees; nil-safe when unarmed
-	h        *fedHandlers       // inbound half
-	adapter  *fedAdapter        // outbound half
-	sysID    string             // the sys account id, for balance assertions
-	issuerID string             // receipt issuer (sys), needed to re-install the signing key on restart
-	priv     ed25519.PrivateKey // this kernel's signing key
-	cfg      kernel.Config      // the policy this node was built with, so a restart rebuilds it
+	db       *store.DB         // the real store, unwrapped: assertions read through this
+	faults   *faultStore       // the decorator the kernel sees; nil-safe when unarmed
+	h        *fedHandlers      // inbound half
+	adapter  *fedAdapter       // outbound half
+	sysID    string            // the sys account id, for balance assertions
+	issuerID string            // receipt issuer (sys), needed to re-install the signing key on restart
+	priv     *ecdsa.PrivateKey // this kernel's signing key
+	cfg      kernel.Config     // the policy this node was built with, so a restart rebuilds it
 }
 
 func newSimNet(t *testing.T) *simNet {
@@ -490,7 +490,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	httpExec := &httpActionExecutor{timeout: cfg.ScriptTimeout, auth: newAuthenticator(box, db, true, cfg.ScriptTimeout), callbackURL: "http://sim.invalid"}
 	k := newKernel(cfg, kernel.Dependencies{Store: base, HTTP: httpExec, Economy: econ})
 	k.SetSecretBox(box)
-	if err := k.FirstBoot(context.Background(), "sys-pass", ""); err != nil {
+	if err := k.FirstBoot(context.Background(), "sys-pass", "", testKeyOf(k)); err != nil {
 		t.Fatalf("%s: first boot: %v", name, err)
 	}
 	priv := bootstrapSigning(t, k)
@@ -499,9 +499,9 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	if err := ensureSysNative(context.Background(), k, "sys", native.Transfer(), 0); err != nil {
 		t.Fatalf("%s: install transfer: %v", name, err)
 	}
-	pub := base64.RawURLEncoding.EncodeToString(priv.Public().(ed25519.PublicKey))
+	pub := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
 
-	adapter := newFedAdapter(pub, k.SignFederation, nil)
+	adapter := newFedAdapter(pub, k.SignFederation)
 	adapter.SetTransport(&simPort{net: n, self: pub})
 	k.SetFederation(adapter)
 
@@ -550,7 +550,7 @@ func (s *simNode) restart(t *testing.T) {
 	k.SetSigningKey(s.priv, s.issuerID)
 	native.Register(k, []native.Spec{native.Transfer()})
 
-	adapter := newFedAdapter(s.key, k.SignFederation, nil)
+	adapter := newFedAdapter(s.key, k.SignFederation)
 	adapter.SetTransport(&simPort{net: s.net, self: s.key})
 	k.SetFederation(adapter)
 
@@ -1554,11 +1554,7 @@ func TestSimTransferRefusalAndReplay(t *testing.T) {
 		t.Errorf("a refused transfer left alice %d available, %d locked", u.Available, u.Locked)
 	}
 
-	// A kernel asking for bob must prove the vault it names, or it is refused; one naming none, on a
-	// world without addresses, is answered with bob's id (P11).
-	if r := b.h.OnResolve(ctx, a.key, fed.ResolveRequest{Kind: "user", User: "bob", BlockchainAddress: "0xforged", BlockchainProof: "x"}); r.Status != http.StatusForbidden {
-		t.Errorf("an unproven vault on a user resolve: status %d, want 403", r.Status)
-	}
+	// A kernel asking for bob is answered with bob's id (P11).
 	if r := b.h.OnResolve(ctx, a.key, fed.ResolveRequest{Kind: "user", User: "bob"}); r.Status != http.StatusOK || !strings.Contains(string(r.Body), bob.ID) {
 		t.Errorf("a user resolve: %d %s, want bob's id", r.Status, r.Body)
 	}

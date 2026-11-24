@@ -4,8 +4,7 @@ package kernel_test
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -149,10 +148,10 @@ func newTestKernelWithScripts(st kernel.Store, exec kernel.ScriptExecutor) *kern
 // there (P5). A test that needs a SECOND identity generates its own key, as a peer is anyway.
 var theTestSigningKey = mustGenerateKey()
 
-func testSigningKey() ed25519.PrivateKey { return theTestSigningKey }
+func testSigningKey() *ecdsa.PrivateKey { return theTestSigningKey }
 
-func mustGenerateKey() ed25519.PrivateKey {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+func mustGenerateKey() *ecdsa.PrivateKey {
+	_, priv, err := kernel.GenKey()
 	if err != nil {
 		panic(err)
 	}
@@ -929,7 +928,7 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	ctx := context.Background()
 	setupSys(t, k, st)
 
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := kernel.GenKey()
 	_, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
 	if err != nil {
 		t.Fatal(err)
@@ -2316,19 +2315,17 @@ type fakeFederationHTTP struct {
 	resolveHandle       string
 	resolveErr          error
 	// The rail identity a resolve reply carries: where the peer is paid, and its own proof of it.
-	resolveBlockchainAddress string
-	resolveBlockchainProof   string
 	// When rejectSignKey is set, ExecuteFederation returns a signed zero-charge rejection receipt —
 	// naming no transaction and naming the request it refuses, exactly how a real serving kernel
 	// refuses a call (§13, P5) — so a test can drive an ACTUAL rejection settlement.
-	rejectSignKey  ed25519.PrivateKey
+	rejectSignKey  *ecdsa.PrivateKey
 	rejectActionID string
 	rejectArgsHash string
 	// signKey and buyerKey make the fake sign as the peer does: every receipt it returns names the
 	// request it answers — the key the kernel minted at dispatch, and the buying kernel — and is
 	// signed over those fields. A test cannot write them itself, because the key does not exist
 	// until the call is dispatched (P5). Set them with signsAs.
-	signKey  ed25519.PrivateKey
+	signKey  *ecdsa.PrivateKey
 	buyerKey string
 	// rejectRefreshProxy makes that rejection the contract-mismatch kind (§8 If-Match): the peer's
 	// terms moved under our cached row, so it tells us to re-resolve rather than refusing outright.
@@ -2359,7 +2356,7 @@ type fakeFederationHTTP struct {
 
 // signsAs makes the fake answer as the peer whose key priv is, for calls bought by k: the receipts
 // it returns are signed by priv and bound to k as the counterparty.
-func (f *fakeFederationHTTP) signsAs(k *kernel.Kernel, priv ed25519.PrivateKey) {
+func (f *fakeFederationHTTP) signsAs(k *kernel.Kernel, priv *ecdsa.PrivateKey) {
 	f.signKey, f.buyerKey = priv, k.PublicKeyB64()
 }
 
@@ -2371,23 +2368,19 @@ func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, na
 	if f.resolveManifest == nil {
 		return nil, nil
 	}
-	// A world without payment addresses carries none, which is what the manual rail these tests run
-	// on reports; a test about paying a peer supplies one.
-	return &kernel.ResolvedAction{Manifest: f.resolveManifest,
-		BlockchainAddress: f.resolveBlockchainAddress, BlockchainProof: f.resolveBlockchainProof}, nil
+	return &kernel.ResolvedAction{Manifest: f.resolveManifest}, nil
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteUser(_ context.Context, _, _ string) (*kernel.ResolvedUser, error) {
 	if f.resolveErr != nil {
 		return nil, f.resolveErr
 	}
-	return &kernel.ResolvedUser{UserID: f.resolveUserID, Handle: f.resolveHandle,
-		BlockchainAddress: f.resolveBlockchainAddress, BlockchainProof: f.resolveBlockchainProof}, nil
+	return &kernel.ResolvedUser{UserID: f.resolveUserID, Handle: f.resolveHandle}, nil
 }
 
 // announced records every paid transfer this double was told of, so a test can assert what the
 // sending kernel told the beneficiary's kernel; announceErr makes the announcement fail.
-func (f *fakeFederationHTTP) AnnounceTransfer(_ context.Context, _ string, p kernel.TransferPaidPayload, _, _ string) error {
+func (f *fakeFederationHTTP) AnnounceTransfer(_ context.Context, _ string, p kernel.TransferPaidPayload, _ string) error {
 	if f.announceErr != nil {
 		return f.announceErr
 	}
@@ -2457,7 +2450,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _ string, call
 			RefreshProxy: f.rejectRefreshProxy, GrantRequired: f.rejectGrantRequired, StartedAt: now, CreatedAt: now,
 		}
 		payload, _ := testNet.ReceiptSigningBytes(r)
-		r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.rejectSignKey, payload))
+		r.Signature = base64.RawURLEncoding.EncodeToString(kernel.SignRaw(f.rejectSignKey, payload))
 		b, _ := json.Marshal(r)
 		status := f.httpStatus // 403 by default: a refusal, not a funding condition
 		if status == 0 {
@@ -2479,7 +2472,7 @@ func (f *fakeFederationHTTP) ExecuteFederation(_ context.Context, _ string, call
 			r.IdempotencyKey, r.Counterparty = idempotencyKey, f.buyerKey
 			r.Signature = ""
 			payload, _ := testNet.ReceiptSigningBytes(&r)
-			r.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(f.signKey, payload))
+			r.Signature = base64.RawURLEncoding.EncodeToString(kernel.SignRaw(f.signKey, payload))
 			b, _ := json.Marshal(&r)
 			f.receiptJSON = string(b)
 		}
@@ -2505,7 +2498,7 @@ func jcsHashForTest(t *testing.T, jsonStr string) string {
 // signReceiptForTest signs a Receipt using the same method as the kernel's signReceipt:
 // Ed25519 over CanonicalJSON of the receipt with Signature cleared. A receipt carrying an
 // obligation gets the seller's half of the draw, since without one it is not settleable (P10).
-func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt) string {
+func signReceiptForTest(t *testing.T, key *ecdsa.PrivateKey, r *kernel.Receipt) string {
 	t.Helper()
 	if r.Charge+r.Premium > 0 && r.Nonce == "" {
 		r.Nonce = "0011223344556677889900aabbccddeeff00112233445566778899aabbccddee"
@@ -2514,7 +2507,7 @@ func signReceiptForTest(t *testing.T, key ed25519.PrivateKey, r *kernel.Receipt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload))
+	return base64.RawURLEncoding.EncodeToString(kernel.SignRaw(key, payload))
 }
 
 // TestSuperuserListTransactions verifies that @sys can list transactions where it is not a party.
@@ -2780,7 +2773,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer kernel this one knows; the seller is funded so the denial is on visibility, not balance.
 	const peer = "cGVlci1sb2NhbC1mZWQ"
-	if err := st.UpsertKernel(ctx, peer, "peer-local-fed", "", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, peer, "peer-local-fed", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2819,7 +2812,7 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 
 	provider := setupUser(t, st, "rate-fed-provider", 0)
 	const peer = "cmF0ZS1mZWQtcGVlcg"
-	if err := st.UpsertKernel(ctx, peer, "rate-fed-peer", "", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, peer, "rate-fed-peer", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2883,7 +2876,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	provider := setupUser(t, st, "prt-provider", 0)
 	const peerKey, strangerKey = "cHJ0LXBlZXI", "cHJ0LXN0cmFuZ2Vy"
 	for _, key := range []string{peerKey, strangerKey} {
-		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", "", time.Now().UTC()); err != nil {
+		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -4099,7 +4092,7 @@ func TestEveryCommittedCallIsObservedOnceByScope(t *testing.T) {
 	})
 	t.Run("outbound never dispatched", func(t *testing.T) {
 		st := newTestStore(t)
-		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		pub, priv, _ := kernel.GenKey()
 		fake := &fakeFederationHTTP{notDispatched: true}
 		k := newKernel(testConfig(), kernel.Dependencies{Store: st, HTTP: fake})
 		m := &recordingMetrics{}
@@ -4361,7 +4354,7 @@ func TestRemoteConnectionsAreBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := func() string {
-		p, _, _ := ed25519.GenerateKey(rand.Reader)
+		p, _, _ := kernel.GenKey()
 		key := base64.RawURLEncoding.EncodeToString(p)
 		if err := k.KnowKernel(ctx, key); err != nil {
 			t.Fatal(err)
@@ -4404,7 +4397,7 @@ func TestRemoteConnectionsAreBounded(t *testing.T) {
 		t.Errorf("a user of this kernel was refused by a bound on other kernels' users: %v", err)
 	}
 	// A kernel this one has never met, or has suspended, signs nobody up.
-	stranger, _, _ := ed25519.GenerateKey(rand.Reader)
+	stranger, _, _ := kernel.GenKey()
 	if err := signUp(kernel.Principal{Kernel: base64.RawURLEncoding.EncodeToString(stranger), UserID: "u", Handle: "h"}); err == nil {
 		t.Errorf("a user of an unknown kernel signed up")
 	}

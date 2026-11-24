@@ -4,7 +4,7 @@ package kernel
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/log"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 )
 
@@ -84,9 +85,8 @@ func (e *TransferEffect) stage(t *Trace) {
 // keys on a.Effect), never its name.
 //
 // The beneficiary is resolved here, before any funds move. One of this kernel's must be a live user
-// other than C, not suspended. One on another kernel is resolved to its stable id by user resolve,
-// which also exchanges the two kernels' proven vaults (P11); where the world has addresses, a kernel
-// that has proven none is refused, since the payment would have nowhere to go. A peer caller is
+// other than C, not suspended. One on another kernel is resolved to its stable id by user resolve
+// (P11), and is paid at that kernel's own key's address. A peer caller is
 // refused: its account holds nothing to fund a value (D14). A task stages its value here at creation,
 // for its requester, never at completion (D6).
 func (k *Kernel) prepareTransferEffect(ctx context.Context, caller Principal, a *Action, args map[string]any) (*TransferEffect, error) {
@@ -422,31 +422,47 @@ func (n Network) payload(domain string, v any) ([]byte, error) {
 	return append(prefix, canon...), nil
 }
 
-// sign signs the prefixed JCS-canonical form of v with key.
-func (n Network) sign(key ed25519.PrivateKey, domain string, v any) (string, error) {
-	if len(key) != ed25519.PrivateKeySize {
+// sign signs the prefixed JCS-canonical form of v with key: ECDSA over its SHA-256, rendered as
+// the 64 bytes r‖s with s in the lower half, so one message has one signature (P1).
+func (n Network) sign(key *ecdsa.PrivateKey, domain string, v any) (string, error) {
+	if key == nil {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
 	}
 	payload, err := n.payload(domain, v)
 	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, payload)), nil
+	digest := sha256.Sum256(payload)
+	sig, err := ethcrypto.Sign(digest[:], key)
+	if err != nil {
+		return "", ErrInternal.Wrapf("sign: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(sig[:64]), nil
 }
 
-// verify checks that sigB64 is a valid Ed25519 signature over the prefixed JCS-canonical form of v.
+// verify checks that sigB64 is a valid signature by pub over the prefixed JCS-canonical form of v.
 // One rule serves wire and storage alike: an artifact signed before this network's fingerprint existed is
 // reported invalid rather than repaired (U36).
-func (n Network) verify(pub ed25519.PublicKey, domain string, v any, sigB64 string) error {
+func (n Network) verify(pub []byte, domain string, v any, sigB64 string) error {
 	payload, err := n.payload(domain, v)
 	if err != nil {
 		return err
 	}
+	digest := sha256.Sum256(payload)
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil || !ed25519.Verify(pub, payload, sig) {
+	if err != nil || len(sig) != 64 || !ethcrypto.VerifySignature(pub, digest[:], sig) {
 		return ErrUnauthorized.Wrap("signature is invalid")
 	}
 	return nil
+}
+
+// PublicKey renders a kernel key's public half the way every payload names a kernel: the 33-byte
+// compressed point, base64url (P1).
+func PublicKey(key *ecdsa.PrivateKey) string {
+	if key == nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(ethcrypto.CompressPubkey(&key.PublicKey))
 }
 
 // VerifyReceipt audits the signed receipt behind one transaction, offline, against what this
@@ -567,11 +583,11 @@ func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*Rece
 	}
 	// A transfer to a user of another kernel is sent by a payment, and the receipt alone does not prove
 	// one exists: the payment named by this transaction must carry exactly the value to that kernel's
-	// proven vault (D18).
+	// address (D18).
 	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr.ValuePeer != "" && tx.Status == TxSuccess {
 		p, perr := k.store.ReadRailTransfer(ctx, tx.ID)
-		vault, verr := k.store.ReadKernelVault(ctx, tr.ValuePeer)
-		checks["payment"] = perr == nil && verr == nil && p != nil && p.Kind == RailKindTransfer &&
+		vault := k.peerVault(tr.ValuePeer)
+		checks["payment"] = perr == nil && p != nil && p.Kind == RailKindTransfer &&
 			p.Amount == r.Value && p.Destination == vault
 	}
 	return &ReceiptVerification{TransactionID: tx.ID, Valid: checks.allHeld(), Checks: checks, Receipt: r}, nil
@@ -599,7 +615,7 @@ func (n Network) ReceiptSigningBytes(r *Receipt) ([]byte, error) {
 	return n.payload(sigDomainReceipt, cp)
 }
 
-// verifyReceiptSignature checks the receipt's Ed25519 signature against pubKeyB64. Fails
+// verifyReceiptSignature checks the receipt's signature against pubKeyB64. Fails
 // closed on an empty key: a missing key must never let an unverified receipt pass as valid (§13).
 func (n Network) verifyReceiptSignature(r *Receipt, pubKeyB64 string) error {
 	if pubKeyB64 == "" {
@@ -845,7 +861,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// nonce, and the obligation — so neither can pick the outcome and neither has to trust the
 	// other's report of it. A losing ticket pays nothing; a winning one pays the face value; an
 	// obligation at or above the face value is paid exactly.
-	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerBlockchainAddress(ctx, peer))
+	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerVault(peer))
 
 	// Detach settlement from execution-scoped cancellation so the remote settlement
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
@@ -1265,15 +1281,20 @@ func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *Sign
 // and about. It binds no petname, and never advances the evidence cursor or the
 // peer-sync cache — those have their own narrow paths, run only after their own work commits.
 func (k *Kernel) ObserveKernel(ctx context.Context, publicKey, nickname, about string) error {
-	return k.observeKernel(ctx, publicKey, nickname, about, "", "")
-}
-
-// observeKernel records what a verified reply said about a kernel, including where it is paid.
-func (k *Kernel) observeKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress, blockchainProof string) error {
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return err
 	}
-	return k.store.UpsertKernel(ctx, publicKey, nickname, about, blockchainAddress, blockchainProof, time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, nickname, about, k.peerVault(publicKey), time.Now().UTC())
+}
+
+// peerVault is where a peer is paid and pays from: the address of its own key on this world's
+// rail, empty where the world has no addresses. It is computed, never told, so no peer can name
+// an address it does not hold (P1).
+func (k *Kernel) peerVault(peerKey string) string {
+	if k.rail == nil {
+		return ""
+	}
+	return k.rail.AddressOf(peerKey)
 }
 
 // BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming), exactly as asked: only
@@ -1284,7 +1305,7 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (st
 	if _, err := decodeRemotePublicKey(publicKey); err != nil {
 		return "", err
 	}
-	if err := k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC()); err != nil {
+	if err := k.store.UpsertKernel(ctx, publicKey, "", "", k.peerVault(publicKey), time.Now().UTC()); err != nil {
 		return "", err
 	}
 	seed := NormalizeHandle(petname)
@@ -1309,7 +1330,7 @@ func (k *Kernel) knowKernel(ctx context.Context, publicKey string) error {
 	if publicKey == k.SelfKey(ctx) {
 		return ErrInvalidInput.Wrap("that is this kernel, not a peer")
 	}
-	return k.store.UpsertKernel(ctx, publicKey, "", "", "", "", time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, "", "", k.peerVault(publicKey), time.Now().UTC())
 }
 
 // KnowKernel is knowKernel for the federation transport, which meets a kernel by its signed request.
@@ -1846,15 +1867,12 @@ func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipRespo
 		about = sys.Description
 	}
 
-	blockchainAddr, blockchainProof := k.BlockchainIdentity(ctx)
 	resp := &GossipResponse{
 		PublicKey:          ourKey,
 		Handle:             handle,
 		About:              about,
 		Network:            k.cfg.Network.Name,
 		NetworkFingerprint: k.cfg.Network.Fingerprint,
-		BlockchainAddress:  blockchainAddr,
-		BlockchainProof:    blockchainProof,
 	}
 
 	manifests, next, err := k.catalogPage(ctx, req.CatalogCursor)
@@ -2113,7 +2131,7 @@ func (k *Kernel) RecordKernelContact(ctx context.Context, publicKey string, ok b
 
 // CreateSignedRejectionReceipt produces a signed Receipt (status=failure, gross=0) for an inbound
 // federation call the receiver refuses before execution. No transaction is created; the receipt is
-// signed with the kernel's Ed25519 key so the caller can verify the rejection was authentic. reason
+// signed with the kernel's key so the caller can verify the rejection was authentic. reason
 // records why (e.g. "counterparty denied", "insufficient balance", "action inactive") so the caller's
 // settled failure is legible rather than always reading "denied". refreshProxy marks a cache fault
 // (contract-hash mismatch, non-executable action) so the origin invalidates its cached proxy (§13).
@@ -2180,11 +2198,6 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	if gossip.NetworkFingerprint != k.cfg.Network.Fingerprint {
 		return "", ErrInvalidInput.Wrapf("peer serves network %q, not ours", gossip.Network)
 	}
-	// Where the rail has addresses, a kernel must prove it controls the one it advertises: an
-	// address merely declared could name a third party's and claim their payment (D23).
-	if _, err := k.verifyBlockchainIdentity(gossip.PublicKey, gossip.BlockchainAddress, gossip.BlockchainProof); err != nil {
-		return "", ErrInvalidInput.Wrap("peer blockchain address is unproven")
-	}
 	// A page is the size this protocol serves, and a peer sending more is not offering more: it is
 	// asking this kernel to verify signatures and embed descriptions by the thousand off one
 	// frame. The cardinality is checked before any of that work, and a page over it is refused
@@ -2194,7 +2207,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			len(gossip.ActionManifests), len(gossip.Evidence), catalogPageSize, gossipEvidencePageSize)
 	}
 	now := time.Now().UTC()
-	if err := k.observeKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About, gossip.BlockchainAddress, gossip.BlockchainProof); err != nil {
+	if err := k.ObserveKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About); err != nil {
 		return "", err
 	}
 
@@ -2348,15 +2361,20 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 	return k.store.UpsertEvidence(ctx, row)
 }
 
-func decodeRemotePublicKey(publicKey string) (ed25519.PublicKey, error) {
+// decodeRemotePublicKey reads a kernel's key as every payload names it, and holds it to being a
+// point on the curve: a key that is none could verify nothing and name no address.
+func decodeRemotePublicKey(publicKey string) ([]byte, error) {
 	key, err := base64.RawURLEncoding.DecodeString(publicKey)
 	if err != nil {
 		return nil, ErrInvalidInput.Wrap("public_key must be base64url")
 	}
-	if len(key) != ed25519.PublicKeySize {
-		return nil, ErrInvalidInput.Wrap("public_key must be a 32-byte Ed25519 public key")
+	if len(key) != 33 {
+		return nil, ErrInvalidInput.Wrap("public_key must be a 33-byte compressed secp256k1 public key")
 	}
-	return ed25519.PublicKey(key), nil
+	if _, err := ethcrypto.DecompressPubkey(key); err != nil {
+		return nil, ErrInvalidInput.Wrap("public_key is not a secp256k1 public key")
+	}
+	return key, nil
 }
 
 // ---- Federation import (uses reconcileImport from kernel.go) ----
@@ -2667,15 +2685,15 @@ func (k *Kernel) CurrentContractHash(ctx context.Context, actionID string) (stri
 	return remoteManifestHash(*m), nil
 }
 
-// SignManifest creates a base64url Ed25519 signature over the canonical ActionManifest.
-func (n Network) SignManifest(key ed25519.PrivateKey, m *ActionManifest) (string, error) {
+// SignManifest creates a base64url signature over the canonical ActionManifest.
+func (n Network) SignManifest(key *ecdsa.PrivateKey, m *ActionManifest) (string, error) {
 	cp := *m
 	cp.Signature = ""
 	return n.sign(key, sigDomainManifest, cp)
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
-// corresponding to pubKeyB64 (base64url Ed25519 public key), and that the monetary fields the
+// corresponding to pubKeyB64 (the kernel's key), and that the monetary fields the
 // origin prices from are in range. A signature proves authorship, not sanity: a signed negative
 // price or out-of-range markup would otherwise flow into the proxy price. This is the single
 // funnel for all three trust boundaries — gossip ingest, authoritative import, and resolve.
@@ -2737,7 +2755,7 @@ type taskCompletePayload struct {
 	UserID         string `json:"user_id,omitempty"`
 }
 
-// verifyPeerSignature verifies a peer's base64url Ed25519 signature over a payload in its own
+// verifyPeerSignature verifies a peer's base64url signature over a payload in its own
 // domain. It owns the cryptographic mechanics only; each exported verifier below translates a
 // failure into its own typed, protocol-specific error.
 func (n Network) verifyPeer(pubKeyB64, domain string, payload any, sigB64 string) error {
@@ -2755,7 +2773,7 @@ func fedCallPayloadOf(c OutboundCall, counterparty, recipient, timestamp, argsHa
 		Lottery: c.Lottery, Recipient: recipient, Timestamp: timestamp}
 }
 
-// VerifyFederationSignature verifies an Ed25519 signature over the canonical federation call payload.
+// VerifyFederationSignature verifies a signature over the canonical federation call payload.
 func (n Network) VerifyFederationSignature(pubKeyB64 string, c OutboundCall, counterparty, recipient, timestamp, argsHash, sigB64 string) error {
 	if err := n.verifyPeer(pubKeyB64, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
@@ -2763,8 +2781,8 @@ func (n Network) VerifyFederationSignature(pubKeyB64 string, c OutboundCall, cou
 	return nil
 }
 
-// SignFederationPayload creates a base64url Ed25519 signature over the canonical federation payload.
-func (n Network) SignFederationPayload(key ed25519.PrivateKey, c OutboundCall, counterparty, recipient, timestamp, argsHash string) (string, error) {
+// SignFederationPayload creates a base64url signature over the canonical federation payload.
+func (n Network) SignFederationPayload(key *ecdsa.PrivateKey, c OutboundCall, counterparty, recipient, timestamp, argsHash string) (string, error) {
 	return n.sign(key, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash))
 }
 
@@ -2791,15 +2809,15 @@ func taskDomain(kind string) string {
 	return sigDomainTaskComplete
 }
 
-// SignTaskPayload creates a base64url Ed25519 signature over a canonical completion (kind "complete")
+// SignTaskPayload creates a base64url signature over a canonical completion (kind "complete")
 // or decline ("cancel") — each in its own domain, disjoint from every other (§12, §13).
-func (n Network) SignTaskPayload(key ed25519.PrivateKey, kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
+func (n Network) SignTaskPayload(key *ecdsa.PrivateKey, kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool) (string, error) {
 	return n.sign(key, taskDomain(kind), taskCompletePayload{Counterparty: counterparty,
 		IdempotencyKey: idempotencyKey, InputHash: inputHash, Recipient: recipient,
 		TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID})
 }
 
-// VerifyTaskSignature verifies a counterparty's Ed25519 signature over a canonical completion or
+// VerifyTaskSignature verifies a counterparty's signature over a canonical completion or
 // decline. recipient must be the verifying kernel's own public key.
 func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
 	p := taskCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
@@ -2812,7 +2830,7 @@ func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idem
 
 // ourKeyB64 is this kernel's own public key in the base64url form every payload names it by.
 func (k *Kernel) ourKeyB64() string {
-	return base64.RawURLEncoding.EncodeToString(k.cfg.SigningKey.Public().(ed25519.PublicKey))
+	return PublicKey(k.cfg.SigningKey)
 }
 
 // ---- Grants across kernels (D10) ----
@@ -2954,7 +2972,7 @@ type GrantOp struct {
 }
 
 // SignGrantOp signs a grant operation whole, as the kernel that forwards it.
-func (n Network) SignGrantOp(key ed25519.PrivateKey, op GrantOp) (string, error) {
+func (n Network) SignGrantOp(key *ecdsa.PrivateKey, op GrantOp) (string, error) {
 	return n.sign(key, sigDomainGrant, op)
 }
 

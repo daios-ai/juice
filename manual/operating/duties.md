@@ -31,7 +31,7 @@ Credit:     owed-to-us=0.00 fUSD limit=50.00 fUSD
 Fees:       20% of each layer's margin here, 5% on work served to another kernel, 5% on work imported from one
 Tickets:    this kernel draws for 0.10 fUSD, and accepts tickets up to 0.50 fUSD
 Listen addresses:
-  /ip4/127.0.0.1/tcp/31401/p2p/12D3KooWJHdK…
+  /ip4/127.0.0.1/tcp/31401/p2p/16Uiu2HAm…
 ```
 
 The **Operator** line separates spendable earnings from funds held for other

@@ -4,8 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -42,7 +40,7 @@ func TestResolveHandle(t *testing.T) {
 	}
 
 	// A peer is resolvable by its base64url public key (the global name) in the kernel position.
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
@@ -155,7 +153,7 @@ func TestEnrichTask(t *testing.T) {
 
 	// No action → empty action field; a waiting task addressed to a peer kernel flags
 	// waiting_on_peer and names the kernel bare — a user always carries `@`, a kernel never does.
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	peerKey := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.BindPetname(ctx, peerKey, "peer"); err != nil {
 		t.Fatal(err)
@@ -232,7 +230,7 @@ func TestEnrichAction(t *testing.T) {
 
 	// A remote proxy is owned by a user on a peer kernel: its address is that owner's, beneath the
 	// peer's local name.
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	key := base64.RawURLEncoding.EncodeToString(pub)
 	if err := k.ObserveKernel(ctx, key, "provider", ""); err != nil {
 		t.Fatal(err)
@@ -777,14 +775,14 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	key := base64.RawURLEncoding.EncodeToString(pub)
 	if _, err := k.BindPetname(ctx, key, "kernelonly"); err != nil {
 		t.Fatal(err)
 	}
 	// The same string is both a handle and a petname here, which is exactly the case the noun
 	// settles: neither route has to ask which was meant.
-	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := genKey()
 	key2 := base64.RawURLEncoding.EncodeToString(pub2)
 	if _, err := k.BindPetname(ctx, key2, "shared"); err != nil {
 		t.Fatal(err)
@@ -829,7 +827,7 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 func TestAddressRendersKernels(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	key := base64.RawURLEncoding.EncodeToString(pub)
 
 	if err := k.KnowKernel(ctx, key); err != nil {

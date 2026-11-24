@@ -4,8 +4,8 @@ package fed
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -33,7 +35,7 @@ import (
 
 // The network identity must derive deterministically from the platform signing key (§12).
 func TestDeriveIdentityDeterministic(t *testing.T) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,7 @@ func TestDeriveIdentityDeterministic(t *testing.T) {
 
 // KeyFromPeerID must round-trip back to the original base64url public key.
 func TestPeerIDKeyRoundTrip(t *testing.T) {
-	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub, _, _ := genKey()
 	want := base64.RawURLEncoding.EncodeToString(pub)
 
 	id, err := PeerIDFromKey(want)
@@ -90,7 +92,7 @@ func TestBootstrapKeys(t *testing.T) {
 	var want []string
 	var infos []peer.AddrInfo
 	for i := 0; i < 3; i++ {
-		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		pub, _, _ := genKey()
 		k := base64.RawURLEncoding.EncodeToString(pub)
 		id, err := PeerIDFromKey(k)
 		if err != nil {
@@ -120,19 +122,19 @@ func TestPeerIDFromKeyRejectsGarbage(t *testing.T) {
 	}
 }
 
-// Signature-domain disjointness (§12): a Juice payload signature (raw Ed25519 over JCS bytes)
+// Signature-domain disjointness (§12): a Juice payload signature (the kernel's signature over JCS bytes)
 // must not be a valid transport-layer signed envelope, and vice versa. If the two domains
 // overlapped, a signature minted in one context could be replayed as authority in the other.
 func TestSignatureDomainsDisjoint(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	hostKey, err := deriveHostKey(priv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// A Juice-style signature: raw Ed25519 over arbitrary payload bytes (as signJCS does).
+	// A Juice-style signature: the kernel's signature over arbitrary payload bytes (as signJCS does).
 	payload := []byte(`{"action":"@a/b","timestamp":"t"}`)
-	juiceSig := ed25519.Sign(priv, payload)
+	juiceSig := signRaw(priv, payload)
 
 	// Attempt to consume the Juice-signed bytes as a libp2p signed envelope. The transport's
 	// envelopes carry a domain string and typed payload; a raw Juice signature is not one, so
@@ -142,7 +144,7 @@ func TestSignatureDomainsDisjoint(t *testing.T) {
 		t.Fatal("a Juice signature was accepted as a libp2p envelope — domains overlap")
 	}
 
-	// Conversely, a real libp2p envelope is not a bare Ed25519 signature over its payload:
+	// Conversely, a real libp2p envelope is not a bare signature over its payload:
 	// its signature covers a domain-separated, length-prefixed encoding, so raw verification fails.
 	rec := &testRecord{data: payload}
 	env, err := record.Seal(rec, hostKey)
@@ -153,8 +155,8 @@ func TestSignatureDomainsDisjoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub := priv.Public().(ed25519.PublicKey)
-	if ed25519.Verify(pub, payload, extractEnvelopeSig(t, hostKey, env)) {
+	pub := ethcrypto.CompressPubkey(&priv.PublicKey)
+	if verifyRaw(pub, payload, extractEnvelopeSig(t, hostKey, env)) {
 		// The envelope signature must NOT verify as a plain signature over the raw payload.
 		t.Fatal("libp2p envelope signature verified as a raw Juice signature — domains overlap")
 	}
@@ -177,10 +179,10 @@ func extractEnvelopeSig(t *testing.T, key libp2pcrypto.PrivKey, env *record.Enve
 	// so we approximate by returning a clearly-non-matching signature. The assertion above only
 	// needs a signature that does not verify as raw(payload); any envelope-derived bytes differ.
 	b, _ := env.Marshal()
-	if len(b) >= ed25519.SignatureSize {
-		return b[len(b)-ed25519.SignatureSize:]
+	if len(b) >= 64 {
+		return b[len(b)-64:]
 	}
-	return make([]byte, ed25519.SignatureSize)
+	return make([]byte, 64)
 }
 
 // ---- Reachability ----
@@ -260,7 +262,7 @@ func TestRequestsAreObservedOnBothSides(t *testing.T) {
 // A probe reports the version a Juice peer says it runs, and nothing for a peer that sends no
 // Juice version: libp2p always sends an agent string, so the library's own must not pass for one.
 func TestProbeReportsTheVersionAJuicePeerSays(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	a, err := New(context.Background(), Config{Namespace: testNamespace, SigningKey: priv,
 		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, Handlers: &fakeHandlers{}, AllowPrivateAddrs: true,
 		AgentVersion: AgentPrefix + "v1.2.3"})
@@ -580,7 +582,7 @@ func freePort(t *testing.T) int {
 func TestSecondKernelIsRefusedTheStandardPort(t *testing.T) {
 	port := freePort(t)
 	build := func() (*Transport, error) {
-		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		_, priv, _ := genKey()
 		return newTransport(context.Background(), Config{
 			Namespace:  testNamespace,
 			SigningKey: priv,
@@ -643,7 +645,7 @@ func TestClaimPortSeesAHeldPortOnEitherTransport(t *testing.T) {
 // is theirs to arrange.
 func TestConfiguredAddressesAreBoundVerbatim(t *testing.T) {
 	port := freePort(t)
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	tr, err := newTransport(context.Background(), Config{
 		Namespace:   testNamespace,
 		SigningKey:  priv,
@@ -740,7 +742,7 @@ func TestATransportWithoutItsLimitsDoesNotStart(t *testing.T) {
 	boundedResources = func(int) (network.ResourceManager, error) { return nil, errors.New("no limits here") }
 	t.Cleanup(func() { boundedResources = old })
 
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	tr, err := New(context.Background(), Config{SigningKey: priv, Namespace: "juice/test", ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}})
 	if err == nil {
 		tr.Close()
@@ -777,7 +779,7 @@ func inboundConnectionsAdmitted(t *testing.T, tr *Transport, atMost int) int {
 // kernel run to carry the network sets it to its machine, and one that says nothing runs under
 // the default an ordinary kernel does (D12).
 func TestInboundConnectionsAreBoundedAsConfigured(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	small, err := New(context.Background(), Config{SigningKey: priv, Namespace: testNamespace,
 		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, AllowPrivateAddrs: true, MaxInboundPeers: 3})
 	if err != nil {
@@ -803,7 +805,7 @@ func TestRelaySlotsAreBoundedAsConfigured(t *testing.T) {
 		t.Fatal("a relayed circuit must carry two frames per direction")
 	}
 
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, priv, _ := genKey()
 	relay, err := New(context.Background(), Config{SigningKey: priv, Namespace: testNamespace,
 		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0"}, AllowPrivateAddrs: true, RelaySlots: 1})
 	if err != nil {
@@ -821,4 +823,28 @@ func TestRelaySlotsAreBoundedAsConfigured(t *testing.T) {
 	if _, err := relayclient.Reserve(ctx, second.host, at); err == nil {
 		t.Fatal("a relay configured for one slot granted a second")
 	}
+}
+
+// genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
+func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ethcrypto.GenerateKey()
+	if err != nil {
+		return nil, nil, err
+	}
+	return ethcrypto.CompressPubkey(&key.PublicKey), key, nil
+}
+
+// signRaw signs bytes the way a kernel signs a payload (P1), and verifyRaw checks one.
+func signRaw(key *ecdsa.PrivateKey, payload []byte) []byte {
+	digest := sha256.Sum256(payload)
+	sig, err := ethcrypto.Sign(digest[:], key)
+	if err != nil {
+		panic(err)
+	}
+	return sig[:64]
+}
+
+func verifyRaw(pub, payload, sig []byte) bool {
+	digest := sha256.Sum256(payload)
+	return len(sig) == 64 && ethcrypto.VerifySignature(pub, digest[:], sig)
 }

@@ -240,9 +240,6 @@ func (k *Kernel) prepareDispatch(ctx context.Context, t *Trace, a *Action, args 
 	if err != nil {
 		return err
 	}
-	if err := k.payableOnThisRail(ctx, a.OwnerKernel, dmax); err != nil {
-		return err
-	}
 	// A call that can owe nothing has nothing to draw for, and carries no ticket terms (P4).
 	var secret string
 	lottery := k.econ.Lottery
@@ -270,32 +267,13 @@ func callerOnWire(caller *Account) Principal {
 	return Principal{UserID: caller.ID, Handle: caller.Handle}
 }
 
-// payableOnThisRail refuses a paid cross-kernel call whose obligation this kernel could not pay: a
-// peer whose address is unknown or unproven could never collect, and taking on the debt anyway would
-// leave the seller owed with no way to be paid. A free call owes nothing and is always allowed,
-// which is what keeps a cold resolve and a price-0 action working before any address is known.
-func (k *Kernel) payableOnThisRail(ctx context.Context, peerKey string, obligation int64) error {
-	if obligation <= 0 || !k.hasAddresses() {
-		return nil // nothing owed, or a world with no addresses: the operator's record is the payment
-	}
-	if k.peerBlockchainAddress(ctx, peerKey) != "" {
-		return nil
-	}
-	name := k.KernelAddress(ctx, peerKey)
-	return ErrPeerUnreachable.Wrapf("%s has not proved where it is paid, so this call could not be settled", name).
-		WithMeta("peer", name.Principal)
-}
-
 // BuyerTerms is what a buyer fixes on a cross-kernel call before the work is done (P4, P10): its
-// commitment to the draw, the face value it dispatches under, and where a winning ticket will be
-// paid from. The address is proven and frozen at admission rather than learned later, so the seller
-// knows every obligation's payer before any payment can land — a payment that arrives ahead of its
-// reveal is then never mistaken for somebody else's.
+// commitment to the draw and the face value it dispatches under. Where a winning ticket will be
+// paid from is the buyer's own key's address, frozen at admission, so the seller knows every
+// obligation's payer before any payment can land.
 type BuyerTerms struct {
-	Commitment        string
-	Lottery           int64
-	BlockchainAddress string
-	BlockchainProof   string
+	Commitment string
+	Lottery    int64
 	// CallerUserID and CallerHandle are the buyer's own user the call is made for, as it signed
 	// them (P4): the principal this kernel records as the caller, on the buyer's kernel.
 	CallerUserID string
@@ -452,18 +430,16 @@ func (k *Kernel) Reveal(ctx context.Context, d *PendingReveal) error {
 }
 
 // TransferPaidPayload is what a kernel signs to tell another kernel whom a payment to it is for (P11):
-// the payment's id — the transaction that made it — its transaction on the rail and amount, the
-// sender's proven vault it comes from, and the beneficiary's stable id on the receiver. The vault's
-// proof travels beside the payload, as on a call (P4).
+// the payment's id — the transaction that made it — its transaction on the rail and amount, and the
+// beneficiary's stable id on the receiver. The payment comes from the sender's own key's address.
 type TransferPaidPayload struct {
-	Amount            int64  `json:"amount"`
-	BeneficiaryID     string `json:"beneficiary_id"`
-	BlockchainAddress string `json:"blockchain_address"`
-	Counterparty      string `json:"counterparty"`
-	ID                string `json:"id"`
-	Recipient         string `json:"recipient"`
-	Timestamp         string `json:"timestamp"`
-	TxHash            string `json:"tx_hash"`
+	Amount        int64  `json:"amount"`
+	BeneficiaryID string `json:"beneficiary_id"`
+	Counterparty  string `json:"counterparty"`
+	ID            string `json:"id"`
+	Recipient     string `json:"recipient"`
+	Timestamp     string `json:"timestamp"`
+	TxHash        string `json:"tx_hash"`
 }
 
 // announceTransfers tells each kernel a transfer payment went to whom it is for, once the payment is
@@ -490,12 +466,8 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 	if fe == nil {
 		return ErrInvalidState.Wrap("federation client is not configured")
 	}
-	vault, proof := k.BlockchainIdentity(ctx)
-	if vault == "" && k.hasAddresses() {
-		return ErrInvalidState.Wrap("this kernel cannot prove its blockchain address yet")
-	}
 	p := TransferPaidPayload{
-		Amount: o.Amount, BeneficiaryID: o.BeneficiaryID, BlockchainAddress: vault,
+		Amount: o.Amount, BeneficiaryID: o.BeneficiaryID,
 		Counterparty: k.ourKeyB64(), ID: o.ID, Recipient: o.PeerKey,
 		Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: o.TxHash,
 	}
@@ -503,7 +475,7 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 	if err != nil {
 		return err
 	}
-	if err := fe.AnnounceTransfer(ctx, o.PeerKey, p, proof, sig); err != nil {
+	if err := fe.AnnounceTransfer(ctx, o.PeerKey, p, sig); err != nil {
 		return err
 	}
 	k.log.With(ctx).Info("transfer.announced", "transfer_id", o.ID, "peer", o.PeerKey, "amount", o.Amount)
@@ -516,7 +488,7 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 // and the beneficiary is credited only when a finalized deposit from that vault, with that transaction
 // and amount, is here: now, if it arrived first, or when it does. Where the world has no addresses
 // this message is itself the payment (D23), booked with the word that names it.
-func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p TransferPaidPayload, proof, signature string) error {
+func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p TransferPaidPayload, signature string) error {
 	pub, err := decodeRemotePublicKey(peerKey)
 	if err != nil {
 		return err
@@ -530,8 +502,10 @@ func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p Trans
 	if p.ID == "" || p.TxHash == "" || p.Amount <= 0 || p.BeneficiaryID == "" {
 		return ErrInvalidInput.Wrap("a transfer names its id, payment, amount and beneficiary")
 	}
-	payer, err := k.ObservePeerVault(ctx, peerKey, p.BlockchainAddress, proof)
-	if err != nil {
+	// The sender is made known with the address its key pays from, so its payment is recognised
+	// as its own when it arrives, whichever of the two comes first.
+	payer := k.peerVault(peerKey)
+	if err := k.store.UpsertKernel(ctx, peerKey, "", "", payer, time.Now().UTC()); err != nil {
 		return err
 	}
 	var payment *RailTransfer

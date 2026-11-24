@@ -8,8 +8,6 @@ package kernel
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -90,7 +88,7 @@ func TestIngestEvidenceRejectsRatingOutsideContract(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Network, cfg.TokenSecret, cfg.IssuerUserID = playNet, "s", "i"
 	k := New(Dependencies{Config: cfg, Store: rs})
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := GenKey()
 	issuer := base64.RawURLEncoding.EncodeToString(pub)
 	now := time.Now().UTC()
 	bundle := func(value float64, note *string) EvidenceBundle {
@@ -123,7 +121,7 @@ func TestIngestEvidenceRejectsRatingOutsideContract(t *testing.T) {
 // signature verification fail, never be silently skipped — a missing key cannot authenticate
 // a receipt, so it must never let an unverified receipt pass as valid (§13).
 func TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := GenKey()
 	r := &Receipt{ID: "r1", ActionID: "a1", Status: TxSuccess, Gross: 5, Net: 5}
 	sig, err := signReceipt(playNet, priv, r)
 	if err != nil {
@@ -668,7 +666,7 @@ func TestDrawIsFairAndAgreed(t *testing.T) {
 // TestRevealDomainIsDisjoint: a reveal signature must not verify under any other domain (§12), so a
 // captured reveal cannot be replayed as some other kind of authorization.
 func TestRevealDomainIsDisjoint(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pub, priv, _ := GenKey()
 	p := RevealPayload{Counterparty: "c", Recipient: "r", Secret: "s", TicketID: "t1", Timestamp: "ts"}
 	sig, err := playNet.sign(priv, sigDomainReveal, p)
 	if err != nil {
@@ -741,14 +739,14 @@ func TestReceiptHashJoinDefinition(t *testing.T) {
 // signature made before this network's fingerprint existed — or on another network — is reported invalid
 // rather than repaired (U36, G7, D23). A signature made under one domain never verifies under another.
 func TestSignatureBindsDomainAndNetwork(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	pub := priv.Public().(ed25519.PublicKey)
+	_, priv, _ := GenKey()
+	pub := PubBytes(priv)
 	payload := map[string]string{"k": "v"}
 	net := playNet
 
 	// A signature with no network prefix at all — what a kernel produced before worlds existed.
 	canon, _ := CanonicalJSON(payload)
-	legacySig := base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, canon))
+	legacySig := base64.RawURLEncoding.EncodeToString(SignRaw(priv, canon))
 	if err := net.verify(pub, sigDomainReceipt, payload, legacySig); err == nil {
 		t.Error("a signature made before the network fingerprint existed must be reported invalid")
 	}
@@ -773,8 +771,8 @@ func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 // identity, is signed under sigDomainRating by the gossiping kernel, and a full-Rating signature
 // does not verify over it — the projection is a distinct signed payload, not a field deletion.
 func TestProjectRatingPrivacy(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	pub := priv.Public().(ed25519.PublicKey)
+	_, priv, _ := GenKey()
+	pub := PubBytes(priv)
 	k := &Kernel{cfg: Config{SigningKey: priv, Network: playNet}}
 
 	note := "frequently timed out"
