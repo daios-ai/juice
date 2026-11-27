@@ -44,7 +44,7 @@ $ juice tx show 116fd3a64b0e
 The three party fields distinguish the participants, each an address. `owner` names the
 owner of the process that funded the work; `caller` names the immediate
 requester; and `target` names the action's owner. A caller on another kernel is
-named there too, as `handle@petname`, or `handle@<key> ~nickname` when your
+named there too, as `handle@petname`, or `handle@<address> ~nickname` when your
 operator has not named the kernel. Under `--json`, each party is an object
 with `address` and `principal`, and `nickname` when present. For a call you start
 with `run`, you are both process owner and requester. If that action calls
@@ -98,11 +98,11 @@ $ juice tx verify 116fd3a64b0e
 ```
 
 Receipt amounts are integer base units. Verification uses the stored record
-and the issuing kernel's public key; it does not require contact with the
+and the issuing kernel's address; it does not require contact with the
 issuer. The command still uses your local kernel's API to retrieve and check
 those records, and reports only the checks relevant to the call.
 
-For a remote call, your kernel retains the remote receipt and its signing key
+For a remote call, your kernel retains the receipt and the issuing kernel's address
 with the transaction. It can therefore verify the charge after losing contact
 with the peer or removing that peer from its local roster:
 
@@ -111,7 +111,7 @@ $ juice tx verify 6cd9f6b68b20
   transaction_id: 6cd9f6b6-…
   valid: true
   remote_kernel_handle: beta-kernel
-  remote_kernel_public_key: hqDr8oMX…
+  remote_kernel: 0x6fbc8401…
   checks: {
     "action_id": true,
     "args_hash": true,

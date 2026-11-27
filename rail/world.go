@@ -77,7 +77,7 @@ type World struct {
 	// member dials before it knows anyone. Each world has its own, since a kernel that dialled
 	// another world's seed would be told, every pass, that it serves a network this one is not.
 	// An empty list is a network whose members introduce each other by editing this file.
-	Seeds []string `json:"seeds" doc:"Multiaddrs of this network's own kernels a new member dials first; empty means members introduce each other."`
+	Seeds []string `json:"seeds" doc:"Seed lines, 0x…@host:port, of this network's own kernels a new member meets first; empty means members introduce each other."`
 
 	// RPC is where this kernel reaches its chain. A chain world must name one; an operator who
 	// wants their own node edits it here, beside the chain it belongs to. There is no field for

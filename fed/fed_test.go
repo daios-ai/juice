@@ -4,7 +4,6 @@ package fed
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -120,20 +119,20 @@ const testNamespace = "juice/fed/discovery/1/test"
 func TestTransportRoundTrip(t *testing.T) {
 	srv := &fakeHandlers{
 		callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`),
-		gossip:   json.RawMessage(`{"public_key":"srv","handle":"@srv"}`),
+		gossip:   json.RawMessage(`{"blockchain_address":"srv","handle":"@srv"}`),
 		taskBody: json.RawMessage(`{"result":{},"tx_id":"tx-1"}`),
 	}
 	a := newTestTransport(t, srv, nil)
 
 	// B bootstraps to A, so New connects B→A and resolve(A) succeeds without the DHT.
-	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+	b := newTestTransport(t, &fakeHandlers{}, a.Endpoints())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	// Call
-	resp, err := b.Call(ctx, a.PublicKey(), CallRequest{
-		Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", Counterparty: b.PublicKey(), IdempotencyKey: "idem-1",
+	resp, err := b.Call(ctx, a.Address(), CallRequest{
+		Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", Counterparty: b.Address(), IdempotencyKey: "idem-1",
 		Timestamp: "2026-07-02T00:00:00Z", Signature: "sig", Args: json.RawMessage(`{"x":1}`),
 	})
 	if err != nil {
@@ -143,22 +142,22 @@ func TestTransportRoundTrip(t *testing.T) {
 		t.Fatalf("Call response: status=%d body=%s", resp.Status, resp.Body)
 	}
 	// The server saw B's proven key and the exact args bytes (args_hash contract).
-	if srv.lastCallPeer != b.PublicKey() {
-		t.Errorf("server saw peer %q, want %q", srv.lastCallPeer, b.PublicKey())
+	if srv.lastCallPeer != b.Address() {
+		t.Errorf("server saw peer %q, want %q", srv.lastCallPeer, b.Address())
 	}
 	if string(srv.lastCall.Args) != `{"x":1}` {
 		t.Errorf("server saw args %s, want {\"x\":1}", srv.lastCall.Args)
 	}
 
 	// Gossip
-	g, err := b.Gossip(ctx, a.PublicKey(), GossipRequest{})
-	if err != nil || string(g) != `{"public_key":"srv","handle":"@srv"}` {
+	g, err := b.Gossip(ctx, a.Address(), GossipRequest{})
+	if err != nil || string(g) != `{"blockchain_address":"srv","handle":"@srv"}` {
 		t.Fatalf("Gossip: %v body=%s", err, g)
 	}
 
 	// Task (§13): the completion verb carries the exact input bytes, like Call's args.
-	sResp, err := b.Task(ctx, a.PublicKey(), TaskRequest{
-		Kind: "complete", Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z",
+	sResp, err := b.Task(ctx, a.Address(), TaskRequest{
+		Kind: "complete", Counterparty: b.Address(), Timestamp: "2026-07-02T00:00:00Z",
 		Signature: "sig", TaskID: "task-1", IdempotencyKey: "idem-2", Input: json.RawMessage(`{"approve":true}`),
 	})
 	if err != nil {
@@ -167,8 +166,8 @@ func TestTransportRoundTrip(t *testing.T) {
 	if sResp.Status != 200 || string(sResp.Body) != `{"result":{},"tx_id":"tx-1"}` {
 		t.Fatalf("Task response: status=%d body=%s", sResp.Status, sResp.Body)
 	}
-	if srv.lastTaskPeer != b.PublicKey() {
-		t.Errorf("server saw task peer %q, want %q", srv.lastTaskPeer, b.PublicKey())
+	if srv.lastTaskPeer != b.Address() {
+		t.Errorf("server saw task peer %q, want %q", srv.lastTaskPeer, b.Address())
 	}
 	if string(srv.lastTask.Input) != `{"approve":true}` || srv.lastTask.TaskID != "task-1" {
 		t.Errorf("server saw task %+v", srv.lastTask)
@@ -176,33 +175,33 @@ func TestTransportRoundTrip(t *testing.T) {
 
 	// Transfer (P11): whom a payment is for reaches the handler with the sender's proven key and
 	// every field intact.
-	tr := TransferRequest{Counterparty: b.PublicKey(), Timestamp: "2026-07-02T00:00:00Z", Signature: "sig",
+	tr := TransferRequest{Counterparty: b.Address(), Timestamp: "2026-07-02T00:00:00Z", Signature: "sig",
 		ID: "tx-9", BeneficiaryID: "u-1", Amount: 40, TxHash: "0xabc"}
-	if tResp, err := b.Transfer(ctx, a.PublicKey(), tr); err != nil || tResp.Status != 200 {
+	if tResp, err := b.Transfer(ctx, a.Address(), tr); err != nil || tResp.Status != 200 {
 		t.Fatalf("Transfer: %v %+v", err, tResp)
 	}
-	if srv.lastTransferPeer != b.PublicKey() || srv.lastTransfer != tr {
+	if srv.lastTransferPeer != b.Address() || srv.lastTransfer != tr {
 		t.Errorf("server saw transfer %+v from %q", srv.lastTransfer, srv.lastTransferPeer)
 	}
 
 	// Grant and process (D10): each reaches its handler whole, with the sender's proven key.
-	gr := GrantRequest{Counterparty: b.PublicKey(), Signature: "sig", Op: json.RawMessage(`{"kind":"plan"}`)}
-	if gResp, err := b.Grant(ctx, a.PublicKey(), gr); err != nil || gResp.Status != 200 {
+	gr := GrantRequest{Counterparty: b.Address(), Signature: "sig", Op: json.RawMessage(`{"kind":"plan"}`)}
+	if gResp, err := b.Grant(ctx, a.Address(), gr); err != nil || gResp.Status != 200 {
 		t.Fatalf("Grant: %v %+v", err, gResp)
 	}
-	if srv.lastGrantPeer != b.PublicKey() || srv.lastGrant.Signature != "sig" || string(srv.lastGrant.Op) != `{"kind":"plan"}` {
+	if srv.lastGrantPeer != b.Address() || srv.lastGrant.Signature != "sig" || string(srv.lastGrant.Op) != `{"kind":"plan"}` {
 		t.Errorf("server saw grant %+v from %q", srv.lastGrant, srv.lastGrantPeer)
 	}
 	pr := ProcessRequest{Kind: "register", Ref: "ref-1", RegID: "work-1"}
-	if pResp, err := b.Process(ctx, a.PublicKey(), pr); err != nil || pResp.Status != 200 {
+	if pResp, err := b.Process(ctx, a.Address(), pr); err != nil || pResp.Status != 200 {
 		t.Fatalf("Process: %v %+v", err, pResp)
 	}
-	if srv.lastProcessPeer != b.PublicKey() || srv.lastProcess != pr {
+	if srv.lastProcessPeer != b.Address() || srv.lastProcess != pr {
 		t.Errorf("server saw process %+v from %q", srv.lastProcess, srv.lastProcessPeer)
 	}
 
 	// Reachability probe reports a live path.
-	r := b.Probe(ctx, a.PublicKey())
+	r := b.Probe(ctx, a.Address())
 	if r.Path != "direct" && r.Path != "relayed" {
 		t.Errorf("Probe path: got %q, want direct or relayed", r.Path)
 	}
@@ -211,8 +210,7 @@ func TestTransportRoundTrip(t *testing.T) {
 // Resolving an unknown key with no route must fail rather than hang forever.
 func TestTransportUnresolvableKey(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)
-	pub, _, _ := genKey()
-	unknown := base64.RawURLEncoding.EncodeToString(pub)
+	unknown := strangerAddress()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

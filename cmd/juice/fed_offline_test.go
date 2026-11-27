@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,8 +77,8 @@ func (f *fakeFed) Probe(context.Context, string) fed.Reachability {
 	}
 	return fed.Reachability{Path: p}
 }
-func (f *fakeFed) ListenAddrs() []string { return f.addrs }
-func (f *fakeFed) Close() error          { return nil }
+func (f *fakeFed) Endpoints() []string { return f.addrs }
+func (f *fakeFed) Close() error        { return nil }
 
 // seedPeer makes a peer known with one active+public imported proxy action, returning its
 // @handle and base64url key — the local state that offline inspect should surface.
@@ -87,7 +86,7 @@ func seedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, string) {
 	t.Helper()
 	ctx := context.Background()
 	pub, priv, _ := genKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)
 	}
@@ -217,10 +216,10 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"},
 	}
 	doc, _ := json.Marshal(kernel.GossipResponse{
-		Handle: handle, PublicKey: key, ActionManifests: []*kernel.ActionManifest{&m},
+		Handle: handle, Address: key, ActionManifests: []*kernel.ActionManifest{&m},
 	})
 	if err := db.ApplyCatalogPage(ctx, key, []*kernel.DiscoveryDoc{{
-		KernelPublicKey: key, ActionID: "act-1", Name: "greet",
+		Kernel: key, ActionID: "act-1", Name: "greet",
 		Description: "greet", ServingPrice: 21, ObservedAt: time.Now().UTC(),
 		InputSchema:  map[string]any{"type": "object"},
 		OutputSchema: map[string]any{"type": "object"},
@@ -268,7 +267,7 @@ func TestInspectCatalogIsOneShapeAndPrice(t *testing.T) {
 	// leaves an empty manifest slice nil and the field is omitempty, so treating emptiness as "no
 	// live data" would answer a retired catalog with whatever the cache still holds, labelled live.
 	t.Run("live peer with no actions does not fall back to cache", func(t *testing.T) {
-		empty, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key})
+		empty, _ := json.Marshal(kernel.GossipResponse{Handle: handle, Address: key})
 		out := inspectResp(t, &server{kernel: k, log: log.Discard(),
 			fed: &fakeFed{inspectDoc: empty, reachPath: "direct"}}, handle)
 		if out["source"] != "live" {
@@ -319,7 +318,7 @@ func TestInspectOfflineStranger(t *testing.T) {
 	pub, _, _ := genKey()
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{reachPath: "unreachable"}}
 
-	out := inspectResp(t, srv, base64.RawURLEncoding.EncodeToString(pub))
+	out := inspectResp(t, srv, pub)
 	if out["source"] != "none" || out["online"] != false {
 		t.Errorf("stranger offline: source=%v online=%v, want none/false", out["source"], out["online"])
 	}
@@ -329,9 +328,9 @@ func TestInspectOfflineStranger(t *testing.T) {
 func TestInspectOnlineLive(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	pub, _, _ := genKey()
-	livekey := base64.RawURLEncoding.EncodeToString(pub)
+	livekey := pub
 	doc, _ := json.Marshal(kernel.GossipResponse{
-		Handle: "live-peer", PublicKey: livekey,
+		Handle: "live-peer", Address: livekey,
 		ActionManifests: []*kernel.ActionManifest{{ActionID: "a", Name: "x", OwnerID: "live-peer-id", OwnerHandle: "live-peer", Price: 3}},
 	})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
@@ -360,7 +359,7 @@ func TestInspectWritesNothing(t *testing.T) {
 		t.Fatalf("seeded peer should start with no last_seen, got %+v", before)
 	}
 
-	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, PublicKey: key})
+	doc, _ := json.Marshal(kernel.GossipResponse{Handle: handle, Address: key})
 	srv := &server{kernel: k, log: log.Discard(), fed: &fakeFed{inspectDoc: doc, reachPath: "direct"}}
 
 	// The response itself is live: what must not happen is persistence of what it saw.
@@ -395,7 +394,7 @@ func peerTaskServer(t *testing.T, f *fakeFed) (*server, string, func(taskID stri
 	}
 	// The outbound task protocol runs kernel-side over kernel.TaskCaller (P8), so the fake backs a
 	// real fedAdapter: these tests exercise the whole path, not a stub of it.
-	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	self, _ := k.GetConfig(context.Background(), configKeyAddress)
 	adapter := newFedAdapter(self, nil)
 	adapter.SetTransport(f)
 	k.SetFederation(adapter)
@@ -531,7 +530,7 @@ func TestCompletePeerTask_DistinguishesNeverSentFromMayHaveRun(t *testing.T) {
 // is the difference between "something is offline" and a peer the operator can act on.
 func TestResolveNamesTheUnreachablePeer(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
-	self, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	self, _ := k.GetConfig(context.Background(), configKeyAddress)
 	adapter := newFedAdapter(self, nil)
 	const key = "k-offline-peer"
 

@@ -21,7 +21,7 @@ Choosing an action and spending on it are separate steps. Read first, decide, th
 ## Names
 
 - A user is `handle@kernel`; an action is `owner@kernel/name`. A bare `alice` or `bob/echo` is refused (exit 5).
-- The kernel segment is the name your client records for that kernel, a petname your kernel bound, or the kernel's public key. A remote action reached by key the first time is shown afterwards under a petname such as `carol@k-wcTB7LHv/shout`; both forms work.
+- The kernel segment is the name your client records for that kernel, a petname your kernel bound, or the kernel's address (`0x` and 40 hex digits). An unnamed kernel is shown by its address, with the name it gives itself beside it as `~name`, which is never usable as a name.
 - A reference that names no action resolves to its `index` child: `bob@acme` → `bob@acme/index`.
 
 ## Setup (done by a person)
@@ -170,7 +170,7 @@ Deposits are made by the operator (on `play`) or by paying the kernel on-chain f
 
 ```bash
 juice tx show <tx_id>        # owner (payer), caller, target, gross, net, fee, refund, status, reason
-juice tx verify <tx_id>      # checks the signed receipt offline against the issuing kernel's key
+juice tx verify <tx_id>      # checks the signed receipt offline against the issuing kernel's address
 juice tx rate <tx_id> 1 --note "did what it said"   # 1 good, 0 bad; caller only; once (a second rating: exit 5)
 juice tx list --limit 20
 ```

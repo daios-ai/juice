@@ -12,7 +12,7 @@ show how to work with them at the command line.
 ## Accounts and identity
 
 A **kernel** is a server that manages accounts, hosts actions, and records their
-execution and payment. Its public key identifies it to other kernels. It also
+execution and payment. Its address (`0x…`) identifies it to other kernels. It also
 has a **nickname**, chosen by its operator, which provides a readable label but
 need not be unique.
 
@@ -22,7 +22,7 @@ another kernel refers to a different account. Kernels also keep accounts that
 represent their peers for recording and authorizing trade; these accounts have
 no user login and hold no money.
 
-Every user account has a **principal**, written `user_id@kernel_key`. It stays
+Every user account has a **principal**, written `user_id@kernel_address`. It stays
 with that account through renames and is never reused. A principal can replace
 an address wherever you name an existing user or action. Creating an account,
 renaming one, and logging in still take a handle.
@@ -40,7 +40,7 @@ A **petname** is a name one kernel assigns to another for use in remote
 references. It is meaningful only on the assigning kernel. Since the remote
 kernel cannot choose this name, it cannot claim an existing local name merely
 by announcing a matching nickname. Only the operator assigns a peer a petname,
-with `admin peer rename`. Until then, the peer is shown by its full key with
+with `admin peer rename`. Until then, the peer is shown by its full address with
 its nickname beside it as `~name`; the nickname does not resolve.
 
 A **world** is a network with a single currency, in which a kernel counts all
@@ -66,15 +66,15 @@ hosted on another kernel. These kinds share the same calling interface.
 
 A **reference** names an action as `owner@kernel/name`, on this kernel and on any
 other alike. The kernel is named as this kernel knows it: its own name for its own
-actions, a petname or public key for another kernel's. The name `localhost`
+actions, a petname or address for another kernel's. The name `localhost`
 also names this kernel, on every kernel: `sys@localhost/time` reaches the time
 action of whichever kernel receives the reference. Replies show resolved
 addresses with the kernel's real name instead. If the reference names no action
 directly, Juice tries its `index` child:
 `bob@acme` can resolve to `bob@acme/index`, and `bob@acme/mail` to `bob@acme/mail/index`. This
 convention gives a group of related actions an entry point. Writing the owner
-by id and the kernel by key gives the action's principal,
-`user_id@kernel_key/name`, which programs can keep and use across kernels.
+by id and the kernel by address gives the action's principal,
+`user_id@kernel_address/name`, which programs can keep and use across kernels.
 
 **Visibility** determines an action's audience. A `private` action is available
 to its owner, a `local` action to users of its kernel, and a `public` action to
@@ -127,7 +127,7 @@ such as one with invalid input, does not produce a call transaction.
 
 A **receipt** is the kernel's signed record of a call's outcome and charge. It
 contains hashes of the input and output and can be verified against the issuing
-kernel's key without contacting that kernel. For a remote call, the local
+kernel's address without contacting that kernel. For a remote call, the local
 transaction also retains the remote receipt used to settle it.
 
 A **rating** records the caller's assessment of a completed call as `0` or `1`,

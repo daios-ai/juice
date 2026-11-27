@@ -170,7 +170,7 @@ func GrantRequiredError(action AddressView) error {
 }
 
 // PeerUnreachableError attributes an unreachable peer to that peer (§13): its address in the message,
-// its key in Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer — call
+// its address in Meta["peer"], mirroring GrantRequiredError. Every path that fails to reach a peer — call
 // dispatch, resolve, task, settlement — mints it here, so a client never has to infer who was
 // unreachable from what the user typed; a call adds its refund clause on top.
 func PeerUnreachableError(peer AddressView) *KernelError {
@@ -186,7 +186,7 @@ func TermsChangedError(net Network, currentHash string, currentPrice int64) erro
 }
 
 // PeerUnfundedError attributes a 402 signed rejection to this kernel's exhausted credit on the
-// peer (§13): its address in the message, its key in Meta["peer"]. An operator condition, not the
+// peer (§13): its address in the message and in Meta["peer"]. An operator condition, not the
 // caller's.
 func PeerUnfundedError(peer AddressView) *KernelError {
 	return ErrPeerUnfunded.Wrapf("this kernel's credit with peer %s is exhausted; the operator must top up", peer).WithMeta("peer", peer.Principal)

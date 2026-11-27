@@ -58,12 +58,12 @@ type GrantStore interface {
 }
 
 // FederationExecutor sends a cross-kernel call to a remote proxy target over the federation
-// transport (§13), addressing the peer by its public key. actionID is the action's stable
+// transport (§13), addressing the peer by its address. actionID is the action's stable
 // id on that peer; expectedContractHash is the cached contract hash the call
 // binds as the §8 If-Match precondition. The transport signs the request as this kernel and
-// resolves peerPublicKey to a live path (direct / hole-punched / relayed).
+// resolves peerAddr to a live path (direct / hole-punched / relayed).
 type FederationExecutor interface {
-	ExecuteFederation(ctx context.Context, peerPublicKey string, call OutboundCall, args map[string]any) (FederationResult, error)
+	ExecuteFederation(ctx context.Context, peerAddr string, call OutboundCall, args map[string]any) (FederationResult, error)
 }
 
 // OutboundCall is what a buying kernel signs into one cross-kernel call (P4): the action by its
@@ -89,7 +89,7 @@ type OutboundCall struct {
 // out, and where the money for a winning one comes from. The kernel owns the payload and its
 // signature; the adapter owns the wire shape and its deadline, and never imports fed.
 type TicketRevealer interface {
-	Reveal(ctx context.Context, peerPublicKey string, payload RevealPayload, signature string) error
+	Reveal(ctx context.Context, peerAddr string, payload RevealPayload, signature string) error
 }
 
 // RemoteResolver resolves a single remote action or user on demand over /juice/fed/resolve/1
@@ -97,15 +97,15 @@ type TicketRevealer interface {
 // action; ResolveRemoteUser maps a user reference to its stable id and handle on the peer. A nil
 // federation client disables lazy resolution (a cold cross-kernel ref is then a plain ErrNotFound).
 type RemoteResolver interface {
-	ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*ResolvedAction, error)
-	ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (*ResolvedUser, error)
+	ResolveRemoteAction(ctx context.Context, peerAddr, owner, name string) (*ResolvedAction, error)
+	ResolveRemoteUser(ctx context.Context, peerAddr, ref string) (*ResolvedUser, error)
 }
 
 // TransferAnnouncer carries one signed `paid` to the kernel a transfer's payment went to, over
 // /juice/fed/transfer/1 (P11): whom the payment is for. Like TicketRevealer, the kernel owns the
 // payload and its signature; the adapter owns the wire shape and its deadline.
 type TransferAnnouncer interface {
-	AnnounceTransfer(ctx context.Context, peerPublicKey string, payload TransferPaidPayload, signature string) error
+	AnnounceTransfer(ctx context.Context, peerAddr string, payload TransferPaidPayload, signature string) error
 }
 
 // TaskRequest is one signed /juice/fed/task/1 request (P8): a holder's notice, or a completion or
@@ -149,8 +149,8 @@ type FederationClient interface {
 // that serves the action, over /juice/fed/grant/1, and a question or notice about a process to the
 // kernel that owns it, over /juice/fed/process/1. The kernel owns the payloads; the adapter the wire.
 type GrantCarrier interface {
-	SendGrant(ctx context.Context, peerPublicKey string, op GrantOp, signature string) (status int, body []byte, err error)
-	SendProcess(ctx context.Context, peerPublicKey, kind, ref, regID string) (status int, body []byte, err error)
+	SendGrant(ctx context.Context, peerAddr string, op GrantOp, signature string) (status int, body []byte, err error)
+	SendProcess(ctx context.Context, peerAddr, kind, ref, regID string) (status int, body []byte, err error)
 }
 
 // HostFunctions are the callbacks available to a running script.
@@ -639,7 +639,7 @@ type Store interface {
 
 	// ---- Peer contact ----
 
-	// RecordKernelContact records one contact observation, keyed by public key: a success advances
+	// RecordKernelContact records one contact observation, keyed by address: a success advances
 	// last_seen, a failure advances last_contact_failed_at. Each timestamp only moves forward and
 	// neither is cleared, so a slow observation cannot overwrite newer truth. An unknown key is a
 	// no-op — observation binds nothing (§13). Display-only cache; never a money path, never
@@ -695,7 +695,7 @@ type Store interface {
 	// UpsertKernel records an observation: nickname, about, timestamps. It never writes the petname
 	// (assigned locally, only on our own outbound act) nor gossip_cursor/last_seen, each of which
 	// advances only after its own work is verified and committed (§13).
-	UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress string, now time.Time) error
+	UpsertKernel(ctx context.Context, address, nickname, about string, now time.Time) error
 	// BindPetname assigns a kernel's local petname in one transaction, so concurrent first use
 	// converges on one name (§13). exact=false preserves an existing petname and suffixes -2…-99 on
 	// collision; exact=true is an operator bind and errors on an occupied name. Returns the binding.
@@ -707,7 +707,7 @@ type Store interface {
 	// ListKernels returns the whole `admin peers` roster (§14) — every known kernel, whether a
 	// transaction here names it — from one query, excluding selfKey.
 	ListKernels(ctx context.Context, selfKey string, includeSuspended bool, limit, offset int) ([]*RemoteKernelView, error)
-	// ReadKernel returns the kernel row for a public key, or nil if unknown.
+	// ReadKernel returns the kernel row for an address, or nil if unknown.
 	ReadKernel(ctx context.Context, publicKey string) (*RemoteKernel, error)
 	// ReadKernelByPetname resolves a bound petname to its kernel; nil when no kernel holds it.
 	ReadKernelByPetname(ctx context.Context, petname string) (*RemoteKernel, error)
@@ -720,11 +720,11 @@ type Store interface {
 	// ApplyCatalogPage commits one page of a peer's catalogue: its documents stamped with the scan
 	// that carried them, the sweep of what a completed scan never mentioned, and where the scan now
 	// stands — one transition, one commit.
-	ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs []*DiscoveryDoc, nextCursor string, generation int64) error
+	ApplyCatalogPage(ctx context.Context, kernelAddr string, docs []*DiscoveryDoc, nextCursor string, generation int64) error
 	// DiscoveryEmbedding returns a stored embedding when the text behind it has not changed.
-	DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, text string) ([]float32, bool)
+	DiscoveryEmbedding(ctx context.Context, kernelAddr, actionID, text string) ([]float32, bool)
 	// CatalogScan reads where a peer's catalogue scan stands.
-	CatalogScan(ctx context.Context, kernelPublicKey string) (string, int64, error)
+	CatalogScan(ctx context.Context, kernelAddr string) (string, int64, error)
 	// ListDiscoveryDocs returns all discovery docs (with embeddings) for the lookup dense leg.
 	ListDiscoveryDocs(ctx context.Context) ([]*DiscoveryDoc, error)
 	// SearchDiscoveryLexical returns doc_keys ranked by BM25 for query, most relevant first.
@@ -736,7 +736,7 @@ type Store interface {
 	// transitions and the E-per-(issuer,subject_kernel,subject_action) cap (§13).
 	UpsertEvidence(ctx context.Context, e *EvidenceRow) error
 	// ListEvidenceBySubject returns evidence rows about a subject kernel, for inspect display.
-	ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*EvidenceRow, error)
+	ListEvidenceBySubject(ctx context.Context, subjectKernel, subjectActionID string) ([]*EvidenceRow, error)
 	// ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts
 	// (with any joined rating and remote receipt) after the cursor, for the evidence sender (§13).
 	ListReceiptsForGossip(ctx context.Context, cursor string, limit int) ([]*GossipReceiptRow, error)
@@ -750,7 +750,7 @@ type Store interface {
 	ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error)
 	// PurgePeer atomically deletes a purged peer's derived data — its proxy actions, their stats, its
 	// tasks and mailbox entries, its discovery_docs, and its evidence rows (as issuer and as subject) —
-	// and forgets its naming state, keeping its kernel row marked forgotten with its key and proven
+	// and forgets its naming state, keeping its kernel row marked forgotten with its
 	// address: the records that name it keep naming it, and a payment from it that lands late is
 	// still recognised (D23). The immutable ledger is untouched (G3).
 	PurgePeer(ctx context.Context, publicKey string) error
@@ -759,7 +759,7 @@ type Store interface {
 	// at or before cutoff and which no record here names (D16 Retention). Counterparties are governed
 	// by PurgePeer instead, so this never touches a kernel this one trades with, a suspended one, or
 	// this kernel's own row (D15). Returns the number evicted.
-	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error)
+	PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string, keepRow bool) (int, error)
 	// DeactivateImportedIfHash deactivates a remote_proxy action only while its contract hash still
 	// matches expectedHash (§13 rule C: hash-conditional so a stale dispatch's late rejection cannot
 	// deactivate a re-resolved row). A no-op when the row is absent or its hash has changed.

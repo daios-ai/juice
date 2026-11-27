@@ -124,7 +124,7 @@ type httpView struct {
 // of the transaction it settles into, or the kernel holding it, which withholds both (P8).
 func enrichTask(k *kernel.Kernel, ctx context.Context, e *kernel.TaskEntry, names *kernel.Names) *taskWithAction {
 	v := &taskWithAction{TaskNotice: e.TaskNotice, RequiredCaller: names.Address(ctx, e.RequiredCaller),
-		Owner: k.KernelAddress(ctx, e.HolderKey)}
+		Owner: k.KernelAddress(ctx, e.HolderKernel)}
 	if e.Requester.UserID != "" {
 		v.Requester = names.Address(ctx, e.Requester)
 	}
@@ -334,10 +334,10 @@ func resolveTarget(k *kernel.Kernel, ctx context.Context, ident, noun string) (*
 		}
 		return acct, "", nil
 	}
-	// A peer is named by its public key or the petname this kernel gave it (D15).
+	// A peer is named by its address or the petname this kernel gave it (D15).
 	kr, err := k.ResolveKernel(ctx, ident)
 	if err != nil || kr.Local {
-		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or public key", ident)
+		return nil, "", kernel.ErrNotFound.Wrapf("%s is not a peer here; peers are named by petname or address", ident)
 	}
 	return nil, kr.Key, nil
 }

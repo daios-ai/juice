@@ -36,7 +36,7 @@ func stubKernel(t *testing.T, decimals uint8, h http.HandlerFunc) *httptest.Serv
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "ok", "handle": "stub", "public_key": "stub-key",
+				"status": "ok", "handle": "stub", "blockchain_address": "stub-key",
 				"network": "play", "decimals": decimals, "symbol": "credits",
 			})
 			return
@@ -408,7 +408,7 @@ func healthServerNamed(t *testing.T, handle, key, fingerprint, network string) *
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok", "handle": handle, "public_key": key,
+			"status": "ok", "handle": handle, "blockchain_address": key,
 			"network": network, "network_fingerprint": fingerprint, "decimals": 0,
 			"version": "v0.0.0-test",
 		})
@@ -439,7 +439,7 @@ func recordLogin(t *testing.T, name, endpoint, pub string) {
 		t.Fatal(err)
 	}
 	cfg := loadClientConfig()
-	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: endpoint, PublicKey: pub, Network: "play"}
+	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: endpoint, Address: pub, Network: "play"}
 	cfg.Current = l.String()
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatalf("record login: %v", err)
@@ -524,7 +524,7 @@ func TestClientRecordsRoundTrip(t *testing.T) {
 	if cfg.Current != "" {
 		t.Fatalf("a fresh client selects %q; it must select nothing", cfg.Current)
 	}
-	wantK := &kernelRec{Endpoint: "http://kernel:4040", PublicKey: "KEY", WorldFingerprint: "DIGEST",
+	wantK := &kernelRec{Endpoint: "http://kernel:4040", Address: "KEY", WorldFingerprint: "DIGEST",
 		Network: "play", Decimals: 2}
 	cfg.Kernels["prod"] = wantK
 	cfg.Current = "alice@prod"
@@ -773,7 +773,7 @@ func TestAddThenRefuseAnotherKernel(t *testing.T) {
 	if name != "k" || outcome != "added" { // the name defaults to the nickname the kernel advertises
 		t.Fatalf("add: name %q outcome %q", name, outcome)
 	}
-	if k.PublicKey != "KEY-A" || k.WorldFingerprint != "DIGEST-A" || k.Network != "play" {
+	if k.Address != "KEY-A" || k.WorldFingerprint != "DIGEST-A" || k.Network != "play" {
 		t.Fatalf("nothing recorded: %+v", k)
 	}
 	if cfg := loadClientConfig(); cfg.Current != "" {
@@ -790,7 +790,7 @@ func TestAddThenRefuseAnotherKernel(t *testing.T) {
 	if _, _, _, err := registerKernel(context.Background(), other.URL); err == nil {
 		t.Fatal("a different kernel took a name already held")
 	}
-	if got := loadClientConfig().Kernels["k"]; got.PublicKey != "KEY-A" || got.Endpoint != srv.URL {
+	if got := loadClientConfig().Kernels["k"]; got.Address != "KEY-A" || got.Endpoint != srv.URL {
 		t.Fatalf("a refused add changed the record: %+v", got)
 	}
 	// Selecting a login whose kernel now answers with another key is refused too.
@@ -815,7 +815,7 @@ func TestSelectRefusesAnotherNetwork(t *testing.T) {
 	srv := healthServer(t, "KEY-A", "DIGEST-B", "mainnet")
 
 	cfg := loadClientConfig()
-	cfg.Kernels["prod"] = &kernelRec{Endpoint: srv.URL, PublicKey: "KEY-A", WorldFingerprint: "DIGEST-A", Network: "play"}
+	cfg.Kernels["prod"] = &kernelRec{Endpoint: srv.URL, Address: "KEY-A", WorldFingerprint: "DIGEST-A", Network: "play"}
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -904,7 +904,7 @@ func TestAMovedKernelKeepsItsLoginsAndAStrangerTakesNoName(t *testing.T) {
 	if !strings.Contains(outcome, "moved") {
 		t.Errorf("outcome = %q, want it to say the kernel moved", outcome)
 	}
-	if k := loadClientConfig().Kernels["k"]; k.Endpoint != moved.URL || k.PublicKey != "KEY-A" {
+	if k := loadClientConfig().Kernels["k"]; k.Endpoint != moved.URL || k.Address != "KEY-A" {
 		t.Errorf("the new address was not recorded: %+v", k)
 	}
 	for _, name := range []string{"person@k", "agent@k"} {
@@ -919,7 +919,7 @@ func TestAMovedKernelKeepsItsLoginsAndAStrangerTakesNoName(t *testing.T) {
 	if _, _, _, err := registerKernel(context.Background(), stranger.URL); err == nil {
 		t.Fatal("a different kernel took a name already held")
 	}
-	if k := loadClientConfig().Kernels["k"]; k.Endpoint != moved.URL || k.PublicKey != "KEY-A" {
+	if k := loadClientConfig().Kernels["k"]; k.Endpoint != moved.URL || k.Address != "KEY-A" {
 		t.Errorf("a refused add moved the record: %+v", k)
 	}
 	for _, name := range []string{"person@k", "agent@k"} {
@@ -948,7 +948,7 @@ func TestAMistypedEndpointChangesNothing(t *testing.T) {
 	if _, _, _, err := registerKernel(context.Background(), "http://127.0.0.1:1"); err == nil {
 		t.Fatal("an unreachable endpoint was accepted")
 	}
-	if k := loadClientConfig().Kernels["k"]; k.Endpoint != srv.URL || k.PublicKey != "KEY-A" {
+	if k := loadClientConfig().Kernels["k"]; k.Endpoint != srv.URL || k.Address != "KEY-A" {
 		t.Fatalf("a refused repoint moved the record: %+v", k)
 	}
 	for _, n := range []string{"person@k", "agent@k"} {
@@ -1039,7 +1039,7 @@ func TestContextsMigrateToLogins(t *testing.T) {
 	if err := os.MkdirAll(credentialsDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	blob := `{"current":"work","kernels":{"work":{"endpoint":"http://kernel:4040","public_key":"KEY","network":"play"}},
+	blob := `{"current":"work","kernels":{"work":{"endpoint":"http://kernel:4040","blockchain_address":"KEY","network":"play"}},
 	  "contexts":{"work":{"kernel":"work","handle":"alice"},
 	              "dup":{"kernel":"work","handle":"alice"},
 	              "never":{"kernel":"work"}}}`
@@ -1060,7 +1060,7 @@ func TestContextsMigrateToLogins(t *testing.T) {
 	if cfg.Current != "alice@work" {
 		t.Fatalf("current: got %q, want alice@work", cfg.Current)
 	}
-	if k := cfg.Kernels["work"]; k == nil || k.PublicKey != "KEY" {
+	if k := cfg.Kernels["work"]; k == nil || k.Address != "KEY" {
 		t.Fatalf("kernel not carried over: %+v", k)
 	}
 	if tok, err := loadToken(); err != nil || tok != "TOK-work" {
@@ -1080,9 +1080,11 @@ func TestContextsMigrateToLogins(t *testing.T) {
 	}
 }
 
-// TestLegacyProfilesMigrate pins the older conversion: each profile becomes a kernel with its
-// pinned key, and the old file is kept under a new name so nothing is destroyed by a client that
-// ran once. A profile never recorded whose session it held, so the session is kept aside.
+// TestLegacyProfilesMigrate pins the older conversion: each profile becomes a kernel, and the old
+// file is kept under a new name so nothing is destroyed by a client that ran once. A profile pinned
+// a key, which names no kernel any more, so the record carries no address and is refused when used
+// until the kernel is added again. A profile never recorded whose session it held, so the session
+// is kept aside.
 func TestLegacyProfilesMigrate(t *testing.T) {
 	clientHomeFor(t)
 	if err := os.MkdirAll(clientHome(), 0o700); err != nil {
@@ -1098,7 +1100,7 @@ func TestLegacyProfilesMigrate(t *testing.T) {
 
 	cfg := loadClientConfig()
 	k := cfg.Kernels["prod"]
-	if k == nil || k.Endpoint != "http://kernel:4040" || k.PublicKey != "KEY" || k.Decimals != 2 {
+	if k == nil || k.Endpoint != "http://kernel:4040" || k.Address != "" || k.Decimals != 2 {
 		t.Fatalf("kernel not migrated: %+v", k)
 	}
 	if cfg.Kernels["spare"] == nil {
@@ -1127,7 +1129,7 @@ func TestLegacyProfilesMigrate(t *testing.T) {
 func TestExistingRecordsAreNeverOverwrittenByMigration(t *testing.T) {
 	clientHomeFor(t)
 	cfg := loadClientConfig()
-	cfg.Kernels["mine"] = &kernelRec{Endpoint: "http://mine:4040", PublicKey: "MINE"}
+	cfg.Kernels["mine"] = &kernelRec{Endpoint: "http://mine:4040", Address: "MINE"}
 	cfg.Current = "alice@mine"
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -1238,7 +1240,7 @@ func TestAPasswordGoesOnlyToTheKernelItWasRecordedFor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "ok", "handle": "k", "public_key": "KEY-B", "network": "play", "network_fingerprint": "D"})
+				"status": "ok", "handle": "k", "blockchain_address": "KEY-B", "network": "play", "network_fingerprint": "D"})
 			return
 		}
 		reached = true
@@ -1247,7 +1249,7 @@ func TestAPasswordGoesOnlyToTheKernelItWasRecordedFor(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	cfg := loadClientConfig()
-	cfg.Kernels["work"] = &kernelRec{Endpoint: srv.URL, PublicKey: "KEY-A", WorldFingerprint: "D", Network: "play"}
+	cfg.Kernels["work"] = &kernelRec{Endpoint: srv.URL, Address: "KEY-A", WorldFingerprint: "D", Network: "play"}
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -1287,7 +1289,7 @@ func TestLoggingOutANamedLoginEndsItOnItsOwnKernel(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "ok", "handle": "other", "public_key": "KEY-B", "network": "play", "network_fingerprint": "D-B"})
+				"status": "ok", "handle": "other", "blockchain_address": "KEY-B", "network": "play", "network_fingerprint": "D-B"})
 			return
 		}
 		var req struct {
@@ -1301,7 +1303,7 @@ func TestLoggingOutANamedLoginEndsItOnItsOwnKernel(t *testing.T) {
 
 	recordLogin(t, "alice@home", home.URL, "KEY-A")
 	cfg := loadClientConfig()
-	cfg.Kernels["away"] = &kernelRec{Endpoint: other.URL, PublicKey: "KEY-B", WorldFingerprint: "D-B", Network: "play"}
+	cfg.Kernels["away"] = &kernelRec{Endpoint: other.URL, Address: "KEY-B", WorldFingerprint: "D-B", Network: "play"}
 	cfg.Current = "alice@home"
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -1411,7 +1413,7 @@ func TestALoginRefusalSaysWhichRefusalItIs(t *testing.T) {
 	}
 	base := flagServer
 	cfg := loadClientConfig()
-	cfg.Kernels["k"] = &kernelRec{Endpoint: base, Network: "play"}
+	cfg.Kernels["k"] = &kernelRec{Endpoint: base, Address: addressAt(base), Network: "play"}
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -1544,7 +1546,7 @@ func loginServer(t *testing.T, seen *[]string) *httptest.Server {
 		switch r.URL.Path {
 		case "/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "ok", "handle": "k", "public_key": "KEY", "network": "play", "network_fingerprint": "D"})
+				"status": "ok", "handle": "k", "blockchain_address": "KEY", "network": "play", "network_fingerprint": "D"})
 		case "/v1/auth/authorize":
 			// The real server redirects the browser to the client's loopback listener, which is
 			// how the code reaches it; doHTTP follows that redirect.
@@ -1577,7 +1579,7 @@ func TestACommandFinishesAsTheLoginItStartedWith(t *testing.T) {
 			cfg := loadClientConfig()
 			cfg.Current = "bob@k"
 			_ = saveClientConfig(cfg)
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "public_key": "KEY",
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "blockchain_address": "KEY",
 				"network": "play", "network_fingerprint": "D", "decimals": 6, "symbol": "credits"})
 			return
 		}
@@ -1678,7 +1680,7 @@ func TestARotatedTokenIsTakenNotSpent(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "MINE", "refresh_token": "R2"})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "public_key": "KEY", "network": "play"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "blockchain_address": "KEY", "network": "play"})
 	}))
 	t.Cleanup(srv.Close)
 	recordLogin(t, "alice@k", srv.URL, "KEY")
@@ -1751,7 +1753,7 @@ func TestANamedLoginIsNeverASilentStranger(t *testing.T) {
 	served := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "public_key": "KEY",
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "blockchain_address": "KEY",
 				"network": "play", "network_fingerprint": "D"})
 			return
 		}
@@ -1813,7 +1815,7 @@ func TestASessionThisClientCannotSaveIsRefused(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "public_key": "KEY", "network": "play"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "blockchain_address": "KEY", "network": "play"})
 		case "/v1/auth/refresh":
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "NEW", "refresh_token": "R2"})
 		default:
@@ -1862,7 +1864,7 @@ func TestAnExpiredSessionIsRenewedBeforeTheRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "public_key": "KEY", "network": "play"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "blockchain_address": "KEY", "network": "play"})
 		case "/v1/auth/refresh":
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "FRESH", "refresh_token": "R2"})
 		default:
@@ -1923,7 +1925,7 @@ func TestOneRecordPerKey(t *testing.T) {
 	if cfg.Kernels["work"] != nil {
 		t.Error("the old name still holds a record; one key is one record")
 	}
-	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].PublicKey != "KEY-A" {
+	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].Address != "KEY-A" {
 		t.Fatalf("the new name holds %+v", cfg.Kernels["home"])
 	}
 	if got := loginNames(t); !slices.Contains(got, "alice@home") {
@@ -1945,10 +1947,10 @@ func TestOneRecordPerKey(t *testing.T) {
 		t.Fatal("a name held by another kernel was taken")
 	}
 	cfg = loadClientConfig()
-	if cfg.Kernels["spare"] == nil || cfg.Kernels["spare"].PublicKey != "KEY-B" {
+	if cfg.Kernels["spare"] == nil || cfg.Kernels["spare"].Address != "KEY-B" {
 		t.Errorf("the refused name no longer holds its own kernel: %+v", cfg.Kernels["spare"])
 	}
-	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].PublicKey != "KEY-A" {
+	if cfg.Kernels["home"] == nil || cfg.Kernels["home"].Address != "KEY-A" {
 		t.Errorf("the kernel that was refused a rename lost its record: %+v", cfg.Kernels["home"])
 	}
 	if got := loginNames(t); !slices.Contains(got, "alice@home") {
@@ -1974,8 +1976,8 @@ func TestAnUnreachableLocalKernelNamesItsWorld(t *testing.T) {
 	_ = home
 	resetClient()
 	cfg := loadClientConfig()
-	cfg.Kernels["work"] = &kernelRec{Endpoint: "http://127.0.0.1:4999", PublicKey: "KEY-A", Network: "arbitrum-one"}
-	cfg.Kernels["away"] = &kernelRec{Endpoint: "http://kernel.example.org:4040", PublicKey: "KEY-B", Network: "play"}
+	cfg.Kernels["work"] = &kernelRec{Endpoint: "http://127.0.0.1:4999", Address: "KEY-A", Network: "arbitrum-one"}
+	cfg.Kernels["away"] = &kernelRec{Endpoint: "http://kernel.example.org:4040", Address: "KEY-B", Network: "play"}
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -1987,5 +1989,22 @@ func TestAnUnreachableLocalKernelNamesItsWorld(t *testing.T) {
 	}
 	if remote := remedy(unreachable("http://kernel.example.org:4040")); strings.Contains(remote, "kernel serve") {
 		t.Errorf("a kernel on another machine cannot be started here: %q", remote)
+	}
+}
+
+// A record made by an earlier juice pinned a key, which names no kernel any more: it says which
+// kernel it was made for no longer, so it is refused, with how to add the kernel again, before
+// anything is sent.
+func TestARecordFromAnEarlierJuiceIsRefused(t *testing.T) {
+	h := &serverHealth{BlockchainAddress: "0x1111111111111111111111111111111111111111", base: "http://k:4040"}
+	err := sameKernel("k", &kernelRec{Endpoint: "http://k:4040", Network: "play"}, h)
+	if err == nil || !strings.Contains(err.Error(), "earlier version") || !strings.Contains(err.Error(), "juice kernel add http://k:4040 k") {
+		t.Fatalf("got %v, want a refusal saying to add the kernel again", err)
+	}
+	if err := sameKernel("k", &kernelRec{Address: h.BlockchainAddress}, h); err != nil {
+		t.Errorf("the kernel the record was made for: %v", err)
+	}
+	if err := sameKernel("k", &kernelRec{Address: "0x2222222222222222222222222222222222222222"}, h); err == nil {
+		t.Error("another kernel at the same URL was accepted")
 	}
 }

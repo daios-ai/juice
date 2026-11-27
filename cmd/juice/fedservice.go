@@ -31,7 +31,7 @@ type fedHandlers struct {
 }
 
 // keyLimiter is a per-key token-bucket rate limiter, used by every surface that admits work from
-// a key it did not choose: inbound federation streams, keyed by peer public key, and the client
+// a key it did not choose: inbound federation streams, keyed by peer address, and the client
 // API, keyed by client address. Keys are free to mint, so the map is swept: an entry unused for
 // its idle window is dropped, and the set of live entries is bounded by traffic rather than by
 // everyone who has ever connected (D12).
@@ -204,7 +204,7 @@ func (h *fedHandlers) OnTask(ctx context.Context, peerKey string, req fed.TaskRe
 	return fedOK(status, body)
 }
 
-// ownKey is this kernel's own public key, the recipient every inbound signature is bound to.
+// ownKey is this kernel's own address, the recipient every inbound signature is bound to.
 
 // OnGrant answers /juice/fed/grant/1 (D10): one grant operation a peer forwards for a user of its
 // own. Once admitted it is the same operation a user here would run, for that principal.
@@ -339,7 +339,7 @@ func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.Res
 		return fedOK(http.StatusOK, kernel.ResolvedAction{Manifest: m})
 	case "user":
 		// A kernel about to pay one of our users is made known here first, and with it the address
-		// its key pays from: its payment must be recognised as its own when it arrives, before the
+		// its address pays from: its payment must be recognised as its own when it arrives, before the
 		// word naming it does (P11, D23).
 		if err := h.kernel.KnowKernel(ctx, peerKey); err != nil {
 			return fedError(err)
@@ -355,7 +355,7 @@ func (h *fedHandlers) OnResolve(ctx context.Context, peerKey string, req fed.Res
 }
 
 // OnGossip returns one page of the gossip document (§13). peerKey is the connection's authenticated
-// public key, which the limiter bounds; req resumes the evidence stream and the catalogue scan.
+// address, which the limiter bounds; req resumes the evidence stream and the catalogue scan.
 func (h *fedHandlers) OnGossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error) {
 	if refused := h.admit("", peerKey, true); refused != nil {
 		return refused.Body, nil
@@ -444,13 +444,13 @@ func taskRequester(k *kernel.Kernel, ctx context.Context, tsStr string, verify f
 // by that kernel — its bare signature, or a user it says is its operator. Neither scope reaches the
 // other, a task addressed anywhere else is no business of this peer's, and a read that fails
 // refuses rather than skips.
-func taskScope(k *kernel.Kernel, ctx context.Context, cpPubKey, taskID, forUserID string, userSuperuser bool) (kernel.Principal, error) {
+func taskScope(k *kernel.Kernel, ctx context.Context, cpAddr, taskID, forUserID string, userSuperuser bool) (kernel.Principal, error) {
 	rc, err := k.TaskRequiredCaller(ctx, taskID)
 	if err != nil {
 		return kernel.Principal{}, err
 	}
 	switch {
-	case rc.Kernel != cpPubKey:
+	case rc.Kernel != cpAddr:
 		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("only the task's required caller may complete or decline it")
 	case forUserID == "" && rc.UserID != "":
 		return kernel.Principal{}, kernel.ErrUnauthorized.Wrap("this task is addressed to a user of your kernel; answer it as that user")
@@ -463,13 +463,13 @@ func taskScope(k *kernel.Kernel, ctx context.Context, cpPubKey, taskID, forUserI
 }
 
 // handleFederationTaskCancel declines a waiting task on behalf of the requesting peer (P8).
-func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, taskID, sigStr, forUserID string, userSuperuser bool) (int, map[string]any, error) {
+func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpAddr, tsStr, taskID, sigStr, forUserID string, userSuperuser bool) (int, map[string]any, error) {
 	if _, err := taskRequester(k, ctx, tsStr, func(self string) error {
-		return k.Network().VerifyTaskSignature("cancel", taskID, cpPubKey, self, "", tsStr, "", forUserID, userSuperuser, sigStr)
+		return k.Network().VerifyTaskSignature("cancel", taskID, cpAddr, self, "", tsStr, "", forUserID, userSuperuser, sigStr)
 	}); err != nil {
 		return 0, nil, err
 	}
-	scope, err := taskScope(k, ctx, cpPubKey, taskID, forUserID, userSuperuser)
+	scope, err := taskScope(k, ctx, cpAddr, taskID, forUserID, userSuperuser)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -482,14 +482,14 @@ func handleFederationTaskCancel(k *kernel.Kernel, ctx context.Context, cpPubKey,
 // handleFederationTaskComplete resumes a waiting task on behalf of the requesting peer (P8). The
 // task's price was parked here at creation, so failures are plain typed errors: there is no remote
 // trace awaiting a signed rejection.
-func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKey, tsStr, idempotencyKey, taskID, sigStr string, rawInput []byte, forUserID string, userSuperuser bool) (int, map[string]any, error) {
+func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpAddr, tsStr, idempotencyKey, taskID, sigStr string, rawInput []byte, forUserID string, userSuperuser bool) (int, map[string]any, error) {
 	self, err := taskRequester(k, ctx, tsStr, func(self string) error {
-		return k.Network().VerifyTaskSignature("complete", taskID, cpPubKey, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), forUserID, userSuperuser, sigStr)
+		return k.Network().VerifyTaskSignature("complete", taskID, cpAddr, self, idempotencyKey, tsStr, sha256HexBytes(rawInput), forUserID, userSuperuser, sigStr)
 	})
 	if err != nil {
 		return 0, nil, err
 	}
-	scope, err := taskScope(k, ctx, cpPubKey, taskID, forUserID, userSuperuser)
+	scope, err := taskScope(k, ctx, cpAddr, taskID, forUserID, userSuperuser)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -502,10 +502,10 @@ func handleFederationTaskComplete(k *kernel.Kernel, ctx context.Context, cpPubKe
 		return 0, nil, kernel.ErrUnauthorized.Wrap("idempotency key does not match the task and input")
 	}
 
-	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
+	if receipt, result, served := servedOutcome(k, ctx, cpAddr, idempotencyKey); served {
 		return replayTaskOutcome(receipt, result, taskID)
 	}
-	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpPubKey, string(rawInput))
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpAddr, string(rawInput))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -602,9 +602,9 @@ func duplicateInFlight() (int, map[string]any, error) {
 // against an answer that will never come. It commits nothing and holds no lock — a refusal is
 // deterministic, so a retry recomputes it — and every refusal reads the same to a stranger, which
 // is what keeps a catalogue it cannot see from being mapped by asking (U48, P4).
-func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, callerUserID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
+func signedRejection(k *kernel.Kernel, ctx context.Context, cpAddr, callerUserID, actionID string, rawArgs []byte, idempotencyKey string, cause error, refreshProxy bool) (int, map[string]any, error) {
 	code, msg := wireError(cause)
-	receipt, err := k.CreateSignedRejectionReceipt(callerUserID, cpPubKey, actionID, rawArgs, idempotencyKey, msg, refreshProxy, errors.Is(cause, kernel.ErrGrantRequired))
+	receipt, err := k.CreateSignedRejectionReceipt(callerUserID, cpAddr, actionID, rawArgs, idempotencyKey, msg, refreshProxy, errors.Is(cause, kernel.ErrGrantRequired))
 	if err != nil {
 		return 0, nil, cause
 	}
@@ -613,7 +613,7 @@ func signedRejection(k *kernel.Kernel, ctx context.Context, cpPubKey, callerUser
 
 // handleFederationCall validates the inbound federation request (counterparty, timestamp,
 // signature) and executes the call. Returns (httpStatus, responseBody, err).
-func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, buyer kernel.BuyerTerms, rawBody []byte) (int, map[string]any, error) {
+func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpAddr, expectedContractHash, tsStr, idempotencyKey, actionParam, sigStr string, buyer kernel.BuyerTerms, rawBody []byte) (int, map[string]any, error) {
 	// The request's own hash is over the bytes as sent (P4); a receipt's is over their canonical
 	// form (P5). Two fields, two rules, and a receipt is never hashed from wire bytes — Go escapes
 	// `<`, `>` and `&` on the way out and canonical JSON does not, so an argument containing one
@@ -624,20 +624,20 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		return 0, nil, err
 	}
 	// recipient is this kernel's own key: verifying with it (not the wire value) rejects a request signed
-	// for a different kernel, so a captured call cannot be replayed here (§13). cpPubKey is the
+	// for a different kernel, so a captured call cannot be replayed here (§13). cpAddr is the
 	// transport-authenticated caller key (OnCall proved connection key == counterparty).
 	ownKey := k.SelfKey(ctx)
-	if err := k.Network().VerifyFederationSignature(cpPubKey, kernel.OutboundCall{
+	if err := k.Network().VerifyFederationSignature(cpAddr, kernel.OutboundCall{
 		ActionID: actionParam, ExpectedContractHash: expectedContractHash, IdempotencyKey: idempotencyKey,
 		Commitment: buyer.Commitment, Lottery: buyer.Lottery, CallerUserID: buyer.CallerUserID, CallerHandle: buyer.CallerHandle,
-	}, cpPubKey, ownKey, tsStr, argsHash, sigStr); err != nil {
+	}, cpAddr, ownKey, tsStr, argsHash, sigStr); err != nil {
 		return 0, nil, err
 	}
 	// A signature-valid caller is admitted without a handshake (P4): its kernel is made known here.
 	// A suspended counterparty needs no gate here — RunFederated refuses it and the pre-execution
 	// branch signs a zero-charge rejection receipt. No petname is bound: a stranger calling us is
 	// not our act of naming (D15), so an inbound call never seeds a local name from a nickname.
-	if err := k.KnowKernel(ctx, cpPubKey); err != nil {
+	if err := k.KnowKernel(ctx, cpAddr); err != nil {
 		return 0, nil, err
 	}
 
@@ -647,7 +647,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// kernel signed for this request, with the reply it recorded. A retry after a lost reply must
 	// never execute the work twice, and must be answered even when the action has since been
 	// deleted — which is why the outcome is looked up before the action (P4).
-	if receipt, result, served := servedOutcome(k, ctx, cpPubKey, idempotencyKey); served {
+	if receipt, result, served := servedOutcome(k, ctx, cpAddr, idempotencyKey); served {
 		if err := k.EnsureRegistered(ctx, receipt.ProcessID); err != nil {
 			return 0, nil, err
 		}
@@ -662,7 +662,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// one would record a readable name with no identity beneath it, so it is refused where the
 	// request is admitted, with a signed rejection like every other pre-execution refusal.
 	if (buyer.CallerUserID == "") != (buyer.CallerHandle == "") {
-		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
+		return signedRejection(k, ctx, cpAddr, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
 			kernel.ErrInvalidInput.Wrap("caller names a handle without an id, or an id without a handle"), false)
 	}
 
@@ -675,7 +675,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// takes no lock, so a flood of them leaves nothing behind.
 	action, err := k.ReadAction(ctx, actionParam)
 	if err != nil || !k.ServedAbroad(action) {
-		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
+		return signedRejection(k, ctx, cpAddr, buyer.CallerUserID, actionParam, rawBody, idempotencyKey,
 			kernel.ErrNotFound.Wrap("action not found"), false)
 	}
 
@@ -683,7 +683,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// refused before execution with a signed refresh_proxy rejection so the caller re-resolves.
 	if expectedContractHash != "" {
 		if cur, herr := k.CurrentContractHash(ctx, action.ID); herr == nil && cur != expectedContractHash {
-			return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, action.ID, rawBody, idempotencyKey,
+			return signedRejection(k, ctx, cpAddr, buyer.CallerUserID, action.ID, rawBody, idempotencyKey,
 				kernel.ErrInvalidState.Wrap("contract changed"), true)
 		}
 	}
@@ -691,7 +691,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 	// The lock is taken only now, when execution may actually begin, and released by the commit
 	// that writes the receipt. Whichever commit finally settles — here, the retry loop, crash
 	// recovery — carries the record id, so the release is atomic with the outcome (§5, §13).
-	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpPubKey, string(rawBody))
+	rec, inFlight, err := takeExecutionLock(k, ctx, idempotencyKey, cpAddr, string(rawBody))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -699,7 +699,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		return duplicateInFlight()
 	}
 
-	reply, callErr := k.RunFederated(ctx, cpPubKey, action, args, rec.ID, buyer)
+	reply, callErr := k.RunFederated(ctx, cpAddr, action, args, rec.ID, buyer)
 	// An outcome is given out only once the kernel the run began on holds this process's remaining
 	// work registered: until then the buyer goes on waiting, which is what keeps that process open
 	// (D2). No receipt here reads as pending, and its retry is answered above, by the same rule.
@@ -730,7 +730,7 @@ func handleFederationCall(k *kernel.Kernel, ctx context.Context, cpPubKey, expec
 		// lock and sign a zero-charge rejection so the caller settles at once. Not a contract-hash
 		// fault — re-resolving would not change the outcome — so refresh_proxy is false.
 		_ = k.DeleteIdempotencyRecord(ctx, rec.ID)
-		return signedRejection(k, ctx, cpPubKey, buyer.CallerUserID, action.ID, rawBody, idempotencyKey, callErr, false)
+		return signedRejection(k, ctx, cpAddr, buyer.CallerUserID, action.ID, rawBody, idempotencyKey, callErr, false)
 	}
 
 	var receipt *kernel.Receipt

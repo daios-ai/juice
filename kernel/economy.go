@@ -312,7 +312,7 @@ func (k *Kernel) HandleReveal(ctx context.Context, peerKey string, p RevealPaylo
 	if r == nil {
 		return nil, ErrNotFound.Wrapf("obligation %s not found", p.TicketID)
 	}
-	pub, err := decodeRemotePublicKey(peerKey)
+	pub, err := ParseKernelAddress(peerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +412,7 @@ func (k *Kernel) Reveal(ctx context.Context, d *PendingReveal) error {
 		return ErrInvalidState.Wrap("federation client is not configured")
 	}
 	p := RevealPayload{
-		Counterparty: k.ourKeyB64(),
+		Counterparty: k.ourAddress(),
 		Recipient:    d.PeerKey,
 		Secret:       d.Secret,
 		TicketID:     d.ID,
@@ -468,7 +468,7 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 	}
 	p := TransferPaidPayload{
 		Amount: o.Amount, BeneficiaryID: o.BeneficiaryID,
-		Counterparty: k.ourKeyB64(), ID: o.ID, Recipient: o.PeerKey,
+		Counterparty: k.ourAddress(), ID: o.ID, Recipient: o.PeerKey,
 		Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: o.TxHash,
 	}
 	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainTransfer, p)
@@ -489,11 +489,11 @@ func (k *Kernel) announceTransfer(ctx context.Context, o *OutgoingTransfer) erro
 // and amount, is here: now, if it arrived first, or when it does. Where the world has no addresses
 // this message is itself the payment (D23), booked with the word that names it.
 func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p TransferPaidPayload, signature string) error {
-	pub, err := decodeRemotePublicKey(peerKey)
+	pub, err := ParseKernelAddress(peerKey)
 	if err != nil {
 		return err
 	}
-	if p.Counterparty != peerKey || p.Recipient != k.ourKeyB64() {
+	if p.Counterparty != peerKey || p.Recipient != k.ourAddress() {
 		return ErrUnauthorized.Wrap("the transfer is not addressed from this peer to this kernel")
 	}
 	if err := k.cfg.Network.verify(pub, sigDomainTransfer, p, signature); err != nil {
@@ -502,10 +502,9 @@ func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p Trans
 	if p.ID == "" || p.TxHash == "" || p.Amount <= 0 || p.BeneficiaryID == "" {
 		return ErrInvalidInput.Wrap("a transfer names its id, payment, amount and beneficiary")
 	}
-	// The sender is made known with the address its key pays from, so its payment is recognised
-	// as its own when it arrives, whichever of the two comes first.
-	payer := k.peerVault(peerKey)
-	if err := k.store.UpsertKernel(ctx, peerKey, "", "", payer, time.Now().UTC()); err != nil {
+	// The sender is made known, so its payment is recognised as its own when it arrives, whichever
+	// of the two comes first: a peer pays from its own address.
+	if err := k.store.UpsertKernel(ctx, peerKey, "", "", time.Now().UTC()); err != nil {
 		return err
 	}
 	var payment *RailTransfer
@@ -518,7 +517,7 @@ func (k *Kernel) HandleTransferPaid(ctx context.Context, peerKey string, p Trans
 	}
 	if err := k.store.RecordIncomingTransfer(ctx, k.cfg.FeeRecipientID, &IncomingTransfer{
 		Counterparty: peerKey, ID: p.ID, BeneficiaryID: p.BeneficiaryID, Amount: p.Amount,
-		Payer: payer, TxHash: p.TxHash, CreatedAt: time.Now().UTC(),
+		Payer: k.peerVault(peerKey), TxHash: p.TxHash, CreatedAt: time.Now().UTC(),
 	}, payment); err != nil {
 		return err
 	}

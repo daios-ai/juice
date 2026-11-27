@@ -1370,8 +1370,8 @@ func transferFixture(t *testing.T) (db *DB, sys string, bob, collider *kernel.Ac
 	if err := db.SetBlockchainAddress(ctx, collider.ID, "0xsender", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	peer = newPeer(t, db, "sender", "ksenderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", time.Now().UTC())
-	if err := db.UpsertKernel(ctx, peer, "", "", "0xsender", time.Now().UTC()); err != nil {
+	peer = newPeer(t, db, "sender", "0xsender", time.Now().UTC())
+	if err := db.UpsertKernel(ctx, peer, "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return db, sys, bob, collider, peer
@@ -1531,58 +1531,50 @@ func TestAnIncomingTransferIsKeyedByItsSenderAndId(t *testing.T) {
 	}
 }
 
-// A kernel's address — its key's own (P1) — is kept on its Kernel row. Forgetting the kernel — as a
-// peer, or as a stale directory entry — keeps the key and the address, listed nowhere and not swept
-// again, so a payment from that address still waits for its word whatever retention is set to;
-// seeing the kernel again brings it back.
+// A kernel is paid at its own address (P1), which is what its row is keyed by. On a world with
+// addresses, forgetting a kernel — as a peer, or as a stale directory entry — keeps its row, listed
+// nowhere and not swept again, so a payment from that address still waits for its word whatever
+// retention is set to; seeing the kernel again brings it back.
 func TestAPeersAddressOutlivesThePeer(t *testing.T) {
 	db, sys, _, collider, peer := transferFixture(t)
 	ctx := context.Background()
-	if err := db.UpsertKernel(ctx, peer, "renamed", "", "0xsender", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, peer, "renamed", "", time.Now().UTC()); err != nil {
 		t.Errorf("the same address again: %v", err)
 	}
-	// A directory-only kernel with a proven vault, gone stale, and one with none.
+	// A directory-only kernel gone stale.
 	old := time.Now().UTC().Add(-48 * time.Hour)
-	stranger, plain := "kstrangerAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "kplainAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	if err := db.UpsertKernel(ctx, stranger, "stranger", "", "0xstranger", old); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.UpsertKernel(ctx, plain, "plain", "", "", old); err != nil {
+	stranger := "0xstranger"
+	if err := db.UpsertKernel(ctx, stranger, "stranger", "", old); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.PurgePeer(ctx, peer); err != nil {
 		t.Fatal(err)
 	}
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
-	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self"); err != nil || n != 2 {
-		t.Fatalf("stale sweep evicted %d: %v, want the stranger and the plain kernel", n, err)
+	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self", true); err != nil || n != 1 {
+		t.Fatalf("stale sweep evicted %d: %v, want the stranger", n, err)
 	}
-	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self"); err != nil || n != 0 {
+	if n, err := db.PurgeStaleDiscovery(ctx, cutoff, "self", true); err != nil || n != 0 {
 		t.Errorf("a forgotten kernel was swept again: %d %v", n, err)
 	}
-	for key, want := range map[string]string{peer: "0xsender", stranger: "0xstranger", plain: ""} {
-		var v string
-		// A kernel that held no address is gone altogether, which reads as none.
-		err := db.db.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, key).Scan(&v)
-		if errors.Is(err, sql.ErrNoRows) {
-			err = nil
-		}
-		if err != nil || v != want {
-			t.Errorf("address of %s after forgetting: %q %v, want %q", key, v, err, want)
+	for _, key := range []string{peer, stranger} {
+		var rows int
+		if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kernels WHERE address=?`, key).Scan(&rows); err != nil || rows != 1 {
+			t.Errorf("the row of %s after forgetting: %d %v, want it kept", key, rows, err)
 		}
 	}
 	if listed, err := db.ListKernels(ctx, "self", true, 0, 0); err != nil || len(listed) != 0 {
 		t.Errorf("forgotten kernels are listed: %d %v", len(listed), err)
 	}
-	// Local accounts registered at both vaults' addresses get neither kernel's payment.
+	// Local accounts registered at both kernels' addresses get neither kernel's payment.
 	collider2 := newUser("collider2", 0)
 	if err := db.CreateUser(ctx, collider2); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetBlockchainAddress(ctx, collider2.ID, "0xstranger", time.Now().UTC()); err != nil {
+	if err := db.SetBlockchainAddress(ctx, collider2.ID, stranger, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	for i, from := range []string{"0xsender", "0xstranger"} {
+	for i, from := range []string{peer, stranger} {
 		if _, err := db.CreateRailDeposit(ctx, sys, paymentIn(fmt.Sprintf("rail:late:%d", i), from, "0xlate", 9), ""); err != nil {
 			t.Fatal(err)
 		}
@@ -1595,12 +1587,29 @@ func TestAPeersAddressOutlivesThePeer(t *testing.T) {
 			t.Errorf("%s got a forgotten kernel's payment: %d", c.Handle, a)
 		}
 	}
-	// Seen again, the kernel is listed again, under the same vault.
-	if err := db.UpsertKernel(ctx, stranger, "back", "", "0xstranger", time.Now().UTC()); err != nil {
+	// Seen again, the kernel is listed again, at the same address.
+	if err := db.UpsertKernel(ctx, stranger, "back", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if listed, _ := db.ListKernels(ctx, "self", true, 0, 0); len(listed) != 1 || listed[0].PublicKey != stranger {
+	if listed, _ := db.ListKernels(ctx, "self", true, 0, 0); len(listed) != 1 || listed[0].Address != stranger {
 		t.Errorf("a kernel seen again is not listed: %+v", listed)
+	}
+}
+
+// Where the world has no addresses no payment can arrive from a kernel, so a stale directory entry
+// goes altogether (D16 Retention).
+func TestAStaleKernelGoesWhereTheWorldHasNoAddresses(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	if err := db.UpsertKernel(ctx, "0xplain", "plain", "", time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.PurgeStaleDiscovery(ctx, time.Now().UTC().Add(-24*time.Hour), "self", false); err != nil || n != 1 {
+		t.Fatalf("stale sweep evicted %d: %v, want the plain kernel", n, err)
+	}
+	var rows int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kernels WHERE address='0xplain'`).Scan(&rows); err != nil || rows != 0 {
+		t.Errorf("the stale kernel's row: %d %v, want it gone", rows, err)
 	}
 }
 

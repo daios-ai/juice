@@ -26,10 +26,13 @@ import (
 	"time"
 
 	"github.com/daios-ai/juice/fed"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/libp2p/go-libp2p"
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+	"github.com/multiformats/go-multiaddr"
 
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
@@ -218,10 +221,10 @@ func fedCall(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, action, ide
 	}
 	body, _ := json.Marshal(args)
 	ts := time.Now().UTC().Format(time.RFC3339)
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cp := kernel.KernelAddress((priv))
 	argsHash := sha256HexBytes(body)
 	// recipient is the serving kernel's own key; empty contract hash skips the §8 If-Match check.
-	ownKey, _ := k.GetConfig(context.Background(), configKeySigningPublic)
+	ownKey, _ := k.GetConfig(context.Background(), configKeyAddress)
 	sig, err := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: action, ExpectedContractHash: "", IdempotencyKey: idempKey, Commitment: "", Lottery: 0}, cp, ownKey, ts, argsHash)
 	if err != nil {
 		t.Fatal(err)
@@ -270,21 +273,24 @@ func TestServeHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Unauthenticated health doubles as an identity banner: status plus the kernel's advertised
-	// federation identity (handle + public key), so a client can see which kernel it's on.
+	// identity (handle + address), so a client can see which kernel it's on.
 	if body["status"] != "ok" {
 		t.Errorf("status = %q, want ok", body["status"])
 	}
 	if body["handle"] != testOwnName {
 		t.Errorf("handle = %q, want the kernel's own name %q", body["handle"], testOwnName)
 	}
-	if body["public_key"] == "" {
-		t.Error("public_key should be present in the health banner")
+	if a, _ := body["blockchain_address"].(string); !kernel.IsKernelAddress(a) {
+		t.Errorf("the banner names the kernel %v, want its address", body["blockchain_address"])
+	}
+	if _, ok := body["public_key"]; ok {
+		t.Error("the banner still names the kernel by a key")
 	}
 	// The banner is an enumerated contract (D20): a client pins what it finds here, and everything
 	// it needs to render or pay money must be in it. A missing key is indistinguishable from a
 	// kernel that has nothing to say, so every one is required, whatever its value.
-	for _, key := range []string{"status", "handle", "public_key", "network", "network_fingerprint",
-		"decimals", "symbol", "token", "blockchain_address", "version"} {
+	for _, key := range []string{"status", "handle", "blockchain_address", "network", "network_fingerprint",
+		"decimals", "symbol", "token", "fed_addrs", "version"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("the health banner omits %q; a client cannot tell that from an empty value", key)
 		}
@@ -295,8 +301,8 @@ func TestServeHealth(t *testing.T) {
 		t.Errorf("version = %v, want the binary's %q", body["version"], version)
 	}
 	// This kernel serves play, where money has no contract and nothing is sent anywhere.
-	if body["token"] != "" || body["blockchain_address"] != "" {
-		t.Errorf("play names a token or an address: %v / %v", body["token"], body["blockchain_address"])
+	if body["token"] != "" {
+		t.Errorf("play names a token: %v", body["token"])
 	}
 }
 
@@ -1633,7 +1639,7 @@ func TestFederationCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 
 	// Register the remote peer with its real public key.
 	err = k.KnowKernel(ctx, pubB64)
@@ -1700,8 +1706,8 @@ func TestFederationCall(t *testing.T) {
 
 	// The caller is one principal (P4): a validly signed request naming half of one is refused
 	// with a signed rejection before anything runs, and nothing is recorded under the half name.
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
-	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	cp := kernel.KernelAddress((priv))
+	ownKey, _ := k.GetConfig(ctx, configKeyAddress)
 	for i, half := range []kernel.BuyerTerms{{CallerUserID: "u-1"}, {CallerHandle: "alice"}} {
 		ts, key := time.Now().UTC().Format(time.RFC3339), fmt.Sprintf("idem-half-%d", i)
 		sig, err := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, IdempotencyKey: key,
@@ -1733,7 +1739,7 @@ func TestFederationCallResolvesByStableID(t *testing.T) {
 	ctx := context.Background()
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
@@ -1803,7 +1809,7 @@ func TestFederationCallSignsRejectionForNonExecutableAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
@@ -1877,7 +1883,7 @@ func TestWaitingOnPeer(t *testing.T) {
 
 	localID, _ := makeUser(t, k, "local-caller")
 	pub, _, _ := genKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	if _, err := k.BindPetname(ctx, peerKey, "peer-caller"); err != nil {
 		t.Fatal(err)
 	}
@@ -2081,7 +2087,7 @@ func TestFederationCallAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
@@ -2109,7 +2115,7 @@ func TestFederationCallAuth(t *testing.T) {
 	}
 
 	action := a.ID
-	cpKey := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cpKey := kernel.KernelAddress((priv))
 	now := func() string { return time.Now().UTC().Format(time.RFC3339) }
 
 	// No counterparty (empty key) → 401.
@@ -2122,7 +2128,7 @@ func TestFederationCallAuth(t *testing.T) {
 	// Unknown but signature-valid counterparty → handshake-free subscription (§13): the caller's
 	// kernel becomes known and the price-0 call succeeds.
 	_, unknownPriv, _ := genKey()
-	unknownKey := base64.RawURLEncoding.EncodeToString(pubBytes(unknownPriv))
+	unknownKey := kernel.KernelAddress((unknownPriv))
 	r2 := fedCall(t, k, unknownPriv, action, "idem-auth-2", map[string]any{})
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusOK {
@@ -2181,7 +2187,7 @@ func TestFederationReplayReceiptNotNil(t *testing.T) {
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	_ = k.KnowKernel(ctx, pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2245,7 +2251,7 @@ func TestHealthCmdHonorsServer(t *testing.T) {
 	var hit string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit = r.URL.Path
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "public_key": "pk"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "handle": "k", "blockchain_address": "pk"})
 	}))
 	defer srv.Close()
 
@@ -2458,7 +2464,7 @@ func TestFederationReplay(t *testing.T) {
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	_ = k.KnowKernel(ctx, pubB64)
 
 	ikey1 := uuid.New().String()
@@ -2481,7 +2487,7 @@ func TestFederationReplay(t *testing.T) {
 	_, _ = k.InsertPendingIdempotencyRecord(ctx, &kernel.IdempotencyRecord{
 		ID:             uuid.New().String(),
 		IdempotencyKey: ikey2,
-		Counterparty:   base64.RawURLEncoding.EncodeToString(pubBytes(priv)),
+		Counterparty:   kernel.KernelAddress((priv)),
 		CreatedAt:      now,
 	})
 	r3 := fedCall(t, k, priv, a.ID, ikey2, map[string]any{})
@@ -2507,7 +2513,7 @@ func TestFederationIdempotencyPreconditionFailure(t *testing.T) {
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	_ = k.KnowKernel(ctx, pubB64)
 
 	// Action requires a "name" field; empty body {} will fail schema validation.
@@ -2571,7 +2577,7 @@ func TestFederationIdempotencyCommittedFailureHasReceipt(t *testing.T) {
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	_ = k.KnowKernel(ctx, pubB64)
 
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2622,7 +2628,7 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := genKey()
-	if err := k.KnowKernel(ctx, base64.RawURLEncoding.EncodeToString(pub)); err != nil {
+	if err := k.KnowKernel(ctx, pub); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := k.CreateAction(ctx, sys.ID, kernel.CreateActionRequest{
@@ -2634,11 +2640,11 @@ func TestFederationCallContractHashMismatch(t *testing.T) {
 	pubAll := kernel.VisibilityPublic
 	_, _ = k.UpdateAction(ctx, sys.ID, kernel.UpdateActionRequest{ID: a.ID, Visibility: &pubAll})
 
-	cp := base64.RawURLEncoding.EncodeToString(pub)
+	cp := pub
 	ts := time.Now().UTC().Format(time.RFC3339)
 	body := []byte("{}")
 	argsHash := sha256HexBytes(body)
-	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	ownKey, _ := k.GetConfig(ctx, configKeyAddress)
 	// Sign a stale contract hash: it verifies (it is in the signed payload) but does not match current.
 	chashKey := uuid.New().String()
 	sig, _ := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, ExpectedContractHash: "stale-hash", IdempotencyKey: chashKey, Commitment: "", Lottery: 0}, cp, ownKey, ts, argsHash)
@@ -2668,7 +2674,7 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 
 	sys, _ := k.ReadUserByHandle(ctx, "sys")
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
@@ -2683,10 +2689,10 @@ func TestFederationCallRejectsArgsHashMismatch(t *testing.T) {
 
 	// Sign over the empty body {} but deliver a different body — the receiver hashes the bytes
 	// it actually got, so the signature no longer matches and the call is rejected (401).
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cp := kernel.KernelAddress((priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	signedHash := sha256HexBytes([]byte("{}"))
-	ownKey, _ := k.GetConfig(ctx, configKeySigningPublic)
+	ownKey, _ := k.GetConfig(ctx, configKeyAddress)
 	sig, _ := testNet.SignFederationPayload(priv, kernel.OutboundCall{ActionID: a.ID, ExpectedContractHash: "", IdempotencyKey: "idem-hash-1", Commitment: "", Lottery: 0}, cp, ownKey, ts, signedHash)
 	resp := fedCallRaw(t, k, cp, ts, "idem-hash-1", a.ID, sig, []byte(`{"injected":true}`))
 	defer resp.Body.Close()
@@ -2764,12 +2770,12 @@ func TestServeRendersATaskHeldByAPeer(t *testing.T) {
 	ctx := context.Background()
 	id, _ := makeUser(t, k, "peer-list-me")
 	pub, _, _ := genKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	if _, err := k.BindPetname(ctx, peerKey, "holder"); err != nil {
 		t.Fatal(err)
 	}
 	v := enrichTask(k, ctx, &kernel.TaskEntry{TaskNotice: kernel.TaskNotice{ID: "s-1", UserID: id, Status: kernel.TaskWaiting},
-		HolderKey: peerKey, RequiredCaller: kernel.Principal{UserID: id}}, k.NewNames())
+		HolderKernel: peerKey, RequiredCaller: kernel.Principal{UserID: id}}, k.NewNames())
 	if v.RequiredCaller.Address != "peer-list-me@"+testOwnName || v.Owner.Address != "holder" || v.WaitingOnPeer {
 		t.Fatalf("view = %+v; want required_caller peer-list-me@%s, owner holder, not waiting on a peer", v, testOwnName)
 	}
@@ -2975,7 +2981,7 @@ func (f *fakeDiscoverer) Advertise(context.Context) error {
 func (f *fakeDiscoverer) DiscoverProviders(context.Context) ([]string, error) {
 	return f.providers, nil
 }
-func (f *fakeDiscoverer) BootstrapKeys() []string { return f.bootstrap }
+func (f *fakeDiscoverer) SeedAddresses() []string { return f.bootstrap }
 func (f *fakeDiscoverer) Gossip(_ context.Context, key string, _ fed.GossipRequest) (json.RawMessage, error) {
 	f.gossiped = append(f.gossiped, key)
 	if f.broken[key] {
@@ -3018,10 +3024,10 @@ func pullWith(candidates func(context.Context) []string, acc func(context.Contex
 // identity than the dialed key — is never accumulated (and is retried a later pass).
 func TestDiscoverOnce(t *testing.T) {
 	mkGossip := func(pk string) json.RawMessage {
-		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
+		b, _ := json.Marshal(kernel.GossipResponse{Address: pk, Handle: pk})
 		return b
 	}
-	poison, _ := json.Marshal(kernel.GossipResponse{PublicKey: "X", Handle: "X"}) // D claims X ≠ D
+	poison, _ := json.Marshal(kernel.GossipResponse{Address: "X", Handle: "X"}) // D claims X ≠ D
 	f := &fakeDiscoverer{
 		bootstrap: []string{"A"},
 		providers: []string{"A", "B", "C", "D"}, // A duplicates bootstrap; C offline; D mismatched
@@ -3029,10 +3035,10 @@ func TestDiscoverOnce(t *testing.T) {
 	}
 	var got []string
 	acc := func(_ context.Context, g *kernel.GossipResponse, introducer string) (string, error) {
-		if introducer != g.PublicKey {
-			t.Errorf("introducer %q must be the authenticated key (== g.PublicKey %q)", introducer, g.PublicKey)
+		if introducer != g.Address {
+			t.Errorf("introducer %q must be the authenticated key (== g.PublicKey %q)", introducer, g.Address)
 		}
-		got = append(got, g.PublicKey)
+		got = append(got, g.Address)
 		return "", nil
 	}
 	noFriends := func(context.Context) []string { return nil }
@@ -3051,7 +3057,7 @@ func TestDiscoverOnce(t *testing.T) {
 // it still pulls gossip from each known peer and records that it was reached. A kernel that answered
 // is a contact whether or not it has ever traded here.
 func TestDiscoverOncePeerSyncNoSeeds(t *testing.T) {
-	g, _ := json.Marshal(kernel.GossipResponse{PublicKey: "F", Handle: "F"})
+	g, _ := json.Marshal(kernel.GossipResponse{Address: "F", Handle: "F"})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"F": g}}
 	peers := func(context.Context) []string { return []string{"F"} }
 	var contacts []contactCall
@@ -3083,7 +3089,7 @@ func noContact(context.Context, string, contactOutcome) {}
 // A dial that never got an answer is the observation that proves a peer unreachable, so the pass
 // records it; every later stage means the peer DID answer and leaves reachability alone (§13).
 func TestDiscoverOnceRecordsContactOutcomes(t *testing.T) {
-	good, _ := json.Marshal(kernel.GossipResponse{PublicKey: "UP", Handle: "UP"})
+	good, _ := json.Marshal(kernel.GossipResponse{Address: "UP", Handle: "UP"})
 	f := &fakeDiscoverer{
 		providers: []string{"UP", "DOWN", "LIAR", "FLAKY"},
 		bootstrap: []string{"UP"},
@@ -3092,7 +3098,7 @@ func TestDiscoverOnceRecordsContactOutcomes(t *testing.T) {
 			"UP": good,
 			// LIAR answers, but as somebody else: a verification failure, not a reachability one.
 			"LIAR": func() json.RawMessage {
-				b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "OTHER", Handle: "OTHER"})
+				b, _ := json.Marshal(kernel.GossipResponse{Address: "OTHER", Handle: "OTHER"})
 				return b
 			}(),
 		},
@@ -3193,7 +3199,7 @@ func readJSONLogEvents(t *testing.T, path, event string) []map[string]any {
 // diag). Each non-verified outcome maps to a distinct stage: transport / decode / mismatch / accumulate.
 func TestDiscoverPullFailureLog(t *testing.T) {
 	mkGossip := func(pk string) json.RawMessage {
-		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
+		b, _ := json.Marshal(kernel.GossipResponse{Address: pk, Handle: pk})
 		return b
 	}
 	f := &fakeDiscoverer{
@@ -3206,7 +3212,7 @@ func TestDiscoverPullFailureLog(t *testing.T) {
 		},
 	}
 	acc := func(_ context.Context, g *kernel.GossipResponse, _ string) (string, error) {
-		if g.PublicKey == "ACC" {
+		if g.Address == "ACC" {
 			return "", fmt.Errorf("rejected")
 		}
 		return "", nil
@@ -3553,7 +3559,7 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok", "handle": "acme", "public_key": "KEY-SELF",
+			"status": "ok", "handle": "acme", "blockchain_address": "KEY-SELF",
 			"network": "play", "network_fingerprint": "D", "decimals": 6, "symbol": "fUSD",
 		})
 	})
@@ -3575,8 +3581,8 @@ func TestRegisterSelfRecordsTheServedKernel(t *testing.T) {
 	if want := "http://127.0.0.1:" + port; k.Endpoint != want {
 		t.Errorf("endpoint %q, want %q", k.Endpoint, want)
 	}
-	if k.PublicKey != "KEY-SELF" {
-		t.Errorf("public key %q, want the key /health reported", k.PublicKey)
+	if k.Address != "KEY-SELF" {
+		t.Errorf("public key %q, want the key /health reported", k.Address)
 	}
 }
 
@@ -3615,7 +3621,7 @@ func TestHealthPublishesTheFederationAddresses(t *testing.T) {
 // record would then say it was down when it was never called (§13).
 func TestDiscoverOnceStopsWhenThePassBudgetIsSpent(t *testing.T) {
 	page := func(pk string) json.RawMessage {
-		b, _ := json.Marshal(kernel.GossipResponse{PublicKey: pk, Handle: pk})
+		b, _ := json.Marshal(kernel.GossipResponse{Address: pk, Handle: pk})
 		return b
 	}
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"A": page("A"), "B": page("B"), "C": page("C")}}
@@ -3670,7 +3676,7 @@ func TestPullPeerReadsUntilCaughtUpOrOutOfBudget(t *testing.T) {
 		{"a backlog is read to the budget", "next-page", discoveryPagesPerPeer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "P", Handle: "P", NextCatalogCursor: tc.next})
+			b, _ := json.Marshal(kernel.GossipResponse{Address: "P", Handle: "P", NextCatalogCursor: tc.next})
 			f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"P": b}}
 			acc := func(context.Context, *kernel.GossipResponse, string) (string, error) { return "", nil }
 			p := pullWith(func(context.Context) []string { return []string{"P"} }, acc, noContact)
@@ -3721,7 +3727,7 @@ func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
 	served, refused := mk("lock-served", true), mk("lock-refused", false)
 
 	pub, priv, _ := genKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := k.KnowKernel(ctx, pubB64); err != nil {
 		t.Fatal(err)
 	}
@@ -3794,7 +3800,7 @@ func TestAnInboundCallStoresALockOnlyWhenItMayHaveExecuted(t *testing.T) {
 // failed and the peer offers it again next pass. Advancing anyway would drop the evidence for good,
 // because cursors only move forward.
 func TestAPageThatCouldNotBeStoredLeavesTheCursorWhereItWas(t *testing.T) {
-	b, _ := json.Marshal(kernel.GossipResponse{PublicKey: "P", Handle: "P", NextCursor: "cursor-2"})
+	b, _ := json.Marshal(kernel.GossipResponse{Address: "P", Handle: "P", NextCursor: "cursor-2"})
 	f := &fakeDiscoverer{gossip: map[string]json.RawMessage{"P": b}}
 	saved := 0
 	p := discoveryPull{
@@ -3917,10 +3923,26 @@ func TestServeBuildsTheTransportWithTheConfiguredLimits(t *testing.T) {
 		t.Fatalf("startFedTransport: %v", err)
 	}
 	t.Cleanup(func() { _ = tr.Close() })
-	at, err := peer.AddrInfoFromString(tr.ListenAddrs()[0])
+	// The endpoint is a seed line; the dialer here is plain libp2p, so it is given the peer the
+	// kernel's key makes, as the transport itself does once it has met a seed.
+	ep := tr.Endpoints()[0]
+	hostAt, portAt, err := net.SplitHostPort(ep[strings.Index(ep, "@")+1:])
 	if err != nil {
 		t.Fatal(err)
 	}
+	ma, err := multiaddr.NewMultiaddr("/ip4/" + hostAt + "/tcp/" + portAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lk, err := libp2pcrypto.UnmarshalSecp256k1PrivateKey(ethcrypto.FromECDSA(testKeyOf(k)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := peer.IDFromPrivateKey(lk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := &peer.AddrInfo{ID: id, Addrs: []multiaddr.Multiaddr{ma}}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	dial := func() host.Host {

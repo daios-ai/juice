@@ -16,7 +16,7 @@ The five things every network crawler measures, and nothing else:
 | `juice_observer_peer_rtt_seconds{kernel}` | one libp2p ping round trip; absent when the ping failed |
 | `juice_observer_last_complete_scan_timestamp_seconds` | when the whole roster was last scanned successfully |
 
-`kernel` is the kernel's public key — its public identity. Population, reachable share, version
+`kernel` is the kernel's address — its public identity. Population, reachable share, version
 distribution, relay dependence and churn are PromQL over these series; the exporter computes none of
 them. It publishes no users, actions, transactions, amounts or counterparties, and it does not claim
 to see traffic between other kernels: it cannot.
@@ -24,16 +24,16 @@ to see traffic between other kernels: it cannot.
 ## How it works
 
 The observer is a client of an ordinary Juice kernel the operator runs — the observer kernel — and
-of nothing else. It drives the `juice` command line, which handles login, token rotation and key
+of nothing else. It drives the `juice` command line, which handles login, token rotation and kernel
 pinning, exactly as `netsim/` does. It never links the kernel.
 
 One pass, every `--interval` (default 5 minutes):
 
 1. Read the whole roster, one page at a time, until a page comes back short:
    `juice --as sys@<kernel> admin peer list --all --json --limit 200 --offset N`.
-   Each row carries `public_key`, `petname`, `nickname`, `traded`, `actions`, `suspended_at`,
-   `last_seen`, `last_contact_failed_at`. Only `public_key` is used.
-2. For every key: `juice --as sys@<kernel> admin peer inspect <key> --json`. The reply's
+   Each row carries `blockchain_address`, `petname`, `nickname`, `traded`, `actions`,
+   `suspended_at`, `last_seen`, `last_contact_failed_at`. Only `blockchain_address` is used.
+2. For every address: `juice --as sys@<kernel> admin peer inspect <address> --json`. The reply's
    `reachability` object carries `path` (`direct` | `relayed` | `unreachable`), `rtt_millis` (a
    libp2p ping round trip; a peer that did not answer it is `unreachable`), `version` (`juice-kernel/<version>`, empty when
    the peer says none) and `error`. The kernel probes the peer when asked and writes nothing.
@@ -58,7 +58,7 @@ credential file and holds no token itself.
 Both hooks exist on every kernel; the observer adds nothing to it.
 
 - `GET /v1/admin/peers?all=1&limit=&offset=` — `juice admin peer list`. Default page 50, ceiling 200.
-- `GET /v1/admin/peers/{key}/inspect` — `juice admin peer inspect`. Bounded to eight seconds per
+- `GET /v1/admin/peers/{address}/inspect` — `juice admin peer inspect`. Bounded to eight seconds per
   peer, so an offline peer costs eight seconds, not the client timeout.
 
 Both are superuser routes on the kernel's client API; see `API.md`.

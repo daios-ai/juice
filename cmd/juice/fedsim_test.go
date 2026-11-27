@@ -499,7 +499,7 @@ func (n *simNet) addNode(name string, sc simConfig) *simNode {
 	if err := ensureSysNative(context.Background(), k, "sys", native.Transfer(), 0); err != nil {
 		t.Fatalf("%s: install transfer: %v", name, err)
 	}
-	pub := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	pub := kernel.KernelAddress((priv))
 
 	adapter := newFedAdapter(pub, k.SignFederation)
 	adapter.SetTransport(&simPort{net: n, self: pub})
@@ -1676,7 +1676,7 @@ func TestSimTaskReachesItsRecipient(t *testing.T) {
 		t.Fatalf("alice's own list: %d tasks, %v; want both delivered", len(open), err)
 	}
 	for _, e := range open {
-		if e.HolderKey != holder.key || e.Status != kernel.TaskWaiting || e.ActionID != "" || e.CreatedByID != "" {
+		if e.HolderKernel != holder.key || e.Status != kernel.TaskWaiting || e.ActionID != "" || e.CreatedByID != "" {
 			t.Errorf("delivered entry %+v: want waiting, held by the holder, its actions withheld", e)
 		}
 	}

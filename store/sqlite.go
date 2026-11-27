@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -61,6 +62,36 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// addressVersion is the migration from which a kernel is named by its address (P1).
+const addressVersion = "065_one_identifier"
+
+// PredatesAddresses reports whether the database at path was made by a juice that named kernels by
+// their public key. Such a database cannot be carried over, and is refused before Open, which
+// switches the journal mode and applies migrations: it is read here without being written, so a
+// database refused is left exactly as it was. A missing or empty database predates nothing.
+func PredatesAddresses(path string) (bool, error) {
+	if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+		return false, nil
+	}
+	db, err := sql.Open(driverName, "file:"+path+"?mode=ro")
+	if err != nil {
+		return false, fmt.Errorf("store: %w", err)
+	}
+	defer db.Close()
+	var tables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).Scan(&tables); err != nil {
+		return false, fmt.Errorf("store: read %s: %w", path, err)
+	}
+	if tables == 0 {
+		return false, nil
+	}
+	var at int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version >= ?`, addressVersion).Scan(&at); err != nil {
+		return false, fmt.Errorf("store: read %s: %w", path, err)
+	}
+	return at == 0, nil
 }
 
 // Close shuts down the database connection.
@@ -385,12 +416,12 @@ func (s *DB) DeactivateImportedIfHash(ctx context.Context, actionID, expectedHas
 // namesKernel holds when some record here names the kernel k as a party — a transaction, a trace, a
 // cached action it owns, a task addressed to it or held by it, a lock it took — which is what makes it a
 // counterparty rather than a kernel known only from the directory (D16).
-const namesKernel = `(EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.public_key OR x.target_kernel = k.public_key)
-   OR EXISTS (SELECT 1 FROM traces t WHERE t.caller_kernel = k.public_key OR t.target_kernel = k.public_key)
-   OR EXISTS (SELECT 1 FROM actions a WHERE a.owner_kernel = k.public_key)
-   OR EXISTS (SELECT 1 FROM tasks s WHERE s.required_caller_kernel = k.public_key)
-   OR EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key = k.public_key)
-   OR EXISTS (SELECT 1 FROM idempotency_records r WHERE r.counterparty = k.public_key))`
+const namesKernel = `(EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.address OR x.target_kernel = k.address)
+   OR EXISTS (SELECT 1 FROM traces t WHERE t.caller_kernel = k.address OR t.target_kernel = k.address)
+   OR EXISTS (SELECT 1 FROM actions a WHERE a.owner_kernel = k.address)
+   OR EXISTS (SELECT 1 FROM tasks s WHERE s.required_caller_kernel = k.address)
+   OR EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_kernel = k.address)
+   OR EXISTS (SELECT 1 FROM idempotency_records r WHERE r.counterparty = k.address))`
 
 // ListPurgeablePeers returns the keys of counterparties idle past cutoff (D16 Retention): last
 // activity — first seen, the latest transaction naming the kernel, the latest gossip mention — at or
@@ -402,38 +433,38 @@ const namesKernel = `(EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel
 // flaked.
 func (s *DB) ListPurgeablePeers(ctx context.Context, cutoff time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT k.public_key FROM kernels k
+SELECT k.address FROM kernels k
 WHERE k.forgotten_at IS NULL AND k.suspended_at IS NULL AND `+namesKernel+`
   AND max(
         julianday(k.first_seen),
         COALESCE((SELECT MAX(julianday(ended_at)) FROM transactions
-                    WHERE caller_kernel=k.public_key OR target_kernel=k.public_key), julianday(k.first_seen)),
+                    WHERE caller_kernel=k.address OR target_kernel=k.address), julianday(k.first_seen)),
         julianday(k.updated_at)
       ) <= julianday(?)
   AND NOT EXISTS (
         SELECT 1 FROM tasks s
          WHERE s.status IN ('waiting','running')
-           AND (s.required_caller_kernel=k.public_key
-                OR s.action_id IN (SELECT id FROM actions WHERE owner_kernel=k.public_key)))
-  AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_key=k.public_key AND m.status IN ('waiting','running'))
+           AND (s.required_caller_kernel=k.address
+                OR s.action_id IN (SELECT id FROM actions WHERE owner_kernel=k.address)))
+  AND NOT EXISTS (SELECT 1 FROM mailbox m WHERE m.holder_kernel=k.address AND m.status IN ('waiting','running'))
   -- Nor consent between the two: a credential one of its users stored here, or a grant one of ours
   -- holds on an action it serves. Neither can be rebuilt from discovery, and a local one never expires (D10).
-  AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.user_kernel=k.public_key)
-  AND NOT EXISTS (SELECT 1 FROM grants g JOIN actions a ON a.id=g.action_id WHERE a.owner_kernel=k.public_key)
+  AND NOT EXISTS (SELECT 1 FROM connections c WHERE c.user_kernel=k.address)
+  AND NOT EXISTS (SELECT 1 FROM grants g JOIN actions a ON a.id=g.action_id WHERE a.owner_kernel=k.address)
   -- Nothing owed either way: no call it made is still unrevealed or unpaid here, and no call we
   -- made to it is still waiting to tell it how the draw came out. Purging would forget the kernel
   -- the reveal or the payment is keyed on, and the obligation could never close (P10).
-  AND NOT EXISTS (SELECT 1 FROM traces ot`+unresolvedTrace+` AND ot.caller_kernel=k.public_key)
+  AND NOT EXISTS (SELECT 1 FROM traces ot`+unresolvedTrace+` AND ot.caller_kernel=k.address)
   AND NOT EXISTS (
         SELECT 1 FROM transactions x JOIN traces t ON t.id = x.trace_id
-         WHERE x.target_kernel=k.public_key AND x.net > 0 AND t.revealed = 0)
+         WHERE x.target_kernel=k.address AND x.net > 0 AND t.revealed = 0)
   -- Nor a call made to it still awaiting its receipt: the retry settles through the proxy this
   -- peer owns, and purging would take that proxy with it.
   AND NOT EXISTS (
         SELECT 1 FROM traces t
-         WHERE t.target_kernel=k.public_key AND t.idempotency_key IS NOT NULL
+         WHERE t.target_kernel=k.address AND t.idempotency_key IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM transactions x WHERE x.trace_id = t.id))
-ORDER BY k.public_key`, timeToStr(cutoff))
+ORDER BY k.address`, timeToStr(cutoff))
 	if err != nil {
 		return nil, dbErr(err, "list purgeable peers")
 	}
@@ -446,66 +477,67 @@ ORDER BY k.public_key`, timeToStr(cutoff))
 // forgotten, so every record that names it keeps naming it. The transaction/receipt ledger is left
 // intact (G3). Deletes run children-before-parents so the RESTRICT foreign keys (tasks→actions,
 // stats→actions) never block.
-func (s *DB) PurgePeer(ctx context.Context, pubKey string) error {
+func (s *DB) PurgePeer(ctx context.Context, addr string) error {
 	return s.withTx(ctx, "purge peer", func(tx *sql.Tx) error {
 		const owned = `SELECT id FROM actions WHERE owner_kernel=?`
-		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, pubKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM action_stats WHERE action_id IN (`+owned+`)`, addr); err != nil {
 			return dbErr(err, "delete action_stats")
 		}
 		// The peer's tasks go with their mailbox entries, and so does everything it delivered here.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM mailbox WHERE holder_key=? OR id IN (SELECT id FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`))`,
-			pubKey, pubKey, pubKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mailbox WHERE holder_kernel=? OR id IN (SELECT id FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`))`,
+			addr, addr, addr); err != nil {
 			return dbErr(err, "delete mailbox entries")
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`)`, pubKey, pubKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE required_caller_kernel=? OR action_id IN (`+owned+`)`, addr, addr); err != nil {
 			return dbErr(err, "delete tasks")
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_kernel=?`, pubKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM actions WHERE owner_kernel=?`, addr); err != nil {
 			return dbErr(err, "delete actions")
 		}
-		return deleteDiscoveryCache(ctx, tx, pubKey)
+		return deleteDiscoveryCache(ctx, tx, addr)
 	})
 }
 
 // deleteDiscoveryCache removes one kernel's regenerable discovery cache within tx — its discovery
 // docs and their FTS mirror, its evidence rows (as issuer and as subject) — and forgets its naming
 // state, marking its row forgotten. Shared by peer purge and stale directory eviction (D16
-// Retention); order is free — no FK links these tables. Doc keys are "<kernel_public_key>/…", so the FTS delete is prefix-scoped by key —
+// Retention); order is free — no FK links these tables. Doc keys are "<kernel>/…", so the FTS delete is prefix-scoped by key —
 // by range, not LIKE, since '_' in a base64url key would be a single-char wildcard and could match
 // another kernel's rows ('0' is the ASCII successor of '/').
-func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, pubKey string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key >= ? || '/' AND doc_key < ? || '0'`, pubKey, pubKey); err != nil {
+func deleteDiscoveryCache(ctx context.Context, tx *sql.Tx, addr string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key >= ? || '/' AND doc_key < ? || '0'`, addr, addr); err != nil {
 		return dbErr(err, "delete discovery_fts")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel_public_key=?`, pubKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_docs WHERE kernel=?`, addr); err != nil {
 		return dbErr(err, "delete discovery_docs")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_public_key=? OR subject_kernel_public_key=?`, pubKey, pubKey); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM evidence WHERE issuer_kernel=? OR subject_kernel=?`, addr, addr); err != nil {
 		return dbErr(err, "delete evidence")
 	}
-	// The row keeps its key and proven address, emptied of everything else: a payment from the vault
+	// The row keeps its address, emptied of everything else: a payment from that address
 	// may arrive after it is forgotten, and must still wait for its word (D23). Seeing the kernel again
 	// brings it back (UpsertKernel).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE kernels SET petname=NULL, nickname='', about='', gossip_cursor='', last_seen=NULL,
 		        last_contact_failed_at=NULL, catalog_cursor='', catalog_generation=0, forgotten_at=?
-		  WHERE public_key=?`, timeToStr(time.Now().UTC()), pubKey); err != nil {
+		  WHERE address=?`, timeToStr(time.Now().UTC()), addr); err != nil {
 		return dbErr(err, "forget kernel")
 	}
 	return nil
 }
 
 // PurgeStaleDiscovery evicts directory-only kernels — stale past cutoff, named by no record here, not
-// suspended — with their whole discovery cache (D16 Retention); the row itself goes unless it proved a
-// vault, whose payment may still arrive (D23). Counterparties are left to PurgePeer. One transaction;
+// suspended — with their whole discovery cache (D16 Retention); the row itself goes unless the world
+// pays to addresses (keepRow), where a payment from the peer's address may still arrive (D23).
+// Counterparties are left to PurgePeer. One transaction;
 // returns the count evicted.
-func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string) (int, error) {
+func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey string, keepRow bool) (int, error) {
 	var evicted int
 	err := s.withTx(ctx, "purge stale discovery", func(tx *sql.Tx) error {
 		// This kernel's own row holds its name (D15): never a stale peer. Moderation outlives idleness.
 		rows, err := tx.QueryContext(ctx,
-			`SELECT public_key FROM kernels k
-			  WHERE updated_at <= ? AND public_key <> ? AND forgotten_at IS NULL AND suspended_at IS NULL
+			`SELECT address FROM kernels k
+			  WHERE updated_at <= ? AND address <> ? AND forgotten_at IS NULL AND suspended_at IS NULL
 			    AND NOT `+namesKernel,
 			timeToStr(cutoff), selfKey)
 		if err != nil {
@@ -525,8 +557,10 @@ func (s *DB) PurgeStaleDiscovery(ctx context.Context, cutoff time.Time, selfKey 
 			return dbErr(err, "stale discovery rows")
 		}
 		for _, k := range keys {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE public_key=? AND blockchain_address = ''`, k); err != nil {
-				return dbErr(err, "delete kernel")
+			if !keepRow {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM kernels WHERE address=?`, k); err != nil {
+					return dbErr(err, "delete kernel")
+				}
 			}
 			if err := deleteDiscoveryCache(ctx, tx, k); err != nil {
 				return err
@@ -592,7 +626,7 @@ func (s *DB) UnsuspendUser(ctx context.Context, id string) error {
 	return dbErr(err, "unsuspend user")
 }
 
-// RecordKernelContact writes the contact display cache (§13), keyed by public key: one observation,
+// RecordKernelContact writes the contact display cache (§13), keyed by address: one observation,
 // one write. A successful contact advances last_seen and, when the peer reported one, refreshes our
 // cached credit there; a failed one advances last_contact_failed_at. Each timestamp only moves
 // forward and neither is ever cleared, so a slow observation cannot overwrite newer truth — a reader
@@ -609,7 +643,7 @@ func (s *DB) RecordKernelContact(ctx context.Context, publicKey string, ok bool,
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE kernels
 		    SET `+col+` = CASE WHEN `+col+` IS NULL OR julianday(`+col+`) < julianday(?) THEN ? ELSE `+col+` END
-		  WHERE public_key = ?`,
+		  WHERE address = ?`,
 		timeToStr(at), timeToStr(at), publicKey)
 	return dbErr(err, "record kernel contact")
 }
@@ -664,11 +698,11 @@ func remoteHandle(a *kernel.Action) string {
 // cached copy belongs to (D13). The account join is gated on a local owner, so a peer's user whose id
 // equals a local one never reads that account.
 const actionsFrom = `actions a LEFT JOIN accounts u ON a.owner_kernel='' AND u.id=a.owner_user_id
-	LEFT JOIN kernels ok ON a.owner_kernel<>'' AND ok.public_key=a.owner_kernel`
+	LEFT JOIN kernels ok ON a.owner_kernel<>'' AND ok.address=a.owner_kernel`
 
 // ownerSuspended fails closed: an owner that is missing is as uncallable as one suspended (D5).
 const ownerSuspended = `(CASE WHEN a.owner_kernel='' THEN u.id IS NULL OR u.suspended_at IS NOT NULL
-	ELSE ok.public_key IS NULL OR ok.suspended_at IS NOT NULL END)`
+	ELSE ok.address IS NULL OR ok.suspended_at IS NOT NULL END)`
 
 // actionCols is the canonical column list for action SELECT statements over actionsFrom.
 // Must stay in sync with scanAction/scanActionFn/finishAction.
@@ -795,10 +829,10 @@ func (s *DB) ListCatalog(ctx context.Context, q kernel.CatalogQuery, limit, offs
 		   AND (?3='' OR (a.owner_kernel='' AND a.owner_user_id=?3))
 		   AND (?4='' OR (a.owner_kernel=?4 AND (a.owner_handle=?5 OR a.owner_user_id=?5)))
 		 UNION ALL
-		 SELECT '', d.kernel_public_key||'/'||d.action_id, d.title FROM discovery_docs d
-		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel_public_key=?4 AND (d.handle=?5 OR d.owner_id=?5)))
+		 SELECT '', d.kernel||'/'||d.action_id, d.title FROM discovery_docs d
+		 WHERE ?6 AND ?3='' AND (?4='' OR (d.kernel=?4 AND (d.handle=?5 OR d.owner_id=?5)))
 		   AND NOT EXISTS (SELECT 1 FROM actions p
-		     WHERE p.owner_kernel=d.kernel_public_key AND p.remote_action_id=d.action_id
+		     WHERE p.owner_kernel=d.kernel AND p.remote_action_id=d.action_id
 		       AND p.active=1 AND p.deleted_at IS NULL)
 		 ORDER BY title, id, doc LIMIT ?7 OFFSET ?8`,
 		q.Superuser, q.CallerID, q.OwnerID, q.PeerKey, q.PeerUser, q.Local, limit, offset)
@@ -1200,13 +1234,13 @@ func (s *DB) insertAuditRows(ctx context.Context, tx *sql.Tx, ktx *kernel.Transa
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO transactions
 		 (id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,
-		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer_key,evidence_eligible,started_at,ended_at,
+		  action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,remote_signer,evidence_eligible,started_at,ended_at,
 		  caller_kernel,caller_handle,target_kernel,target_handle)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ktx.ID, ktx.ProcessID, ktx.TraceID, ktx.ParentTraceID,
 		ktx.OwnerUserID, ktx.CallerUserID, ktx.TargetUserID, ktx.ActionID, ktx.ActionName, ktx.RemoteActionID,
 		rawJSONStr(ktx.ArgsJSON), rawJSONStr(ktx.ReplyJSON), string(ktx.Status),
-		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSignerKey),
+		ktx.Gross, ktx.Net, ktx.Fee, ktx.Refund, ktx.Reason, nullStr(ktx.RemoteReceiptHash), ktx.RemoteReceiptJSON, nullStr(ktx.RemoteSigner),
 		ktx.EvidenceEligible, timeToStr(ktx.StartedAt), timeToStr(ktx.EndedAt),
 		ktx.CallerKernel, ktx.CallerHandle, ktx.TargetKernel, ktx.TargetHandle,
 	); err != nil {
@@ -1500,18 +1534,14 @@ func commitTraceTransferEffect(ctx context.Context, tx *sql.Tx, sys, traceID, tx
 // reserveTransferPayment turns a transfer's value into the rail payment that carries it to the
 // beneficiary's kernel (D18): C's lock is released and the same amount reserved from C into the
 // operator's hold, in this one commit, so C is debited once. The payment is named by the transaction,
-// which is what the beneficiary's kernel will be told (P11), and goes to that kernel's address —
-// empty where the world has no addresses, where the rail pays no address at all.
+// which is what the beneficiary's kernel will be told (P11), and goes to that kernel's address, its
+// id. Where the world has no addresses the rail pays no address at all and ignores it.
 func reserveTransferPayment(ctx context.Context, tx *sql.Tx, sys, callerC string, value int64, peer, txID string, at time.Time) error {
-	var vault string
-	if err := tx.QueryRowContext(ctx, `SELECT blockchain_address FROM kernels WHERE public_key=?`, peer).Scan(&vault); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return dbErr(err, "transfer: read vault")
-	}
 	if err := releaseTransferValue(ctx, tx, callerC, value, callerC); err != nil {
 		return err
 	}
 	return reserveRailTx(ctx, tx, sys, &kernel.RailTransfer{ID: txID, Kind: kernel.RailKindTransfer, Party: callerC,
-		Amount: value, Credit: value, Destination: vault, Status: kernel.RailStatusPending,
+		Amount: value, Credit: value, Destination: peer, Status: kernel.RailStatusPending,
 		Reason: "transfer " + txID, CreatedAt: at}, callerC, value, at)
 }
 
@@ -1965,7 +1995,7 @@ func (s *DB) TraceHasTransaction(ctx context.Context, traceID string) (bool, err
 // ---- Transactions ----
 
 const txColumns = `id,process_id,trace_id,parent_trace_id,owner_user_id,caller_user_id,target_user_id,` +
-	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer_key,''),started_at,ended_at,` +
+	`action_id,action_name,remote_action_id,args_json,reply_json,status,gross,net,fee,refund,reason,remote_receipt_hash,remote_receipt_json,COALESCE(remote_signer,''),started_at,ended_at,` +
 	`caller_kernel,caller_handle,target_kernel,target_handle`
 
 // scanTx scans one transaction row using the provided scan function.
@@ -1977,7 +2007,7 @@ func scanTx(scan func(...any) error) (kernel.Transaction, error) {
 	if err := scan(&tx.ID, &tx.ProcessID, &tx.TraceID, &tx.ParentTraceID,
 		&tx.OwnerUserID, &tx.CallerUserID, &tx.TargetUserID, &tx.ActionID, &tx.ActionName, &tx.RemoteActionID,
 		&argsJSON, &replyJSON, &status,
-		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON, &tx.RemoteSignerKey,
+		&tx.Gross, &tx.Net, &tx.Fee, &tx.Refund, &tx.Reason, &remoteReceiptHash, &tx.RemoteReceiptJSON, &tx.RemoteSigner,
 		&startedAt, &endedAt, &tx.CallerKernel, &tx.CallerHandle, &tx.TargetKernel, &tx.TargetHandle); err != nil {
 		return tx, err
 	}
@@ -2277,7 +2307,7 @@ SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_u
        s.required_caller_handle, s.partial_args, s.price, COALESCE(s.tx_id,''), s.created_at, s.action_id,
        COALESCE(a.input_schema,''), COALESCE(t.action_id,''), COALESCE(p.owner_user_id,''), COALESCE(t.process_id,''),
        COALESCE(x.status,''), COALESCE(x.reply_json,''),
-       COALESCE((SELECT value FROM config WHERE key='signing_public_key'),''),
+       COALESCE((SELECT value FROM config WHERE key='kernel_address'),''),
        COALESCE(s.requester_user_id,''), COALESCE(r.handle,'')
   FROM tasks s
   LEFT JOIN accounts r ON r.id=s.requester_user_id
@@ -2287,7 +2317,7 @@ SELECT s.id, s.revision, s.status, s.required_caller_kernel, s.required_caller_u
   LEFT JOIN transactions x ON x.id=s.tx_id
  WHERE s.id=?`, id).Scan(&e.ID, &e.Revision, &status, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID,
 		&e.RequiredCaller.Handle, &partial, &e.Price, &e.TxID, &createdAt, &e.ActionID,
-		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &e.HolderKey,
+		&schema, &e.CreatedByID, &e.OwnerUserID, &e.ProcessID, &outcome, &reply, &e.HolderKernel,
 		&e.RequesterID, &e.RequesterHandle)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, kernel.ErrNotFound.Wrap("task not found")
@@ -2318,13 +2348,13 @@ func upsertMailbox(ctx context.Context, tx *sql.Tx, e *kernel.TaskEntry) error {
 		return dbErr(err, "encode task notice")
 	}
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO mailbox (holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,
+INSERT INTO mailbox (holder_kernel,id,required_caller_kernel,required_caller_user_id,required_caller_handle,
                      owner_user_id,process_id,status,revision,notice_json,created_at,
                      requester_kernel,requester_user_id,requester_handle)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(holder_key,id) DO UPDATE SET status=excluded.status, revision=excluded.revision, notice_json=excluded.notice_json
+ON CONFLICT(holder_kernel,id) DO UPDATE SET status=excluded.status, revision=excluded.revision, notice_json=excluded.notice_json
  WHERE excluded.revision > mailbox.revision`,
-		e.HolderKey, e.ID, e.RequiredCaller.Kernel, e.RequiredCaller.UserID, e.RequiredCaller.Handle,
+		e.HolderKernel, e.ID, e.RequiredCaller.Kernel, e.RequiredCaller.UserID, e.RequiredCaller.Handle,
 		nullStr(e.OwnerUserID), nullStr(e.ProcessID), string(e.Status), e.Revision, string(notice), timeToStr(e.CreatedAt),
 		e.Requester.Kernel, e.Requester.UserID, e.Requester.Handle)
 	if err != nil || !e.RequiredCaller.Local() || e.Requester.UserID == "" || e.Requester.Same(e.RequiredCaller) {
@@ -2337,12 +2367,12 @@ VALUES (?,?,?,?,'pending',?)`,
 	return dbErr(err, "record requester")
 }
 
-const mailboxCols = `holder_key,id,required_caller_kernel,required_caller_user_id,required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json,requester_kernel,requester_user_id,requester_handle`
+const mailboxCols = `holder_kernel,id,required_caller_kernel,required_caller_user_id,required_caller_handle,COALESCE(owner_user_id,''),COALESCE(process_id,''),notice_json,requester_kernel,requester_user_id,requester_handle`
 
 func scanMailbox(scan func(...any) error) (*kernel.TaskEntry, error) {
 	e := &kernel.TaskEntry{}
 	var notice string
-	if err := scan(&e.HolderKey, &e.ID, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID, &e.RequiredCaller.Handle,
+	if err := scan(&e.HolderKernel, &e.ID, &e.RequiredCaller.Kernel, &e.RequiredCaller.UserID, &e.RequiredCaller.Handle,
 		&e.OwnerUserID, &e.ProcessID, &notice, &e.Requester.Kernel, &e.Requester.UserID, &e.Requester.Handle); err != nil {
 		return nil, err
 	}
@@ -2397,7 +2427,7 @@ func (s *DB) RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID s
 	return s.withTx(ctx, "record task notice", func(tx *sql.Tx) error {
 		var held, addressee string
 		var addresseeKernel string
-		err := tx.QueryRowContext(ctx, `SELECT holder_key, required_caller_kernel, required_caller_user_id FROM mailbox WHERE id=?`, n.ID).Scan(&held, &addresseeKernel, &addressee)
+		err := tx.QueryRowContext(ctx, `SELECT holder_kernel, required_caller_kernel, required_caller_user_id FROM mailbox WHERE id=?`, n.ID).Scan(&held, &addresseeKernel, &addressee)
 		if err == nil && (held != holderKey || addresseeKernel != "" || addressee != requiredCallerID) {
 			return kernel.ErrInvalidInput.Wrap("a task id is delivered by one holder to one addressee")
 		}
@@ -2408,7 +2438,7 @@ func (s *DB) RecordTaskNotice(ctx context.Context, holderKey, requiredCallerID s
 		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM accounts WHERE id=?`, requiredCallerID).Scan(&one); err != nil {
 			return kernel.ErrNotFound.Wrap("the task names no user of this kernel")
 		}
-		return upsertMailbox(ctx, tx, &kernel.TaskEntry{TaskNotice: *n, HolderKey: holderKey,
+		return upsertMailbox(ctx, tx, &kernel.TaskEntry{TaskNotice: *n, HolderKernel: holderKey,
 			RequiredCaller: kernel.User(requiredCallerID),
 			Requester:      kernel.Principal{Kernel: holderKey, UserID: n.RequesterID, Handle: n.RequesterHandle}})
 	})
@@ -3327,18 +3357,17 @@ func ftsMatchQuery(query string) string {
 // outbound act) NOR gossip_cursor/last_seen, each of which has its own narrow path that
 // runs only after the corresponding work is verified and committed. Insert-if-absent for everything
 // else, so a minimal row created by an inbound call never clears learned metadata.
-func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, blockchainAddress string, now time.Time) error {
+func (s *DB) UpsertKernel(ctx context.Context, address, nickname, about string, now time.Time) error {
 	return s.withTx(ctx, "upsert kernel", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO kernels (public_key,nickname,about,blockchain_address,first_seen,updated_at)
-		 VALUES (?,?,?,?,?,?)
-		 ON CONFLICT(public_key) DO UPDATE SET
+			`INSERT INTO kernels (address,nickname,about,first_seen,updated_at)
+		 VALUES (?,?,?,?,?)
+		 ON CONFLICT(address) DO UPDATE SET
 		   nickname=CASE WHEN excluded.nickname != '' THEN excluded.nickname ELSE kernels.nickname END,
 		   about=CASE WHEN excluded.about != '' THEN excluded.about ELSE kernels.about END,
-		   blockchain_address=CASE WHEN excluded.blockchain_address != '' THEN excluded.blockchain_address ELSE kernels.blockchain_address END,
 		   forgotten_at=NULL,
 		   updated_at=excluded.updated_at`,
-			publicKey, nickname, about, blockchainAddress, timeToStr(now), timeToStr(now),
+			address, nickname, about, timeToStr(now), timeToStr(now),
 		)
 		return dbErr(err, "upsert kernel")
 	})
@@ -3348,14 +3377,14 @@ func (s *DB) UpsertKernel(ctx context.Context, publicKey, nickname, about, block
 func (s *DB) BindPetname(ctx context.Context, publicKey, petname string) error {
 	return s.withTx(ctx, "bind petname", func(tx *sql.Tx) error {
 		var known int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kernels WHERE public_key=?`, publicKey).Scan(&known); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM kernels WHERE address=?`, publicKey).Scan(&known); err != nil {
 			return dbErr(err, "read kernel")
 		}
 		if known == 0 {
 			return kernel.ErrNotFound.Wrapf("kernel %s is not known", publicKey)
 		}
 		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT public_key FROM kernels WHERE petname=?`, petname).Scan(&owner)
+		err := tx.QueryRowContext(ctx, `SELECT address FROM kernels WHERE petname=?`, petname).Scan(&owner)
 		switch {
 		case errors.Is(err, sql.ErrNoRows) || owner == publicKey:
 		case err != nil:
@@ -3363,7 +3392,7 @@ func (s *DB) BindPetname(ctx context.Context, publicKey, petname string) error {
 		default:
 			return kernel.ErrInvalidInput.Wrapf("petname %s is already bound to another kernel", petname)
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE kernels SET petname=? WHERE public_key=?`, petname, publicKey)
+		_, err = tx.ExecContext(ctx, `UPDATE kernels SET petname=? WHERE address=?`, petname, publicKey)
 		return dbErr(err, "bind petname")
 	})
 }
@@ -3374,12 +3403,12 @@ func (s *DB) BindPetname(ctx context.Context, publicKey, petname string) error {
 func (s *DB) SetKernelSuspended(ctx context.Context, publicKey string, suspend bool, now time.Time) error {
 	if suspend {
 		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO kernels (public_key,nickname,about,first_seen,updated_at,suspended_at) VALUES (?,'','',?,?,?)
-			 ON CONFLICT(public_key) DO UPDATE SET suspended_at=excluded.suspended_at`,
+			`INSERT INTO kernels (address,nickname,about,first_seen,updated_at,suspended_at) VALUES (?,'','',?,?,?)
+			 ON CONFLICT(address) DO UPDATE SET suspended_at=excluded.suspended_at`,
 			publicKey, timeToStr(now), timeToStr(now), timeToStr(now))
 		return dbErr(err, "suspend kernel")
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE kernels SET suspended_at=NULL WHERE public_key=?`, publicKey)
+	res, err := s.db.ExecContext(ctx, `UPDATE kernels SET suspended_at=NULL WHERE address=?`, publicKey)
 	if err != nil {
 		return dbErr(err, "unsuspend kernel")
 	}
@@ -3397,13 +3426,13 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 		limit = -1 // SQLite: no ceiling
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT k.public_key, COALESCE(k.petname,''), k.nickname, k.about,
-		        EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.public_key OR x.target_kernel = k.public_key),
+		`SELECT k.address, COALESCE(k.petname,''), k.nickname, k.about,
+		        EXISTS (SELECT 1 FROM transactions x WHERE x.caller_kernel = k.address OR x.target_kernel = k.address),
 		        k.suspended_at, k.last_seen, k.last_contact_failed_at,
-		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel_public_key = k.public_key)
+		        (SELECT COUNT(*) FROM discovery_docs d WHERE d.kernel = k.address)
 		 FROM kernels k
-		 WHERE k.public_key != ? AND k.forgotten_at IS NULL AND (? OR k.suspended_at IS NULL)
-		 ORDER BY k.updated_at DESC, k.public_key
+		 WHERE k.address != ? AND k.forgotten_at IS NULL AND (? OR k.suspended_at IS NULL)
+		 ORDER BY k.updated_at DESC, k.address
 		 LIMIT ? OFFSET ?`, selfKey, includeSuspended, limit, offset)
 	if err != nil {
 		return nil, dbErr(err, "list kernels")
@@ -3411,7 +3440,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 	return queryList(rows, "list kernels", func(scan func(...any) error) (*kernel.RemoteKernelView, error) {
 		var v kernel.RemoteKernelView
 		var suspendedAt, lastSeen, failedAt *string
-		if err := scan(&v.PublicKey, &v.Petname, &v.Nickname, &v.About, &v.Traded,
+		if err := scan(&v.Address, &v.Petname, &v.Nickname, &v.About, &v.Traded,
 			&suspendedAt, &lastSeen, &failedAt, &v.Actions); err != nil {
 			return nil, err
 		}
@@ -3423,7 +3452,7 @@ func (s *DB) ListKernels(ctx context.Context, selfKey string, includeSuspended b
 }
 
 func (s *DB) ReadKernel(ctx context.Context, publicKey string) (*kernel.RemoteKernel, error) {
-	return s.readKernelBy(ctx, "public_key", publicKey)
+	return s.readKernelBy(ctx, "address", publicKey)
 }
 
 // ReadKernelByPetname resolves a bound petname to its kernel (§13); nil when no kernel holds it.
@@ -3438,9 +3467,9 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 	var firstSeen, updatedAt string
 	var lastSeen, failedAt, suspendedAt *string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT public_key,COALESCE(petname,''),nickname,about,blockchain_address,gossip_cursor,last_seen,last_contact_failed_at,suspended_at,first_seen,updated_at
+		`SELECT address,COALESCE(petname,''),nickname,about,gossip_cursor,last_seen,last_contact_failed_at,suspended_at,first_seen,updated_at
 		   FROM kernels WHERE `+col+`=?`, val).
-		Scan(&k.PublicKey, &k.Petname, &k.Nickname, &k.About, &k.BlockchainAddress, &k.GossipCursor,
+		Scan(&k.Address, &k.Petname, &k.Nickname, &k.About, &k.GossipCursor,
 			&lastSeen, &failedAt, &suspendedAt, &firstSeen, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3460,7 +3489,7 @@ func (s *DB) readKernelBy(ctx context.Context, col, val string) (*kernel.RemoteK
 // verified and committed (§13) — never from ordinary observation.
 func (s *DB) SetGossipCursor(ctx context.Context, publicKey, cursor string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE kernels SET gossip_cursor=?, updated_at=? WHERE public_key=?`,
+		`UPDATE kernels SET gossip_cursor=?, updated_at=? WHERE address=?`,
 		cursor, timeToStr(time.Now().UTC()), publicKey)
 	return dbErr(err, "set gossip cursor")
 }
@@ -3479,7 +3508,7 @@ func discoveryDocKey(kernelKey, actionID string) string {
 // the whole of one, so nothing is removed until a scan reaches the end (an empty nextCursor) —
 // and because the three writes are one commit, the catalogue is never seen partway between them
 // (P9).
-func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs []*kernel.DiscoveryDoc, nextCursor string, generation int64) error {
+func (s *DB) ApplyCatalogPage(ctx context.Context, kernelAddr string, docs []*kernel.DiscoveryDoc, nextCursor string, generation int64) error {
 	return s.withTx(ctx, "apply catalog page", func(tx *sql.Tx) error {
 		for _, d := range docs {
 			inJSON, o0 := json.Marshal(d.InputSchema)
@@ -3496,19 +3525,19 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 				embed = string(b)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO discovery_docs (kernel_public_key,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
+				`INSERT INTO discovery_docs (kernel,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,generation,observed_at)
 				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-				 ON CONFLICT (kernel_public_key, action_id) DO UPDATE SET
+				 ON CONFLICT (kernel, action_id) DO UPDATE SET
 				   handle=excluded.handle, owner_id=excluded.owner_id, title=excluded.title, description=excluded.description, name=excluded.name,
 				   input_schema=excluded.input_schema, output_schema=excluded.output_schema,
 				   serving_price=excluded.serving_price, embed_vec=excluded.embed_vec,
 				   generation=excluded.generation, observed_at=excluded.observed_at`,
-				kernelPublicKey, d.Handle, d.OwnerID, d.Title, d.Description, d.ActionID, d.Name,
+				kernelAddr, d.Handle, d.OwnerID, d.Title, d.Description, d.ActionID, d.Name,
 				string(inJSON), string(outJSON), d.ServingPrice, embed, generation,
 				timeToStr(d.ObservedAt)); err != nil {
 				return dbErr(err, "insert discovery_doc")
 			}
-			key := discoveryDocKey(kernelPublicKey, d.ActionID)
+			key := discoveryDocKey(kernelAddr, d.ActionID)
 			if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key = ?`, key); err != nil {
 				return dbErr(err, "clear discovery_fts row")
 			}
@@ -3519,8 +3548,8 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 		}
 		if nextCursor == "" { // the page ended the catalogue: what this scan never mentioned is gone
 			rows, err := tx.QueryContext(ctx,
-				`SELECT action_id FROM discovery_docs WHERE kernel_public_key=? AND generation<>?`,
-				kernelPublicKey, generation)
+				`SELECT action_id FROM discovery_docs WHERE kernel=? AND generation<>?`,
+				kernelAddr, generation)
 			if err != nil {
 				return dbErr(err, "list stale discovery docs")
 			}
@@ -3536,19 +3565,19 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 			rows.Close()
 			for _, id := range stale {
 				if _, err := tx.ExecContext(ctx, `DELETE FROM discovery_fts WHERE doc_key=?`,
-					discoveryDocKey(kernelPublicKey, id)); err != nil {
+					discoveryDocKey(kernelAddr, id)); err != nil {
 					return dbErr(err, "clear discovery_fts")
 				}
 			}
 			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM discovery_docs WHERE kernel_public_key=? AND generation<>?`,
-				kernelPublicKey, generation); err != nil {
+				`DELETE FROM discovery_docs WHERE kernel=? AND generation<>?`,
+				kernelAddr, generation); err != nil {
 				return dbErr(err, "sweep discovery_docs")
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE kernels SET catalog_cursor=?, catalog_generation=? WHERE public_key=?`,
-			nextCursor, generation, kernelPublicKey); err != nil {
+			`UPDATE kernels SET catalog_cursor=?, catalog_generation=? WHERE address=?`,
+			nextCursor, generation, kernelAddr); err != nil {
 			return dbErr(err, "set catalog scan")
 		}
 		return nil
@@ -3558,12 +3587,12 @@ func (s *DB) ApplyCatalogPage(ctx context.Context, kernelPublicKey string, docs 
 // DiscoveryEmbedding returns the embedding already held for one discovered action when the text it
 // was computed from — its title and description — has not changed, so unchanged words cost no
 // model call.
-func (s *DB) DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, text string) ([]float32, bool) {
+func (s *DB) DiscoveryEmbedding(ctx context.Context, kernelAddr, actionID, text string) ([]float32, bool) {
 	var title, description string
 	var embed *string
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT title, description, embed_vec FROM discovery_docs WHERE kernel_public_key=? AND action_id=?`,
-		kernelPublicKey, actionID).Scan(&title, &description, &embed); err != nil || embed == nil {
+		`SELECT title, description, embed_vec FROM discovery_docs WHERE kernel=? AND action_id=?`,
+		kernelAddr, actionID).Scan(&title, &description, &embed); err != nil || embed == nil {
 		return nil, false
 	}
 	if title+" "+description != text {
@@ -3578,12 +3607,12 @@ func (s *DB) DiscoveryEmbedding(ctx context.Context, kernelPublicKey, actionID, 
 
 // CatalogScan is where a peer's catalogue scan stands: the cursor to resume at, and the generation
 // the pages so far were stamped with.
-func (s *DB) CatalogScan(ctx context.Context, kernelPublicKey string) (string, int64, error) {
+func (s *DB) CatalogScan(ctx context.Context, kernelAddr string) (string, int64, error) {
 	var cursor string
 	var generation int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT catalog_cursor, catalog_generation FROM kernels WHERE public_key=?`,
-		kernelPublicKey).Scan(&cursor, &generation)
+		`SELECT catalog_cursor, catalog_generation FROM kernels WHERE address=?`,
+		kernelAddr).Scan(&cursor, &generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, nil
 	}
@@ -3592,7 +3621,7 @@ func (s *DB) CatalogScan(ctx context.Context, kernelPublicKey string) (string, i
 
 func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kernel_public_key,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
+		`SELECT kernel,handle,owner_id,title,description,action_id,name,input_schema,output_schema,serving_price,embed_vec,observed_at
 		 FROM discovery_docs`)
 	if err != nil {
 		return nil, dbErr(err, "list discovery docs")
@@ -3601,7 +3630,7 @@ func (s *DB) ListDiscoveryDocs(ctx context.Context) ([]*kernel.DiscoveryDoc, err
 		var d kernel.DiscoveryDoc
 		var inJSON, outJSON, observedAt string
 		var embed sql.NullString
-		if err := scan(&d.KernelPublicKey, &d.Handle, &d.OwnerID, &d.Title, &d.Description, &d.ActionID, &d.Name,
+		if err := scan(&d.Kernel, &d.Handle, &d.OwnerID, &d.Title, &d.Description, &d.ActionID, &d.Name,
 			&inJSON, &outJSON, &d.ServingPrice, &embed, &observedAt); err != nil {
 			return nil, err
 		}
@@ -3635,8 +3664,8 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 		var storedReceipt, storedRating string
 		var equivocated int
 		err := tx.QueryRowContext(ctx,
-			`SELECT evidence_receipt_json, rating_json, equivocated FROM evidence WHERE issuer_public_key=? AND receipt_hash=?`,
-			e.IssuerPublicKey, e.ReceiptHash).Scan(&storedReceipt, &storedRating, &equivocated)
+			`SELECT evidence_receipt_json, rating_json, equivocated FROM evidence WHERE issuer_kernel=? AND receipt_hash=?`,
+			e.IssuerKernel, e.ReceiptHash).Scan(&storedReceipt, &storedRating, &equivocated)
 		switch {
 		case err == sql.ErrNoRows:
 			// New row.
@@ -3649,8 +3678,8 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 			// statement is left exactly as signed — overwriting half of it would leave a row no
 			// single signature covers (§13).
 			_, uerr := tx.ExecContext(ctx,
-				`UPDATE evidence SET equivocated=1, observed_at=? WHERE issuer_public_key=? AND receipt_hash=?`,
-				timeToStr(e.ObservedAt), e.IssuerPublicKey, e.ReceiptHash)
+				`UPDATE evidence SET equivocated=1, observed_at=? WHERE issuer_kernel=? AND receipt_hash=?`,
+				timeToStr(e.ObservedAt), e.IssuerKernel, e.ReceiptHash)
 			return dbErr(uerr, "mark evidence equivocated")
 		default:
 			// The same signed statement, arriving again — possibly now carrying its rating. Only
@@ -3667,18 +3696,18 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 			// effective_at moves only with the rating, since that is the only thing that changed.
 			_, uerr := tx.ExecContext(ctx,
 				`UPDATE evidence SET rating_json=?, equivocated=?, observed_at=?, effective_at=?
-				 WHERE issuer_public_key=? AND receipt_hash=?`,
+				 WHERE issuer_kernel=? AND receipt_hash=?`,
 				finalRating, boolInt(finalEquivocated), timeToStr(e.ObservedAt), timeToStr(e.EffectiveAt),
-				e.IssuerPublicKey, e.ReceiptHash)
+				e.IssuerKernel, e.ReceiptHash)
 			return dbErr(uerr, "update evidence")
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO evidence (issuer_public_key,receipt_hash,subject_kernel_public_key,subject_action_id,
-			   counterparty_kernel_public_key,evidence_receipt_json,rating_json,remote_receipt_hash,
+			`INSERT INTO evidence (issuer_kernel,receipt_hash,subject_kernel,subject_action_id,
+			   counterparty_kernel,evidence_receipt_json,rating_json,remote_receipt_hash,
 			   receipt_created_at,effective_at,observed_at,equivocated)
 			 VALUES (?,?,?,?,?,?,?,?,?,?,?,0)`,
-			e.IssuerPublicKey, e.ReceiptHash, e.SubjectKernelPublicKey, e.SubjectActionID,
-			e.CounterpartyKernelPublicKey, e.EvidenceReceiptJSON, e.RatingJSON, e.RemoteReceiptHash,
+			e.IssuerKernel, e.ReceiptHash, e.SubjectKernel, e.SubjectActionID,
+			e.CounterpartyKernel, e.EvidenceReceiptJSON, e.RatingJSON, e.RemoteReceiptHash,
 			timeToStr(e.ReceiptCreatedAt), timeToStr(e.EffectiveAt), timeToStr(e.ObservedAt)); err != nil {
 			return dbErr(err, "insert evidence")
 		}
@@ -3686,13 +3715,13 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 		// sender serves, so a consumer never stores what it is about to evict.
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM evidence
-			  WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
+			  WHERE issuer_kernel=? AND subject_kernel=? AND subject_action_id=?
 			    AND receipt_hash NOT IN (
 			      SELECT receipt_hash FROM evidence
-			       WHERE issuer_public_key=? AND subject_kernel_public_key=? AND subject_action_id=?
+			       WHERE issuer_kernel=? AND subject_kernel=? AND subject_action_id=?
 			       ORDER BY receipt_created_at DESC, receipt_hash DESC LIMIT ?)`,
-			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID,
-			e.IssuerPublicKey, e.SubjectKernelPublicKey, e.SubjectActionID, kernelEvidenceCap); err != nil {
+			e.IssuerKernel, e.SubjectKernel, e.SubjectActionID,
+			e.IssuerKernel, e.SubjectKernel, e.SubjectActionID, kernelEvidenceCap); err != nil {
 			return dbErr(err, "evict evidence over cap")
 		}
 		return nil
@@ -3702,15 +3731,15 @@ func (s *DB) UpsertEvidence(ctx context.Context, e *kernel.EvidenceRow) error {
 // ListEvidenceBySubject returns the retained evidence about one subject: a whole kernel when
 // subjectActionID is empty, one of its actions otherwise. Both forms are served by
 // idx_evidence_subject, which leads on exactly that pair.
-func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*kernel.EvidenceRow, error) {
-	where, args := `subject_kernel_public_key=?`, []any{subjectKernelPublicKey}
+func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernel, subjectActionID string) ([]*kernel.EvidenceRow, error) {
+	where, args := `subject_kernel=?`, []any{subjectKernel}
 	if subjectActionID != "" {
 		where += ` AND subject_action_id=?`
 		args = append(args, subjectActionID)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT issuer_public_key,receipt_hash,subject_kernel_public_key,subject_action_id,
-		        counterparty_kernel_public_key,evidence_receipt_json,rating_json,remote_receipt_hash,
+		`SELECT issuer_kernel,receipt_hash,subject_kernel,subject_action_id,
+		        counterparty_kernel,evidence_receipt_json,rating_json,remote_receipt_hash,
 		        receipt_created_at,effective_at,observed_at,equivocated
 		 FROM evidence WHERE `+where+` ORDER BY receipt_created_at DESC`, args...)
 	if err != nil {
@@ -3720,8 +3749,8 @@ func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, 
 		var e kernel.EvidenceRow
 		var receiptCreated, effectiveAt, observedAt string
 		var equiv int
-		if err := scan(&e.IssuerPublicKey, &e.ReceiptHash, &e.SubjectKernelPublicKey, &e.SubjectActionID,
-			&e.CounterpartyKernelPublicKey, &e.EvidenceReceiptJSON, &e.RatingJSON, &e.RemoteReceiptHash,
+		if err := scan(&e.IssuerKernel, &e.ReceiptHash, &e.SubjectKernel, &e.SubjectActionID,
+			&e.CounterpartyKernel, &e.EvidenceReceiptJSON, &e.RatingJSON, &e.RemoteReceiptHash,
 			&receiptCreated, &effectiveAt, &observedAt, &equiv); err != nil {
 			return nil, err
 		}
@@ -3735,8 +3764,8 @@ func (s *DB) ListEvidenceBySubject(ctx context.Context, subjectKernelPublicKey, 
 
 // ListReceiptsForGossip returns one ordered page of this kernel's own gossip-eligible receipts after
 // cursor (§13). Two legs, unified: (a) receipts of the kernel's own active public non-transfer
-// actions (execution evidence — SubjectKernelPublicKey left empty for the kernel to fill with its own
-// key; CounterpartyKernelPublicKey set when the caller was a peer); (b) receipt-backed remote_proxy
+// actions (execution evidence — SubjectKernel left empty for the kernel to fill with its own
+// key; CounterpartyKernel set when the caller was a peer); (b) receipt-backed remote_proxy
 // calls (subject is the peer owner's key + remote action id; RemoteReceiptJSON is the stored serving
 // receipt) — every admitted execution, rated or not. Which rows are evidence at all was decided when
 // each settled and is read off `evidence_eligible`, never re-derived here (P9). The receipt and the
@@ -3794,7 +3823,7 @@ LIMIT ?`
 		var ratingValue *float64
 		var ratingNote, ratedHash, ratingCreated *string
 		if err := rows.Scan(&receiptHash, &status, &started, &created,
-			&row.SubjectKernelPublicKey, &row.SubjectActionID, &row.CounterpartyKernelPublicKey,
+			&row.SubjectKernel, &row.SubjectActionID, &row.CounterpartyKernel,
 			&row.RemoteReceiptJSON, &eff, &receiptID,
 			&ratingValue, &ratingNote, &ratedHash, &ratingCreated); err != nil {
 			return nil, dbErr(err, "scan gossip receipt")
@@ -3991,10 +4020,10 @@ func (s *DB) ListPublicRatings(ctx context.Context, actionID, subjectKernel, sub
 	// equivocated says nothing, so nothing links through it (D11, D16).
 	subjectRecord := `
 		  JOIN evidence x ON x.receipt_hash = e.remote_receipt_hash
-		                 AND x.issuer_public_key = ?
-		                 AND x.subject_kernel_public_key = e.subject_kernel_public_key
+		                 AND x.issuer_kernel = ?
+		                 AND x.subject_kernel = e.subject_kernel
 		                 AND x.subject_action_id = e.subject_action_id
-		                 AND x.counterparty_kernel_public_key = e.issuer_public_key
+		                 AND x.counterparty_kernel = e.issuer_kernel
 		                 AND x.equivocated = 0`
 	// The outcomes the two sides report, compared in the group rather than in the join: a row
 	// dropped by the join is a row whose disagreement nobody would see.
@@ -4005,7 +4034,7 @@ func (s *DB) ListPublicRatings(ctx context.Context, actionID, subjectKernel, sub
 		// by the kernel that called it.
 		subjectRecord = `
 		  JOIN receipts rc ON rc.hash = e.remote_receipt_hash AND rc.action_id = ?
-		  JOIN transactions t2 ON t2.id = rc.tx_id AND t2.caller_kernel = e.issuer_public_key`
+		  JOIN transactions t2 ON t2.id = rc.tx_id AND t2.caller_kernel = e.issuer_kernel`
 		subjectStatus = `MIN(t2.status)`
 		args = []any{actionID, actionID, subjectKernel, subjectAction}
 	}
@@ -4017,8 +4046,8 @@ func (s *DB) ListPublicRatings(ctx context.Context, actionID, subjectKernel, sub
 		  SELECT MIN(json_extract(e.rating_json,'$.rating')), MIN(json_extract(e.rating_json,'$.note')),
 		         MIN(json_extract(e.rating_json,'$.created_at')), 'peer'
 		  FROM evidence e`+subjectRecord+`
-		  WHERE e.subject_kernel_public_key=? AND e.subject_action_id=? AND e.rating_json<>''
-		  GROUP BY e.issuer_public_key, e.remote_receipt_hash
+		  WHERE e.subject_kernel=? AND e.subject_action_id=? AND e.rating_json<>''
+		  GROUP BY e.issuer_kernel, e.remote_receipt_hash
 		  HAVING COUNT(DISTINCT json_extract(e.rating_json,'$.rating') || '|' || COALESCE(json_extract(e.rating_json,'$.note'),'')) = 1
 		     AND COUNT(DISTINCT json_extract(e.evidence_receipt_json,'$.status')) = 1
 		     AND `+subjectStatus+` = MIN(json_extract(e.evidence_receipt_json,'$.status'))

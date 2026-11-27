@@ -44,7 +44,7 @@ func TestRegisterRemoteKernelValidatesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	validKey := base64.RawURLEncoding.EncodeToString(pub)
+	validKey := pub
 	if _, err := knownPeer(k, ctx, validKey); err != nil {
 		t.Fatalf("valid remote kernel should register: %v", err)
 	}
@@ -58,8 +58,8 @@ func TestBindPetnameCollisionSuffixes(t *testing.T) {
 
 	pub1, _, _ := kernel.GenKey()
 	pub2, _, _ := kernel.GenKey()
-	key1 := base64.RawURLEncoding.EncodeToString(pub1)
-	key2 := base64.RawURLEncoding.EncodeToString(pub2)
+	key1 := pub1
+	key2 := pub2
 
 	// The name lives in the kernel namespace (D15) and the operator gives it exactly: a second kernel
 	// asking for a name already given is refused, never suffixed into a name nobody chose.
@@ -81,7 +81,7 @@ func TestKernelMountConcurrent(t *testing.T) {
 	k := newTestKernel(st)
 	setupSys(t, k, st)
 	pub, _, _ := kernel.GenKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 
 	errs := make([]error, 8)
 	var wg sync.WaitGroup
@@ -107,14 +107,14 @@ func TestBindPetnameNormalizes(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, _, _ := kernel.GenKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 
 	// The petname is canonicalized on binding and resolves in the kernel namespace only.
 	if _, err := mountKernelForTest(t, k, ctx, key, "peerless"); err != nil {
 		t.Fatalf("mount kernel: %v", err)
 	}
 	rk, err := k.ReadKernelByPetname(ctx, "peerless")
-	if err != nil || rk == nil || rk.PublicKey != key {
+	if err != nil || rk == nil || rk.Address != key {
 		t.Fatalf("ReadKernelByPetname(peerless): got %v err %v, want key %s", rk, err, key)
 	}
 	if _, err := k.ReadUserByHandle(ctx, "peerless"); err == nil {
@@ -131,8 +131,8 @@ func TestImportRemoteActionCreatesRemoteProxy(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "remote-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "remote-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,8 +184,8 @@ func TestImportRemoteActionReimp(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "reimp-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "reimp-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,8 +243,8 @@ func TestImportRemoteActionUnchangedPreservesActiveAndStats(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "stable-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "stable-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,8 +300,8 @@ func TestImportRemoteActionIdempotentAfterUpdate(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "idem-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "idem-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,8 +363,8 @@ func TestImportRemoteActionRejectsInvalidSignature(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, _, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "bad-sig-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "bad-sig-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,8 +393,8 @@ func TestImportRemoteActionRejectsNegativePrice(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "neg-price-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "neg-price-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,8 +428,8 @@ func TestImportRemoteActionRejectsMissingRequiredFields(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mrf-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "mrf-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,8 +590,8 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 	k := newTestKernelWithHTTP(st, fake)
 	fake.signsAs(k, priv)
 
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "proxy-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "proxy-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestCallRemoteProxyRecordsReceiptHash(t *testing.T) {
 // setupSettleProxy creates an active+public remote proxy action and a funded caller with a
 // pre-funded root trace, returning everything needed to drive a remote settlement through Call.
 // The fake's receiptJSON is left empty for the caller to set.
-func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv *ecdsa.PrivateKey, pub []byte, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
+func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, priv *ecdsa.PrivateKey, pub string, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
 	t.Helper()
 	return setupSettleProxyWithKernel(t, st, newTestKernelWithHTTP(st, fake), fake, priv, pub, remoteActionID, proxyPrice)
 }
@@ -674,14 +674,14 @@ func setupSettleProxy(t *testing.T, st kernel.Store, fake *fakeFederationHTTP, p
 // setupSettleProxyWithKernel is setupSettleProxy against a caller-supplied kernel, so a test
 // can configure the kernel before importing the proxy. The fake signs as the peer, so the receipts
 // it returns name the request they answer, as a real seller's do (P5).
-func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel, fake *fakeFederationHTTP, priv *ecdsa.PrivateKey, pub []byte, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
+func setupSettleProxyWithKernel(t *testing.T, st kernel.Store, k *kernel.Kernel, fake *fakeFederationHTTP, priv *ecdsa.PrivateKey, pub string, remoteActionID string, proxyPrice int64) (*kernel.Kernel, *kernel.Action, *kernel.Account) {
 	t.Helper()
 	fake.signsAs(k, priv)
 	ctx := context.Background()
 	setupSys(t, nil, st)
 
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "settle-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "settle-peer")
 	if err != nil {
 		t.Fatalf("knownPeer: %v", err)
 	}
@@ -1342,8 +1342,8 @@ func TestProxyMutationsRejected(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mut-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "mut-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1379,11 +1379,11 @@ func TestProxyAddressableFormsOnly(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	peer, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "mp-peer")
+	bindPetnameForTest(t, k, ctx, pub, "mp-peer")
 	m := kernel.ActionManifest{
 		ActionID: "mp-act", OwnerID: "mp-owner-id", OwnerHandle: "mp-owner", Title: "Test action", Name: "act", Description: "svc",
 		Kind: kernel.KindHTTP, Price: 5, InputSchema: map[string]any{"type": "object"},
@@ -1416,7 +1416,7 @@ func TestSigilHandleRejectedAtBoundaries(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	peer, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1444,7 @@ func TestResolvePrincipalRefusesEmptyRemoteID(t *testing.T) {
 	ctx := context.Background()
 	setupSys(t, nil, st)
 	pub, _, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	fake := &fakeFederationHTTP{resolveUserID: "", resolveHandle: "alice"}
 	k := newTestKernelWithHTTP(st, fake)
 	if _, err := knownPeer(k, ctx, peerKey); err != nil {
@@ -1467,8 +1467,8 @@ func TestSetActiveRejectsRemoteProxy(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "d-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "d-peer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1498,7 +1498,7 @@ func TestImportedProxyKeepsHandleBesideName(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 
 	peer, err := knownPeer(k, ctx, pubB64)
 	if err != nil {
@@ -1538,7 +1538,7 @@ func TestRemoteImportOwnerQualifiedNoCollision(t *testing.T) {
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{})
 
 	const peerPetname = "collide-peer"
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	peer, err := knownPeer(k, ctx, peerKey)
 	if err != nil {
 		t.Fatal(err)
@@ -1583,7 +1583,7 @@ func TestReplacedRemoteActionRetiresItsCachedCopy(t *testing.T) {
 	setupSys(t, nil, st)
 	pub, priv, _ := kernel.GenKey()
 	k := newTestKernelWithHTTP(st, &fakeFederationHTTP{})
-	peer, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1612,7 +1612,7 @@ func TestReplacedRemoteActionRetiresItsCachedCopy(t *testing.T) {
 
 func TestTaskCompleteSignatureCoversTheUser(t *testing.T) {
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	cp, recip, uid, sid, ts := pubB64, "recipkey", "user-1", "task-1", "2026-07-31T00:00:00Z"
 
 	sig, err := testNet.SignTaskPayload(priv, "complete", sid, cp, recip, "idem", ts, "ihash", uid, false)
@@ -1667,7 +1667,7 @@ func TestLocalPrincipal(t *testing.T) {
 func TestLazyResolveRemoteCachesProxy(t *testing.T) {
 	st := newTestStore(t)
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	m := kernel.ActionManifest{
 		ActionID: "ra-1", OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
@@ -1734,7 +1734,7 @@ func TestColdResolveIndexesAndNamesNothing(t *testing.T) {
 	newPeer := func(t *testing.T, handle string) (kernel.ActionManifest, string) {
 		t.Helper()
 		pub, priv, _ := kernel.GenKey()
-		key := base64.RawURLEncoding.EncodeToString(pub)
+		key := pub
 		m := kernel.ActionManifest{
 			ActionID: "ra-" + handle, OwnerID: "remote-" + handle, OwnerHandle: "bob", Title: "Test action", Name: "greet",
 			RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
@@ -1765,7 +1765,7 @@ func TestColdResolveIndexesAndNamesNothing(t *testing.T) {
 			k := newTestKernelWithHTTP(st, &fakeFederationHTTP{resolveManifest: &m})
 			ctx := context.Background()
 			// A valid, free nickname is available for the bind to seed from.
-			if err := st.UpsertKernel(ctx, key, tc.nickname, "", "", time.Now().UTC()); err != nil {
+			if err := st.UpsertKernel(ctx, key, tc.nickname, "", time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if tc.preAccount {
@@ -1815,8 +1815,8 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	k := newTestKernelWithHTTP(st, fake)
 	fake.signsAs(k, priv)
 
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "verify-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "verify-peer")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -1893,7 +1893,7 @@ func TestVerifyRemoteReceiptValid(t *testing.T) {
 	if !after.Valid || !after.Checks["signature"] {
 		t.Errorf("a genuine receipt stopped verifying once its peer was purged: checks=%v", after.Checks)
 	}
-	if after.RemoteKernelPublicKey == "" {
+	if after.RemoteKernel == "" {
 		t.Errorf("the verification no longer names the signer")
 	}
 }
@@ -2019,8 +2019,8 @@ func TestVerifyLocalReceipt(t *testing.T) {
 			t.Errorf("check %q ran on a local receipt; it has no peer key, frozen rate or draw", absent)
 		}
 	}
-	if v.RemoteKernelPublicKey != "" {
-		t.Errorf("local verification named a remote kernel %q", v.RemoteKernelPublicKey)
+	if v.RemoteKernel != "" {
+		t.Errorf("local verification named a remote kernel %q", v.RemoteKernel)
 	}
 
 	// Tampering is done to the FILE, the way corruption or an operator would: no store method may
@@ -2068,7 +2068,7 @@ func TestVerifyRemoteReceiptSignatureTamper(t *testing.T) {
 	fake := &fakeFederationHTTP{}
 	k := newTestKernelWithHTTP(st, fake)
 
-	remoteUser, _ := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	remoteUser, _ := knownPeer(k, ctx, pub)
 	m := kernel.ActionManifest{
 		ActionID: "tamper-action-1", OwnerID: "tamper-peer-id", OwnerHandle: "tamper-peer", Title: "Test action", Name: "tact",
 		Kind: kernel.KindHTTP, Price: 0, Description: "t",
@@ -2122,8 +2122,8 @@ func TestVerifyRemoteReceiptAfterProxyDeleted(t *testing.T) {
 	k := newTestKernelWithHTTP(st, fake)
 	fake.signsAs(k, priv)
 
-	remoteUser, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
-	bindPetnameForTest(t, k, ctx, base64.RawURLEncoding.EncodeToString(pub), "del-peer")
+	remoteUser, err := knownPeer(k, ctx, pub)
+	bindPetnameForTest(t, k, ctx, pub, "del-peer")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -2202,8 +2202,8 @@ func TestCreateSignedRejectionReceipt(t *testing.T) {
 	setupSys(t, k, st)
 
 	_, priv, _ := kernel.GenKey()
-	pub := kernel.PubBytes(priv)
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pub := kernel.KernelAddress(priv)
+	pubB64 := pub
 
 	rawArgs := []byte(`{"url":"https://example.test/x?a=1&b=2"}`)
 	// The caller named is the buyer's user as the buyer signed it (P4, P5).
@@ -2256,8 +2256,8 @@ func TestPurgeIdlePeers(t *testing.T) {
 	setupSys(t, kDisabled, st)
 
 	_, priv, _ := kernel.GenKey()
-	pub := kernel.PubBytes(priv)
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pub := kernel.KernelAddress(priv)
+	pubB64 := pub
 	peer, err := knownPeer(kDisabled, ctx, pubB64)
 	if err != nil {
 		t.Fatalf("knownPeer: %v", err)
@@ -2276,7 +2276,7 @@ func TestPurgeIdlePeers(t *testing.T) {
 	if err := st.UpsertStats(ctx, &kernel.Stats{ActionID: act.ID, Uses: 3, Successes: 3, LastUsedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertKernel(ctx, pubB64, "old-peer", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, pubB64, "old-peer", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2335,7 +2335,7 @@ func TestFriendDoesNotReexportImportedProxies(t *testing.T) {
 
 	// An imported proxy from peer C, made active+public exactly as the bulk friend-import does.
 	pub, priv, _ := kernel.GenKey()
-	peerC, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	peerC, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2401,7 +2401,7 @@ func TestRemoteCallNotDispatchedFailsFast(t *testing.T) {
 		t.Fatalf("Run: expected ErrPeerUnreachable, got %v", err)
 	}
 	var ke *kernel.KernelError
-	if !errors.As(err, &ke) || ke.Meta["peer"] != base64.RawURLEncoding.EncodeToString(pub) {
+	if !errors.As(err, &ke) || ke.Meta["peer"] != pub {
 		t.Errorf("expected Meta[peer] to be the peer's key, got %+v", err)
 	}
 	// Settled as a failure, not parked: no pending trace, exactly one failure transaction.
@@ -2530,7 +2530,7 @@ func TestSettleRemoteFailureClassification(t *testing.T) {
 			// class must never be attributed to the peer's funding or its refusal.
 			if tc.want != kernel.ErrExecutionFailed {
 				var ke *kernel.KernelError
-				if !errors.As(err, &ke) || ke.Meta["peer"] != base64.RawURLEncoding.EncodeToString(pub) {
+				if !errors.As(err, &ke) || ke.Meta["peer"] != pub {
 					t.Errorf("expected Meta[peer] to be the peer's key, got %+v", err)
 				}
 			} else if errors.Is(err, kernel.ErrPeerUnfunded) || errors.Is(err, kernel.ErrUnauthorized) {
@@ -2554,7 +2554,7 @@ func TestRecordKernelContact(t *testing.T) {
 	sys := setupSys(t, k, st)
 
 	pub, _, _ := kernel.GenKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	if _, err := knownPeer(k, ctx, key); err != nil {
 		t.Fatalf("knownPeer: %v", err)
 	}
@@ -2596,7 +2596,7 @@ func TestRecordKernelContact(t *testing.T) {
 
 	// Unknown key is a no-op (no error).
 	strangerPub, _, _ := kernel.GenKey()
-	if err := k.RecordKernelContact(ctx, base64.RawURLEncoding.EncodeToString(strangerPub), true); err != nil {
+	if err := k.RecordKernelContact(ctx, strangerPub, true); err != nil {
 		t.Errorf("unknown key should be a no-op, got %v", err)
 	}
 }
@@ -2772,7 +2772,7 @@ func pexKernel(st kernel.Store, interval time.Duration) (*kernel.Kernel, string)
 	cfg := testConfig()
 	cfg.SigningKey, cfg.DiscoveryInterval = priv, interval
 	k := newKernel(cfg, kernel.Dependencies{Store: st})
-	return k, base64.RawURLEncoding.EncodeToString(kernel.PubBytes(priv))
+	return k, kernel.KernelAddress(priv)
 }
 
 func pexKey(t *testing.T) string {
@@ -2781,7 +2781,7 @@ func pexKey(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base64.RawURLEncoding.EncodeToString(pub)
+	return pub
 }
 
 // Gossip carries no membership, and serving a pull provisions nothing (§13): discovery of which
@@ -2811,17 +2811,17 @@ func TestAccumulateGossipBinding(t *testing.T) {
 	sender := pexKey(t)
 
 	// binding: a reply claiming an identity other than the authenticated key is rejected.
-	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: sender, Handle: "ok"}, pexKey(t)); !errors.Is(err, kernel.ErrInvalidInput) {
 		t.Errorf("introducer mismatch: got %v, want ErrInvalidInput", err)
 	}
 	// invalid identity: empty and non-bare handles are failed pulls, not verified ones.
 	for _, bad := range []string{"", "a/b", "a@b"} {
-		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
+		if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: sender, Handle: bad}, sender); !errors.Is(err, kernel.ErrInvalidInput) {
 			t.Errorf("handle %q: got %v, want ErrInvalidInput", bad, err)
 		}
 	}
 	// a valid pull refreshes the discovered-kernel row (verified).
-	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: sender, Handle: "sendername"}, sender); err != nil {
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: sender, Handle: "sendername"}, sender); err != nil {
 		t.Fatal(err)
 	}
 	if dk, _ := st.ReadKernel(ctx, sender); dk == nil || dk.Nickname != "sendername" {
@@ -2947,7 +2947,7 @@ func TestHandleAndPetnameShareOneString(t *testing.T) {
 		t.Errorf("the user namespace must still resolve to the local user, got %v (%v)", u, err)
 	}
 	rk, err := k.ReadKernelByPetname(ctx, "minibox")
-	if err != nil || rk == nil || rk.PublicKey != key {
+	if err != nil || rk == nil || rk.Address != key {
 		t.Errorf("the kernel namespace must resolve to the kernel, got %v (%v)", rk, err)
 	}
 }
@@ -3044,7 +3044,7 @@ func TestSuspendKernelProvisionsAtomically(t *testing.T) {
 // testKernelKey is a distinct, well-formed kernel key for test n: the same one every run.
 func testKernelKey(n int) string {
 	seed := sha256.Sum256([]byte(fmt.Sprintf("test kernel %d", n)))
-	return kernel.PublicKey(kernel.KeyFromSeed(seed[:]))
+	return kernel.KernelAddress(kernel.KeyFromSeed(seed[:]))
 }
 
 // TestManifestMonetaryBoundsRejected: a signature proves authorship, not sanity. A signed manifest
@@ -3058,7 +3058,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	remoteUser, err := knownPeer(k, ctx, peerKey)
 	if err != nil {
 		t.Fatal(err)
@@ -3093,7 +3093,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 	// Gossip ingest skips the same manifests while indexing a sound one alongside them.
 	good := signed("sound", 100, 500)
 	g := &kernel.GossipResponse{
-		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good, bad["negative-price"], bad["negative-bps"], bad["out-of-range-bps"]},
 	}
 	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
@@ -3118,7 +3118,7 @@ func TestManifestMonetaryBoundsRejected(t *testing.T) {
 func TestProxyRepricesOnImportBPSChange(t *testing.T) {
 	st := newTestStore(t)
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	m := kernel.ActionManifest{
 		ActionID: "ra-price", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
@@ -3182,7 +3182,7 @@ func TestLegacyProxyHealsOnNextFundedUse(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	m := kernel.ActionManifest{
 		ActionID: "ra-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
@@ -3301,7 +3301,7 @@ func TestEveryReadPathReprices(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	m := kernel.ActionManifest{
 		ActionID: "ra-paths", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet a person warmly", Kind: kernel.KindHTTP, Price: 100,
@@ -3392,7 +3392,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, priv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 
 	m := kernel.ActionManifest{
 		ActionID: "quote-parity-action", OwnerID: "remote-owner-id", OwnerHandle: "carol",
@@ -3411,7 +3411,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 
 	// Leg 1: learn it from gossip, then read the hash lookup would show a local caller.
 	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{
-		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "carolkernel", ActionManifests: []*kernel.ActionManifest{&m},
+		NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "carolkernel", ActionManifests: []*kernel.ActionManifest{&m},
 	}, ""); err != nil {
 		t.Fatalf("AccumulateGossip: %v", err)
 	}
@@ -3458,7 +3458,7 @@ func TestDiscoveredQuoteHashMatchesProxy(t *testing.T) {
 func TestResolveRemoteApplicationRoot(t *testing.T) {
 	st := newTestStore(t)
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	sign := func(m *kernel.ActionManifest) *kernel.ActionManifest {
 		sig, err := testNet.SignManifest(priv, m)
 		if err != nil {
@@ -3528,7 +3528,7 @@ func TestResolveRemoteApplicationRoot(t *testing.T) {
 // have it executed under the reference the caller typed.
 func TestResolveRemoteManifestBoundToRequest(t *testing.T) {
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	manifest := func(owner, name string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
 			ActionID: "ra-x", OwnerID: "remote-id", OwnerHandle: owner, Title: "Test action", Name: name,
@@ -3581,7 +3581,7 @@ func TestResolveRemoteManifestBoundToRequest(t *testing.T) {
 func TestStaleExactProxyReResolvesBeforeIndex(t *testing.T) {
 	st := newTestStore(t)
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	manifest := func(name string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
 			ActionID: "ra-" + name, OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: name,
@@ -3747,7 +3747,7 @@ func TestAReceiptAnsweringAnotherCallNeverSettles(t *testing.T) {
 	}
 
 	for i, tc := range []struct{ name, key, counterparty string }{
-		{"another call's receipt", "some-other-call", k.PublicKeyB64()},
+		{"another call's receipt", "some-other-call", k.OwnAddress()},
 		{"another buyer's receipt", "", "SOMEBODY-ELSE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3830,11 +3830,11 @@ func TestDiscoveryCandidatesReadDebtsFirstThenTheLongestUnheard(t *testing.T) {
 
 	// The debtor was heard from a moment ago and its key sorts last: only the obligation can put it
 	// at the head.
-	debtor := peerWithAddress(t, k, st, debtorKey, "0xdebtor")
-	announcedOwed(t, st, "tk-candidates", debtor, seller.ID, "0xdebtor", "0xpaid-candidates", 40)
-	peerWithAddress(t, k, st, never, "0xnever") // known, never read
-	peerWithAddress(t, k, st, old, "0xold")
-	peerWithAddress(t, k, st, recent, "0xrecent")
+	debtor := payingPeer(t, k, st, debtorKey)
+	announcedOwed(t, st, "tk-candidates", debtor, seller.ID, debtor, "0xpaid-candidates", 40)
+	payingPeer(t, k, st, never) // known, never read
+	payingPeer(t, k, st, old)
+	payingPeer(t, k, st, recent)
 	for k2, at := range map[string]time.Time{
 		debtorKey: now, old: now.Add(-time.Hour), recent: now.Add(-time.Minute),
 	} {
@@ -3845,7 +3845,7 @@ func TestDiscoveryCandidatesReadDebtsFirstThenTheLongestUnheard(t *testing.T) {
 
 	// dir is a stranger the directory turned up this pass: never heard, like never, so the two are
 	// ordered by key. This kernel itself is never a candidate.
-	got := k.DiscoveryCandidates(ctx, []string{dir, k.PublicKeyB64()})
+	got := k.DiscoveryCandidates(ctx, []string{dir, k.OwnAddress()})
 	want := []string{debtorKey, dir, never, old, recent}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("candidate order = %v, want %v", got, want)
@@ -3854,7 +3854,7 @@ func TestDiscoveryCandidatesReadDebtsFirstThenTheLongestUnheard(t *testing.T) {
 	// Money waits in both directions. A peer holding a call of ours — whose answer decides money
 	// already reserved here — is read before anyone we have merely not heard from, even though it
 	// owes us nothing and was heard from a moment ago.
-	holder := peerWithAddress(t, k, st, recent, "0xrecent") // heard most recently of all
+	holder := payingPeer(t, k, st, recent) // heard most recently of all
 	buyer := setupUser(t, st, "candidate-buyer", 1000)
 	parkedCallTo(t, st, holder, buyer)
 	got = k.DiscoveryCandidates(ctx, nil)
@@ -3986,7 +3986,7 @@ func TestResolveCarriesTheTitle(t *testing.T) {
 	ctx := context.Background()
 	setupSys(t, k, st)
 	pub, priv, _ := kernel.GenKey()
-	peer, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	peer, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4050,7 +4050,7 @@ func TestServedManifestCarriesTheTitle(t *testing.T) {
 		t.Errorf("manifest title %q", m.Title)
 	}
 	m.Title = "Tampered"
-	if err := testNet.VerifyManifestSignature(base64.RawURLEncoding.EncodeToString(kernel.PubBytes(testSigningKey())), m); err == nil {
+	if err := testNet.VerifyManifestSignature(kernel.KernelAddress(testSigningKey()), m); err == nil {
 		t.Error("the signature must cover the title")
 	}
 }
@@ -4128,7 +4128,7 @@ func TestServedCallAsksItsOriginForTheGrantor(t *testing.T) {
 	setupSys(t, k, st)
 	const origin, banned = "b3JpZ2luLWtlcm5lbA", "YmFubmVkLWtlcm5lbA"
 	for _, key := range []string{origin, banned} {
-		if err := st.UpsertKernel(ctx, key, key[:6], "", "", time.Now().UTC()); err != nil {
+		if err := st.UpsertKernel(ctx, key, key[:6], "", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -4201,7 +4201,7 @@ func TestServedCallAsksForItsGrantorOnceBeforeFunding(t *testing.T) {
 	k.SetSecretBox(b64Box{})
 	setupSys(t, k, st)
 	const origin = "b3JpZ2luLWtlcm5lbA"
-	if err := st.UpsertKernel(ctx, origin, "origin", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, origin, "origin", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	owner := setupUser(t, st, "once-owner", 1000)
@@ -4243,7 +4243,7 @@ func TestPrincipalsResolveLikeAddresses(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := kernel.GenKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	m := kernel.ActionManifest{ActionID: "ra-id", OwnerID: "remote-bob-id", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
 		InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{"type": "object"}, ArtifactHash: "h", UpdatedAt: time.Now()}

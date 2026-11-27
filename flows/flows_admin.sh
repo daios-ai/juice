@@ -221,8 +221,8 @@ flow_localhost() {
     j "$db" "$hb" user approve alice@localhost >/dev/null 2>&1
     assert_eq "localhost.data_unchanged" "call sys@localhost/time" "$(pathf "$(jj "$db" "$hb" task show "$task")" partial_args.message)"
 
-    # A stranger's key: any point on the curve is one, and this is the curve's own generator.
-    local key; key=$(python3 -c 'import base64;print(base64.urlsafe_b64encode(bytes.fromhex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")).rstrip(b"=").decode())')
+    # A stranger's address: any 0x and 40 hex digits is one, and nobody here answers for this one.
+    local key="0x000000000000000000000000000000000000dead"
     assert_fails "localhost.reserved" "localhost names this kernel" -- j "$db" "$hs" admin peer rename "$key" localhost
 }
 

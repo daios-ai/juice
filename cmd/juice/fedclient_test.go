@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"reflect"
@@ -73,7 +72,7 @@ func TestExecuteFederationSuccess(t *testing.T) {
 		return "sig", "ts", nil
 	}
 	fr, err := executeFederationOverTransport(context.Background(), fc, signer,
-		base64.RawURLEncoding.EncodeToString(pubBytes(priv)),
+		kernel.KernelAddress((priv)),
 		"peerkey", kernel.OutboundCall{ActionID: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", ExpectedContractHash: "chash", IdempotencyKey: "key-123"}, map[string]any{})
 	if err != nil {
 		t.Fatalf("executeFederationOverTransport: %v", err)
@@ -177,7 +176,7 @@ func TestContactClassificationAgreesAcrossPaths(t *testing.T) {
 // receiver must verify the request once it rebuilds the call from the wire, as OnCall does.
 func TestAnOutboundCallReachesTheWireWhole(t *testing.T) {
 	pub, priv, _ := genKey()
-	local := base64.RawURLEncoding.EncodeToString(pub)
+	local := pub
 	call := kernel.OutboundCall{ActionID: "v-action", ExpectedContractHash: "v-hash", IdempotencyKey: "v-key",
 		Commitment: "v-commitment", Lottery: 7, CallerUserID: "v-user", CallerHandle: "v-handle",
 		ProcessKernel: "v-origin", ProcessRef: "v-ref"}

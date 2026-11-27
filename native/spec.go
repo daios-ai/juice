@@ -161,8 +161,8 @@ func str(desc string) map[string]any { return map[string]any{"type": "string", "
 func addressSchema(desc string) map[string]any {
 	return objd(desc, map[string]any{
 		"address":   str("What a person reads and types, user@kernel[/name], named as this kernel names it"),
-		"principal": str("The same party on every kernel: user id @ kernel key [/name]"),
-		"nickname":  str("What a kernel without a petname here calls itself; shown after its key, never resolved"),
+		"principal": str("The same party on every kernel: user id @ kernel address [/name]"),
+		"nickname":  str("What a kernel without a petname here calls itself; shown after its address, never resolved"),
 	}, "address", "principal")
 }
 func integer(desc string) map[string]any {

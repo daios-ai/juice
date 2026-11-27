@@ -81,23 +81,23 @@ selection may change as a person uses other accounts on the same machine.
 
 ## Naming a kernel
 
-A kernel has a public key and a name of its own. On another kernel it has a
+A kernel has an address and a name of its own. On another kernel it has a
 petname only if that kernel's operator gives it one:
 
 | Name | Chosen by | Where it resolves |
 |---|---|---|
-| Public key | derived from the kernel's recovery phrase | on every kernel; it is the kernel's identity |
+| Address | derived from the kernel's recovery phrase | on every kernel; it is the kernel's identity |
 | Own name | the kernel's operator, at first boot (`kernel_handle`) | on that kernel, as the kernel segment of its users' and actions' addresses, `alice@acme`, `bob@acme/echo`; and on your machine, since a client records a kernel under the name it calls itself |
 | Petname | one kernel's operator, with `admin peer rename` | on that kernel only, in `owner@kernel/name` and `handle@kernel` |
-| Nickname | the remote kernel's operator | never; shown as `~name` beside the key when no petname is bound |
+| Nickname | the remote kernel's operator | never; shown as `~name` beside the address when no petname is bound |
 | `localhost` | reserved | on every kernel, as that kernel itself; replies use the resolved address instead |
 
 No kernel can be given `localhost` as its own name or as a petname.
 
-A kernel's own name is a petname it binds to its own key, so no peer can be given
-it there. Two kernels may call themselves the same thing; their public keys are
-their identity, and a client that knows both cannot hold them under one name.
-A kernel you serve is registered on every boot. Each key has one client record:
+A kernel binds its own name to its address, so no peer can be given that name
+there. Two kernels may call themselves the same thing. Their addresses tell
+them apart, and a client cannot register both under the same name.
+A kernel you serve is registered on every boot. Each address has one client record:
 a known kernel that has renamed itself is re-recorded under its new name and
 keeps its logins. A name held by a different kernel is refused.
 
@@ -105,17 +105,17 @@ keeps its logins. A name held by a different kernel is refused.
 
 ```console
 $ juice kernel add https://kernel.example.org
-acme  network play  https://kernel.example.org  fdlMi64P…  (added)
+acme  network play  https://kernel.example.org  0xcaf2a882…  (added)
 $ juice kernel list
-KERNEL  NETWORK  ADDRESS                     IN USE  KEY
-acme    play     https://kernel.example.org          fdlMi64P…
+KERNEL  NETWORK  URL                         IN USE  BLOCKCHAIN ADDRESS
+acme    play     https://kernel.example.org          0xcaf2a882…
 $ juice kernel health acme
-ok  acme  network play  fdlMi64P…  v0.14.46
+ok  acme  network play  0xcaf2a882…  v0.14.46
 ```
 
-Registration records the public key and network returned by the address you
+Registration records the address and network returned by the URL you
 provide. Later login and selection operations check those values before trusting
-the server. If you register a new address under an existing client name, the
+the server. If you register a new URL under an existing client name, the
 client accepts it only when it identifies the same kernel on the same network;
 the saved logins are then retained.
 

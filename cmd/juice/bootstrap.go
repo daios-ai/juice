@@ -32,7 +32,7 @@ const (
 	// at every startup (D9, D23).
 	configKeyWorldFingerprint = "world_fingerprint"
 	configKeySuperuser        = "superuser_handle"
-	configKeySigningPublic    = "signing_public_key"
+	configKeyAddress          = "kernel_address"
 	superuserHandle           = "sys"
 )
 
@@ -277,16 +277,12 @@ func firstBootCredentials(w rail.World) (bootCredentials, error) {
 	}
 	if held != nil && !held.Equal(key) {
 		return c, fmt.Errorf("%s: that is the phrase of kernel %s, and %s holds the key of kernel %s",
-			source, kernel.PublicKey(key), kernelHome(), kernel.PublicKey(held))
+			source, kernel.KernelAddress(key), kernelHome(), kernel.KernelAddress(held))
 	}
 	c.key = key
 	c.recoveryKey = base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey))
 	if restored {
-		fmt.Fprintf(os.Stderr, "That phrase is kernel %s", kernel.PublicKey(key))
-		if w.Rail == rail.RailEVM {
-			fmt.Fprintf(os.Stderr, ", paid at %s", strings.ToLower(ethcrypto.PubkeyToAddress(key.PublicKey).Hex()))
-		}
-		fmt.Fprintln(os.Stderr, ".")
+		fmt.Fprintf(os.Stderr, "That phrase is kernel %s.\n", kernel.KernelAddress(key))
 	}
 	return c, nil
 }
@@ -325,9 +321,9 @@ func bootstrap(k *kernel.Kernel, key *ecdsa.PrivateKey, nativeCfg NativeConfig, 
 
 	// The key on disk and the database must be one kernel: signing as one over the other's ledger
 	// would speak for books it never kept.
-	if stored := k.SelfKey(ctx); key == nil || stored != kernel.PublicKey(key) {
+	if stored := k.SelfKey(ctx); key == nil || stored != kernel.KernelAddress(key) {
 		return fmt.Errorf("%s is the key of kernel %s, and this database is kernel %s",
-			kernelKeyPath(), kernel.PublicKey(key), stored)
+			kernelKeyPath(), kernel.KernelAddress(key), stored)
 	}
 	su, err := k.ReadUserByHandle(ctx, handle)
 	if err != nil {

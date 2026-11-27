@@ -125,7 +125,7 @@ purchase; adding a key afterwards cannot recover an earlier unkeyed run.
 ## Calling an action on another kernel
 
 To reach a remote provider, include its kernel in the action reference. This
-can be a petname assigned by your operator or the remote kernel's public key.
+can be a petname assigned by your operator or the remote kernel's address.
 Here the operator has assigned `beta-kernel`:
 
 ```console
@@ -133,7 +133,7 @@ $ juice run 'dave@beta-kernel/summarize' '{"text":"a long document"}'
 dave@beta-kernel/summarize costs 2.205 fUSD. Run it? [y/N] y
 ```
 
-You can also give the action's principal, `user_id@kernel_key/name`, as the
+You can also give the action's principal, `user_id@kernel_address/name`, as the
 reference. For each call executed elsewhere in your run, the serving kernel
 asks yours who began the run. If yours cannot be reached, admission is refused
 with `peer_unreachable` and that call costs nothing. Work already delivered

@@ -18,11 +18,11 @@ import (
 )
 
 // fedAdapter is the kernel.FederationClient implementation. transport is nil until serve time (a CLI
-// process federates nothing), and localPubKey/signFederation are supplied at construction from the
+// process federates nothing), and localAddr/signFederation are supplied at construction from the
 // kernel, which loads the signing key at bootstrap.
 type fedAdapter struct {
 	transport      federationTransport // libp2p federation carrier; nil off the serving path
-	localPubKey    string              // this kernel's base64url public key
+	localAddr      string              // this kernel's address
 	signFederation signerFunc          // signs as this kernel; the private key never leaves the kernel
 	recordContact  contactRecorder     // journals whether a peer answered (§13); nil off the serving path
 }
@@ -30,15 +30,15 @@ type fedAdapter struct {
 // newFedAdapter builds the adapter around the kernel's own signer. Only the signers it uses are
 // injected: outbound calls need the fed_call signature, while task and settle signing stay on the
 // paths that own them (the control path and the kernel respectively).
-func newFedAdapter(localPubKey string, sign signerFunc) *fedAdapter {
-	return &fedAdapter{localPubKey: localPubKey, signFederation: sign}
+func newFedAdapter(localAddr string, sign signerFunc) *fedAdapter {
+	return &fedAdapter{localAddr: localAddr, signFederation: sign}
 }
 
 // SetTransport installs the libp2p carrier once serve has started it, completing construction.
 func (c *fedAdapter) SetTransport(tr federationTransport) { c.transport = tr }
 
-// SetLocalPubKey records this kernel's own key, known after bootstrap loads the signing key.
-func (c *fedAdapter) SetLocalPubKey(key string) { c.localPubKey = key }
+// SetLocalAddr records this kernel's own key, known after bootstrap loads the signing key.
+func (c *fedAdapter) SetLocalAddr(key string) { c.localAddr = key }
 
 // SetContactRecorder installs the contact journal (§13). Every outbound leg below reports through
 // `contacted`, so reachability is observed where the transport actually succeeds or fails.
@@ -94,17 +94,17 @@ func (c *fedAdapter) contacted(ctx context.Context, peerKey string, outcome cont
 type signerFunc = func(call kernel.OutboundCall, counterparty, recipient, argsHash string) (sig, ts string, err error)
 
 // ExecuteFederation sends a cross-kernel call over the libp2p federation transport (§13),
-// addressing the peer by its public key. The routing (peer key, action id) that used
+// addressing the peer by its address. The routing (peer address, action id) that used
 // to live in a URL is now explicit arguments. A missing transport, or a transport error,
 // returns a zero FederationResult so the kernel keeps the call pending for retry.
-func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerPublicKey string, call kernel.OutboundCall, args map[string]any) (kernel.FederationResult, error) {
+func (c *fedAdapter) ExecuteFederation(ctx context.Context, peerAddr string, call kernel.OutboundCall, args map[string]any) (kernel.FederationResult, error) {
 	if c.transport == nil {
 		// No transport at all: the request provably cannot have been sent (§13 never-dispatched).
 		return kernel.FederationResult{NotDispatched: true}, nil
 	}
-	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localPubKey,
-		peerPublicKey, call, args)
-	c.contacted(ctx, peerPublicKey, contactFromResult(fr))
+	fr, err := executeFederationOverTransport(ctx, c.transport, c.signFederation, c.localAddr,
+		peerAddr, call, args)
+	c.contacted(ctx, peerAddr, contactFromResult(fr))
 	return fr, err
 }
 
@@ -184,19 +184,19 @@ func (c *fedAdapter) SendProcess(ctx context.Context, peerKey, kind, ref, regID 
 // Reveal implements kernel.TicketRevealer over /juice/fed/settle/1 (P10): the buyer tells the seller
 // how one obligation's draw came out. The kernel owns the payload and its signature; a refusal is
 // reported as-is so the worker can try again from the ticket row.
-func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.RevealPayload, signature string) error {
+func (c *fedAdapter) Reveal(ctx context.Context, peerAddr string, p kernel.RevealPayload, signature string) error {
 	if c.transport == nil {
-		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr)).Wrap("federation transport not running")
 	}
 	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
-	resp, err := c.transport.Reveal(octx, peerPublicKey, fed.RevealRequest{
+	resp, err := c.transport.Reveal(octx, peerAddr, fed.RevealRequest{
 		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature,
 		TicketID: p.TicketID, Secret: p.Secret, TxHash: p.TxHash,
 	})
-	c.contacted(ctx, peerPublicKey, contactFromErr(err))
+	c.contacted(ctx, peerAddr, contactFromErr(err))
 	if err != nil {
-		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr))
 	}
 	if resp.Status != 200 {
 		return kernel.ErrExecutionFailed.Wrapf("the peer refused the reveal (status %d)", resp.Status)
@@ -206,19 +206,19 @@ func (c *fedAdapter) Reveal(ctx context.Context, peerPublicKey string, p kernel.
 
 // AnnounceTransfer implements kernel.TransferAnnouncer over /juice/fed/transfer/1 (P11): the sender
 // tells the kernel a payment went to whom it is for. A refusal is reported so the worker tries again.
-func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string, p kernel.TransferPaidPayload, signature string) error {
+func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerAddr string, p kernel.TransferPaidPayload, signature string) error {
 	if c.transport == nil {
-		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr)).Wrap("federation transport not running")
 	}
 	octx, cancel := context.WithTimeout(ctx, fedTaskTimeout)
 	defer cancel()
-	resp, err := c.transport.Transfer(octx, peerPublicKey, fed.TransferRequest{
+	resp, err := c.transport.Transfer(octx, peerAddr, fed.TransferRequest{
 		Counterparty: p.Counterparty, Timestamp: p.Timestamp, Signature: signature, ID: p.ID,
 		BeneficiaryID: p.BeneficiaryID, Amount: p.Amount, TxHash: p.TxHash,
 	})
-	c.contacted(ctx, peerPublicKey, contactFromErr(err))
+	c.contacted(ctx, peerAddr, contactFromErr(err))
 	if err != nil {
-		return kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
+		return kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr))
 	}
 	if resp.Status != 200 {
 		return kernel.ErrExecutionFailed.Wrapf("the peer refused the transfer (status %d): %s", resp.Status, resp.Body)
@@ -230,14 +230,14 @@ func (c *fedAdapter) AnnounceTransfer(ctx context.Context, peerPublicKey string,
 // /juice/fed/resolve/1 protocol (§13 subscription-free calls): fetch one signed manifest, or map a
 // user reference to its stable id+handle on the peer. A missing transport is ErrPeerUnreachable so
 // the kernel never treats "no network" as "action absent".
-func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, owner, name string) (*kernel.ResolvedAction, error) {
+func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerAddr, owner, name string) (*kernel.ResolvedAction, error) {
 	if c.transport == nil {
-		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr)).Wrap("federation transport not running")
 	}
-	resp, err := c.transport.Resolve(ctx, peerPublicKey, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
-	c.contacted(ctx, peerPublicKey, contactFromErr(err))
+	resp, err := c.transport.Resolve(ctx, peerAddr, fed.ResolveRequest{Kind: "action", Owner: owner, Name: name})
+	c.contacted(ctx, peerAddr, contactFromErr(err))
 	if err != nil {
-		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr))
 	}
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote action not found")
@@ -250,15 +250,15 @@ func (c *fedAdapter) ResolveRemoteAction(ctx context.Context, peerPublicKey, own
 }
 
 // ResolveRemoteUser asks a peer for one of its users' stable id and handle (P11).
-func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref string) (*kernel.ResolvedUser, error) {
+func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerAddr, ref string) (*kernel.ResolvedUser, error) {
 	if c.transport == nil {
-		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey)).Wrap("federation transport not running")
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr)).Wrap("federation transport not running")
 	}
 	req := fed.ResolveRequest{Kind: "user", User: ref}
-	resp, err := c.transport.Resolve(ctx, peerPublicKey, req)
-	c.contacted(ctx, peerPublicKey, contactFromErr(err))
+	resp, err := c.transport.Resolve(ctx, peerAddr, req)
+	c.contacted(ctx, peerAddr, contactFromErr(err))
 	if err != nil {
-		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerPublicKey))
+		return nil, kernel.PeerUnreachableError(kernel.KeyAddress(peerAddr))
 	}
 	if resp.Status != 200 {
 		return nil, kernel.ErrNotFound.Wrap("remote user not found")
@@ -273,7 +273,7 @@ func (c *fedAdapter) ResolveRemoteUser(ctx context.Context, peerPublicKey, ref s
 // executeFederationOverTransport is the transport-backed kernel.FederationExecutor. It signs the
 // request as this kernel and sends the exact args bytes so the receiver's args_hash matches.
 func executeFederationOverTransport(ctx context.Context, tr federationTransport, signerFn signerFunc,
-	localPubKey, peerPublicKey string, call kernel.OutboundCall, args map[string]any) (kernel.FederationResult, error) {
+	localAddr, peerAddr string, call kernel.OutboundCall, args map[string]any) (kernel.FederationResult, error) {
 
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -282,7 +282,7 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 	argsHash := sha256HexBytes(body)
 	req := fed.CallRequest{
 		Action:               call.ActionID,
-		Counterparty:         localPubKey,
+		Counterparty:         localAddr,
 		ExpectedContractHash: call.ExpectedContractHash,
 		IdempotencyKey:       call.IdempotencyKey,
 		Commitment:           call.Commitment,
@@ -294,12 +294,12 @@ func executeFederationOverTransport(ctx context.Context, tr federationTransport,
 		Args:                 json.RawMessage(body),
 	}
 	if signerFn != nil {
-		if sig, ts, serr := signerFn(call, localPubKey, peerPublicKey, argsHash); serr == nil {
+		if sig, ts, serr := signerFn(call, localAddr, peerAddr, argsHash); serr == nil {
 			req.Signature = sig
 			req.Timestamp = ts
 		}
 	}
-	resp, err := tr.Call(ctx, peerPublicKey, req)
+	resp, err := tr.Call(ctx, peerAddr, req)
 	if err != nil {
 		// Provably-never-sent (resolve/connect failed) → NotDispatched, so a first dispatch may
 		// fail fast (§13). Any other transport error stays pending: the request may have executed

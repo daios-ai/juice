@@ -19,7 +19,7 @@ func TestPeerInspectShowsTheVersionThePeerSaid(t *testing.T) {
 		{`{"path":"unreachable","rtt_millis":3}`, "Version:      unknown\n"},
 	} {
 		stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"public_key":"K","reachability":` + c.reply + `,"online":true,"source":"live"}`))
+			_, _ = w.Write([]byte(`{"blockchain_address":"K","reachability":` + c.reply + `,"online":true,"source":"live"}`))
 		})
 		out := captureStdout(t, func() error {
 			_, err := execTestCmd(t, peerInspectCmd(), "K")

@@ -31,7 +31,7 @@ Explicit selection keeps later invocations tied to the intended account even
 when a person changes the client's current login. If the named login does not
 exist, the command fails instead of selecting another account.
 
-For persistent records, identify the kernel by public key and network fingerprint
+For persistent records, identify the kernel by address and network fingerprint
 and the account by its ID. You can obtain these from `kernel list` and
 `user me`. Handles and local kernel names are useful for interaction but may
 be renamed or reused.
@@ -90,7 +90,7 @@ and, where applicable, `meta`:
 
 ```
 {"code":"schema_violation","error":"field msg: required field missing"}
-{"code":"grant_required","error":"grant required for bob@acme/mail","meta":{"action":"<owner-id>@<kernel-key>/mail"}}
+{"code":"grant_required","error":"grant required for bob@acme/mail","meta":{"action":"<owner-id>@<kernel-address>/mail"}}
 ```
 
 The message names parties and actions by address; `meta` names them by
@@ -251,7 +251,7 @@ and use its managed session for subsequent commands.
 ## Speaking HTTP directly
 
 A direct HTTP client uses the same API as the command line. Before sending
-credentials, check `GET /health` against the expected kernel key and network,
+credentials, check `GET /health` against the expected kernel address and network,
 as shown below. Authentication uses an authorization code with PKCE: the
 client generates a verifier, sends its derived challenge when authenticating,
 and presents the verifier when exchanging the code for tokens.
@@ -280,13 +280,14 @@ Access tokens expire. On a 401, the client can exchange its refresh token at
 before the next refresh, since the old one is no longer valid.
 
 Check `GET /health` before trusting a server, and compare what it reports against
-the key and network you expect:
+the kernel address and network you expect:
 
 ```console
 $ curl -s localhost:4040/health
-{"decimals":6,"fed_addrs":["/ip4/127.0.0.1/tcp/31313/p2p/16Uiu2HAm…"],
+{"blockchain_address":"0xcaf2a882…","decimals":6,
+ "fed_addrs":["0xcaf2a882…@127.0.0.1:31313"],
  "handle":"acme","network":"play","network_fingerprint":"baed18ae…",
- "public_key":"fdlMi64P…","blockchain_address":"","status":"ok","symbol":"fUSD","token":"","version":"v0.14.46"}
+ "status":"ok","symbol":"fUSD","token":"","version":"v0.14.46"}
 ```
 
 This check distinguishes the expected kernel from any other server occupying

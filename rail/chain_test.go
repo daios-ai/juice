@@ -5,7 +5,6 @@ package rail
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"math/big"
@@ -497,19 +496,12 @@ func TestTheKernelKeyIsWrittenOnceAndNeverOverwritten(t *testing.T) {
 	}
 }
 
-// A kernel is paid at the address of its own key, which anyone computes from the key alone: the
-// same address the key signs for, in the form the rail reports senders in. A key that is none has
-// no address.
-func TestAKernelsAddressIsComputedFromItsKey(t *testing.T) {
+// A kernel is paid at its own address, which is its id (P1): the address the rail pays to and
+// watches is the one every other kernel names it by.
+func TestAKernelIsPaidAtItsID(t *testing.T) {
 	c, _ := testChain(t)
-	own := base64.RawURLEncoding.EncodeToString(crypto.CompressPubkey(&c.key.PublicKey))
-	if got := c.AddressOf(own); got != c.Address() {
-		t.Errorf("the address of this kernel's key is %q, and it is paid at %q", got, c.Address())
-	}
-	for _, bad := range []string{"", "not base64!", base64.RawURLEncoding.EncodeToString(make([]byte, 33))} {
-		if got := c.AddressOf(bad); got != "" {
-			t.Errorf("AddressOf(%q) = %q, want none", bad, got)
-		}
+	if got, want := c.Address(), kernel.KernelAddress(c.key); got != want {
+		t.Errorf("the rail pays %q, and the kernel is %q", got, want)
 	}
 }
 

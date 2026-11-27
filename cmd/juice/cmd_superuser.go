@@ -66,7 +66,7 @@ type roster struct {
 var rosters = map[string]roster{
 	"user": {noun: "user", target: "USER", id: "address", named: "a user's address, handle@kernel, as `admin user list` shows it",
 		renamed: "NEW_NAME is the new address, handle@kernel on this kernel; the old handle is freed"},
-	"peer": {noun: "peer", target: "PEER", id: "public_key", named: "a peer kernel's petname or public key, as `admin peer list` shows it",
+	"peer": {noun: "peer", target: "PEER", id: "blockchain_address", named: "a peer kernel's petname or address, as `admin peer list` shows it",
 		renamed: "NEW_NAME becomes the peer's petname — the local name your commands use for it"},
 }
 
@@ -138,10 +138,9 @@ func identityCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel", nil, output{id: "public_key", human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", "/v1/admin/kernel", nil, output{id: "blockchain_address", human: func(b []byte) error {
 				var out struct {
 					Handle            string   `json:"handle"`
-					PublicKey         string   `json:"public_key"`
 					Version           string   `json:"version"`
 					LatestRelease     *string  `json:"latest_release"`
 					About             string   `json:"about"`
@@ -185,7 +184,7 @@ func identityCmd() *cobra.Command {
 					return err
 				}
 				fmt.Printf("Handle:     %s\n", out.Handle)
-				fmt.Printf("Public key: %s\n", out.PublicKey)
+				fmt.Printf("Blockchain address: %s\n", out.BlockchainAddress)
 				fmt.Printf("Version:    %s\n", out.Version)
 				// The newest release, present only while the kernel checks for one; empty until its
 				// first read of the releases page succeeds.
@@ -204,9 +203,6 @@ func identityCmd() *cobra.Command {
 				}
 				if out.Network != "" {
 					fmt.Printf("Network:    %s\n", out.Network)
-				}
-				if out.BlockchainAddress != "" {
-					fmt.Printf("Paid at:    %s\n", out.BlockchainAddress)
 				}
 				if out.Finalized != nil {
 					fmt.Printf("Holdings:   %s (gas %s) as of block %d\n",
@@ -250,7 +246,7 @@ func identityCmd() *cobra.Command {
 				fmt.Printf("Tickets:    this kernel draws for %s, and accepts tickets up to %s\n",
 					net.Amount(out.Lottery), net.Amount(out.LotteryMax))
 				if len(out.Addrs) > 0 {
-					fmt.Println("Listen addresses:")
+					fmt.Println("TCP endpoints:")
 					for _, a := range out.Addrs {
 						fmt.Printf("  %s\n", a)
 					}
@@ -374,7 +370,7 @@ func adminDepositsCmd() *cobra.Command {
 func peerInspectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "inspect PEER",
-		Short: "Inspect a remote kernel (by public key or bound petname)",
+		Short: "Inspect a remote kernel (by address or bound petname)",
 		Long: "Inspect a remote kernel: identity, public actions, retained trade evidence, and " +
 			"reachability. The petname is the local name this kernel gave the peer (`admin rename`); " +
 			"the nickname is what the peer calls itself, shown for recognition but never usable as a " +
@@ -387,14 +383,14 @@ func peerInspectCmd() *cobra.Command {
 				return err
 			}
 			path := "/v1/admin/peers/" + url.PathEscape(args[0]) + "/inspect"
-			return cli.emitCtx(ctx, "GET", path, nil, output{id: "public_key", human: func(b []byte) error {
+			return cli.emitCtx(ctx, "GET", path, nil, output{id: "blockchain_address", human: func(b []byte) error {
 				var out struct {
-					Petname   string `json:"petname"`
-					Nickname  string `json:"nickname"`
-					Handle    string `json:"handle"` // live pull: the kernel's own advertised name
-					PublicKey string `json:"public_key"`
-					About     string `json:"about"`
-					Actions   []struct {
+					Petname           string `json:"petname"`
+					Nickname          string `json:"nickname"`
+					Handle            string `json:"handle"` // live pull: the kernel's own advertised name
+					BlockchainAddress string `json:"blockchain_address"`
+					About             string `json:"about"`
+					Actions           []struct {
 						Name        kernel.AddressView `json:"name"`
 						Title       string             `json:"title"`
 						Description string             `json:"description"`
@@ -417,7 +413,7 @@ func peerInspectCmd() *cobra.Command {
 				// does (§13), so they print as separate lines rather than one ambiguous "handle".
 				petname := out.Petname
 				if petname == "" {
-					petname = "— (unbound; call it by key)"
+					petname = "— (unbound; call it by address)"
 				}
 				nickname := out.Nickname
 				if nickname == "" {
@@ -425,7 +421,7 @@ func peerInspectCmd() *cobra.Command {
 				}
 				fmt.Printf("Petname:      %s\n", petname)
 				fmt.Printf("Nickname:     %s\n", nickname)
-				fmt.Printf("Public key:   %s\n", out.PublicKey)
+				fmt.Printf("Blockchain address: %s\n", out.BlockchainAddress)
 				if out.About != "" {
 					fmt.Printf("About:        %s\n", out.About)
 				}
@@ -466,9 +462,9 @@ func peerInspectCmd() *cobra.Command {
 						subjectName = out.Nickname
 					}
 					if subjectName == "" {
-						subjectName = shortKey(out.PublicKey)
+						subjectName = shortKey(out.BlockchainAddress)
 					}
-					printEvidence(subjectName, out.PublicKey, out.Evidence)
+					printEvidence(subjectName, out.BlockchainAddress, out.Evidence)
 				}
 				return nil
 			}})
@@ -481,7 +477,7 @@ func peerListCmd() *cobra.Command {
 	var limit, offset int
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List known kernels (counterparties and discovery-only), merged by key",
+		Short: "List known kernels (counterparties and discovery-only), merged by address",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			q := url.Values{}
@@ -494,9 +490,9 @@ func peerListCmd() *cobra.Command {
 				path += "?" + e
 			}
 			// PETNAME is the local name that resolves a reference; NICKNAME is what the kernel
-			// calls itself and never resolves (§13). The public key always resolves, so an unbound
-			// kernel is still callable — bind a petname with `admin peer rename <key> <name>`.
-			return cli.emit("GET", path, nil, output{id: "public_key", human: list(
+			// calls itself and never resolves (§13). The address always resolves, so an unbound
+			// kernel is still callable — bind a petname with `admin peer rename <address> <name>`.
+			return cli.emit("GET", path, nil, output{id: "blockchain_address", human: list(
 				column{"PETNAME", dash("petname")},
 				column{"NICKNAME", dash("nickname")},
 				column{"TRADED", func(row json.RawMessage) string {
@@ -514,7 +510,7 @@ func peerListCmd() *cobra.Command {
 					}
 					return ""
 				}},
-				column{"PUBLIC KEY", text("public_key")},
+				column{"BLOCKCHAIN ADDRESS", text("blockchain_address")},
 			)})
 		},
 	}
@@ -523,7 +519,7 @@ func peerListCmd() *cobra.Command {
 	return cmd
 }
 
-// shortKey abbreviates a base64url public key for display.
+// shortKey abbreviates a kernel address for display.
 func shortKey(k string) string {
 	if len(k) > 12 {
 		return k[:12] + "…"

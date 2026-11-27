@@ -5,7 +5,6 @@ package kernel
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -196,14 +195,6 @@ type stubRail struct {
 
 func (r stubRail) Address() string { return r.addr }
 
-// AddressOf gives every key an address of its own wherever the world has addresses.
-func (r stubRail) AddressOf(key string) string {
-	if r.addr == "" {
-		return ""
-	}
-	return "0xof-" + key
-}
-
 func (stubRail) Witness(_ context.Context, ref string, amount int64) (RailDeposit, error) {
 	return RailDeposit{Key: "rail:ref:" + ref, TxHash: ref, Amount: amount}, nil
 }
@@ -217,7 +208,7 @@ func revealFixture(t *testing.T, obligation, lottery int64, secret, status strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	st := &owedStore{
 		row: &Owed{
 			ID: "call-1", PeerKey: peerKey, UserID: "seller-1", TraceID: "tr-1", Settled: settled,
@@ -430,7 +421,7 @@ type paidStore struct {
 	Store
 	got     *IncomingTransfer
 	payment *RailTransfer
-	vault   string
+	known   string
 }
 
 func (s *paidStore) RecordIncomingTransfer(_ context.Context, _ string, it *IncomingTransfer, payment *RailTransfer) error {
@@ -438,8 +429,8 @@ func (s *paidStore) RecordIncomingTransfer(_ context.Context, _ string, it *Inco
 	return nil
 }
 
-func (s *paidStore) UpsertKernel(_ context.Context, _, _, _, address string, _ time.Time) error {
-	s.vault = address
+func (s *paidStore) UpsertKernel(_ context.Context, address, _, _ string, _ time.Time) error {
+	s.known = address
 	return nil
 }
 
@@ -454,8 +445,8 @@ func (s *paidStore) ReconcileDeposits(context.Context, string, int) ([]*LedgerEn
 func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
 	_, own, _ := GenKey()
 	pub, priv, _ := GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
-	ownKey := base64.RawURLEncoding.EncodeToString(PubBytes(own))
+	peerKey := pub
+	ownKey := KernelAddress(own)
 	good := func() TransferPaidPayload {
 		return TransferPaidPayload{Amount: 50, BeneficiaryID: "bob-id", Counterparty: peerKey, ID: "tx-1",
 			Recipient: ownKey, Timestamp: time.Now().UTC().Format(time.RFC3339), TxHash: "0xhash"}
@@ -504,8 +495,13 @@ func TestATransferAnnouncementIsCheckedBeforeItIsKept(t *testing.T) {
 			if st.got == nil || st.got.Amount != 50 || st.got.BeneficiaryID != "bob-id" || st.got.Counterparty != peerKey || st.got.TxHash != "0xhash" {
 				t.Fatalf("kept %+v", st.got)
 			}
-			if want := c.rail.AddressOf(peerKey); st.got.Payer != want || st.vault != want {
-				t.Errorf("payer %q, vault recorded %q, want the address of the sender's key %q", st.got.Payer, st.vault, want)
+			// The sender pays from its own address, which is its id, wherever the world has addresses.
+			want := peerKey
+			if c.rail.Address() == "" {
+				want = ""
+			}
+			if st.got.Payer != want || st.known != peerKey {
+				t.Errorf("payer %q, kernel recorded %q, want payer %q and the sender %q known", st.got.Payer, st.known, want, peerKey)
 			}
 			if wantPayment := c.rail.Address() == ""; (st.payment != nil) != wantPayment {
 				t.Errorf("payment booked with the word: %+v, want %v", st.payment, wantPayment)

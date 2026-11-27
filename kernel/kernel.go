@@ -663,7 +663,7 @@ func (k *Kernel) markEvidenceEligible(ctx context.Context, action *Action, tx *T
 		return
 	}
 	if action.Kind == KindRemoteProxy {
-		tx.EvidenceEligible = tx.RemoteReceiptJSON != "" && tx.RemoteSignerKey != "" &&
+		tx.EvidenceEligible = tx.RemoteReceiptJSON != "" && tx.RemoteSigner != "" &&
 			!isRejectionReceipt(remoteReceiptTxID(tx.RemoteReceiptJSON)) &&
 			!strings.HasPrefix(tx.Reason, reasonRemoteReceiptInvalidPrefix)
 		return
@@ -869,7 +869,7 @@ func (k *Kernel) CreateGrants(ctx context.Context, caller Principal, providerKey
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	} else if !caller.Local() {
-		// What users of other kernels may store here is bounded in all and per kernel: a kernel key
+		// What users of other kernels may store here is bounded in all and per kernel: a kernel address
 		// costs nothing, so neither bound alone would hold (D10).
 		total, ofKernel, cerr := k.store.CountRemoteConnections(ctx, caller.Kernel)
 		if cerr != nil {
@@ -1075,8 +1075,8 @@ func ValidateHandle(handle string) error {
 	}
 	// Handles must not collide with the other two account productions (§14), so one resolver
 	// disambiguates by shape without a sigil.
-	if looksLikeKey(handle) || looksLikeID(handle) {
-		return ErrInvalidInput.Wrap("handle must not look like a public key or id")
+	if IsKernelAddress(handle) || looksLikeID(handle) {
+		return ErrInvalidInput.Wrap("handle must not look like a kernel address or id")
 	}
 	return nil
 }
@@ -1928,7 +1928,7 @@ func (k *Kernel) Catalog(ctx context.Context, q CatalogQuery, limit, offset int)
 			}
 			docs = make(map[string]*DiscoveryDoc, len(all))
 			for _, d := range all {
-				docs[discoveryDocKey(d.KernelPublicKey, d.ActionID)] = d
+				docs[discoveryDocKey(d.Kernel, d.ActionID)] = d
 			}
 		}
 		d := docs[e.DocKey]
@@ -1947,7 +1947,7 @@ func (k *Kernel) Catalog(ctx context.Context, q CatalogQuery, limit, offset int)
 // DiscoveredAddress names a discovered action (D15): its owner on its kernel, named as this kernel
 // names that kernel, and its principal from the signed manifest it was learned from.
 func (k *Kernel) DiscoveredAddress(ctx context.Context, d *DiscoveryDoc) AddressView {
-	return k.KernelAddress(ctx, d.KernelPublicKey).under(d.Handle, d.OwnerID, d.KernelPublicKey).Child(d.Name)
+	return k.KernelAddress(ctx, d.Kernel).under(d.Handle, d.OwnerID, d.Kernel).Child(d.Name)
 }
 
 // ListAllActions returns all actions regardless of active state.
@@ -2009,9 +2009,9 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 		return ErrInternal.Wrapf("generate jwt secret: %v", err)
 	}
 	configs := map[string]string{
-		"superuser_handle":   SuperuserHandle,
-		"signing_public_key": PublicKey(key),
-		"jwt_secret":         hex.EncodeToString(jwtRaw),
+		"superuser_handle": SuperuserHandle,
+		"kernel_address":   KernelAddress(key),
+		"jwt_secret":       hex.EncodeToString(jwtRaw),
 	}
 	if err := k.store.InitFirstBoot(ctx, u, configs); err != nil {
 		return err
@@ -2023,8 +2023,8 @@ func (k *Kernel) FirstBoot(ctx context.Context, password, recoveryPublicKey stri
 	// InitFirstBoot uses INSERT OR IGNORE, so on a re-run the database keeps the key it was made
 	// for. A different key is another kernel's: signing as it here would speak for a ledger it
 	// never kept.
-	if stored := k.SelfKey(ctx); stored != PublicKey(key) {
-		return ErrInvalidState.Wrapf("this database is kernel %s; the key given is kernel %s", stored, PublicKey(key))
+	if stored := k.SelfKey(ctx); stored != KernelAddress(key) {
+		return ErrInvalidState.Wrapf("this database is kernel %s; the key given is kernel %s", stored, KernelAddress(key))
 	}
 	k.SetSigningKey(key, su.ID)
 	// Only apply the stored secret when no secret was provided at construction
@@ -3002,7 +3002,7 @@ func (k *Kernel) ListRatings(ctx context.Context, actionID string, limit, offset
 // so a buyer who paid abroad is as much a part of the provider's track record as one who paid here.
 func (k *Kernel) ActionRatings(ctx context.Context, a *Action, limit, offset int) ([]PublicRating, error) {
 	subjectKernel, subjectAction := k.actionSubject(ctx, a)
-	return k.store.ListPublicRatings(ctx, a.ID, subjectKernel, subjectAction, k.ourKeyB64(), limit, offset)
+	return k.store.ListPublicRatings(ctx, a.ID, subjectKernel, subjectAction, k.ourAddress(), limit, offset)
 }
 
 // ---- Stats ----
@@ -3189,7 +3189,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 		if doc, ok := discHits[r.id]; ok {
 			// Shadow: if we already hold an active local proxy for this remote action, the local row is
 			// already in the local legs — drop the discovery duplicate.
-			if px, _ := k.store.ReadProxyByRemoteID(ctx, doc.KernelPublicKey, doc.ActionID); px != nil && px.Active {
+			if px, _ := k.store.ReadProxyByRemoteID(ctx, doc.Kernel, doc.ActionID); px != nil && px.Active {
 				continue
 			}
 			// Indicative all-in price: the peer's signed serving price plus this kernel's current
@@ -3200,7 +3200,7 @@ func (k *Kernel) Lookup(ctx context.Context, req LookupRequest) ([]*LookupResult
 				continue
 			}
 			out = append(out, &LookupResult{Discovered: doc, Price: price, Score: float32(r.score),
-				QuoteHash: quoteHashOf(quoteTermsOfDoc(doc, price)), Host: hostOf(doc.KernelPublicKey)})
+				QuoteHash: quoteHashOf(quoteTermsOfDoc(doc, price)), Host: hostOf(doc.Kernel)})
 			continue
 		}
 		a, err := k.store.ReadAction(ctx, r.id)
@@ -3222,7 +3222,7 @@ func (k *Kernel) forEachDiscoveryHit(ctx context.Context, query string, oversamp
 	}
 	byKey := map[string]*DiscoveryDoc{}
 	for _, d := range docs {
-		byKey[discoveryDocKey(d.KernelPublicKey, d.ActionID)] = d
+		byKey[discoveryDocKey(d.Kernel, d.ActionID)] = d
 	}
 	if k.llm != nil {
 		if qvec, err := k.llm.Embed(ctx, query); err == nil {

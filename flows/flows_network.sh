@@ -4,13 +4,13 @@
 # real NAT (e.g. a home connection):
 #
 #   JUICE_NETWORK_FLOWS=1 \
-#   JUICE_NET_BOOTSTRAP="/dnsaddr/seed.example/p2p/<seedid>" \
-#   JUICE_NET_PEER_KEY="<remote peer public key>" \
+#   JUICE_NET_BOOTSTRAP="0x<seed address>@seed.example:31313" \
+#   JUICE_NET_PEER_KEY="<remote peer address>" \
 #   JUICE=/path/to/juice bash flows/flows_test.sh
 #
-# JUICE_NET_BOOTSTRAP  — a reachable public seed/bootstrap multiaddr (the ONLY thing configured; the
+# JUICE_NET_BOOTSTRAP  — a reachable public seed line, 0x…@host:port (the ONLY thing configured; the
 #                        remote peer must then be found through routing discovery, never a manual address).
-# JUICE_NET_PEER_KEY   — a remote kernel's base64url public key on a DIFFERENT network, running and
+# JUICE_NET_PEER_KEY   — a remote kernel's address on a DIFFERENT network, running and
 #                        advertising the discovery namespace.
 #
 # When JUICE_NETWORK_FLOWS=1, BOTH vars are REQUIRED: their absence is a hard failure, not a

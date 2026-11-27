@@ -39,11 +39,10 @@ func (k *Kernel) VerifyCapability(ctx context.Context, token string) (traceID, o
 	}
 	traceID, sig := token[:dot], token[dot+1:]
 
-	pub, err := decodeRemotePublicKey(PublicKey(k.cfg.SigningKey))
-	if err != nil {
+	if k.cfg.SigningKey == nil {
 		return "", "", ErrInvalidState.Wrap("signing key is not configured")
 	}
-	if err := k.cfg.Network.verify(pub, sigDomainCapability, capPayload(traceID), sig); err != nil {
+	if err := k.cfg.Network.verify(KernelAddress(k.cfg.SigningKey), sigDomainCapability, capPayload(traceID), sig); err != nil {
 		return "", "", ErrUnauthorized.Wrap("invalid capability")
 	}
 

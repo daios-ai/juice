@@ -87,9 +87,9 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	// that set none gets a fresh one — fresh, because two simulated kernels with one key would
 	// each take the other's users for their own.
 	ctx := context.Background()
-	if key, _ := k.GetConfig(ctx, configKeySigningPublic); key == "" {
+	if key, _ := k.GetConfig(ctx, configKeyAddress); key == "" {
 		_, priv, _ := genKey()
-		_ = k.SetConfig(ctx, configKeySigningPublic, kernel.PublicKey(priv))
+		_ = k.SetConfig(ctx, configKeyAddress, kernel.KernelAddress(priv))
 	}
 	if err := k.BindOwnName(ctx, testOwnName); err != nil {
 		panic(err)
@@ -97,22 +97,19 @@ func newKernel(cfg kernel.Config, deps kernel.Dependencies) *kernel.Kernel {
 	return k
 }
 
-// testKeys holds the key of every kernel a test made, by its public half: a kernel's key lives in
-// a file beside its database, which a test kernel does not have.
+// testKeys holds the key of every kernel a test made, by its address: a kernel's key lives in a
+// file beside its database, which a test kernel does not have.
 var testKeys sync.Map
 
-// genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
-func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+// genKey makes a kernel's key for a test: its address, as payloads carry it, and the key.
+func genKey() (string, *ecdsa.PrivateKey, error) {
 	key, err := ethcrypto.GenerateKey()
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
-	testKeys.Store(kernel.PublicKey(key), key)
-	return pubBytes(key), key, nil
+	testKeys.Store(kernel.KernelAddress(key), key)
+	return kernel.KernelAddress(key), key, nil
 }
-
-// pubBytes is a key's public half as payloads carry it, before base64url.
-func pubBytes(key *ecdsa.PrivateKey) []byte { return ethcrypto.CompressPubkey(&key.PublicKey) }
 
 // testKeyOf is the key of a test kernel, which its fixture made.
 func testKeyOf(k *kernel.Kernel) *ecdsa.PrivateKey {
@@ -158,8 +155,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	// A real kernel answers /health with its key and its network, and a client reads that banner
 	// before it will scale money or release a credential. A test kernel that cannot is not standing
 	// in for one.
-	if err := db.SetConfig(context.Background(), configKeySigningPublic,
-		base64.RawURLEncoding.EncodeToString(pubBytes(signingKey))); err != nil {
+	if err := db.SetConfig(context.Background(), configKeyAddress,
+		kernel.KernelAddress((signingKey))); err != nil {
 		t.Fatalf("newTestEnv: signing public key: %v", err)
 	}
 
@@ -195,6 +192,20 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{db: db, k: k, dir: dir}
 }
 
+// addressAt is the address the kernel at endpoint answers with, which `kernel add` pins; empty
+// where nothing answers as a kernel.
+func addressAt(endpoint string) string {
+	body, status, err := doHTTP(context.Background(), "GET", strings.TrimRight(endpoint, "/")+"/health", nil, nil, 0, true)
+	if err != nil || status != http.StatusOK {
+		return ""
+	}
+	h, err := decodeHealth(endpoint, body)
+	if err != nil {
+		return ""
+	}
+	return h.BlockchainAddress
+}
+
 // selectTestLogin records a kernel at endpoint and selects a login on it, which is what `kernel
 // add` and `auth login` do between them. Tests that store a token need one, because a token is
 // stored under the login that holds it.
@@ -209,7 +220,7 @@ func selectTestLogin(t *testing.T, name, endpoint string) {
 	t.Setenv("JUICE_AS", "")
 	t.Cleanup(func() { flagAs = old })
 	cfg := loadClientConfig()
-	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: strings.TrimRight(endpoint, "/"), Network: "play"}
+	cfg.Kernels[l.Kernel] = &kernelRec{Endpoint: strings.TrimRight(endpoint, "/"), Address: addressAt(endpoint), Network: "play"}
 	cfg.Current = l.String()
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatalf("select test login: %v", err)
@@ -1660,7 +1671,7 @@ func TestRemoteImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 
 	const actionID = "action-remote-id"
 	m := kernel.ActionManifest{
@@ -2263,7 +2274,7 @@ func resolves(words []string) bool {
 // its own copy of the response shape, and the field it had not copied vanished from --json.
 func TestAdminKernelShowRelaysEveryFieldTheServerSent(t *testing.T) {
 	body := map[string]any{
-		"handle": "acme", "public_key": "KEY", "network": "play",
+		"handle": "acme", "blockchain_address": "KEY", "network": "play",
 		"network_fingerprint": "5e0dcafe", "lottery": 1000000, "lottery_max": 5000000,
 		"credit_limit": 500000000, "exposure": 0, "fee_bps": 2000, "remote_bps": 500, "import_bps": 500,
 	}
@@ -2585,7 +2596,7 @@ func TestAdminRoutesNameTheirNoun(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub, _, _ := genKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	if _, err := env.k.BindPetname(ctx, key, "shop"); err != nil {
 		t.Fatal(err)
 	}
@@ -2719,16 +2730,15 @@ func TestOnlyTheClientResolvesTheIdentity(t *testing.T) {
 }
 
 // depositKernel serves the two facts `user deposit` composes its answer from: the identity banner
-// and the caller's own account. A chain world is the interesting case, so the banner carries an
-// address, and the token is a parameter because an older kernel does not publish one.
+// and the caller's own account. Every kernel has an address; a world with a token is one where it
+// is paid there.
 func depositKernel(t *testing.T, network, kernelAddr, token, mine string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status": "ok", "handle": "bank", "public_key": "bank-key",
-				"network": network, "decimals": 6, "symbol": "USDT",
-				"token": token, "blockchain_address": kernelAddr,
+				"status": "ok", "handle": "bank", "blockchain_address": kernelAddr,
+				"network": network, "decimals": 6, "symbol": "USDT", "token": token,
 			})
 			return
 		}
@@ -2746,8 +2756,7 @@ func depositKernel(t *testing.T, network, kernelAddr, token, mine string) {
 
 // A symbol names no token: one chain carries several stablecoins with one name and six decimals,
 // and a payment in the wrong one is never credited. The contract is therefore what the command
-// must print, and where the kernel does not publish one it must say so rather than leave a blank
-// line under an instruction to send money.
+// must print, beside the kernel's address; a world with no token has nothing to send to.
 func TestDepositNamesTheTokenItTakes(t *testing.T) {
 	const (
 		vault = "0x1111111111111111111111111111111111111111"
@@ -2791,21 +2800,8 @@ func TestDepositNamesTheTokenItTakes(t *testing.T) {
 		}
 	})
 
-	t.Run("a kernel that publishes no token says so", func(t *testing.T) {
-		depositKernel(t, "real", vault, "", mine)
-		got := run(t)
-		if !strings.Contains(got, "Ask the operator") {
-			t.Errorf("an absent contract must be named, not left blank:\n%s", got)
-		}
-		for _, line := range strings.Split(got, "\n") {
-			if strings.HasPrefix(line, "  ") && strings.TrimSpace(line) == "" {
-				t.Errorf("an empty indented line reads as a contract that is not there:\n%q", got)
-			}
-		}
-	})
-
 	t.Run("play has nothing to send", func(t *testing.T) {
-		depositKernel(t, "play", "", "", "")
+		depositKernel(t, "play", "0x4444444444444444444444444444444444444444", "", "")
 		got := run(t)
 		if !strings.Contains(got, "no addresses to send to") {
 			t.Errorf("play must still explain that the operator records payments:\n%s", got)
@@ -3325,7 +3321,7 @@ func TestEveryCommandAMessageNamesExists(t *testing.T) {
 // admin kernel show writes the running build, and the newest release while the kernel checks for
 // one: unknown before its first read, a note when it is newer, and no line when it does not check.
 func TestAdminKernelShowWritesTheRelease(t *testing.T) {
-	body := map[string]any{"handle": "acme", "public_key": "KEY", "version": "v0.17.2"}
+	body := map[string]any{"handle": "acme", "blockchain_address": "KEY", "version": "v0.17.2"}
 	stubKernel(t, 6, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(body) })
 	show := func() string {
 		return captureStdout(t, func() error { _, err := execTestCmd(t, identityCmd()); return err })

@@ -73,14 +73,14 @@ $ juice user me
     {
       "directory": {
         "address": "bob@acme",
-        "principal": "<user-id>@<kernel-key>"
+        "principal": "<user-id>@<kernel-address>"
       },
       "connections": [ … ],
       "actions": [
         {
           "action": {
             "address": "bob@acme/mail",
-            "principal": "<user-id>@<kernel-key>/mail"
+            "principal": "<user-id>@<kernel-address>/mail"
           },
           "provider_key": "bearer:httpbin.org",
           …
@@ -103,7 +103,7 @@ $ juice user disconnect bob@acme/mail
   revoked: [
     {
       "address": "bob@acme/mail",
-      "principal": "<user-id>@<kernel-key>/mail"
+      "principal": "<user-id>@<kernel-address>/mail"
     }
   ]
 ```

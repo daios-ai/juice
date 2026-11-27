@@ -23,6 +23,7 @@ import (
 	"github.com/daios-ai/juice/kernel"
 	"github.com/daios-ai/juice/log"
 	"github.com/daios-ai/juice/rail"
+	"github.com/daios-ai/juice/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -276,6 +277,16 @@ func runServer(name string) error {
 	if err != nil {
 		return err
 	}
+	// A kernel is named by its address (P1). A database made by a juice that named kernels by their
+	// key cannot be carried over either, and is refused before it is opened in the same way.
+	if old, err := store.PredatesAddresses(dbFile); err != nil {
+		return err
+	} else if old {
+		return fmt.Errorf("%s was made by an earlier juice, which named kernels by their public key.\n"+
+			"       It cannot be carried over. Move %s aside, then start this kernel again with its\n"+
+			"       recovery phrase: the same phrase gives the same address and, on a chain, the coins at it.\n"+
+			"       The accounts, balances and actions of the old kernel do not carry over", dbFile, kernelHome())
+	}
 
 	k, db, logger, httpExec, fedAdapter, specs, err := openKernel(world, key)
 	if err != nil {
@@ -393,7 +404,7 @@ func runServer(name string) error {
 			httpExec.callbackURL = "http://127.0.0.1:" + port
 		}
 	}
-	// Start the federation transport (§13): peers addressed by key, no HTTP endpoints. The
+	// Start the federation transport (§13): peers addressed by address, no HTTP endpoints. The
 	// libp2p identity is the platform signing key, so the transport IS this kernel's identity.
 	// The operator's metrics (D20), only when an address is configured. The registry exists before the
 	// transport because the transport reports into it; it is served only once the transport is up.
@@ -420,7 +431,7 @@ func runServer(name string) error {
 	fedAdapter.SetTransport(fedTransport)
 	fedAdapter.SetContactRecorder(recordContact)
 	pub := k.SelfKey(context.Background())
-	fedAdapter.SetLocalPubKey(pub)
+	fedAdapter.SetLocalAddr(pub)
 	defer fedTransport.Close()
 
 	// Drive pending remote-proxy calls (§13). The worker drains the work that survived the last
@@ -520,12 +531,10 @@ func runServer(name string) error {
 
 	// server.ready is emitted only after a successful bind — the harness waits on this line, and
 	// it is the last thing an operator sees at first boot, so it says what answered and nothing
-	// else: the kernel, its network, where clients reach it, and the key that is its identity.
-	// The federation addresses are reported by /health and by `admin kernel show`, so the line
-	// stays short; the peer id inside them is this same key in libp2p's spelling (D15, §14).
-	pubKey := k.SelfKey(context.Background())
+	// else: the kernel, its network, where clients reach it, and the address that is its identity.
+	// The TCP endpoints are reported by /health and by `admin kernel show`, so the line stays short.
 	logger.Info("server.ready", "handle", k.OwnName(context.Background()), "network", world.Name,
-		"addr", ln.Addr().String(), "public_key", pubKey)
+		"addr", ln.Addr().String(), "blockchain_address", k.SelfKey(context.Background()))
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -655,7 +664,7 @@ func newContactRecorder(record func(context.Context, string, bool) error) contac
 type fedDiscoverer interface {
 	Advertise(ctx context.Context) error
 	DiscoverProviders(ctx context.Context) ([]string, error)
-	BootstrapKeys() []string
+	SeedAddresses() []string
 	Gossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error)
 }
 
@@ -679,7 +688,7 @@ func discoverOnce(ctx context.Context, d fedDiscoverer, p discoveryPull, logger 
 	var directory []string
 	// Advertising and enumerating are time-boxed and skipped with no seeds, so a slow DHT can
 	// never consume the budget the peers themselves need (§13).
-	if boot := d.BootstrapKeys(); len(boot) > 0 {
+	if boot := d.SeedAddresses(); len(boot) > 0 {
 		dctx, dcancel := context.WithTimeout(ctx, discoveryDirectoryTimeout)
 		if err := d.Advertise(dctx); err != nil {
 			logger.Debug("discovery.advertise.failed", "error", err.Error())
@@ -748,8 +757,8 @@ func pullPeer(ctx context.Context, d fedDiscoverer, p discoveryPull, key string,
 		if uerr := json.Unmarshal(raw, &g); uerr != nil {
 			return fail("decode", uerr)
 		}
-		if g.PublicKey != key {
-			return fail("mismatch", fmt.Errorf("public_key mismatch: claimed %s", g.PublicKey))
+		if g.Address != key {
+			return fail("mismatch", fmt.Errorf("blockchain_address mismatch: claimed %s", g.Address))
 		}
 		next, aerr := accumulateInto(ctx, p, &g, key, scan)
 		if aerr != nil {
@@ -856,7 +865,7 @@ type fedClient interface {
 	Gossip(ctx context.Context, peerKey string, req fed.GossipRequest) (json.RawMessage, error)
 	Task(ctx context.Context, peerKey string, req fed.TaskRequest) (fed.TaskResponse, error)
 	Probe(ctx context.Context, peerKey string) fed.Reachability
-	ListenAddrs() []string
+	Endpoints() []string
 	Close() error
 }
 
@@ -866,44 +875,37 @@ const fedOpTimeout = 8 * time.Second
 
 // registerRoutes mounts all application routes onto r for the given server.
 // Rate-limited routes (auth, user creation) are registered by the caller before this call.
-// blockchainAddress is where this kernel is paid, empty on a world with no addresses.
-func (s *server) blockchainAddress(ctx context.Context) string {
-	return s.kernel.BlockchainAddress()
-}
-
 // getHealth is the identity banner (unauthenticated) every client reads before it trusts a server:
 // which kernel this is, which network it serves, and how its money is written (D20). The handle and
-// public key are this kernel's advertised federation identity (§13), not secrets — only the private
-// key is withheld.
+// address are this kernel's advertised identity (§13), not secrets — only the private key is
+// withheld.
 func (s *server) getHealth(w http.ResponseWriter, r *http.Request) {
-	pub := s.kernel.SelfKey(r.Context())
 	net := s.kernel.Network()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":              "ok",
 		"handle":              s.kernel.OwnName(r.Context()),
-		"public_key":          pub,
+		"blockchain_address":  s.kernel.SelfKey(r.Context()),
 		"network":             net.Name,
 		"network_fingerprint": net.Fingerprint,
 		"decimals":            net.Decimals,
 		"symbol":              net.Symbol,
 		"token":               net.Token,
-		"blockchain_address":  s.blockchainAddress(r.Context()),
 		"version":             version,
-		// Where peers dial this kernel. Public already — the kernel advertises these in the
-		// routing table — and the one place a person outside can read them, which is what an
+		// Where peers meet this kernel, as seed lines. Public already — the kernel advertises these
+		// in the routing table — and the one place a person outside can read them, which is what an
 		// operator checking their own node from elsewhere, and a client turning a client address
-		// into a federation address, both need (§13).
+		// into a seed line, both need (§13).
 		"fed_addrs": s.fedAddrs(),
 	})
 }
 
-// fedAddrs are the addresses the transport is reachable on, each ending in this kernel's peer id.
+// fedAddrs are the TCP endpoints the transport listens on, each written as a seed line, 0x…@host:port.
 // Empty before the transport starts, and never nil, so a reader finds a list either way.
 func (s *server) fedAddrs() []string {
 	if s.fed == nil {
 		return []string{}
 	}
-	addrs := s.fed.ListenAddrs()
+	addrs := s.fed.Endpoints()
 	if addrs == nil {
 		return []string{}
 	}
@@ -1940,7 +1942,7 @@ func writeErr(w http.ResponseWriter, err error) {
 
 // ---- Federation transport wiring ----
 //
-// The libp2p federation transport (§13) addresses peers by key, with no HTTP endpoints. Inbound
+// The libp2p federation transport (§13) addresses peers by address, with no HTTP endpoints. Inbound
 // protocol streams are answered by fedHandlers, which reuses the same verification and settlement
 // logic (handleFederationCall, etc.); outbound remote-proxy calls go out over the transport.
 

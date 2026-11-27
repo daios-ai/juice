@@ -58,7 +58,7 @@ messages, and responses from external systems.
 ## Running a kernel
 
 A kernel can run on a laptop behind a home router as well as on a public server.
-Other kernels identify it by its public key and can reach it without a public
+Other kernels identify it by its address (`0x…`) and can reach it without a public
 address or port forwarding. Running a kernel therefore lets you participate in
 the network from your own machine, while using somebody else's kernel requires
 only a client and an account there.
@@ -86,7 +86,7 @@ explains these amounts before you make a remote purchase.
 
 Every settled call produces an immutable transaction and a signed receipt. The
 records identify the payer, requester, and payee, and account for the charge.
-The receipt can be verified against the issuing kernel's signing key without
+The receipt can be verified against the issuing kernel's address without
 contacting that kernel. Money movements and their records are committed
 together, so the account history accompanies the movement of funds.
 

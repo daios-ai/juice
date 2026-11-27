@@ -3,6 +3,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -528,7 +529,7 @@ func newProcess(ownerID string) *kernel.Process {
 // returns its key: a peer is its kernel row and holds nothing else here (D4).
 func newPeer(t *testing.T, db *DB, handle, key string, createdAt time.Time) string {
 	t.Helper()
-	if err := db.UpsertKernel(context.Background(), key, handle, "", "", createdAt); err != nil {
+	if err := db.UpsertKernel(context.Background(), key, handle, "", createdAt); err != nil {
 		t.Fatalf("upsert kernel %s: %v", handle, err)
 	}
 	if err := db.BindPetname(context.Background(), key, handle); err != nil {
@@ -901,9 +902,9 @@ func TestListCatalog(t *testing.T) {
 	add(kernel.User(bob.ID), "b-off", false, kernel.VisibilityPublic, "")
 	add(kernel.Principal{Kernel: peer, UserID: "dave-id", Handle: "dave"}, "sum", true, kernel.VisibilityLocal, "r1")
 	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "K", ActionID: "r1", Handle: "dave", Name: "sum", Title: "d-sum", ObservedAt: time.Now()},
-		{KernelPublicKey: "K", ActionID: "r2", Handle: "dave", Name: "tr", Title: "d-tr", ObservedAt: time.Now()},
-		{KernelPublicKey: "K", ActionID: "r3", Handle: "erin", Name: "x", Title: "e-x", ObservedAt: time.Now()},
+		{Kernel: "K", ActionID: "r1", Handle: "dave", Name: "sum", Title: "d-sum", ObservedAt: time.Now()},
+		{Kernel: "K", ActionID: "r2", Handle: "dave", Name: "tr", Title: "d-tr", ObservedAt: time.Now()},
+		{Kernel: "K", ActionID: "r3", Handle: "erin", Name: "x", Title: "e-x", ObservedAt: time.Now()},
 	}, "", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -3663,7 +3664,7 @@ func TestPurgePeer(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC()
-	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "otherkeyBBB", "other", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3689,10 +3690,10 @@ func TestPurgePeer(t *testing.T) {
 		t.Errorf("action_stats after purge = %d, want 0", n)
 	}
 	// The kernel row stays, forgotten and nameless, so the records that name it keep naming it.
-	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=? AND forgotten_at IS NOT NULL AND petname IS NULL`, peer); n != 1 {
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE address=? AND forgotten_at IS NOT NULL AND petname IS NULL`, peer); n != 1 {
 		t.Errorf("the purged peer's row must stay forgotten, got %d", n)
 	}
-	if n := count(`SELECT COUNT(*) FROM kernels WHERE public_key=? AND forgotten_at IS NULL`, "otherkeyBBB"); n != 1 {
+	if n := count(`SELECT COUNT(*) FROM kernels WHERE address=? AND forgotten_at IS NULL`, "otherkeyBBB"); n != 1 {
 		t.Errorf("another kernel's row after purge = %d, want 1 (untouched)", n)
 	}
 	if tx, err := db.ReadTransaction(ctx, txID); err != nil || tx.CallerKernel != peer {
@@ -3710,17 +3711,17 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
 
 	// A stale never-peer kernel with a discovery doc and an evidence row (both must be evicted).
-	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, "staleKey", "stale", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ApplyCatalogPage(ctx, "staleKey", []*kernel.DiscoveryDoc{{KernelPublicKey: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}, "", 0); err != nil {
+	if err := db.ApplyCatalogPage(ctx, "staleKey", []*kernel.DiscoveryDoc{{Kernel: "staleKey", ActionID: "sa1", Name: "svc", Description: "d", ObservedAt: old}}, "", 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertEvidence(ctx, &kernel.EvidenceRow{IssuerPublicKey: "staleKey", ReceiptHash: "rh1", SubjectKernelPublicKey: "staleKey", SubjectActionID: "sa1", EvidenceReceiptJSON: "{}", ReceiptCreatedAt: old, EffectiveAt: old, ObservedAt: old}); err != nil {
+	if err := db.UpsertEvidence(ctx, &kernel.EvidenceRow{IssuerKernel: "staleKey", ReceiptHash: "rh1", SubjectKernel: "staleKey", SubjectActionID: "sa1", EvidenceReceiptJSON: "{}", ReceiptCreatedAt: old, EffectiveAt: old, ObservedAt: old}); err != nil {
 		t.Fatal(err)
 	}
 	// A fresh never-peer kernel survives.
-	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", "", fresh); err != nil {
+	if err := db.UpsertKernel(ctx, "freshKey", "fresh", "", fresh); err != nil {
 		t.Fatal(err)
 	}
 	// A stale counterparty survives here (peer retention governs it, not this sweep), and so does a
@@ -3730,7 +3731,7 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := db.PurgeStaleDiscovery(ctx, cutoff, "")
+	n, err := db.PurgeStaleDiscovery(ctx, cutoff, "", false)
 	if err != nil {
 		t.Fatalf("PurgeStaleDiscovery: %v", err)
 	}
@@ -3744,16 +3745,16 @@ func TestPurgeStaleDiscovery(t *testing.T) {
 		}
 		return c
 	}
-	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key=?`, "staleKey"); c != 0 {
+	if c := count(`SELECT COUNT(*) FROM kernels WHERE address=?`, "staleKey"); c != 0 {
 		t.Errorf("stale discovered_kernels = %d, want 0", c)
 	}
-	if c := count(`SELECT COUNT(*) FROM discovery_docs WHERE kernel_public_key=?`, "staleKey"); c != 0 {
+	if c := count(`SELECT COUNT(*) FROM discovery_docs WHERE kernel=?`, "staleKey"); c != 0 {
 		t.Errorf("stale discovery_docs = %d, want 0", c)
 	}
-	if c := count(`SELECT COUNT(*) FROM evidence WHERE issuer_public_key=?`, "staleKey"); c != 0 {
+	if c := count(`SELECT COUNT(*) FROM evidence WHERE issuer_kernel=?`, "staleKey"); c != 0 {
 		t.Errorf("stale evidence = %d, want 0", c)
 	}
-	if c := count(`SELECT COUNT(*) FROM kernels WHERE public_key IN ('freshKey','peerKey','bannedKey') AND forgotten_at IS NULL`); c != 3 {
+	if c := count(`SELECT COUNT(*) FROM kernels WHERE address IN ('freshKey','peerKey','bannedKey') AND forgotten_at IS NULL`); c != 3 {
 		t.Errorf("fresh, counterparty and suspended survivors = %d, want 3", c)
 	}
 }
@@ -3777,7 +3778,7 @@ func TestListPurgeablePeers(t *testing.T) {
 	newPeer(t, db, "stranger", "k-stranger", old) // excluded: no record names it; discovery evicts it
 	counterparty("recent", "k-recent", now)       // excluded: first seen within the window
 	counterparty("gossip", "k-gossip", old)       // excluded: a recent gossip mention keeps it live
-	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "k-gossip", "gossip", "", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetKernelSuspended(ctx, counterparty("banned", "k-banned", old), true, old); err != nil {
@@ -4273,11 +4274,11 @@ func TestListReceiptsForGossip(t *testing.T) {
 	if found == nil {
 		t.Fatalf("a NULL-effect public action's receipt must be gossip-eligible; got %d rows", len(rows))
 	}
-	if found.CounterpartyKernelPublicKey != "peerKeyXYZ" {
-		t.Errorf("counterparty = %q, want the peer caller's key", found.CounterpartyKernelPublicKey)
+	if found.CounterpartyKernel != "peerKeyXYZ" {
+		t.Errorf("counterparty = %q, want the peer caller's key", found.CounterpartyKernel)
 	}
-	if found.SubjectKernelPublicKey != "" {
-		t.Errorf("own-action subject kernel must be empty (kernel fills its own key), got %q", found.SubjectKernelPublicKey)
+	if found.SubjectKernel != "" {
+		t.Errorf("own-action subject kernel must be empty (kernel fills its own key), got %q", found.SubjectKernel)
 	}
 	if found.Cursor == "" {
 		t.Error("gossip row must carry a cursor high-watermark")
@@ -4338,10 +4339,10 @@ func TestListKernelsRoster(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Discovery-only: a kernel row with a nickname, no petname, and no record naming it.
-	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "rosterK3", "minibox", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, "SELF", "me", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, "SELF", "me", "", now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4352,7 +4353,7 @@ func TestListKernelsRoster(t *testing.T) {
 		}
 		m := map[string]*kernel.RemoteKernelView{}
 		for _, v := range views {
-			m[v.PublicKey] = v
+			m[v.Address] = v
 		}
 		return m
 	}
@@ -4384,7 +4385,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	now := time.Now().UTC()
 	const key = "narrowkey"
 
-	if err := db.UpsertKernel(ctx, key, "nick", "about", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, key, "nick", "about", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetGossipCursor(ctx, key, "cursor-1"); err != nil {
@@ -4395,7 +4396,7 @@ func TestUpsertKernelPreservesNarrowPaths(t *testing.T) {
 	}
 	// A later observation (e.g. the next gossip pass, or a minimal row from an inbound call)
 	// must not reset any of it.
-	if err := db.UpsertKernel(ctx, key, "", "", "", now.Add(time.Minute)); err != nil {
+	if err := db.UpsertKernel(ctx, key, "", "", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	rk, err := db.ReadKernel(ctx, key)
@@ -4474,8 +4475,8 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 	}
 
 	docs := []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "pk", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
-		{KernelPublicKey: "pk", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
+		{Kernel: "pk", ActionID: "a1", Name: "paid", Description: "d", ServingPrice: 105, ObservedAt: now},
+		{Kernel: "pk", ActionID: "a2", Name: "free", Description: "d", ServingPrice: 0, ObservedAt: now},
 	}
 	if err := db.ApplyCatalogPage(ctx, "pk", docs, "", 0); err != nil {
 		t.Fatalf("ApplyCatalogPage: %v", err)
@@ -4494,7 +4495,7 @@ func TestDiscoveryDocServingPrice(t *testing.T) {
 
 	// A negative serving price is rejected by the column CHECK, not silently stored.
 	err = db.ApplyCatalogPage(ctx, "pk", []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "pk", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
+		{Kernel: "pk", ActionID: "a3", Name: "bad", ServingPrice: -1, ObservedAt: now},
 	}, "", 0)
 	if err == nil {
 		t.Error("a negative serving_price must be rejected by the CHECK constraint")
@@ -4562,7 +4563,7 @@ func TestMigration046DropsDiscoveryKind(t *testing.T) {
 
 	// Repopulation path: a stored page and a lexical search work against the new shape.
 	if err := db.ApplyCatalogPage(ctx, "pk", []*kernel.DiscoveryDoc{
-		{KernelPublicKey: "pk", Handle: "prov", ActionID: "a1", Name: "weather",
+		{Kernel: "pk", Handle: "prov", ActionID: "a1", Name: "weather",
 			Description: "forecast", ServingPrice: 10, ObservedAt: time.Now().UTC()},
 	}, "", 0); err != nil {
 		t.Fatalf("ApplyCatalogPage: %v", err)
@@ -4587,7 +4588,7 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 	const k1, k2 = "kernel_A", "kernelXA"
 	seed := func(key, name string) {
 		if err := db.ApplyCatalogPage(ctx, key, []*kernel.DiscoveryDoc{
-			{KernelPublicKey: key, Handle: "prov", ActionID: "a1", Name: name,
+			{Kernel: key, Handle: "prov", ActionID: "a1", Name: name,
 				Description: name, ServingPrice: 1, ObservedAt: now},
 		}, "", 0); err != nil {
 			t.Fatalf("ApplyCatalogPage(%s): %v", key, err)
@@ -4604,13 +4605,13 @@ func TestDiscoveryFTSDeleteIsNotWildcarded(t *testing.T) {
 
 	// Stale eviction of k1 (never a peer) must not clear k2's rows either.
 	old := now.Add(-100 * 24 * time.Hour)
-	if err := db.UpsertKernel(ctx, k1, "one", "", "", old); err != nil {
+	if err := db.UpsertKernel(ctx, k1, "one", "", old); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertKernel(ctx, k2, "two", "", "", now); err != nil {
+	if err := db.UpsertKernel(ctx, k2, "two", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour), ""); err != nil {
+	if _, err := db.PurgeStaleDiscovery(ctx, now.Add(-24*time.Hour), "", false); err != nil {
 		t.Fatalf("PurgeStaleDiscovery: %v", err)
 	}
 	if keys, err := db.SearchDiscoveryLexical(ctx, "beta", 10); err != nil || len(keys) != 1 || keys[0] != k2+"/a1" {
@@ -4698,7 +4699,8 @@ func TestMigration053RenamesInPlace(t *testing.T) {
 	}
 	for _, tc := range []struct{ table, old, renamed string }{
 		{"accounts", "rail_address", "blockchain_address"},
-		{"kernels", "rail_address", "blockchain_address"},
+		// The kernel's own column was dropped later still (065): a kernel is paid at its address.
+		{"kernels", "rail_address", "address"},
 		{"traces", "owed_rail_address", "owed_blockchain_address"},
 	} {
 		cols := map[string]bool{}
@@ -5259,7 +5261,7 @@ func TestRecordTaskNoticeKeepsOnlyNewer(t *testing.T) {
 	if err := db.RecordTaskNotice(ctx, "holder-h", alice.ID, notice(3, kernel.TaskDone)); err != nil {
 		t.Fatal(err)
 	}
-	if e := held(); e.Revision != 3 || e.Status != kernel.TaskDone || e.HolderKey != "holder-h" {
+	if e := held(); e.Revision != 3 || e.Status != kernel.TaskDone || e.HolderKernel != "holder-h" {
 		t.Errorf("a newer notice was not kept: %+v", e)
 	}
 	if err := db.RecordTaskNotice(ctx, "holder-g", alice.ID, notice(9, kernel.TaskWaiting)); !errors.Is(err, kernel.ErrInvalidInput) {
@@ -5289,7 +5291,7 @@ func TestRecordTaskNoticeKeepsOnlyNewer(t *testing.T) {
 func TestTaskRevisionsAreToldUntilAcknowledged(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	if err := db.SetConfig(ctx, "signing_public_key", "self-key"); err != nil {
+	if err := db.SetConfig(ctx, "kernel_address", "self-key"); err != nil {
 		t.Fatal(err)
 	}
 	owner := newUser("rev-owner", 100)
@@ -5324,7 +5326,7 @@ func TestTaskRevisionsAreToldUntilAcknowledged(t *testing.T) {
 	if len(o) != 1 || o[0].PeerKey != "peer-key" || o[0].Notice.Revision != 1 || o[0].Notice.UserID != remote || o[0].Notice.ActionID != "" {
 		t.Fatalf("owed = %+v; want revision 1 addressed to the remote user, its actions withheld", o)
 	}
-	if e, _ := db.ReadMailbox(ctx, task.ID); e == nil || e.HolderKey != "self-key" || e.OwnerUserID != owner.ID || e.ActionID != act.ID {
+	if e, _ := db.ReadMailbox(ctx, task.ID); e == nil || e.HolderKernel != "self-key" || e.OwnerUserID != owner.ID || e.ActionID != act.ID {
 		t.Errorf("the holder's own entry = %+v", e)
 	}
 	if err := db.MarkTaskTold(ctx, task.ID, 1); err != nil {
@@ -5596,7 +5598,7 @@ func TestMigration059NamesPartiesAsPrincipals(t *testing.T) {
 			t.Errorf("%d peer or tombstone accounts survived", n)
 		}
 		var suspended sql.NullString
-		q(`SELECT suspended_at FROM kernels WHERE public_key='KEYK'`, &suspended)
+		q(`SELECT suspended_at FROM kernels WHERE address='KEYK'`, &suspended)
 		if !suspended.Valid {
 			t.Error("the peer's suspension did not move to its kernel row")
 		}
@@ -5691,7 +5693,7 @@ func TestBindPetnameIsExact(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	newPeer(t, db, "taken", "K1", time.Now().UTC())
-	if err := db.UpsertKernel(ctx, "K2", "", "", "", time.Now().UTC()); err != nil {
+	if err := db.UpsertKernel(ctx, "K2", "", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.BindPetname(ctx, "K1", "taken"); err != nil {
@@ -5706,6 +5708,20 @@ func TestBindPetnameIsExact(t *testing.T) {
 	if rk, _ := db.ReadKernel(ctx, "K2"); rk == nil || rk.Petname != "" {
 		t.Errorf("the refused kernel was named: %+v", rk)
 	}
+}
+
+// undoOneIdentifier puts the schema back to where it was before migration 065, for a test that runs
+// an earlier migration again over a database that has already passed it.
+var undoOneIdentifier = []string{
+	`ALTER TABLE kernels RENAME COLUMN address TO public_key`,
+	`ALTER TABLE kernels ADD COLUMN blockchain_address TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE evidence RENAME COLUMN issuer_kernel TO issuer_public_key`,
+	`ALTER TABLE evidence RENAME COLUMN subject_kernel TO subject_kernel_public_key`,
+	`ALTER TABLE evidence RENAME COLUMN counterparty_kernel TO counterparty_kernel_public_key`,
+	`ALTER TABLE discovery_docs RENAME COLUMN kernel TO kernel_public_key`,
+	`ALTER TABLE transactions RENAME COLUMN remote_signer TO remote_signer_key`,
+	`ALTER TABLE mailbox RENAME COLUMN holder_kernel TO holder_key`,
+	`DELETE FROM schema_migrations WHERE version='065_one_identifier'`,
 }
 
 // A discovered action keeps its owner's id from the signed manifest beside the handle (D15, D16),
@@ -5726,8 +5742,9 @@ func TestMigration062DropsDiscoveryWithoutOwnerIDs(t *testing.T) {
 	if err := db.db.QueryRow(`SELECT COUNT(*) FROM discovery_fts`).Scan(&fts); err != nil || fts == 0 {
 		t.Fatalf("the discovered action's search entry was never written: %d, %v", fts, err)
 	}
-	for _, q := range []string{`ALTER TABLE discovery_docs DROP COLUMN owner_id`, `DELETE FROM schema_migrations WHERE version='062_names_and_ids'`,
-		`UPDATE kernels SET catalog_cursor='mid-scan'`} {
+	// Back to the schema before 062: the later renames (065) undone first, so both run again in order.
+	for _, q := range append(undoOneIdentifier, `ALTER TABLE discovery_docs DROP COLUMN owner_id`, `DELETE FROM schema_migrations WHERE version='062_names_and_ids'`,
+		`UPDATE kernels SET catalog_cursor='mid-scan'`) {
 		if _, err := db.db.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
@@ -6077,5 +6094,36 @@ func TestSettlementQueriesUseIndexes(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A database made by a juice that named kernels by their key is recognised before the store is
+// opened, and reading it writes nothing to it: a refused kernel is left exactly as it was. A
+// database this juice made, and one that does not exist yet, predate nothing.
+func TestADatabaseFromBeforeAddressesIsRecognisedUntouched(t *testing.T) {
+	dir := t.TempDir()
+	old := preValueMigrationDB(t, func(*sql.DB) {})
+	db := openThrough(t, old, "064_one_key")
+	if _, err := db.db.Exec(`PRAGMA journal_mode=DELETE`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	before, err := os.ReadFile(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := PredatesAddresses(old); err != nil || !got {
+		t.Fatalf("a database through 064 predates addresses: %v %v, want true", got, err)
+	}
+	if after, _ := os.ReadFile(old); !bytes.Equal(before, after) {
+		t.Error("reading the old database changed it")
+	}
+	current := filepath.Join(dir, "current.db")
+	openAt(t, current).Close()
+	if got, err := PredatesAddresses(current); err != nil || got {
+		t.Errorf("a database this juice made: %v %v, want false", got, err)
+	}
+	if got, err := PredatesAddresses(filepath.Join(dir, "none.db")); err != nil || got {
+		t.Errorf("a database that does not exist: %v %v, want false", got, err)
 	}
 }

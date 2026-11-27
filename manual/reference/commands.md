@@ -182,7 +182,7 @@ takes `--visibility`. `create` requires `--title`. The schemas follow
 | `juice admin kernel show` | identity, money position, rates, credit ([Operator duties](../operating/duties.html#the-one-view-to-read-first)) |
 | `juice admin kernel deposits` | unattributed payments, and work delivered unpaid |
 
-Peer targets use a public key or petname. User targets use a `handle@kernel`
+Peer targets use an address or petname. User targets use a `handle@kernel`
 address or an account ID. The separate commands avoid ambiguity when a handle
 and a petname happen to be the same. Ordinary user and action references also
-accept principals: `user_id@kernel_key` and `user_id@kernel_key/name`.
+accept principals: `user_id@kernel_address` and `user_id@kernel_address/name`.

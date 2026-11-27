@@ -209,7 +209,7 @@ flow_rail_profile() {
 
     # Registering a kernel records its key and its network, and selects nothing.
     HOME="$hc" "$JUICE" kernel add "$(url "$dba")" >/dev/null 2>&1 || { fail "rail_profile.pin" "add failed"; return; }
-    assert_nonempty "rail_profile.pinned_key" "$(HOME="$hc" "$JUICE" --json kernel list | grep -o '"public_key": "[^"]*"' | head -1)"
+    assert_nonempty "rail_profile.pinned_key" "$(HOME="$hc" "$JUICE" --json kernel list | grep -o '"blockchain_address": "[^"]*"' | head -1)"
     assert_contains "rail_profile.lists" "kernel-a" "$(HOME="$hc" "$JUICE" kernel list)"
     HOME="$hc" "$JUICE" auth login sys@kernel-a --password sys-pass >/dev/null 2>&1
     assert_json "rail_profile.logged_in" "$(HOME="$hc" "$JUICE" --json user me)" address sys@kernel-a
@@ -226,7 +226,7 @@ flow_rail_profile() {
         env HOME="$hc" "$JUICE" --server "$(url "$hb")" user me
 
     # A record that no longer names the kernel it pinned refuses to switch rather than guessing.
-    profile_set "$hc" public_key "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    profile_set "$hc" blockchain_address "0x000000000000000000000000000000000000dead"
     assert_fails "rail_profile.key_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@kernel-a
     profile_set "$hc" world_fingerprint "0000000000000000000000000000000000000000000000000000000000000000"
     assert_fails "rail_profile.digest_mismatch_refused" "" -- env HOME="$hc" "$JUICE" auth use sys@kernel-a
@@ -331,8 +331,8 @@ flow_two_kernels() {
     HOME="$hc" "$JUICE" auth login sys@kernel-beta --password sys-pass >/dev/null 2>&1
 
     local ka kb
-    ka=$(strfield "$(JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
-    kb=$(strfield "$(JUICE_AS=sys@kernel-beta  HOME="$hc" "$JUICE" --json admin kernel show)" public_key)
+    ka=$(strfield "$(JUICE_AS=sys@kernel-alpha HOME="$hc" "$JUICE" --json admin kernel show)" blockchain_address)
+    kb=$(strfield "$(JUICE_AS=sys@kernel-beta  HOME="$hc" "$JUICE" --json admin kernel show)" blockchain_address)
     assert_nonempty "two_kernels.alpha_key" "$ka"
     assert_ne "two_kernels.distinct_identities" "$ka" "$kb"
     assert_json "two_kernels.alpha_handle" \
@@ -448,8 +448,8 @@ flow_restore_from_phrase() {
     local dir db hs ha; dir=$(new_dir); db="$(kdb "$dir")"; hs=$(home "$dir" sys); ha=$(home "$dir" alice)
     local root; root=$(khome "$db")
     make_admin "$db" "$hs" || { fail "restore.boot" "server did not start"; return; }
-    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
-    assert_eq "restore.key_is_the_compressed_point" 44 "${#key}"
+    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)
+    assert_eq "restore.named_by_its_address" 42 "${#key}"
     make_user "$db" "$hs" "$ha" alice
     deposit "$db" "$hs" alice 500
     assert_contains "restore.alice_exists" "alice" "$(j "$db" "$hs" admin user list)"
@@ -486,7 +486,7 @@ flow_restore_from_phrase() {
 
     # The phrase: the same kernel, saying so, with a ledger of its own.
     start_server "$db" "$hs" || { fail "restore.restored" "server did not start"; return; }
-    assert_eq "restore.same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
+    assert_eq "restore.same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)"
     assert_contains "restore.says_which_kernel" "That phrase is kernel $key" "$(cat "$(server_log "$db")")"
     j "$db" "$hs" auth login "sys@$(kname "$db")" --password sys-pass >/dev/null 2>&1
     assert_not_contains "restore.ledger_starts_again" "alice" "$(j "$db" "$hs" admin user list)"
@@ -505,7 +505,7 @@ flow_restore_from_phrase() {
     # Another phrase is another kernel.
     rm -rf "$root/kernels/play" "$root.play.phrase"
     start_server "$db" "$hs" || { fail "restore.another_kernel" "server did not start"; return; }
-    assert_ne "restore.another_phrase_is_another_kernel" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
+    assert_ne "restore.another_phrase_is_another_kernel" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)"
 }
 
 # Money is written one way. What a command takes is what it shows, and an amount is never rendered
@@ -579,7 +579,7 @@ flow_one_output_policy() {
     # --json is what the server sent, so a field the CLI does not print is still carried. The
     # network fingerprint is read here before an operator believes any other number.
     assert_nonempty "output.identity_keeps_the_digest" "$(strfield "$(jj "$db" "$hs" admin kernel show)" network_fingerprint)"
-    assert_nonempty "output.health_is_the_banner" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" public_key)"
+    assert_nonempty "output.health_is_the_banner" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" blockchain_address)"
     assert_nonempty "output.health_says_the_version" "$(strfield "$(jj "$db" "$ha" kernel health "$KERNEL_NAME")" version)"
     # A verb that does not exist under a group is an error, never that group's help and exit 0.
     assert_fails "output.unknown_verb_is_refused" "unknown command" -- j "$db" "$ha" admin deposit

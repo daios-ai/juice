@@ -9,12 +9,12 @@ import (
 
 // Address is the one name form (D15): `user@kernel` names a user, `user@kernel/name` an action. The
 // user segment is a handle or a user id, the kernel segment a petname — this kernel's own name is one,
-// bound to its own key — or a raw key; each pair is disjoint by shape, so nothing guesses. Written
+// bound to its own address — or an address; each pair is disjoint by shape, so nothing guesses. Written
 // with an id and a key, an address is a principal, meaning the same party on every kernel. A bare
 // handle is not a name anywhere: like an email address, the local part means nothing without its host.
 type Address struct {
 	User   string // the user's handle or id on Kernel
-	Kernel string // petname or raw key, as typed; never stored, never signed
+	Kernel string // petname or address, as typed; never stored, never signed
 	Name   string // action name, possibly with `/`; "" names the user, or an owner's root
 }
 
@@ -33,8 +33,8 @@ func ParseAddress(s string) (Address, error) {
 			return Address{}, err
 		}
 	}
-	if ValidateHandle(kernelSeg) != nil && !looksLikeKey(kernelSeg) {
-		return Address{}, ErrInvalidInput.Wrapf("%q is not a kernel name or key", kernelSeg)
+	if ValidateHandle(kernelSeg) != nil && !IsKernelAddress(kernelSeg) {
+		return Address{}, ErrInvalidInput.Wrapf("%q is not a kernel name or address", kernelSeg)
 	}
 	return Address{User: handle, Kernel: kernelSeg, Name: name}, nil
 }
@@ -72,7 +72,7 @@ type Principal struct {
 	Handle string
 }
 
-// Written is a principal as a program keeps it (D15): user_id@kernel_key, a kernel alone as its
+// Written is a principal as a program keeps it (D15): user_id@kernel_address, a kernel alone as its
 // key, and empty for nobody. self is this kernel's key, which a party here leaves implicit.
 func (p Principal) Written(self string) string {
 	key := firstNonEmpty(p.Kernel, self)
@@ -99,7 +99,7 @@ func (p Principal) Same(q Principal) bool { return p.Kernel == q.Kernel && p.Use
 // happens to be the same never is.
 func (p Principal) IsUser(id string) bool { return p.Local() && id != "" && p.UserID == id }
 
-// KernelRef is a resolved kernel segment: the key it names, and whether that is this kernel.
+// KernelRef is a resolved kernel segment: the address it names, and whether that is this kernel.
 type KernelRef struct {
 	Key   string
 	Local bool
@@ -110,7 +110,7 @@ type KernelRef struct {
 const Localhost = "localhost"
 
 // ResolveKernel is the one place a kernel segment becomes a key (D15): localhost, a bound petname —
-// this kernel's own name among them — else a raw key. A self-asserted nickname never resolves, so
+// this kernel's own name among them — else an address. A self-asserted nickname never resolves, so
 // no kernel can capture a name by gossiping it first.
 func (k *Kernel) ResolveKernel(ctx context.Context, seg string) (KernelRef, error) {
 	seg = strings.TrimSpace(seg)
@@ -119,11 +119,11 @@ func (k *Kernel) ResolveKernel(ctx context.Context, seg string) (KernelRef, erro
 	}
 	var key string
 	if rk, err := k.store.ReadKernelByPetname(ctx, seg); err == nil && rk != nil {
-		key = rk.PublicKey
-	} else if looksLikeKey(seg) {
-		key = seg
+		key = rk.Address
+	} else if IsKernelAddress(seg) {
+		key = strings.ToLower(seg)
 	} else {
-		return KernelRef{}, ErrNotFound.Wrapf("kernel %q is not a known name or key", seg)
+		return KernelRef{}, ErrNotFound.Wrapf("kernel %q is not a known name or address", seg)
 	}
 	return KernelRef{Key: key, Local: key == k.SelfKey(ctx)}, nil
 }
@@ -245,7 +245,7 @@ func (k *Kernel) LocalPrincipal(ctx context.Context, ref string) (userID, handle
 
 // AddressView is how a reply names a party or an action (D15, D20): the address a person reads and
 // types, the principal a program keeps — the same party on every kernel, whatever it is called — and,
-// for a kernel this one has given no petname, the nickname it calls itself, shown after its key and
+// for a kernel this one has given no petname, the nickname it calls itself, shown after its address and
 // never resolved.
 type AddressView struct {
 	Address   string `json:"address"`
@@ -285,11 +285,11 @@ func (n *Names) account(ctx context.Context, id string) *Account {
 	return u
 }
 
-// KeyAddress is a kernel known only by its key: the key is both its address and its principal.
+// KeyAddress is a kernel known only by its address, which is both its name and its principal.
 func KeyAddress(key string) AddressView { return AddressView{Address: key, Principal: key} }
 
-// Kernel renders a kernel (D15): its petname, else its key with the nickname it gives itself beside
-// it, so the true key is always what an unnamed kernel is shown and typed by.
+// Kernel renders a kernel (D15): its petname, else its address with the nickname it gives itself beside
+// it, so the true address is always what an unnamed kernel is shown and typed by.
 func (n *Names) Kernel(ctx context.Context, key string) AddressView {
 	if v, ok := n.kernels[key]; ok {
 		return v
@@ -316,8 +316,8 @@ func (n *Names) local(ctx context.Context) (self, own string) {
 // Address renders a principal (D20): a user here as handle@<own name>; a user on a peer as their
 // handle beneath the peer's name; the peer kernel itself as that name alone. A user always carries
 // `@`, a kernel never does, so the two cannot be confused however they are named. Its principal is
-// the user's id beneath the kernel's key. An id that names nobody here — a party purged before
-// kernels were named by key — renders as itself, so an immutable ledger stays legible.
+// the user's id beneath the kernel's address. An id that names nobody here — a party purged before
+// kernels were named by principal — renders as itself, so an immutable ledger stays legible.
 func (n *Names) Address(ctx context.Context, p Principal) AddressView {
 	if !p.Local() {
 		v := n.Kernel(ctx, p.Kernel)

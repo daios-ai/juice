@@ -372,7 +372,7 @@ func (k *Kernel) CancelTask(ctx context.Context, callerID, taskID string) (*Task
 // P8. It takes the entry as read, so a blocked requester's tasks are declined without the read gate
 // ever showing them to their addressee.
 func (k *Kernel) decline(ctx context.Context, callerID string, e *TaskEntry) error {
-	if e.HolderKey != k.SelfKey(ctx) {
+	if e.HolderKernel != k.SelfKey(ctx) {
 		_, err := k.sendTask(ctx, callerID, e, "cancel", nil)
 		return err
 	}
@@ -484,7 +484,7 @@ func (k *Kernel) CompleteTask(ctx context.Context, callerID, taskID string, inpu
 	if e.Status != TaskWaiting {
 		return nil, ErrInvalidState.Wrap("task is not waiting").Because(ErrTaskNotClaimed)
 	}
-	if e.HolderKey != k.SelfKey(ctx) {
+	if e.HolderKernel != k.SelfKey(ctx) {
 		return k.sendTask(ctx, callerID, e, "complete", input)
 	}
 	return k.completeTask(ctx, User(callerID), taskID, input, "", "")

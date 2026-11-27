@@ -5,7 +5,6 @@ package rail
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -625,20 +624,6 @@ func (c *Chain) FinalizedBalances(ctx context.Context) (int64, string, uint64, b
 // DepositsScannedTo says how far payments have been observed, so an audit knows whether its cut is
 // covered or whether money has arrived that nobody has looked for yet.
 func (c *Chain) DepositsScannedTo() (uint64, bool, error) { return c.rail.DepositsScannedTo() }
-
-// AddressOf is the address a kernel's key holds: a kernel is paid at its own key's address and pays
-// from it, so the address is computed and never told (P1). Empty for a key that is none.
-func (c *Chain) AddressOf(kernelKey string) string {
-	raw, err := base64.RawURLEncoding.DecodeString(kernelKey)
-	if err != nil {
-		return ""
-	}
-	pub, err := crypto.DecompressPubkey(raw)
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(crypto.PubkeyToAddress(*pub).Hex())
-}
 
 // OpeningBalance is what the account held at the block the payment scan starts after. The scan
 // reports every payment from the next block on, so a payment is in this balance or in the scan and

@@ -371,7 +371,6 @@ func errorFromResponse(status int, body []byte) error {
 type serverHealth struct {
 	Status            string `json:"status"`
 	Handle            string `json:"handle"`
-	PublicKey         string `json:"public_key"`
 	Network           string `json:"network"`
 	Fingerprint       string `json:"network_fingerprint"`
 	Decimals          uint8  `json:"decimals"`
@@ -469,7 +468,7 @@ func (c *client) dialHealth(ctx context.Context, base string) (*serverHealth, er
 // else at that address must be an error rather than a blank "ok" line.
 func decodeHealth(base string, body []byte) (*serverHealth, error) {
 	var h serverHealth
-	if err := json.Unmarshal(body, &h); err != nil || h.PublicKey == "" {
+	if err := json.Unmarshal(body, &h); err != nil || h.BlockchainAddress == "" {
 		return nil, kernel.ErrInvalidState.Wrapf("%s answered, but it is not a juice kernel", base)
 	}
 	h.base = strings.TrimRight(base, "/")
@@ -518,11 +517,11 @@ func (c *client) network(ctx context.Context) (kernel.Network, error) {
 // rotated under a lock, because a session's lifecycle is its own.
 
 // kernelRec is one kernel this client knows: where it answers, and the identity it reported there.
-// The key and network are what a login checks before it is selected, so a command never lands on a
-// kernel other than the one this record was made for.
+// The address and network are what a login checks before it is selected, so a command never lands
+// on a kernel other than the one this record was made for.
 type kernelRec struct {
 	Endpoint         string `json:"endpoint"`
-	PublicKey        string `json:"public_key,omitempty"`
+	Address          string `json:"blockchain_address,omitempty"`
 	WorldFingerprint string `json:"world_fingerprint,omitempty"`
 	Network          string `json:"network,omitempty"`
 	Decimals         uint8  `json:"decimals,omitempty"`
@@ -668,16 +667,20 @@ func kernelNamed(cfg *clientConfig, name string) (*kernelRec, error) {
 	return nil, kernel.ErrNotFound.Wrapf("no kernel named %s; add it with: juice kernel add URL %s", name, name)
 }
 
-// sameKernel is the one definition of "the kernel this record was made for": the key it answers
-// with, and the network it serves. A key that changed is a different kernel on the same port; a
-// network that changed means every balance and signature there now means something else (D23).
-// Registering a kernel and selecting a login both ask this, and differ only in what they do with
-// a mismatch — so neither can hold its own idea of the same kernel.
+// sameKernel is the one definition of "the kernel this record was made for": the address it
+// answers with, and the network it serves. An address that changed is a different kernel on the
+// same port; a network that changed means every balance and signature there now means something
+// else (D23). Registering a kernel and selecting a login both ask this, and differ only in what
+// they do with a mismatch — so neither can hold its own idea of the same kernel. A record made by
+// an earlier juice names no address, so it cannot say which kernel it was made for, and is refused.
 func sameKernel(name string, k *kernelRec, h *serverHealth) error {
 	again := fmt.Sprintf("\nIf it was reinstalled, forget the old record and add it again:\n"+
 		"  juice kernel forget %s\n  juice kernel add %s %s", name, h.base, name)
 	switch {
-	case k.PublicKey != "" && h.PublicKey != k.PublicKey:
+	case k.Address == "":
+		return kernel.ErrInvalidState.Wrapf(
+			"the record of \"%s\" was made by an earlier version of juice and names no address. Nothing was sent.%s", name, again)
+	case h.BlockchainAddress != k.Address:
 		return kernel.ErrInvalidState.Wrapf(
 			"the kernel at %s is not the one you registered as \"%s\". Nothing was sent.%s", h.base, name, again)
 	case k.WorldFingerprint != "" && h.Fingerprint != k.WorldFingerprint:
@@ -940,7 +943,6 @@ func migrateLegacyRecords() *clientConfig {
 		Active   string `json:"active"`
 		Profiles map[string]struct {
 			Endpoint         string `json:"endpoint"`
-			PublicKey        string `json:"public_key"`
 			WorldFingerprint string `json:"world_digest"`
 			Network          string `json:"network"`
 			Decimals         uint8  `json:"decimals"`
@@ -954,7 +956,7 @@ func migrateLegacyRecords() *clientConfig {
 	cfg := &clientConfig{Kernels: map[string]*kernelRec{}}
 	for name, p := range old.Profiles {
 		cfg.Kernels[name] = &kernelRec{
-			Endpoint: p.Endpoint, PublicKey: p.PublicKey, WorldFingerprint: p.WorldFingerprint,
+			Endpoint: p.Endpoint, WorldFingerprint: p.WorldFingerprint,
 			Network: p.Network, Decimals: p.Decimals,
 		}
 		if p.Token != "" || p.RefreshToken != "" {

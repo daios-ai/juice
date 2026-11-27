@@ -4,7 +4,6 @@ package kernel_test
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1534,7 +1533,7 @@ func TestInboundFailureChargesOnlyWhatChildrenSettled(t *testing.T) {
 			ctx := context.Background()
 			provider := setupUser(t, st, "icc-provider", 1000)
 			const peer = "aWNjLXBlZXI"
-			if err := st.UpsertKernel(ctx, peer, "icc-peer", "", "", time.Now().UTC()); err != nil {
+			if err := st.UpsertKernel(ctx, peer, "icc-peer", "", time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			parent := &kernel.Action{ID: uuid.New().String(), OwnerUserID: provider.ID, Name: "icc-parent", Kind: kernel.KindWasm,
@@ -2477,7 +2476,7 @@ func TestCreateTaskHealsLegacyProxy(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	pub, priv, _ := kernel.GenKey()
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	m := kernel.ActionManifest{
 		ActionID: "ra-task-legacy", OwnerID: "remote-bob", OwnerHandle: "bob", Title: "Test action", Name: "greet",
 		RemoteBPS: 500, Description: "greet", Kind: kernel.KindHTTP, Price: 100,
@@ -2677,7 +2676,7 @@ func TestRemoteCompletionNeedsItsOwnNotice(t *testing.T) {
 	ctx := context.Background()
 	alice := setupUser(t, st, "notice-alice", 0)
 	pub, priv, _ := kernel.GenKey()
-	holder := base64.RawURLEncoding.EncodeToString(pub)
+	holder := pub
 	if err := st.RecordTaskNotice(ctx, holder, alice.ID, &kernel.TaskNotice{ID: "asked", Revision: 1, Status: kernel.TaskWaiting}); err != nil {
 		t.Fatal(err)
 	}

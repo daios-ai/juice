@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -41,7 +40,7 @@ func TestResolveHandle(t *testing.T) {
 
 	// A peer is resolvable by its base64url public key (the global name) in the kernel position.
 	pub, _, _ := genKey()
-	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
+	keyB64 := pub
 	if err := k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +153,7 @@ func TestEnrichTask(t *testing.T) {
 	// No action → empty action field; a waiting task addressed to a peer kernel flags
 	// waiting_on_peer and names the kernel bare — a user always carries `@`, a kernel never does.
 	pub, _, _ := genKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	if _, err := k.BindPetname(ctx, peerKey, "peer"); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +230,7 @@ func TestEnrichAction(t *testing.T) {
 	// A remote proxy is owned by a user on a peer kernel: its address is that owner's, beneath the
 	// peer's local name.
 	pub, _, _ := genKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	if err := k.ObserveKernel(ctx, key, "provider", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +449,7 @@ func TestListActions_ScopeStripAndDiscovered(t *testing.T) {
 		t.Errorf("no results filtering by owner svc-lpa@k: %v", err)
 	}
 
-	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{{KernelPublicKey: "K", ActionID: "r1",
+	if err := db.ApplyCatalogPage(ctx, "K", []*kernel.DiscoveryDoc{{Kernel: "K", ActionID: "r1",
 		Handle: "dave", Name: "sum", Title: "Summarize", Description: "d", ServingPrice: 100, ObservedAt: time.Now().UTC()}}, "", 1); err != nil {
 		t.Fatal(err)
 	}
@@ -776,14 +775,14 @@ func TestATargetIsWhatItsNounNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub, _, _ := genKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 	if _, err := k.BindPetname(ctx, key, "kernelonly"); err != nil {
 		t.Fatal(err)
 	}
 	// The same string is both a handle and a petname here, which is exactly the case the noun
 	// settles: neither route has to ask which was meant.
 	pub2, _, _ := genKey()
-	key2 := base64.RawURLEncoding.EncodeToString(pub2)
+	key2 := pub2
 	if _, err := k.BindPetname(ctx, key2, "shared"); err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +827,7 @@ func TestAddressRendersKernels(t *testing.T) {
 	k, _ := newRemoteTestKernel(t)
 	ctx := context.Background()
 	pub, _, _ := genKey()
-	key := base64.RawURLEncoding.EncodeToString(pub)
+	key := pub
 
 	if err := k.KnowKernel(ctx, key); err != nil {
 		t.Fatal(err)

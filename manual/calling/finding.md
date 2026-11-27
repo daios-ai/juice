@@ -23,7 +23,7 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
       {
         "action": {
           "address": "bob@acme/echo",
-          "principal": "<user-id>@<kernel-key>/echo"
+          "principal": "<user-id>@<kernel-address>/echo"
         },
         "action_id": "bb7fe1a8-…",
         "title": "Echo a message",
@@ -77,7 +77,7 @@ hosting kernel. In these examples, the operator has named it `beta-kernel`:
 ```
 "action": {
   "address": "dave@beta-kernel/summarize",
-  "principal": "<user-id>@<kernel-key>/summarize"
+  "principal": "<user-id>@<kernel-address>/summarize"
 },
 "price": 2205000,
 "observed_at": "2026-09-14T12:06:20Z",

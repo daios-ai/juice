@@ -929,7 +929,7 @@ func TestLoginRejectsRemotePeer(t *testing.T) {
 	setupSys(t, k, st)
 
 	pub, _, _ := kernel.GenKey()
-	_, err := knownPeer(k, ctx, base64.RawURLEncoding.EncodeToString(pub))
+	_, err := knownPeer(k, ctx, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2357,7 +2357,7 @@ type fakeFederationHTTP struct {
 // signsAs makes the fake answer as the peer whose key priv is, for calls bought by k: the receipts
 // it returns are signed by priv and bound to k as the counterparty.
 func (f *fakeFederationHTTP) signsAs(k *kernel.Kernel, priv *ecdsa.PrivateKey) {
-	f.signKey, f.buyerKey = priv, k.PublicKeyB64()
+	f.signKey, f.buyerKey = priv, k.OwnAddress()
 }
 
 func (f *fakeFederationHTTP) ResolveRemoteAction(_ context.Context, _, owner, name string) (*kernel.ResolvedAction, error) {
@@ -2773,7 +2773,7 @@ func TestRunFederatedLocalActionDenied(t *testing.T) {
 	target := setupUser(t, st, "target-local-fed", 0)
 	// A peer kernel this one knows; the seller is funded so the denial is on visibility, not balance.
 	const peer = "cGVlci1sb2NhbC1mZWQ"
-	if err := st.UpsertKernel(ctx, peer, "peer-local-fed", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, peer, "peer-local-fed", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2812,7 +2812,7 @@ func TestRateInboundForeignCallRefused(t *testing.T) {
 
 	provider := setupUser(t, st, "rate-fed-provider", 0)
 	const peer = "cmF0ZS1mZWQtcGVlcg"
-	if err := st.UpsertKernel(ctx, peer, "rate-fed-peer", "", "", time.Now().UTC()); err != nil {
+	if err := st.UpsertKernel(ctx, peer, "rate-fed-peer", "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	a := &kernel.Action{
@@ -2876,7 +2876,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	provider := setupUser(t, st, "prt-provider", 0)
 	const peerKey, strangerKey = "cHJ0LXBlZXI", "cHJ0LXN0cmFuZ2Vy"
 	for _, key := range []string{peerKey, strangerKey} {
-		if err := st.UpsertKernel(ctx, key, "n-"+key, "", "", time.Now().UTC()); err != nil {
+		if err := st.UpsertKernel(ctx, key, "n-"+key, "", time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2904,7 +2904,7 @@ func TestActionRatingsAdmitTradeBackedPeerRatings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	self := k.PublicKeyB64()
+	self := k.OwnAddress()
 	now := time.Now().UTC().Truncate(time.Second)
 	rows := []*kernel.EvidenceRow{
 		ratingEvidence(t, peerKey, self, a.ID, "peer-own-1", servedHash, 1, now.Add(-time.Minute)), // admitted
@@ -4355,7 +4355,7 @@ func TestRemoteConnectionsAreBounded(t *testing.T) {
 	}
 	peer := func() string {
 		p, _, _ := kernel.GenKey()
-		key := base64.RawURLEncoding.EncodeToString(p)
+		key := p
 		if err := k.KnowKernel(ctx, key); err != nil {
 			t.Fatal(err)
 		}
@@ -4398,7 +4398,7 @@ func TestRemoteConnectionsAreBounded(t *testing.T) {
 	}
 	// A kernel this one has never met, or has suspended, signs nobody up.
 	stranger, _, _ := kernel.GenKey()
-	if err := signUp(kernel.Principal{Kernel: base64.RawURLEncoding.EncodeToString(stranger), UserID: "u", Handle: "h"}); err == nil {
+	if err := signUp(kernel.Principal{Kernel: stranger, UserID: "u", Handle: "h"}); err == nil {
 		t.Errorf("a user of an unknown kernel signed up")
 	}
 }

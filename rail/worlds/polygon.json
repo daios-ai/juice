@@ -8,7 +8,7 @@
   "symbol": "USDT0",
   "description": "USDT0 on Polygon",
   "seeds": [
-    "/dns4/tanerio.juiceos.org/tcp/31313/p2p/16Uiu2HAmGCEtaG4FooPrSjDJoVEbkgiUcZGXSzvHSJWdrNnP2mTx"
+    "0x2d4c8247ce77e51d41bdbdf775f9ee915807bf78@tanerio.juiceos.org:31313"
   ],
   "finality": "finalized",
   "venue": {

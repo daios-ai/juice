@@ -5,7 +5,6 @@ package native
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
@@ -62,7 +61,7 @@ func newLookupTestKernel(t *testing.T) (*kernel.Kernel, kernel.Store) {
 	cfg.SigningKey = priv
 	k := kernel.New(kernel.Dependencies{Store: db, Embedder: &fakeEmbedder{}, Config: cfg})
 	// The test kernel calls itself `k`, so a test address reads alice@k (D15).
-	_ = db.SetConfig(context.Background(), "signing_public_key", base64.RawURLEncoding.EncodeToString(ethcrypto.CompressPubkey(&priv.PublicKey)))
+	_ = db.SetConfig(context.Background(), "kernel_address", kernel.KernelAddress(priv))
 	if err := k.BindOwnName(context.Background(), "k"); err != nil {
 		t.Fatal(err)
 	}
@@ -214,10 +213,10 @@ func TestExecuteLookupRemoteHitNamingAndFreshness(t *testing.T) {
 	seedAction(t, st, owner.ID, "weather", "forecast the weather for a city")
 
 	pub, _, _ := genKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(pub)
+	peerKey := pub
 	observed := time.Now().UTC().Add(-90 * time.Minute).Truncate(time.Second)
 	doc := &kernel.DiscoveryDoc{
-		KernelPublicKey: peerKey, Handle: "prov", OwnerID: "prov-id", ActionID: "act-remote", Name: "weather",
+		Kernel: peerKey, Handle: "prov", OwnerID: "prov-id", ActionID: "act-remote", Name: "weather",
 		Description: "forecast the weather for a city", ServingPrice: 10, ObservedAt: observed,
 	}
 	if err := st.ApplyCatalogPage(ctx, peerKey, []*kernel.DiscoveryDoc{doc}, "", 0); err != nil {
@@ -333,11 +332,11 @@ func TestExecuteLookupHitsCarryTheirEvidence(t *testing.T) {
 	}
 }
 
-// genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
-func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+// genKey makes a kernel's key for a test: its address, as payloads carry it, and the key.
+func genKey() (string, *ecdsa.PrivateKey, error) {
 	key, err := ethcrypto.GenerateKey()
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
-	return ethcrypto.CompressPubkey(&key.PublicKey), key, nil
+	return kernel.KernelAddress(key), key, nil
 }

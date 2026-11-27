@@ -57,8 +57,8 @@ func DispatchRecordForTest(mp, gross, remoteBPS, importBPS, lottery int64, secre
 	return marshalDispatch(nil, "", mp, gross, "", remoteBPS, importBPS, secret, lottery, Principal{})
 }
 
-// PublicKeyB64 is this kernel's own key in the form evidence names a subject by.
-func (k *Kernel) PublicKeyB64() string { return k.ourKeyB64() }
+// OwnAddress is this kernel's own address, the form evidence names a subject by.
+func (k *Kernel) OwnAddress() string { return k.ourAddress() }
 
 // ServingRecordForTest is the seller's half of the same record: what a foreign call was admitted
 // under, for a test that stages one by hand.
@@ -77,7 +77,7 @@ const TestOwnName = "k"
 // key when no signing key is configured yet, so ResolveKernel knows "this kernel" from the start.
 func (k *Kernel) BindOwnNameForTest(ctx context.Context) {
 	if k.SelfKey(ctx) == "" {
-		_ = k.store.SetConfig(ctx, "signing_public_key", PublicKey(testOwnKey))
+		_ = k.store.SetConfig(ctx, "kernel_address", KernelAddress(testOwnKey))
 	}
 	if err := k.BindOwnName(ctx, TestOwnName); err != nil {
 		panic(err)
@@ -89,17 +89,14 @@ var testOwnKey = KeyFromSeed(bytes.Repeat([]byte{7}, 32))
 // TestOwnKey is the key every test kernel's database is bound to.
 var TestOwnKey = testOwnKey
 
-// GenKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
-func GenKey() ([]byte, *ecdsa.PrivateKey, error) {
+// GenKey makes a kernel's key for a test: its address, as payloads carry it, and the key.
+func GenKey() (string, *ecdsa.PrivateKey, error) {
 	key, err := ethcrypto.GenerateKey()
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
-	return PubBytes(key), key, nil
+	return KernelAddress(key), key, nil
 }
-
-// PubBytes is a key's public half as payloads carry it, before base64url.
-func PubBytes(key *ecdsa.PrivateKey) []byte { return ethcrypto.CompressPubkey(&key.PublicKey) }
 
 // KeyFromSeed is the key whose secret is seed, for a test that needs the same kernel every run.
 func KeyFromSeed(seed []byte) *ecdsa.PrivateKey {
@@ -118,7 +115,7 @@ func SignRaw(key *ecdsa.PrivateKey, payload []byte) []byte {
 	if err != nil {
 		panic(err)
 	}
-	return sig[:64]
+	return sig
 }
 
 // CanCall exposes the visibility predicate so an external test can hold the store's SQL copy of it
@@ -128,7 +125,7 @@ var CanCall = canCall
 // SignTaskNoticeForTest signs a notice as the holder whose key is priv would, addressed to k (P8).
 func (k *Kernel) SignTaskNoticeForTest(priv *ecdsa.PrivateKey, n TaskNotice) *SignedTaskNotice {
 	ts := time.Now().UTC().Format(time.RFC3339)
-	holder := PublicKey(priv)
-	sig, _ := k.cfg.Network.sign(priv, sigDomainTaskNotice, taskNoticePayload{Counterparty: holder, Notice: n, Recipient: k.ourKeyB64(), Timestamp: ts})
+	holder := KernelAddress(priv)
+	sig, _ := k.cfg.Network.sign(priv, sigDomainTaskNotice, taskNoticePayload{Counterparty: holder, Notice: n, Recipient: k.ourAddress(), Timestamp: ts})
 	return &SignedTaskNotice{Notice: n, Timestamp: ts, Signature: sig}
 }

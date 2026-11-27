@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -183,7 +184,7 @@ func TestFirstBootAtomic(t *testing.T) {
 	}
 
 	// All config entries must be present.
-	for _, key := range []string{"superuser_handle", "signing_public_key", "jwt_secret"} {
+	for _, key := range []string{"superuser_handle", "kernel_address", "jwt_secret"} {
 		v, err := k.GetConfig(ctx, key)
 		if err != nil || v == "" {
 			t.Errorf("config %q missing after FirstBoot: %v", key, err)
@@ -320,7 +321,7 @@ func TestBootstrapRejectsKeyMismatch(t *testing.T) {
 
 	// Tamper: the database now says it is another kernel.
 	other, _, _ := genKey()
-	if err := k.SetConfig(ctx, configKeySigningPublic, base64.RawURLEncoding.EncodeToString(other)); err != nil {
+	if err := k.SetConfig(ctx, configKeyAddress, other); err != nil {
 		t.Fatal(err)
 	}
 
@@ -744,7 +745,7 @@ func TestFirstBootCredentials(t *testing.T) {
 				got.recoveryKey != base64.RawURLEncoding.EncodeToString(recovery.Public().(ed25519.PublicKey)) {
 				t.Fatalf("got %+v, %v", got, err)
 			}
-			if !strings.Contains(shown, kernel.PublicKey(want)) {
+			if !strings.Contains(shown, kernel.KernelAddress(want)) {
 				t.Errorf("a restore must say which kernel the phrase is: %q", shown)
 			}
 		})
@@ -794,7 +795,7 @@ func TestFirstBootAtATerminal(t *testing.T) {
 	if err != nil || !restored.key.Equal(want) || shown != "" {
 		t.Fatalf("restore: %v, a phrase shown %q", err, shown)
 	}
-	if !strings.Contains(said, kernel.PublicKey(want)) || !strings.Contains(said, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266") {
+	if !strings.Contains(said, kernel.KernelAddress(want)) || !strings.Contains(said, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266") {
 		t.Errorf("a restore on a chain must say the kernel and its address: %q", said)
 	}
 
@@ -827,8 +828,8 @@ func TestFirstBootRecordsTheKernel(t *testing.T) {
 	if sys, err := k.ReadUserByHandle(ctx, superuserHandle); err != nil || sys.RecoveryPublicKey != recoveryKey {
 		t.Fatalf("the phrase's recovery key was not enrolled: %+v %v", sys, err)
 	}
-	if got := k.SelfKey(ctx); got != kernel.PublicKey(key) {
-		t.Errorf("the database is kernel %s, want %s", got, kernel.PublicKey(key))
+	if got := k.SelfKey(ctx); got != kernel.KernelAddress(key) {
+		t.Errorf("the database is kernel %s, want %s", got, kernel.KernelAddress(key))
 	}
 	if v, _ := k.GetConfig(ctx, "signing_private_key"); v != "" {
 		t.Error("the key was written into the database")
@@ -885,6 +886,48 @@ func TestAKernelWithoutItsKeyIsRefusedUntouched(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(db); string(got) != "an older kernel's database" {
 		t.Errorf("the refused boot touched the database: %q", got)
+	}
+}
+
+// A kernel made by a juice that named kernels by their key is refused before its database is
+// opened, with what to do instead, and the database is left exactly as it was.
+func TestAKernelFromBeforeAddressesIsRefusedUntouched(t *testing.T) {
+	headless(t)
+	t.Setenv("JUICE_HOME", t.TempDir())
+	old := worldName
+	t.Cleanup(func() { worldName = old })
+	t.Cleanup(bindServeFlags(t))
+	worldName = "play"
+	if err := os.MkdirAll(kernelHome(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := genKey()
+	if err := rail.StoreKey(kernelKeyPath(), key); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(kernelHome(), "juice.db")
+	st, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	raw, err := sql.Open("sqlite", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DELETE FROM schema_migrations WHERE version='065_one_identifier'`, `PRAGMA journal_mode=DELETE`} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+	before, _ := os.ReadFile(db)
+	err = runServer("play")
+	if err == nil || !strings.Contains(err.Error(), "earlier juice") || !strings.Contains(err.Error(), "recovery phrase") {
+		t.Fatalf("want a refusal saying to start again from the phrase, got %v", err)
+	}
+	if after, _ := os.ReadFile(db); !bytes.Equal(before, after) {
+		t.Error("the refused boot touched the database")
 	}
 }
 

@@ -21,7 +21,7 @@ funds, configured rates, and exposure to remote trade:
 ```console
 $ juice admin kernel show
 Handle:     acme
-Public key: fdlMi64P…
+Blockchain address: 0xcaf2a882…
 Version:    v0.17.2
 Latest:     v0.17.2
 Network:    play
@@ -30,8 +30,8 @@ Solvency:   user-balances=10.00 fUSD money-in=10.00 fUSD difference=0.00 fUSD
 Credit:     owed-to-us=0.00 fUSD limit=50.00 fUSD
 Fees:       20% of each layer's margin here, 5% on work served to another kernel, 5% on work imported from one
 Tickets:    this kernel draws for 0.10 fUSD, and accepts tickets up to 0.50 fUSD
-Listen addresses:
-  /ip4/127.0.0.1/tcp/31401/p2p/16Uiu2HAm…
+TCP endpoints:
+  0xcaf2a882…@127.0.0.1:31401
 ```
 
 The **Operator** line separates spendable earnings from funds held for other
@@ -118,30 +118,30 @@ $ juice admin user rename carol@acme carolyn@acme
 The operator can rename a user through the dedicated rename command. The
 account ID and history remain the same, while the old handle becomes available
 for reuse. Programs keeping durable references should store the principal,
-`user_id@kernel_key`. It is accepted wherever an address names an existing
+`user_id@kernel_address`. It is accepted wherever an address names an existing
 user or action; `sys/resolve` turns a user address into its principal.
 
 ## Peers
 
 ```console
 $ juice admin peer list
-PETNAME     NICKNAME  TRADED  LAST SEEN  LAST FAILED  ACTIONS  STATUS  PUBLIC KEY
-—           beta      yes     just now   never        0                hqDr8oMX…
+PETNAME     NICKNAME  TRADED  LAST SEEN  LAST FAILED  ACTIONS  STATUS  BLOCKCHAIN ADDRESS
+—           beta      yes     just now   never        0                0x6fbc8401…
 ```
 
 The roster combines known counterparties with kernels learned through discovery.
 `PETNAME` is the local name usable in references, while `NICKNAME` is the label
 reported by the peer. A dash in the petname column means the peer must be
-addressed by key. With `--all`, suspended peers are included and marked in
+named by its address. With `--all`, suspended peers are included and marked in
 the `STATUS` column.
 
 No call or resolution assigns a petname. Until the operator names a peer, it
-is shown by its key with its nickname after it as `~name`. To assign a petname,
+is shown by its address with its nickname after it as `~name`. To assign a petname,
 use:
 
 ```console
-$ juice admin peer rename hqDr8oMX… beta-kernel
-hqDr8oMX… renamed to beta-kernel.
+$ juice admin peer rename 0x6fbc8401… beta-kernel
+0x6fbc8401… renamed to beta-kernel.
 ```
 
 Renaming requires the chosen petname to be available and not `localhost`,
@@ -156,7 +156,7 @@ of evidence and advances neither timestamp. Inspect a peer for more detail:
 $ juice admin peer inspect beta-kernel
 Petname:      beta-kernel
 Nickname:     beta
-Public key:   hqDr8oMX…
+Blockchain address: 0x6fbc8401…
 Reachability: direct (0ms)
 Version:      juice-kernel/v0.14.46
 Traded here:  yes

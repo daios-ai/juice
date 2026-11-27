@@ -26,10 +26,11 @@ network fingerprint twice in passing. Whether they belong in the manual at all i
 ## 1. What a kernel is on the network
 
 **One key, and nothing else.** A kernel has one secp256k1 keypair, derived from its recovery
-phrase at first boot, and keeps it for life; on a chain the same key is its payment address. There is no second identity: the address peers dial is derived from that same public key, by
-a deterministic one-to-one mapping (`fed.PeerIDFromKey`, `fed/transport.go:53`). So dialing a
-kernel and verifying what it signed rest on the same secret, and a kernel that loses the key loses
-both. Keys are written as 44 characters of base64url. Key rotation is not supported.
+phrase at first boot, and keeps it for life. It is known by one thing: the key's Ethereum address,
+`0x` and 40 hex digits, which names it to peers, users and programs and is where it is paid on a
+chain. The key itself is never shown or sent as a name. So dialing a kernel, verifying what it
+signed and paying it rest on the same secret, and a kernel that loses the key loses all three. Key
+rotation is not supported.
 
 **One network, named by a fingerprint.** The network is 32 bytes: SHA-256 over the canonical JSON
 of the world's four defining fields — `chain_id`, `name`, `rail`, `token` (`rail/world.go`,
@@ -263,8 +264,8 @@ Three differences from the message, each deliberate:
   transmitted: the receiver knows its own network and which channel it is serving.
 - `args_hash` replaces `args`. The arguments travel whole and are hashed into the signature, so a
   large payload is not signed twice and the receipt can name the same hash.
-- `recipient` — the seller's own public key — is in the signed bytes and absent from the wire. The
-  buyer signs whom it dialed; the receiver verifies with its own key. A captured request therefore
+- `recipient` — the seller's own address — is in the signed bytes and absent from the wire. The
+  buyer signs whom it dialed; the receiver verifies with its own address. A captured request therefore
   cannot be replayed to a third kernel, which would otherwise see a valid signature from `acme`
   over a call it never asked for (`fed/fed.go:84`).
 
@@ -274,10 +275,13 @@ signature fails, so neither side may pretty-print, reorder, or add a field.
 
 ## 2. How two kernels talk
 
-**The address is the key.** A kernel's public key *is* its address. The transport turns the key
-into a libp2p peer id by a fixed mapping (`fed/transport.go:53`) and asks the network where that
-peer is. No URLs, no DNS names, no certificates: there is nothing to configure and nothing to
-impersonate, because a peer that cannot sign as that key cannot complete the connection.
+**The address is the name.** The transport is the one place an address meets a connection. A
+kernel it has met — a seed, a peer found by discovery, one that called in — is remembered by
+address. A kernel never met announces itself on the DHT under its address, and the caller keeps only
+an announcer whose key hashes to that address. A seed line, `0x…@host:port`, is met over TCP: one
+handshake learns the key the seed proves, and it must hash to the address before the connection is
+made. No URLs, no certificates: there is nothing to impersonate, because a peer that cannot sign as
+the key behind an address cannot complete the connection.
 
 **What is bound.** By default the standard port 31313, on TCP and on QUIC, claimed with an ordinary
 socket first so a second kernel on the same host is refused rather than silently sharing it
@@ -302,11 +306,10 @@ dial that failed before any byte was written — because that alone lets the ker
 instead of holding it open for retry (`fed/fed.go:21`). A write that succeeded and a read that then
 failed are not that case: the peer may have the request, so the call stays pending.
 
-**What it tells the kernel about the sender.** Just the peer's public key, recovered from the
-connection (`fed/transport.go:479`). A kernel's peer id carries the key inside it, so this needs no
-lookup and cannot be forged: it is the key the connection's encryption was negotiated with. Every
+**What it tells the kernel about the sender.** Just the peer's address, computed from the key the
+connection's encryption was negotiated with, so it needs no lookup and cannot be forged. Every
 further question — is this peer suspended, does it owe us, may it call this action — is the
-kernel's, answered from the key.
+kernel's, answered from the address.
 
 ### QUIC, and why both
 
@@ -346,9 +349,9 @@ code enables none: over TCP the handshake is Noise, and over QUIC it is TLS 1.3,
 includes by construction. Both give forward secrecy, so recording the traffic and stealing a
 kernel's key later does not decrypt what was already sent.
 
-Authentication comes free with the addressing, because the address is the key. The dialer asks for
-one specific peer id, which *is* the peer's public key, and the handshake only completes if the
-other end proves it holds the matching private key. There is no certificate authority in the
+Authentication comes free with the addressing, because the address is a hash of the key. The
+dialer asks for the peer that key makes, and the handshake only completes if the other end proves
+it holds the matching private key. There is no certificate authority in the
 picture and nothing to trust: a man in the middle cannot present someone else's key without that
 key's secret half.
 
@@ -367,7 +370,7 @@ never plain.
 There is no registry and no membership list. A kernel builds its own picture of the network by
 repeating one pass, at startup and then every five minutes by default.
 
-**The candidate set.** Three sources, merged into one list of public keys:
+**The candidate set.** Three sources, merged into one list of addresses:
 
 - the peers it already knows, from its own database — anyone it has traded with or met before;
 - the seeds its world file names;
@@ -414,7 +417,7 @@ whole card index plus the next hundred pages after that bookmark, plus a new boo
          |                                                | read own identity
          |                                                | sign every public manifest (<=100)
          |                                                | select evidence after cursor (<=100)
-         |  { public_key, handle, network, blockchain_address,   |
+         |  { blockchain_address, handle, network,         |
          |    action_manifests: [ ...10 cards... ],        |
          |    evidence:         [ ...100 items... ],       |
          |    next_cursor: "...| r-8931" }                 |
@@ -655,9 +658,9 @@ digest.
 {
   "evidence_receipt": {
     "receipt_hash": "9c1f…",
-    "subject_kernel_public_key": "ZmTu…",
+    "subject_kernel": "0x5c3e…",
     "subject_action_id": "0e0b5d6a-…",
-    "counterparty_kernel_public_key": "O2on…",
+    "counterparty_kernel": "0x9a01…",
     "status": "success",
     "started_at": "2026-09-18T11:02:44Z",
     "created_at": "2026-09-18T11:02:45Z",
@@ -840,7 +843,7 @@ same link. No score: the numbers are shown with their provenance and the reader 
 
 - `bob/translate` — an action on this kernel.
 - `bob@brick/translate` — `bob`'s action on the kernel A calls `brick`. The part after `@` is
-  either a petname A chose for that kernel or the peer's 44-character key itself.
+  either a petname A chose for that kernel or the peer's address itself.
 - a bare action id, which is an object rather than a path and is never extended.
 
 A reference with no action name means the group's index: `bob@brick` resolves `bob/index` on

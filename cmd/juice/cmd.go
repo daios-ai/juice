@@ -764,7 +764,7 @@ func userBlockchainAddressCmd() *cobra.Command {
 					return kernel.ErrInvalidInput.Wrap("--signature is required when nobody is at the terminal to sign")
 				}
 				fmt.Fprintf(os.Stderr, "Sign this message with the wallet holding %s:\n\n%s\n\n",
-					args[0], string(kernel.BlockchainAddressMessage(h.PublicKey, me.ID, args[0])))
+					args[0], string(kernel.BlockchainAddressMessage(h.BlockchainAddress, me.ID, args[0])))
 				fmt.Fprint(os.Stderr, "Signature: ")
 				line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				signature = strings.TrimSpace(line)
@@ -805,14 +805,19 @@ func userDepositCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A kernel always has an address; a world pays to it only where it has a token on a chain.
+			payTo := h.BlockchainAddress
+			if h.Token == "" {
+				payTo = ""
+			}
 			facts, err := json.Marshal(map[string]string{
-				"network": h.Network, "kernel_address": h.BlockchainAddress, "your_address": me.BlockchainAddress,
+				"network": h.Network, "kernel_address": payTo, "your_address": me.BlockchainAddress,
 				"token": h.Token})
 			if err != nil {
 				return err
 			}
 			return emit(facts, output{human: func([]byte) error {
-				if h.BlockchainAddress == "" {
+				if payTo == "" {
 					fmt.Printf("Money on the %s network has no addresses to send to.\n", h.Network)
 					fmt.Println("The operator of this kernel records payments here; there is nothing to send from your side.")
 					return nil
@@ -823,22 +828,14 @@ func userDepositCmd() *cobra.Command {
 				if money == "" {
 					money = "money"
 				}
-				fmt.Printf("Send %s on the %s network to this kernel at:\n  %s\n\n", money, h.Network, h.BlockchainAddress)
+				fmt.Printf("Send %s on the %s network to this kernel at:\n  %s\n\n", money, h.Network, payTo)
 				// The contract, not the symbol, is what says which money this is: one chain carries
-				// several tokens called the same thing, and a payment in the wrong one is never
-				// credited. An older kernel does not publish it, and a blank line under an
-				// instruction to send money would be worse than none.
-				if h.Token != "" {
-					fmt.Printf("Send only this token, and nothing else:\n  %s", h.Token)
-					if h.Symbol != "" {
-						fmt.Printf("  (%s)", h.Symbol)
-					}
-					fmt.Print("\n\n")
-				} else {
-					fmt.Println("This kernel does not say which token it takes; its symbol alone does not name one.")
-					fmt.Println("Ask the operator for the exact contract address before sending anything.")
-					fmt.Println()
+				// several tokens called the same thing, and a payment in the wrong one is never credited.
+				fmt.Printf("Send only this token, and nothing else:\n  %s", h.Token)
+				if h.Symbol != "" {
+					fmt.Printf("  (%s)", h.Symbol)
 				}
+				fmt.Print("\n\n")
 				if me.BlockchainAddress == "" {
 					fmt.Println("You have no address registered, so a payment from you cannot be recognized as yours.")
 					fmt.Println("Register the address you will pay from first:  juice user blockchain-address ADDRESS")
@@ -1331,7 +1328,7 @@ func printEvidence(subjectName, subjectKey string, rows []*kernel.SubjectEvidenc
 	fmt.Printf("\nExecution reported by %s\n", subjectName)
 	own := false
 	for _, e := range rows {
-		if e.IssuerPublicKey == subjectKey {
+		if e.IssuerKernel == subjectKey {
 			own = true
 			printEvidenceRow("  ", e, false)
 		}
@@ -1341,7 +1338,7 @@ func printEvidence(subjectName, subjectKey string, rows []*kernel.SubjectEvidenc
 	}
 	header := false
 	for _, e := range rows {
-		if e.IssuerPublicKey == subjectKey {
+		if e.IssuerKernel == subjectKey {
 			continue
 		}
 		if !header {
@@ -1357,7 +1354,7 @@ func printEvidence(subjectName, subjectKey string, rows []*kernel.SubjectEvidenc
 // differently — a claim nobody else corroborates is shown, never taken as fact (§13).
 func printEvidenceRow(indent string, e *kernel.SubjectEvidenceRow, counterparty bool) {
 	fmt.Printf("%sFrom %s on %s: %d interactions, %d successful  ~%.0fms",
-		indent, shortKey(e.IssuerPublicKey), e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
+		indent, shortKey(e.IssuerKernel), e.SubjectActionID, e.Uses, e.Successes, e.AvgLatencyMs)
 	if counterparty {
 		switch {
 		case e.Uses > 0 && e.CorroboratedUses == e.Uses:

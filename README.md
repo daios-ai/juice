@@ -83,7 +83,7 @@ INF action.registered_native name=lookup
 INF action.native_enabled name=lookup
 …
 INF client.self_registered kernel=acme outcome=added
-INF server.ready handle=acme network=play addr=[::]:4040 public_key=AhRCQfpF…
+INF server.ready handle=acme network=play addr=[::]:4040 blockchain_address=0x5c3e8a…
 ```
 
 Declining, or interrupting before those answers, leaves nothing behind.
@@ -129,7 +129,7 @@ before kernels were named moves itself into `kernels/<its name>/` on first boot.
 
 Every command is `juice [admin] <noun> <verb>`, with `juice run` the one exception. The
 CLI is a pure client of the server: under `$JUICE_HOME/client/` it keeps the kernels it
-knows — each one's address, public key and network — and one file per *login*, written
+knows — each one's URL, address and network — and one file per *login*, written
 `handle@kernel`, which says both who a command acts as and which kernel it acts through.
 
 A kernel you serve yourself is registered by `serve` as it starts, under the name it
@@ -329,10 +329,10 @@ sys/time`.
 
 ## Federation
 
-Kernels reach each other by public key over libp2p — no URLs, no port forwarding; a
+Kernels reach each other by address over libp2p — no URLs, no port forwarding; a
 kernel behind home NAT federates like any other. It joins through the seeds in its
-world file, which is the one place a meeting point is named: to use another, edit
-that file. `play` and `polygon` name this project's seeds; on the others, operators write in one.
+world file, written `0x…@host:port`, which is the one place a meeting point is named: to
+use another, edit that file. `play` and `polygon` name this project's seeds; on the others, operators write in one.
 Serving is just marking an action
 `public`. Calling is just naming it:
 

@@ -66,13 +66,13 @@ INF action.registered_native name=lookup
 INF action.native_enabled name=lookup
 …
 INF client.self_registered kernel=acme outcome=added
-INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
+INF server.ready handle=acme network=play addr=[::]:4040 blockchain_address=0xcaf2a882…
 ```
 
 The name is the kernel's nickname, which every operator on the network sees;
 the world's name is shared by all of them, which is why the kernel needs one of
-its own. The ready line names the kernel, network, HTTP address, and public key.
-Federation listening addresses are available through `juice admin kernel show`
+its own. The ready line names the kernel, network, HTTP endpoint, and blockchain address.
+The TCP endpoints are available through `juice admin kernel show`
 and `GET /health`.
 
 On a chain network, first boot also reaches the chain and records the block it
@@ -99,7 +99,7 @@ points — is in the world file.
 > even on another machine or in another world.
 
 With setup complete, later starts use the saved state and print a ready line
-identifying the kernel, network, and public key.
+identifying the kernel, network, and blockchain address.
 
 ## Setting up on a chain
 
@@ -162,18 +162,19 @@ the kernel. Log in as `sys` and inspect its blockchain address:
 ```console
 $ juice admin kernel show
 Handle:     bank
+Blockchain address: 0xcaf2a882af8730c6ad92d76361b1952c71c0453f
+Version:    …
 Network:    polygon
-Paid at:    0xcaf2a882af8730c6ad92d76361b1952c71c0453f
 Holdings:   0.00 USDT0 (gas 0.00) as of block 13
 …
 ```
 
 `Holdings` reports the kernel's USDT0 and, as `gas`, its POL. `juice user
-deposit` reports the same `Paid at` address, together with the accepted USDT0
+deposit` reports the same address, together with the accepted USDT0
 contract and the current account's registered sender address.
 
-**4. Supply the first POL.** From your own wallet, send POL on Polygon to the
-`Paid at:` address. With the settings in `polygon.json` the kernel refills below 5 POL and
+**4. Supply the first POL.** From your own wallet, send POL on Polygon to this
+address. With the settings in `polygon.json` the kernel refills below 5 POL and
 buys up to 15 POL, so sending 15 POL lets the first payments go out without a
 refill.
 
@@ -253,7 +254,7 @@ Each kernel has a home directory containing the state needed to run it:
 
 ```
 ~/.juice/kernels/play/
-  juice.db        accounts, actions, ledger, and the kernel's public key
+  juice.db        accounts, actions, ledger, and the kernel's address
   kernel.key      the kernel's private signing key
   config.json     configuration, written once at first boot
   serve.lock      held by the running server, and holding its process id
@@ -289,18 +290,24 @@ Copying individual files while the server is running is not a supported backup
 procedure.
 
 If the home is lost, start the kernel in an empty home on the same world and
-enter its recovery phrase at first boot. Check the kernel id printed after
-`That phrase is kernel` and, on a chain network, the address after `paid at`.
+enter its recovery phrase at first boot. Check that the address printed after
+`That phrase is kernel` matches the address of the lost kernel.
 Peers still know the kernel by the same identity. Its ledger starts again.
 On a chain network, the kernel credits the token balance already at its address
 to `sys`. Recovering
 the old accounts, balances and actions requires a backup of the home. Stop the
 old instance before starting the restored one.
 
-A kernel created by a version that kept its signing key in `juice.db` must be
-created anew. This version refuses the old database. Keep the old home to read
-its records with the version that created it. On a chain network, its
-`rail.key` still controls the coins at the old address.
+This version refuses databases that named kernels by public key. Before the
+change on a chain network, have users withdraw their balances and settle
+outstanding payments with other kernels. Keep the old home for its records.
+Replace world files that use the old seed format and start in an empty home
+with the kernel's phrase. On each client, forget the old registration and
+register the kernel again.
+
+Kernels from the earlier version that kept the signing key in `juice.db` must
+also be created anew. For those kernels, the old `rail.key` controls the
+coins at the old chain address.
 
 To upgrade, coordinate with the other operators on your network. Stop new
 cross-kernel calls and let all existing calls settle on every kernel before
@@ -318,15 +325,15 @@ the records and keys needed to resolve them.
 
 ## Joining the network
 
-The world file's `seeds` are addresses of kernels to contact when joining the
-network. Through them, kernels find peers and exchange public catalogues.
+The world file's `seeds` list kernels to contact when joining the network, one
+`0x…@host:port` entry per endpoint. Through them, kernels find peers and exchange public catalogues.
 `play` and `polygon` include project seeds. On `arbitrum-one` and
-`arbitrum-sepolia`, add the address of a kernel already serving that world.
+`arbitrum-sepolia`, add a seed line from a kernel already serving that world.
 To use a different seed on any world, edit `seeds` in its world file. Eligible
 public actions then become available to remote callers without another
 registration step.
 
-Peers are identified by public key. A kernel behind a home router can be reached
+Peers are identified by address. A kernel behind a home router can be reached
 directly, by hole punching through the router, or through another kernel
 carrying its traffic as a relay, without configuring port forwarding. Publicly
 reachable kernels also help route traffic;
@@ -334,17 +341,17 @@ every kernel listens on port 31313 unless its configuration says otherwise, so
 a seed is dialable at a known address with nothing to configure.
 
 Discovery is separated by network, so kernels find peers on their own network
-and nowhere else. You can inspect the local transport addresses with:
+and nowhere else. You can inspect the local TCP endpoints with:
 
 ```console
 $ juice admin kernel show
 …
-Listen addresses:
-  /ip4/127.0.0.1/tcp/31313/p2p/16Uiu2HAm…
+TCP endpoints:
+  0xcaf2a882…@127.0.0.1:31313
 ```
 
 From another machine, request `GET /health` at the kernel's HTTP address. Its
-`fed_addrs` field lists the federation addresses; no login is needed.
+`fed_addrs` field lists the same TCP endpoints; no login is needed.
 
 ## Checking it is up
 
@@ -353,7 +360,7 @@ is needed.
 
 ```console
 $ juice kernel health acme
-ok  acme  network play  fdlMi64P…  v0.14.46
+ok  acme  network play  0xcaf2a882…  v0.14.46
 ```
 
 Health checks require no login and report the server's identity and version as

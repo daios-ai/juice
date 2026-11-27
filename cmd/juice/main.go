@@ -475,9 +475,9 @@ func openKernel(world rail.World, key *ecdsa.PrivateKey) (*kernel.Kernel, *store
 		}
 	}
 
-	// The adapter learns this kernel's own public key once bootstrap has loaded the signing key.
-	if pub, _ := db.GetConfig(context.Background(), configKeySigningPublic); pub != "" {
-		fedAdapter.SetLocalPubKey(pub)
+	// The adapter learns this kernel's own address once bootstrap has loaded the signing key.
+	if pub, _ := db.GetConfig(context.Background(), configKeyAddress); pub != "" {
+		fedAdapter.SetLocalAddr(pub)
 	}
 
 	return k, db, logger, httpExec, fedAdapter, specs, nil

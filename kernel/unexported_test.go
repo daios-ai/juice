@@ -13,9 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 // TestCanCallVisibilityMatrix exercises the caller-scoped, three-level visibility predicate (§4):
@@ -89,10 +92,10 @@ func TestIngestEvidenceRejectsRatingOutsideContract(t *testing.T) {
 	cfg.Network, cfg.TokenSecret, cfg.IssuerUserID = playNet, "s", "i"
 	k := New(Dependencies{Config: cfg, Store: rs})
 	pub, priv, _ := GenKey()
-	issuer := base64.RawURLEncoding.EncodeToString(pub)
+	issuer := pub
 	now := time.Now().UTC()
 	bundle := func(value float64, note *string) EvidenceBundle {
-		er := &EvidenceReceipt{ReceiptHash: "H1", SubjectKernelPublicKey: "subj", SubjectActionID: "act",
+		er := &EvidenceReceipt{ReceiptHash: "H1", SubjectKernel: "subj", SubjectActionID: "act",
 			Status: TxSuccess, StartedAt: now, CreatedAt: now}
 		er.Signature, _ = playNet.sign(priv, sigDomainEvidenceReceipt, *er)
 		rt := &RatingEvidence{Rating: value, Note: note, RatedReceiptHash: "H1", CreatedAt: now}
@@ -132,7 +135,7 @@ func TestVerifyRemoteReceiptSignatureFailsClosedOnEmptyKey(t *testing.T) {
 	if err := playNet.verifyReceiptSignature(r, ""); err == nil {
 		t.Fatal("empty peer key: got nil, want error (must fail closed)")
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if err := playNet.verifyReceiptSignature(r, pubB64); err != nil {
 		t.Fatalf("valid signature with correct key: %v", err)
 	}
@@ -740,7 +743,7 @@ func TestReceiptHashJoinDefinition(t *testing.T) {
 // rather than repaired (U36, G7, D23). A signature made under one domain never verifies under another.
 func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	_, priv, _ := GenKey()
-	pub := PubBytes(priv)
+	pub := KernelAddress(priv)
 	payload := map[string]string{"k": "v"}
 	net := playNet
 
@@ -767,12 +770,77 @@ func TestSignatureBindsDomainAndNetwork(t *testing.T) {
 	}
 }
 
+// TestASignatureIsCheckedAgainstTheSignersAddressAlone: a kernel is named by its address and no key
+// travels with a message (P1), so verification recovers the signer and compares addresses. Another
+// kernel's address, altered bytes, and the second signature a high s would allow are all refused.
+func TestASignatureIsCheckedAgainstTheSignersAddressAlone(t *testing.T) {
+	signer, priv, _ := GenKey()
+	stranger, _, _ := GenKey()
+	payload := map[string]string{"k": "v"}
+	sig, err := playNet.sign(priv, sigDomainReceipt, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.RawURLEncoding.DecodeString(sig)
+	if len(raw) != 65 {
+		t.Fatalf("a signature is %d bytes, want r‖s‖v, 65", len(raw))
+	}
+	if err := playNet.verify(signer, sigDomainReceipt, payload, sig); err != nil {
+		t.Errorf("refused for its signer: %v", err)
+	}
+	if err := playNet.verify(strings.ToUpper(signer[:2])+strings.ToUpper(signer[2:]), sigDomainReceipt, payload, sig); err != nil {
+		t.Errorf("an address in another letter case is the same address: %v", err)
+	}
+	if err := playNet.verify(stranger, sigDomainReceipt, payload, sig); err == nil {
+		t.Error("accepted for another kernel's address")
+	}
+	if err := playNet.verify(signer, sigDomainReceipt, map[string]string{"k": "w"}, sig); err == nil {
+		t.Error("accepted over altered bytes")
+	}
+	// The same r with s mirrored to the upper half and v flipped is a valid ECDSA signature by the
+	// same key; accepting it would give one message two signatures.
+	n := ethcrypto.S256().Params().N
+	s := new(big.Int).SetBytes(raw[32:64])
+	high := append(append(append([]byte{}, raw[:32]...), new(big.Int).Sub(n, s).FillBytes(make([]byte, 32))...), raw[64]^1)
+	if err := playNet.verify(signer, sigDomainReceipt, payload, base64.RawURLEncoding.EncodeToString(high)); err == nil {
+		t.Error("accepted the high-s twin of a signature")
+	}
+	if err := playNet.verify(signer, sigDomainReceipt, payload, base64.RawURLEncoding.EncodeToString(raw[:64])); err == nil {
+		t.Error("accepted a signature without its recovery byte")
+	}
+}
+
+// TestAKernelIsNamedByItsEthereumAddress: the id is the standard Ethereum address of the key, so the
+// first account a wallet derives from a phrase is the kernel that phrase makes. The vector is the
+// well-known first test account; input in any letter case reads as the one lower-case form.
+func TestAKernelIsNamedByItsEthereumAddress(t *testing.T) {
+	key := KeyFromSeed(mustHex("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"))
+	const want = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+	if got := KernelAddress(key); got != want {
+		t.Errorf("address %s, want %s", got, want)
+	}
+	if got, err := ParseKernelAddress("0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266"); err != nil || got != want {
+		t.Errorf("a checksummed address reads as %q (%v), want %s", got, err, want)
+	}
+	for _, bad := range []string{"", "f39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0xf39fd6e51aad88f6f4ce6ab8827279cfffb9226",
+		"0xg39fd6e51aad88f6f4ce6ab8827279cfffb92266", "AoS_dWImK71pQAhXSPO-avpSrjFxVRgezjG2Y1HM_6Sw"} {
+		if _, err := ParseKernelAddress(bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%q read as an address", bad)
+		}
+	}
+	for _, name := range []string{want, "0X" + want[2:]} {
+		if err := ValidateHandle(name); err == nil {
+			t.Errorf("%q accepted as a name, though it reads as an address", name)
+		}
+	}
+}
+
 // TestProjectRatingPrivacy: the gossip rating projection (§13) drops rater and transaction
 // identity, is signed under sigDomainRating by the gossiping kernel, and a full-Rating signature
 // does not verify over it — the projection is a distinct signed payload, not a field deletion.
 func TestProjectRatingPrivacy(t *testing.T) {
 	_, priv, _ := GenKey()
-	pub := PubBytes(priv)
+	pub := KernelAddress(priv)
 	k := &Kernel{cfg: Config{SigningKey: priv, Network: playNet}}
 
 	note := "frequently timed out"

@@ -615,7 +615,7 @@ var unresolvedTrace = ` LEFT JOIN transactions ox ON ox.trace_id = ot.id
 // the `paid` naming it (P10, P11), or from an address some unresolved foreign call named as its payer.
 // Both can land before the message naming them. A world with no addresses reserves nothing: there
 // the message is itself the payment (D23).
-var reservedDeposit = `d.party <> '' AND (EXISTS (SELECT 1 FROM kernels v WHERE v.blockchain_address = d.party)
+var reservedDeposit = `d.party <> '' AND (EXISTS (SELECT 1 FROM kernels v WHERE v.address = d.party)
 	OR EXISTS (SELECT 1 FROM traces ot` + unresolvedTrace + ` AND ot.owed_blockchain_address = d.party))`
 
 // owedSelect is the projection, from the peer's name for the call to the reveal on its trace. The

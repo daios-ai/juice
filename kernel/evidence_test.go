@@ -4,7 +4,6 @@ package kernel_test
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,14 +17,14 @@ import (
 func execEvidence(t *testing.T, issuer, subjKernel, action, counterparty, receiptHash string, created time.Time) *kernel.EvidenceRow {
 	t.Helper()
 	er := kernel.EvidenceReceipt{
-		ReceiptHash: receiptHash, SubjectKernelPublicKey: subjKernel, SubjectActionID: action,
-		CounterpartyKernelPublicKey: counterparty, Status: kernel.TxSuccess,
+		ReceiptHash: receiptHash, SubjectKernel: subjKernel, SubjectActionID: action,
+		CounterpartyKernel: counterparty, Status: kernel.TxSuccess,
 		StartedAt: created.Add(-100 * time.Millisecond), CreatedAt: created,
 	}
 	b, _ := json.Marshal(er)
 	return &kernel.EvidenceRow{
-		IssuerPublicKey: issuer, ReceiptHash: receiptHash, SubjectKernelPublicKey: subjKernel,
-		SubjectActionID: action, CounterpartyKernelPublicKey: counterparty,
+		IssuerKernel: issuer, ReceiptHash: receiptHash, SubjectKernel: subjKernel,
+		SubjectActionID: action, CounterpartyKernel: counterparty,
 		EvidenceReceiptJSON: string(b), ReceiptCreatedAt: created, EffectiveAt: created, ObservedAt: created,
 	}
 }
@@ -33,7 +32,7 @@ func execEvidence(t *testing.T, issuer, subjKernel, action, counterparty, receip
 func ratingEvidence(t *testing.T, issuer, subjKernel, action, receiptHash, remoteReceiptHash string, val float64, created time.Time) *kernel.EvidenceRow {
 	t.Helper()
 	er := kernel.EvidenceReceipt{
-		ReceiptHash: receiptHash, SubjectKernelPublicKey: subjKernel, SubjectActionID: action,
+		ReceiptHash: receiptHash, SubjectKernel: subjKernel, SubjectActionID: action,
 		Status: kernel.TxSuccess, RemoteReceiptHash: remoteReceiptHash,
 		StartedAt: created, CreatedAt: created,
 	}
@@ -41,7 +40,7 @@ func ratingEvidence(t *testing.T, issuer, subjKernel, action, receiptHash, remot
 	rating := kernel.RatingEvidence{Rating: val, RatedReceiptHash: receiptHash, CreatedAt: created}
 	rJSON, _ := json.Marshal(rating)
 	return &kernel.EvidenceRow{
-		IssuerPublicKey: issuer, ReceiptHash: receiptHash, SubjectKernelPublicKey: subjKernel,
+		IssuerKernel: issuer, ReceiptHash: receiptHash, SubjectKernel: subjKernel,
 		SubjectActionID: action, EvidenceReceiptJSON: string(erJSON), RatingJSON: string(rJSON),
 		RemoteReceiptHash: remoteReceiptHash, ReceiptCreatedAt: created, EffectiveAt: created, ObservedAt: created,
 	}
@@ -79,7 +78,7 @@ func TestSubjectEvidenceTradeBackedBinding(t *testing.T) {
 	for _, r := range rows {
 		trade += r.RatingCount
 		unver += r.UnverifiedRatings
-		if r.IssuerPublicKey == B {
+		if r.IssuerKernel == B {
 			subjectUses += r.Uses
 		}
 	}
@@ -96,7 +95,7 @@ func TestSubjectEvidenceTradeBackedBinding(t *testing.T) {
 	// names A as counterparty and H1 joins), C's is not (C never traded with B, so its claim is
 	// uncorroborated even though it points at H1).
 	for _, r := range rows {
-		switch r.IssuerPublicKey {
+		switch r.IssuerKernel {
 		case A:
 			if r.CorroboratedUses != 1 {
 				t.Errorf("A's interaction should be corroborated: CorroboratedUses=%d, want 1", r.CorroboratedUses)
@@ -176,7 +175,7 @@ func TestSubjectEvidenceOneRatingPerTrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range rows {
-		if r.IssuerPublicKey == A && (r.RatingCount != 1 || r.Uses != 1 || r.CorroboratedUses != 1) {
+		if r.IssuerKernel == A && (r.RatingCount != 1 || r.Uses != 1 || r.CorroboratedUses != 1) {
 			t.Errorf("three agreeing rows on one trade: want 1 rating, 1 use, 1 corroborated, got %d/%d/%d",
 				r.RatingCount, r.Uses, r.CorroboratedUses)
 		}
@@ -187,7 +186,7 @@ func TestSubjectEvidenceOneRatingPerTrade(t *testing.T) {
 	}
 	rows, _ = k.SubjectEvidence(ctx, B, "")
 	for _, r := range rows {
-		if r.IssuerPublicKey == A && r.SubjectActionID == "act2" && (r.RatingCount != 0 || r.UnverifiedRatings != 1 || r.CorroboratedUses != 0) {
+		if r.IssuerKernel == A && r.SubjectActionID == "act2" && (r.RatingCount != 0 || r.UnverifiedRatings != 1 || r.CorroboratedUses != 0) {
 			t.Errorf("a rating on another action's receipt counted as trade-backed: %+v", r)
 		}
 	}
@@ -196,7 +195,7 @@ func TestSubjectEvidenceOneRatingPerTrade(t *testing.T) {
 	}
 	rows, _ = k.SubjectEvidence(ctx, B, "")
 	for _, r := range rows {
-		if r.IssuerPublicKey == A && r.RatingCount != 0 {
+		if r.IssuerKernel == A && r.RatingCount != 0 {
 			t.Errorf("a disagreeing row on the same trade: want 0 ratings, got %d", r.RatingCount)
 		}
 	}
@@ -215,7 +214,7 @@ func TestSubjectEvidenceOneRatingPerTrade(t *testing.T) {
 	}
 	rows, _ = k.SubjectEvidence(ctx, B, "")
 	for _, r := range rows {
-		if r.IssuerPublicKey == A && r.SubjectActionID == "act3" && r.RatingCount != 0 {
+		if r.IssuerKernel == A && r.SubjectActionID == "act3" && r.RatingCount != 0 {
 			t.Errorf("an equivocated sibling on the trade: want 0 ratings, got %d", r.RatingCount)
 		}
 	}
@@ -229,7 +228,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	ctx := context.Background()
 
 	peerPub, peerPriv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	peerKey := peerPub
 
 	good := &kernel.ActionManifest{
 		ActionID: "act-good", OwnerID: "u1", OwnerHandle: "prov", Title: "Test action", Name: "translate",
@@ -253,7 +252,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 		Signature: sig, // signature is for `good`, not `bad`
 	}
 	forged := &kernel.GossipResponse{
-		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good, bad},
 	}
 	if _, err := k.AccumulateGossip(ctx, forged, peerKey); !errors.Is(err, kernel.ErrUnauthorized) {
@@ -264,7 +263,7 @@ func TestAccumulateGossipIndexesVerifiedManifests(t *testing.T) {
 	}
 
 	g := &kernel.GossipResponse{
-		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{good},
 	}
 	if _, err := k.AccumulateGossip(ctx, g, peerKey); err != nil {
@@ -319,7 +318,7 @@ func TestCorroborationRequiresTheTwoStatementsToAgree(t *testing.T) {
 	}
 	var buyerRow *kernel.SubjectEvidenceRow
 	for _, r := range rows {
-		if r.IssuerPublicKey == buyer {
+		if r.IssuerKernel == buyer {
 			buyerRow = r
 		}
 	}
@@ -364,7 +363,7 @@ func TestASecondStatementAboutOneReceiptIsEquivocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range stored {
-		if e.IssuerPublicKey != buyer {
+		if e.IssuerKernel != buyer {
 			continue
 		}
 		if !e.Equivocated {
@@ -373,7 +372,7 @@ func TestASecondStatementAboutOneReceiptIsEquivocation(t *testing.T) {
 		if e.EvidenceReceiptJSON != first.EvidenceReceiptJSON {
 			t.Error("the stored statement must stay exactly as it was signed")
 		}
-		if e.CounterpartyKernelPublicKey == "SOMEONE-ELSE" || e.RemoteReceiptHash == "h-other" {
+		if e.CounterpartyKernel == "SOMEONE-ELSE" || e.RemoteReceiptHash == "h-other" {
 			t.Error("a second story must not re-aim the link the first one made")
 		}
 	}
@@ -382,7 +381,7 @@ func TestASecondStatementAboutOneReceiptIsEquivocation(t *testing.T) {
 		t.Fatal(derr)
 	}
 	for _, r := range derived {
-		if r.IssuerPublicKey == buyer && (r.Uses != 0 || r.CorroboratedUses != 0) {
+		if r.IssuerKernel == buyer && (r.Uses != 0 || r.CorroboratedUses != 0) {
 			t.Errorf("an equivocated trade must count for nothing, got %+v", r)
 		}
 	}
@@ -394,8 +393,8 @@ func evidenceRow(t *testing.T, issuer, receiptHash, subjectKernel, subjectAction
 	t.Helper()
 	now := time.Now().UTC().Truncate(time.Second)
 	er := kernel.EvidenceReceipt{
-		ReceiptHash: receiptHash, SubjectKernelPublicKey: subjectKernel, SubjectActionID: subjectAction,
-		CounterpartyKernelPublicKey: counterparty, RemoteReceiptHash: remoteHash,
+		ReceiptHash: receiptHash, SubjectKernel: subjectKernel, SubjectActionID: subjectAction,
+		CounterpartyKernel: counterparty, RemoteReceiptHash: remoteHash,
 		Status: status, StartedAt: now, CreatedAt: now,
 	}
 	b, err := json.Marshal(er)
@@ -403,9 +402,9 @@ func evidenceRow(t *testing.T, issuer, receiptHash, subjectKernel, subjectAction
 		t.Fatal(err)
 	}
 	return &kernel.EvidenceRow{
-		IssuerPublicKey: issuer, ReceiptHash: receiptHash,
-		SubjectKernelPublicKey: subjectKernel, SubjectActionID: subjectAction,
-		CounterpartyKernelPublicKey: counterparty, RemoteReceiptHash: remoteHash,
+		IssuerKernel: issuer, ReceiptHash: receiptHash,
+		SubjectKernel: subjectKernel, SubjectActionID: subjectAction,
+		CounterpartyKernel: counterparty, RemoteReceiptHash: remoteHash,
 		EvidenceReceiptJSON: string(b),
 		ReceiptCreatedAt:    now, EffectiveAt: now, ObservedAt: now,
 	}
@@ -421,7 +420,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	peerPub, peerPriv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	peerKey := peerPub
 
 	manifest := func(id string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
@@ -438,7 +437,7 @@ func TestACatalogueSweepsOnlyWhenItsScanCompletes(t *testing.T) {
 		return m
 	}
 	page := func(next string, ids ...string) *kernel.GossipResponse {
-		g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk",
 			NextCatalogCursor: next}
 		for _, id := range ids {
 			g.ActionManifests = append(g.ActionManifests, manifest(id))
@@ -497,7 +496,7 @@ func TestABuyerSeesTheEvidenceAboutARemoteAction(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 	providerPub, providerPriv, _ := kernel.GenKey()
-	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
+	providerKey := providerPub
 	const otherBuyer, remoteAction = "kernelM", "remote-1"
 
 	k := newTestKernel(st)
@@ -535,7 +534,7 @@ func TestABuyerSeesTheEvidenceAboutARemoteAction(t *testing.T) {
 	}
 	var other *kernel.SubjectEvidenceRow
 	for _, r := range record.ObservedByOthers {
-		if r.IssuerPublicKey == otherBuyer {
+		if r.IssuerKernel == otherBuyer {
 			other = r
 		}
 	}
@@ -642,7 +641,7 @@ func issuerRow(t *testing.T, k *kernel.Kernel, ctx context.Context, subjectKerne
 		t.Fatal(err)
 	}
 	for _, r := range rows {
-		if r.IssuerPublicKey == issuer {
+		if r.IssuerKernel == issuer {
 			return r
 		}
 	}
@@ -660,7 +659,7 @@ func TestAGossipPageOverTheProtocolsSizeIsRefusedWhole(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	peerPub, peerPriv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	peerKey := peerPub
 
 	manifest := func(id string) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
@@ -676,7 +675,7 @@ func TestAGossipPageOverTheProtocolsSizeIsRefusedWhole(t *testing.T) {
 		m.Signature = sig
 		return m
 	}
-	g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk"}
+	g := &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk"}
 	for i := 0; i <= kernel.CatalogPageSizeForTest; i++ { // one over the page this protocol serves
 		g.ActionManifests = append(g.ActionManifests, manifest(fmt.Sprintf("a%03d", i)))
 	}
@@ -698,7 +697,7 @@ func TestTheRatingsSurfaceAndTheActionRecordAgree(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	providerPub, providerPriv, _ := kernel.GenKey()
-	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
+	providerKey := providerPub
 	const buyer, remoteAction = "BUYER", "remote-1"
 
 	setupSys(t, k, st)
@@ -757,7 +756,7 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	providerPub, providerPriv, _ := kernel.GenKey()
-	providerKey := base64.RawURLEncoding.EncodeToString(providerPub)
+	providerKey := providerPub
 	const buyer, elsewhere, action = "BUYER", "OTHER-KERNEL", "act-1"
 
 	setupSys(t, k, st)
@@ -797,7 +796,7 @@ func TestCorroborationNamesTheSubjectKernelNotJustTheAction(t *testing.T) {
 	// And the action's own read says the same: the claim is there, unverified, not confirmed.
 	record := k.ActionRecord(ctx, proxy)
 	for _, r := range record.ObservedByOthers {
-		if r.IssuerPublicKey == buyer && r.RatingCount != 0 {
+		if r.IssuerKernel == buyer && r.RatingCount != 0 {
 			t.Errorf("the record counted %d trade-backed ratings on an unlinked claim", r.RatingCount)
 		}
 	}
@@ -811,7 +810,7 @@ func TestGossipIndexesOnlyHoldableContracts(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	peerPub, peerPriv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	peerKey := peerPub
 	manifest := func(id, title string, in map[string]any) *kernel.ActionManifest {
 		m := &kernel.ActionManifest{
 			ActionID: id, OwnerID: "u1", OwnerHandle: "prov", Name: id, Title: title,
@@ -827,7 +826,7 @@ func TestGossipIndexesOnlyHoldableContracts(t *testing.T) {
 	}
 	open := map[string]any{"type": "object"}
 	g := &kernel.GossipResponse{
-		NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey, Handle: "peerk",
+		NetworkFingerprint: testNet.Fingerprint, Address: peerKey, Handle: "peerk",
 		ActionManifests: []*kernel.ActionManifest{
 			manifest("titled", "Translate a contract", open),
 			manifest("untitled", "", open),
@@ -863,7 +862,7 @@ func TestPeerCatalogCarriesTitles(t *testing.T) {
 	k := newTestKernel(st)
 	ctx := context.Background()
 	peerPub, peerPriv, _ := kernel.GenKey()
-	peerKey := base64.RawURLEncoding.EncodeToString(peerPub)
+	peerKey := peerPub
 	m := &kernel.ActionManifest{
 		ActionID: "a1", OwnerID: "u1", OwnerHandle: "prov", Name: "translate", Title: "Translate a contract",
 		Description: "translates", Kind: kernel.KindHTTP, Price: 5,
@@ -878,7 +877,7 @@ func TestPeerCatalogCarriesTitles(t *testing.T) {
 	if len(live) != 1 || live[0].Title != "Translate a contract" {
 		t.Fatalf("live catalogue = %+v", live)
 	}
-	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, PublicKey: peerKey,
+	if _, err := k.AccumulateGossip(ctx, &kernel.GossipResponse{NetworkFingerprint: testNet.Fingerprint, Address: peerKey,
 		Handle: "peerk", ActionManifests: []*kernel.ActionManifest{m}}, peerKey); err != nil {
 		t.Fatal(err)
 	}

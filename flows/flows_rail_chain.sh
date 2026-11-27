@@ -42,7 +42,7 @@ EOF
 _chain_pay_in() {
     local db="$1" home="$2" wkey="$3" amount="$4" pw="${5:-userpass}" base waddr kkey uid msg sig vault
     base=$(url "$db"); waddr=$(cast wallet address --private-key "$wkey")
-    kkey=$(strfield "$(http_body GET "$base/health")" public_key)
+    kkey=$(strfield "$(http_body GET "$base/health")" blockchain_address)
     uid=$(strfield "$(jj "$db" "$home" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")
@@ -182,20 +182,22 @@ print(rows[0]['status'], rows[0].get('tx_hash', '-')) if rows else print('- -')"
     # agree from the first pass and a payment after the restore is counted once.
     anvil_mine 8
     local held; held=$(anvil_uint "$token" "balanceOf(address)(uint256)" "$vault")
-    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
+    local key; key=$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)
     stop_server "$db"
     rm -rf "$(dirname "$db")"
     make_admin "$db" "$hs" "${CHAIN_CFG[@]}" || { fail "rail_chain.restored" "server did not start"; return; }
-    assert_eq "rail_chain.restored_same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" public_key)"
+    assert_eq "rail_chain.restored_same_key" "$key" "$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)"
     assert_eq "rail_chain.restored_same_address" "$vault" "$(vault_of "$db")"
-    assert_contains "rail_chain.restore_says_the_address" "paid at $vault" "$(cat "$(server_log "$db")")"
+    assert_contains "rail_chain.restore_says_the_address" "That phrase is kernel $vault." "$(cat "$(server_log "$db")")"
     assert_jnum "rail_chain.restored_coins_are_the_operators" "$(jj "$db" "$hs" user me)" available "$held"
     make_user "$db" "$hs" "$ha" alice
     _chain_pay_in "$db" "$ha" "$akey" 3000000 >/dev/null
     assert_jnum "rail_chain.payment_after_restore_counted_once" "$(jj "$db" "$ha" user me)" available 3000000
+    # The audit speaks once the scan has reached the finalized block, so the chain is left at rest
+    # while it catches up: a chain mined on every look keeps the target moving ahead of the scan.
+    anvil_mine 2
     deadline=$(( $(date +%s) + 30 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        anvil_mine 2
         ident=$(jj "$db" "$hs" admin kernel show)
         [ "$(pathf "$ident" custody.checked)" = True ] && break
         sleep 0.5
@@ -419,7 +421,7 @@ PYEOF
     cast send --private-key "$key" --rpc-url "$rpc" "$waddr" --value 0.0004ether >/dev/null 2>&1
     cast send --private-key "$key" --rpc-url "$rpc" "$token" "mint(address,uint256)" "$waddr" 2000000 >/dev/null 2>&1
 
-    kkey=$(strfield "$(http_body GET "$(url "$db")/health")" public_key)
+    kkey=$(strfield "$(http_body GET "$(url "$db")/health")" blockchain_address)
     uid=$(strfield "$(jj "$db" "$ha" user me)" id)
     printf -v msg 'juice address registration\nkernel: %s\nuser: %s\naddress: %s' "$kkey" "$uid" "$waddr"
     sig=$(cast wallet sign --private-key "$wkey" "$msg")

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,9 +121,8 @@ func (k *Kernel) prepareTransferEffect(ctx context.Context, caller Principal, a 
 	return &TransferEffect{Amount: amount, Dest: benef.ID}, nil
 }
 
-// prepareRemoteTransfer resolves a beneficiary on another kernel (P11): its stable id there, and the
-// vault the payment will go to, proven and recorded by the resolve itself — which refuses a kernel
-// proving none where the world has addresses, so the payment always has a destination.
+// prepareRemoteTransfer resolves a beneficiary on another kernel (P11): its stable id there. The
+// payment goes to that kernel's address, which is its id, so it always has a destination.
 func (k *Kernel) prepareRemoteTransfer(ctx context.Context, amount int64, ref string) (*TransferEffect, error) {
 	p, err := k.ResolvePrincipal(ctx, ref)
 	if err != nil {
@@ -423,7 +423,8 @@ func (n Network) payload(domain string, v any) ([]byte, error) {
 }
 
 // sign signs the prefixed JCS-canonical form of v with key: ECDSA over its SHA-256, rendered as
-// the 64 bytes r‖s with s in the lower half, so one message has one signature (P1).
+// the 65 bytes r‖s‖v Ethereum uses, s in the lower half so one message has one signature. The last
+// byte lets a verifier recover the signer, so a signature is checked against an address alone (P1).
 func (n Network) sign(key *ecdsa.PrivateKey, domain string, v any) (string, error) {
 	if key == nil {
 		return "", ErrInvalidState.Wrap("signing key is not configured")
@@ -437,32 +438,66 @@ func (n Network) sign(key *ecdsa.PrivateKey, domain string, v any) (string, erro
 	if err != nil {
 		return "", ErrInternal.Wrapf("sign: %v", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(sig[:64]), nil
+	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-// verify checks that sigB64 is a valid signature by pub over the prefixed JCS-canonical form of v.
-// One rule serves wire and storage alike: an artifact signed before this network's fingerprint existed is
-// reported invalid rather than repaired (U36).
-func (n Network) verify(pub []byte, domain string, v any, sigB64 string) error {
+// verify checks that sigB64 is a signature by the kernel at address over the prefixed
+// JCS-canonical form of v: the signer is recovered from the signature and must be that address.
+// A high s is refused, so one message keeps one signature. One rule serves wire and storage alike:
+// an artifact signed before this network's fingerprint existed is reported invalid rather than
+// repaired (U36).
+func (n Network) verify(address, domain string, v any, sigB64 string) error {
+	want, err := ParseKernelAddress(address)
+	if err != nil {
+		return err
+	}
 	payload, err := n.payload(domain, v)
 	if err != nil {
 		return err
 	}
 	digest := sha256.Sum256(payload)
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
-	if err != nil || len(sig) != 64 || !ethcrypto.VerifySignature(pub, digest[:], sig) {
+	if err != nil || len(sig) != 65 ||
+		!ethcrypto.ValidateSignatureValues(sig[64], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:64]), true) {
+		return ErrUnauthorized.Wrap("signature is invalid")
+	}
+	pub, err := ethcrypto.SigToPub(digest[:], sig)
+	if err != nil || KernelAddressOf(pub) != want {
 		return ErrUnauthorized.Wrap("signature is invalid")
 	}
 	return nil
 }
 
-// PublicKey renders a kernel key's public half the way every payload names a kernel: the 33-byte
-// compressed point, base64url (P1).
-func PublicKey(key *ecdsa.PrivateKey) string {
+// KernelAddress is a kernel's one identifier: the Ethereum address of its key, 0x and 40 lower-case
+// hex digits. It names the kernel on every world, on the network, and where it is paid (P1).
+func KernelAddress(key *ecdsa.PrivateKey) string {
 	if key == nil {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString(ethcrypto.CompressPubkey(&key.PublicKey))
+	return KernelAddressOf(&key.PublicKey)
+}
+
+// KernelAddressOf is the address of a key's public half: the last 20 bytes of its Keccak-256 hash.
+func KernelAddressOf(pub *ecdsa.PublicKey) string {
+	return strings.ToLower(ethcrypto.PubkeyToAddress(*pub).Hex())
+}
+
+// ParseKernelAddress reads a kernel's address in any letter case and returns it in the one form
+// every record and message uses.
+func ParseKernelAddress(s string) (string, error) {
+	if !IsKernelAddress(s) {
+		return "", ErrInvalidInput.Wrapf("%q is not a kernel address: 0x and 40 hex digits", s)
+	}
+	return strings.ToLower(s), nil
+}
+
+// IsKernelAddress reports whether s has the shape of a kernel address, 0x and 40 hex digits.
+func IsKernelAddress(s string) bool {
+	if len(s) != 42 || (s[:2] != "0x" && s[:2] != "0X") {
+		return false
+	}
+	_, err := hex.DecodeString(s[2:])
+	return err == nil
 }
 
 // VerifyReceipt audits the signed receipt behind one transaction, offline, against what this
@@ -507,7 +542,7 @@ func (k *Kernel) VerifyReceipt(ctx context.Context, subjectID, txID string) (*Re
 	checks := ReceiptChecks{
 		// Hash integrity, then the signature under this kernel's own network prefix.
 		"receipt_hash": sha256Hex(tx.RemoteReceiptJSON) == tx.RemoteReceiptHash,
-		"signature":    k.cfg.Network.verifyReceiptSignature(&r, tx.RemoteSignerKey) == nil,
+		"signature":    k.cfg.Network.verifyReceiptSignature(&r, tx.RemoteSigner) == nil,
 		"action_id":    r.ActionID == firstNonEmpty(tx.RemoteActionID, tx.ActionID),
 		"status":       r.Status == tx.Status,
 		// The execution obligation the buyer owes, and the serving markup inside it. The value
@@ -543,22 +578,22 @@ func (k *Kernel) VerifyReceipt(ctx context.Context, subjectID, txID string) (*Re
 	unbound := r.IdempotencyKey == "" && r.Counterparty == ""
 	if !unbound {
 		checks["idempotency_key"] = r.IdempotencyKey == obligationID
-		checks["counterparty"] = r.Counterparty == k.ourKeyB64()
+		checks["counterparty"] = r.Counterparty == k.ourAddress()
 	}
 
 	return &ReceiptVerification{
-		TransactionID:         txID,
-		Unbound:               unbound,
-		Valid:                 checks.allHeld(),
-		RemoteKernelHandle:    k.KernelAddress(ctx, tx.RemoteSignerKey),
-		RemoteKernelPublicKey: tx.RemoteSignerKey,
-		Checks:                checks,
-		Receipt:               &r,
+		TransactionID:      txID,
+		Unbound:            unbound,
+		Valid:              checks.allHeld(),
+		RemoteKernelHandle: k.KernelAddress(ctx, tx.RemoteSigner),
+		RemoteKernel:       tx.RemoteSigner,
+		Checks:             checks,
+		Receipt:            &r,
 	}, nil
 }
 
 // verifyLocalReceipt audits the receipt this kernel signed for a call it executed itself, against
-// its own key. Same question, one issuer: there is no peer key, no frozen cross-kernel rate and no
+// its own key. Same question, one issuer: there is no peer address, no frozen cross-kernel rate and no
 // draw, so those checks do not appear.
 func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*ReceiptVerification, error) {
 	r, err := k.store.ReadReceiptByTxID(ctx, tx.ID)
@@ -569,7 +604,7 @@ func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*Rece
 		return nil, ErrNotFound.Wrap("transaction has no receipt")
 	}
 	checks := ReceiptChecks{
-		"signature": k.cfg.Network.verifyReceiptSignature(r, k.ourKeyB64()) == nil,
+		"signature": k.cfg.Network.verifyReceiptSignature(r, k.ourAddress()) == nil,
 		"action_id": r.ActionID == tx.ActionID,
 		"status":    r.Status == tx.Status,
 		// P5: charge is the full allocation on success, and what settled beneath it on a failure;
@@ -586,9 +621,8 @@ func (k *Kernel) verifyLocalReceipt(ctx context.Context, tx *Transaction) (*Rece
 	// address (D18).
 	if tr, err := k.store.ReadTrace(ctx, tx.TraceID); err == nil && tr.ValuePeer != "" && tx.Status == TxSuccess {
 		p, perr := k.store.ReadRailTransfer(ctx, tx.ID)
-		vault := k.peerVault(tr.ValuePeer)
 		checks["payment"] = perr == nil && p != nil && p.Kind == RailKindTransfer &&
-			p.Amount == r.Value && p.Destination == vault
+			p.Amount == r.Value && p.Destination == tr.ValuePeer
 	}
 	return &ReceiptVerification{TransactionID: tx.ID, Valid: checks.allHeld(), Checks: checks, Receipt: r}, nil
 }
@@ -615,13 +649,13 @@ func (n Network) ReceiptSigningBytes(r *Receipt) ([]byte, error) {
 	return n.payload(sigDomainReceipt, cp)
 }
 
-// verifyReceiptSignature checks the receipt's signature against pubKeyB64. Fails
+// verifyReceiptSignature checks the receipt's signature against address. Fails
 // closed on an empty key: a missing key must never let an unverified receipt pass as valid (§13).
-func (n Network) verifyReceiptSignature(r *Receipt, pubKeyB64 string) error {
-	if pubKeyB64 == "" {
-		return ErrInvalidState.Wrap("peer public key is not configured; cannot verify receipt signature")
+func (n Network) verifyReceiptSignature(r *Receipt, address string) error {
+	if address == "" {
+		return ErrInvalidState.Wrap("peer address is not configured; cannot verify receipt signature")
 	}
-	pub, err := decodeRemotePublicKey(pubKeyB64)
+	pub, err := ParseKernelAddress(address)
 	if err != nil {
 		return err
 	}
@@ -636,7 +670,7 @@ func (n Network) verifyReceiptSignature(r *Receipt, pubKeyB64 string) error {
 // (keep-trace-open) on absent, unparseable, invalidly signed, or mismatched receipts so the
 // trace is never settled against a receipt that fails the invariants VerifyReceipt audits.
 // Settlement must only proceed when this function returns without error.
-func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedActionID, expectedArgsHash, expectedKey, selfKey string) (*Receipt, error) {
+func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, address, expectedActionID, expectedArgsHash, expectedKey, selfKey string) (*Receipt, error) {
 	if receiptJSON == "" {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
@@ -644,7 +678,7 @@ func (n Network) parseAndVerifyRemoteReceipt(receiptJSON, pubKeyB64, expectedAct
 	if err := json.Unmarshal([]byte(receiptJSON), &r); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt pending")
 	}
-	if err := n.verifyReceiptSignature(&r, pubKeyB64); err != nil {
+	if err := n.verifyReceiptSignature(&r, address); err != nil {
 		return nil, ErrTimeout.Wrap("remote receipt: invalid signature")
 	}
 	if expectedActionID != "" && r.ActionID != expectedActionID {
@@ -749,7 +783,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	if trace.IdempotencyKey != nil {
 		expectedKey = *trace.IdempotencyKey
 	}
-	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, peer, action.RemoteActionID, expectedArgsHash, expectedKey, k.ourKeyB64())
+	rp, err := k.cfg.Network.parseAndVerifyRemoteReceipt(fr.ReceiptJSON, peer, action.RemoteActionID, expectedArgsHash, expectedKey, k.ourAddress())
 	if err != nil {
 		// The call is parked, not lost: no receipt has settled it, so the allocation stays locked and
 		// the process open until one arrives (§13). Hand back the durable
@@ -797,7 +831,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	ktx.Fee = importFee
 	ktx.RemoteReceiptHash = sha256Hex(fr.ReceiptJSON)
 	ktx.RemoteReceiptJSON = fr.ReceiptJSON
-	ktx.RemoteSignerKey = peer // stored with the receipt it verified (G7)
+	ktx.RemoteSigner = peer // stored with the receipt it verified (G7)
 
 	stats := k.computeStats(ctx, action.ID, ktx, latency)
 	// A rejection is the peer's refusal to execute, at any price: an executed failure that consumed
@@ -861,7 +895,7 @@ func (k *Kernel) settleRemoteCall(ctx context.Context, logger *log.Logger, actio
 	// nonce, and the obligation — so neither can pick the outcome and neither has to trust the
 	// other's report of it. A losing ticket pays nothing; a winning one pays the face value; an
 	// obligation at or above the face value is paid exactly.
-	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, k.peerVault(peer))
+	payout, drawn := k.drawPayment(trace, d, obligation, r.Nonce, peer)
 
 	// Detach settlement from execution-scoped cancellation so the remote settlement
 	// (obligation/duty/refund + audit record) always commits once the signed receipt is in.
@@ -1086,10 +1120,10 @@ func normalizeTaskInput(raw json.RawMessage) ([]byte, string, error) {
 	return input, sha256Hex(string(input)), nil
 }
 
-// SelfKey is this kernel's own base64url public key — the counterparty it signs as, and the name
+// SelfKey is this kernel's own address — the counterparty it signs as, and the name
 // every surface gives it. It is the one reader of the stored key.
 func (k *Kernel) SelfKey(ctx context.Context) string {
-	key, _ := k.store.GetConfig(ctx, "signing_public_key")
+	key, _ := k.store.GetConfig(ctx, "kernel_address")
 	return key
 }
 
@@ -1131,10 +1165,10 @@ func (k *Kernel) sendTask(ctx context.Context, callerID string, e *TaskEntry, ki
 		return nil, ErrUnauthorized.Wrap("only the task's required caller may complete or decline it")
 	}
 	// A suspended holder delivers nothing, so its reply could not be recorded after the work ran.
-	if k.holderSuspended(ctx, e.HolderKey) {
+	if k.holderSuspended(ctx, e.HolderKernel) {
 		return nil, ErrUnauthorized.Wrap("this kernel has suspended the task's holder")
 	}
-	r := TaskRequest{Kind: kind, Counterparty: k.ourKeyB64(), Timestamp: time.Now().UTC().Format(time.RFC3339),
+	r := TaskRequest{Kind: kind, Counterparty: k.ourAddress(), Timestamp: time.Now().UTC().Format(time.RFC3339),
 		TaskID: e.ID, ForUserID: callerID, UserSuperuser: k.IsSuperuser(ctx, callerID)}
 	var inputHash string
 	if kind == "complete" {
@@ -1142,24 +1176,24 @@ func (k *Kernel) sendTask(ctx context.Context, callerID string, e *TaskEntry, ki
 		if r.Input, inputHash, err = normalizeTaskInput(rawInput); err != nil {
 			return nil, err
 		}
-		r.IdempotencyKey = TaskIdempotencyKey(e.HolderKey, e.ID, inputHash)
+		r.IdempotencyKey = TaskIdempotencyKey(e.HolderKernel, e.ID, inputHash)
 	}
-	sig, err := k.cfg.Network.SignTaskPayload(k.cfg.SigningKey, kind, e.ID, r.Counterparty, e.HolderKey,
+	sig, err := k.cfg.Network.SignTaskPayload(k.cfg.SigningKey, kind, e.ID, r.Counterparty, e.HolderKernel,
 		r.IdempotencyKey, r.Timestamp, inputHash, r.ForUserID, r.UserSuperuser)
 	if err != nil {
 		return nil, err
 	}
 	r.Signature = sig
-	status, body, notDispatched, err := k.fedClient.SendTask(ctx, e.HolderKey, r)
+	status, body, notDispatched, err := k.fedClient.SendTask(ctx, e.HolderKernel, r)
 	var reply struct {
 		CallReply
 		Notice *SignedTaskNotice `json:"notice"`
 	}
 	var nerr error = ErrExecutionFailed.Wrap("the holder's reply carries no task notice")
 	if err == nil && json.Unmarshal(body, &reply) == nil && reply.Notice != nil && reply.Notice.Notice.ID == e.ID {
-		nerr = k.HandleTaskNotice(ctx, e.HolderKey, reply.Notice)
+		nerr = k.HandleTaskNotice(ctx, e.HolderKernel, reply.Notice)
 	}
-	if err := taskReply(status, body, notDispatched, err, e.HolderKey, &reply); err != nil {
+	if err := taskReply(status, body, notDispatched, err, e.HolderKernel, &reply); err != nil {
 		return nil, err
 	}
 	// The work ran on the holder; a success is reported only once the entry here says so (P8).
@@ -1180,7 +1214,7 @@ func (k *Kernel) sendTask(ctx context.Context, callerID string, e *TaskEntry, ki
 func (k *Kernel) signNotice(o *OutgoingNotice) (*SignedTaskNotice, error) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	sig, err := k.cfg.Network.sign(k.cfg.SigningKey, sigDomainTaskNotice,
-		taskNoticePayload{Counterparty: k.ourKeyB64(), Notice: o.Notice, Recipient: o.PeerKey, Timestamp: ts})
+		taskNoticePayload{Counterparty: k.ourAddress(), Notice: o.Notice, Recipient: o.PeerKey, Timestamp: ts})
 	return &SignedTaskNotice{Notice: o.Notice, Timestamp: ts, Signature: sig}, err
 }
 
@@ -1225,7 +1259,7 @@ func (k *Kernel) announceTask(ctx context.Context, o *OutgoingNotice) error {
 		return err
 	}
 	status, body, notDispatched, err := k.fedClient.SendTask(ctx, o.PeerKey, TaskRequest{Kind: "notice",
-		Counterparty: k.ourKeyB64(), Timestamp: s.Timestamp, Signature: s.Signature, Notice: &s.Notice})
+		Counterparty: k.ourAddress(), Timestamp: s.Timestamp, Signature: s.Signature, Notice: &s.Notice})
 	if err := taskReply(status, body, notDispatched, err, o.PeerKey, &struct{}{}); err != nil {
 		return err
 	}
@@ -1242,7 +1276,7 @@ func (k *Kernel) holderSuspended(ctx context.Context, key string) bool {
 // against the holder and this kernel, a suspended holder is refused (U37), and a notice addressed to
 // no user is this kernel's own, answered by its operator. The actions a peer withholds are dropped.
 func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *SignedTaskNotice) error {
-	p := taskNoticePayload{Counterparty: holderKey, Notice: s.Notice, Recipient: k.ourKeyB64(), Timestamp: s.Timestamp}
+	p := taskNoticePayload{Counterparty: holderKey, Notice: s.Notice, Recipient: k.ourAddress(), Timestamp: s.Timestamp}
 	if err := k.cfg.Network.verifyPeer(holderKey, sigDomainTaskNotice, p, s.Signature); err != nil {
 		return ErrUnauthenticated.Wrap("task notice signature is invalid")
 	}
@@ -1281,20 +1315,20 @@ func (k *Kernel) HandleTaskNotice(ctx context.Context, holderKey string, s *Sign
 // and about. It binds no petname, and never advances the evidence cursor or the
 // peer-sync cache — those have their own narrow paths, run only after their own work commits.
 func (k *Kernel) ObserveKernel(ctx context.Context, publicKey, nickname, about string) error {
-	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+	publicKey, err := ParseKernelAddress(publicKey)
+	if err != nil {
 		return err
 	}
-	return k.store.UpsertKernel(ctx, publicKey, nickname, about, k.peerVault(publicKey), time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, nickname, about, time.Now().UTC())
 }
 
-// peerVault is where a peer is paid and pays from: the address of its own key on this world's
-// rail, empty where the world has no addresses. It is computed, never told, so no peer can name
-// an address it does not hold (P1).
+// peerVault is where a peer is paid and pays from: its own address, which is its id, and empty
+// where the world has no addresses. No peer can name an address it does not hold (P1).
 func (k *Kernel) peerVault(peerKey string) string {
-	if k.rail == nil {
+	if !k.hasAddresses() {
 		return ""
 	}
-	return k.rail.AddressOf(peerKey)
+	return peerKey
 }
 
 // BindPetname assigns a kernel's local, resolvable name (§13 Stiegler naming), exactly as asked: only
@@ -1302,10 +1336,11 @@ func (k *Kernel) peerVault(peerKey string) string {
 // one on its own. Petnames share the handle grammar and validator, so a key- or id-shaped name is
 // rejected and the resolver's syntactic disjointness holds (§14).
 func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (string, error) {
-	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+	publicKey, err := ParseKernelAddress(publicKey)
+	if err != nil {
 		return "", err
 	}
-	if err := k.store.UpsertKernel(ctx, publicKey, "", "", k.peerVault(publicKey), time.Now().UTC()); err != nil {
+	if err := k.store.UpsertKernel(ctx, publicKey, "", "", time.Now().UTC()); err != nil {
 		return "", err
 	}
 	seed := NormalizeHandle(petname)
@@ -1315,7 +1350,7 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (st
 	if err := k.store.BindPetname(ctx, publicKey, seed); err != nil {
 		return "", err
 	}
-	k.log.With(ctx).Info("kernel.petname.bound", "petname", seed, "public_key", publicKey)
+	k.log.With(ctx).Info("kernel.petname.bound", "petname", seed, "kernel", publicKey)
 	return seed, nil
 }
 
@@ -1324,13 +1359,14 @@ func (k *Kernel) BindPetname(ctx context.Context, publicKey, petname string) (st
 // It binds no petname — an inbound call is not our act of naming (D15) — and refuses a malformed key
 // and this kernel's own, which is no peer of itself.
 func (k *Kernel) knowKernel(ctx context.Context, publicKey string) error {
-	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+	publicKey, err := ParseKernelAddress(publicKey)
+	if err != nil {
 		return err
 	}
 	if publicKey == k.SelfKey(ctx) {
 		return ErrInvalidInput.Wrap("that is this kernel, not a peer")
 	}
-	return k.store.UpsertKernel(ctx, publicKey, "", "", k.peerVault(publicKey), time.Now().UTC())
+	return k.store.UpsertKernel(ctx, publicKey, "", "", time.Now().UTC())
 }
 
 // KnowKernel is knowKernel for the federation transport, which meets a kernel by its signed request.
@@ -1380,7 +1416,8 @@ func (k *Kernel) setKernelSuspended(ctx context.Context, operatorID, publicKey s
 	if err := k.requireSuperuser(ctx, operatorID); err != nil {
 		return err
 	}
-	if _, err := decodeRemotePublicKey(publicKey); err != nil {
+	publicKey, err := ParseKernelAddress(publicKey)
+	if err != nil {
 		return err
 	}
 	if publicKey == k.SelfKey(ctx) {
@@ -1390,7 +1427,7 @@ func (k *Kernel) setKernelSuspended(ctx context.Context, operatorID, publicKey s
 		return err
 	}
 	event := map[bool]string{true: "kernel.suspended", false: "kernel.unsuspended"}[suspend]
-	k.log.With(ctx).Info(event, "public_key", publicKey)
+	k.log.With(ctx).Info(event, "kernel", publicKey)
 	return nil
 }
 
@@ -1439,7 +1476,7 @@ func (k *Kernel) BindOwnName(ctx context.Context, name string) error {
 	return nil
 }
 
-// KernelName renders a kernel for a human: its bound petname, else its public key. It is the one
+// KernelName renders a kernel for a human: its bound petname, else its address. It is the one
 // rule for every kernel-facing output (§14) — a key always resolves a reference, so a name printed
 // for an unbound kernel is still something the operator can retype into the next command.
 func (k *Kernel) KernelName(ctx context.Context, publicKey string) string {
@@ -1467,7 +1504,7 @@ func (k *Kernel) ListKernels(ctx context.Context, includeSuspended bool, limit, 
 //     heard how a draw came out, or it holds a call of ours whose answer decides a reserve;
 //  2. then longest unheard first, a kernel never read counting as never heard, so a stranger met
 //     once is refreshed and no peer can be starved by a busy directory;
-//  3. then by key, so the order is the same on every kernel and every pass, and a pass cut short
+//  3. then by address, so the order is the same on every kernel and every pass, and a pass cut short
 //     resumes where the last one was cut rather than re-reading a random few (§13).
 //
 // peersMoneyIsWaitingOn is every peer some money is waiting on, in either direction: one that owes
@@ -1496,9 +1533,9 @@ func (k *Kernel) DiscoveryCandidates(ctx context.Context, directory []string) []
 	lastSeen := make(map[string]time.Time, len(kernels))
 	for _, p := range kernels {
 		if p.LastSeen != nil {
-			lastSeen[p.PublicKey] = *p.LastSeen
+			lastSeen[p.Address] = *p.LastSeen
 		} else {
-			lastSeen[p.PublicKey] = time.Time{}
+			lastSeen[p.Address] = time.Time{}
 		}
 	}
 	owing := k.peersMoneyIsWaitingOn(ctx)
@@ -1508,7 +1545,7 @@ func (k *Kernel) DiscoveryCandidates(ctx context.Context, directory []string) []
 		}
 	}
 	out := make([]string, 0, len(lastSeen))
-	self, configured := k.ourKeyB64(), k.SelfKey(ctx)
+	self, configured := k.ourAddress(), k.SelfKey(ctx)
 	for key := range lastSeen {
 		if key != "" && key != self && key != configured {
 			out = append(out, key)
@@ -1539,7 +1576,7 @@ func tradeGroups(rows []*EvidenceRow) []*tradeGroup {
 	var out []*tradeGroup
 	index := map[[3]string]*tradeGroup{}
 	for _, e := range rows {
-		key := [3]string{e.IssuerPublicKey, e.SubjectActionID, e.RemoteReceiptHash}
+		key := [3]string{e.IssuerKernel, e.SubjectActionID, e.RemoteReceiptHash}
 		if e.RemoteReceiptHash == "" {
 			key[2] = "own:" + e.ReceiptHash
 		}
@@ -1639,8 +1676,8 @@ func sameNote(a, b *string) bool {
 // names the issuer as counterparty. Ratings that fail the link are surfaced as UnverifiedRatings;
 // equivocated rows contribute no rating. This replaces the deleted introducer roster as the
 // reputation display; local Stats are never touched by evidence.
-func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, subjectActionID string) ([]*SubjectEvidenceRow, error) {
-	rows, err := k.store.ListEvidenceBySubject(ctx, subjectKernelPublicKey, subjectActionID)
+func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernel, subjectActionID string) ([]*SubjectEvidenceRow, error) {
+	rows, err := k.store.ListEvidenceBySubject(ctx, subjectKernel, subjectActionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1654,23 +1691,23 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, su
 	}
 	own := map[string]ownClaim{}
 	for _, e := range rows {
-		if e.IssuerPublicKey == subjectKernelPublicKey {
+		if e.IssuerKernel == subjectKernel {
 			var er EvidenceReceipt
 			_ = json.Unmarshal([]byte(e.EvidenceReceiptJSON), &er)
-			own[execKey(e.ReceiptHash, e.SubjectActionID)] = ownClaim{e.CounterpartyKernelPublicKey, er.Status}
+			own[execKey(e.ReceiptHash, e.SubjectActionID)] = ownClaim{e.CounterpartyKernel, er.Status}
 		}
 	}
 	// linked reports that this issuer's row and the subject's own row describe one trade: the same
 	// receipt, the same action, and the subject naming this issuer as the party it traded with.
 	linked := func(e *EvidenceRow) (ownClaim, bool) {
 		c, ok := own[execKey(e.RemoteReceiptHash, e.SubjectActionID)]
-		return c, ok && e.RemoteReceiptHash != "" && c.counterparty == e.IssuerPublicKey
+		return c, ok && e.RemoteReceiptHash != "" && c.counterparty == e.IssuerKernel
 	}
 	agg := map[string]*SubjectEvidenceRow{}
 	get := func(issuer, action string) *SubjectEvidenceRow {
 		kk := issuer + "\x1f" + action
 		if agg[kk] == nil {
-			agg[kk] = &SubjectEvidenceRow{IssuerPublicKey: issuer, SubjectActionID: action}
+			agg[kk] = &SubjectEvidenceRow{IssuerKernel: issuer, SubjectActionID: action}
 		}
 		return agg[kk]
 	}
@@ -1682,7 +1719,7 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, su
 	// trade-backed only through the two-kernel link; a claim without it is shown, never taken on faith.
 	for _, g := range tradeGroups(rows) {
 		e := g.rows[0]
-		row := get(e.IssuerPublicKey, e.SubjectActionID)
+		row := get(e.IssuerKernel, e.SubjectActionID)
 		// An issuer that has told two stories about one trade has said nothing usable about it:
 		// not the outcome, not the rating, not that the trade happened at all. It is counted and
 		// shown, because a reader who cannot see that an issuer contradicted itself has not been
@@ -1707,7 +1744,7 @@ func (k *Kernel) SubjectEvidence(ctx context.Context, subjectKernelPublicKey, su
 			// A linked pair that agrees is corroboration; one that disagrees is two signed
 			// statements that cannot both be true. Counting the second as the first would call a
 			// contradiction a confirmation, which is the opposite of what evidence is for (§13).
-			if e.IssuerPublicKey != subjectKernelPublicKey && isLinked {
+			if e.IssuerKernel != subjectKernel && isLinked {
 				if claim.status == er.Status {
 					row.CorroboratedUses++
 				} else {
@@ -1749,7 +1786,7 @@ func (k *Kernel) actionSubject(ctx context.Context, a *Action) (subjectKernel, s
 	if a.Kind == KindRemoteProxy {
 		return a.OwnerKernel, a.RemoteActionID
 	}
-	return k.ourKeyB64(), a.ID
+	return k.ourAddress(), a.ID
 }
 
 // ActionRecord is everything this kernel holds about one action's conduct, in three parts that are
@@ -1784,7 +1821,7 @@ func (k *Kernel) ActionRecord(ctx context.Context, a *Action) *ActionRecord {
 // DiscoveredRecord is the same view for an action this kernel has only heard of, which it has
 // therefore never called: the subject is the kernel that runs it and the id it runs under.
 func (k *Kernel) DiscoveredRecord(ctx context.Context, d *DiscoveryDoc) *ActionRecord {
-	return k.subjectRecord(ctx, d.KernelPublicKey, d.ActionID)
+	return k.subjectRecord(ctx, d.Kernel, d.ActionID)
 }
 
 func (k *Kernel) subjectRecord(ctx context.Context, subjectKernel, subjectAction string) *ActionRecord {
@@ -1797,7 +1834,7 @@ func (k *Kernel) subjectRecord(ctx context.Context, subjectKernel, subjectAction
 		return rec
 	}
 	for _, row := range rows {
-		if row.IssuerPublicKey == subjectKernel {
+		if row.IssuerKernel == subjectKernel {
 			rec.ProviderReported = row
 			continue
 		}
@@ -1808,7 +1845,7 @@ func (k *Kernel) subjectRecord(ctx context.Context, subjectKernel, subjectAction
 
 // PurgeIdlePeers reaps peers idle past PeerRetention with nothing unresolved (D16 Retention): it
 // deletes each such peer's proxy actions, stats, tasks, discovery docs and evidence and forgets its
-// naming state, keeping its key, its proven address and the transaction ledger intact. In the same pass it also evicts
+// naming state, keeping its address and the transaction ledger intact. In the same pass it also evicts
 // directory-only discovered kernels stale past the same horizon (never-peer cache rows that would
 // otherwise accumulate unbounded, §13). Internal maintenance (like RetryPendingRemoteDispatches, no
 // superuser gate) — driven by the serve sweep and once at startup. PeerRetention <= 0 disables it.
@@ -1827,15 +1864,15 @@ func (k *Kernel) PurgeIdlePeers(ctx context.Context) (int, error) {
 	purged := 0
 	for _, key := range keys {
 		if err := k.store.PurgePeer(ctx, key); err != nil {
-			logger.Error("peer.purge.failed", "public_key", key, "error", err)
+			logger.Error("peer.purge.failed", "kernel", key, "error", err)
 			continue
 		}
 		purged++
-		logger.Info("peer.purged", "public_key", key)
+		logger.Info("peer.purged", "kernel", key)
 	}
 	// Evict directory-only discovered kernels stale past the same horizon, so the discovery cache
 	// stays bounded on a busy network (counterparties are handled by the loop above).
-	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.SelfKey(ctx)); derr != nil {
+	if evicted, derr := k.store.PurgeStaleDiscovery(ctx, cutoff, k.SelfKey(ctx), k.hasAddresses()); derr != nil {
 		logger.Error("discovery.purge.failed", "error", derr)
 	} else if evicted > 0 {
 		logger.Info("discovery.purged", "kernels", evicted)
@@ -1858,7 +1895,7 @@ const catalogPageSize = 100
 // requester's cursor. The catalogue is paged rather than capped, and skipped entirely when the
 // requester already holds it.
 func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipResponse, error) {
-	ourKey := k.ourKeyB64()
+	ourKey := k.ourAddress()
 	handle := k.OwnName(ctx)
 	// The kernel's self-description is @sys's user description (§13): one primitive, not a config key.
 	var about string
@@ -1868,7 +1905,7 @@ func (k *Kernel) GetGossip(ctx context.Context, req GossipRequest) (*GossipRespo
 	}
 
 	resp := &GossipResponse{
-		PublicKey:          ourKey,
+		Address:            ourKey,
 		Handle:             handle,
 		About:              about,
 		Network:            k.cfg.Network.Name,
@@ -1928,18 +1965,18 @@ func (k *Kernel) catalogPage(ctx context.Context, cursor string) ([]*ActionManif
 // (canonical JSON — the one definition shared with the serving kernel's ReceiptHash), never the raw
 // tx.RemoteReceiptHash. Signed under the evidence_receipt domain.
 func (k *Kernel) buildEvidenceReceipt(ourKey string, row *GossipReceiptRow) (*EvidenceReceipt, error) {
-	subjectKernel := row.SubjectKernelPublicKey
+	subjectKernel := row.SubjectKernel
 	if subjectKernel == "" {
 		subjectKernel = ourKey // own execution evidence
 	}
 	er := &EvidenceReceipt{
-		ReceiptHash:                 row.ReceiptHash,
-		SubjectKernelPublicKey:      subjectKernel,
-		SubjectActionID:             row.SubjectActionID,
-		CounterpartyKernelPublicKey: row.CounterpartyKernelPublicKey,
-		Status:                      row.Status,
-		StartedAt:                   row.StartedAt,
-		CreatedAt:                   row.CreatedAt,
+		ReceiptHash:        row.ReceiptHash,
+		SubjectKernel:      subjectKernel,
+		SubjectActionID:    row.SubjectActionID,
+		CounterpartyKernel: row.CounterpartyKernel,
+		Status:             row.Status,
+		StartedAt:          row.StartedAt,
+		CreatedAt:          row.CreatedAt,
 	}
 	if row.RemoteReceiptJSON != "" {
 		h, herr := receiptHashFromJSON(row.RemoteReceiptJSON)
@@ -2015,7 +2052,7 @@ func (k *Kernel) signRating(re *RatingEvidence) error {
 	return nil
 }
 
-// ReadKernel returns the kernel row for a public key, or nil if unknown.
+// ReadKernel returns the kernel row for an address, or nil if unknown.
 func (k *Kernel) ReadKernel(ctx context.Context, publicKey string) (*RemoteKernel, error) {
 	return k.store.ReadKernel(ctx, publicKey)
 }
@@ -2034,7 +2071,7 @@ func (k *Kernel) DiscoveryDocsForKernel(ctx context.Context, publicKey string) (
 	}
 	out := make([]*DiscoveryDoc, 0)
 	for _, d := range all {
-		if d.KernelPublicKey == publicKey {
+		if d.Kernel == publicKey {
 			out = append(out, d)
 		}
 	}
@@ -2120,7 +2157,7 @@ func (k *Kernel) SetGossipCursor(ctx context.Context, publicKey, cursor string) 
 	return k.store.SetGossipCursor(ctx, publicKey, cursor)
 }
 
-// RecordKernelContact persists one contact observation (§13) keyed by public key: a success advances
+// RecordKernelContact persists one contact observation (§13) keyed by address: a success advances
 // last_seen, a failure advances last_contact_failed_at. A no-op for an unknown key. No moderation
 // check: suspension governs whose requests this kernel answers, while reachability is a fact about
 // the network that gates nothing — freezing it would only make the operator's view of a suspended
@@ -2178,15 +2215,15 @@ func (k *Kernel) CreateSignedRejectionReceipt(callerUserID, counterpartyKey, act
 // stores each verified evidence bundle. It returns the page's NextCursor so the discovery loop can
 // persist the peer's evidence high-watermark. Nothing here grants callability — a lookup selection
 // still resolves and verifies from the home kernel.
-func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducerPublicKey string) (string, error) {
-	if gossip.PublicKey == "" {
-		return "", ErrInvalidInput.Wrap("gossip missing public_key")
+func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, introducer string) (string, error) {
+	if gossip.Address == "" {
+		return "", ErrInvalidInput.Wrap("gossip missing blockchain_address")
 	}
 	// Authenticated-key binding (§13): the reply must be signed-by-transport as the key we dialed;
 	// a responder cannot claim a different identity and write under it. The caller passes the
 	// Noise-authenticated key it dialed as the introducer.
-	if introducerPublicKey != "" && gossip.PublicKey != introducerPublicKey {
-		return "", ErrInvalidInput.Wrap("gossip public_key does not match the authenticated peer")
+	if introducer != "" && gossip.Address != introducer {
+		return "", ErrInvalidInput.Wrap("gossip blockchain_address does not match the authenticated peer")
 	}
 	// A verified pull requires a valid (bare) identity (§3, §14); an empty or non-bare handle is a
 	// failed pull, not a success — so it never resets attempts and counts toward stub eviction.
@@ -2207,7 +2244,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 			len(gossip.ActionManifests), len(gossip.Evidence), catalogPageSize, gossipEvidencePageSize)
 	}
 	now := time.Now().UTC()
-	if err := k.ObserveKernel(ctx, gossip.PublicKey, gossip.Handle, gossip.About); err != nil {
+	if err := k.ObserveKernel(ctx, gossip.Address, gossip.Handle, gossip.About); err != nil {
 		return "", err
 	}
 
@@ -2215,7 +2252,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	// a large one would otherwise lose its first page before its last arrived, and a page that
 	// happened to be empty would erase everything known about the peer. When the page ends the
 	// catalogue the scan is complete, and only then is what the scan did not mention swept (P9).
-	cursor, generation, _ := k.store.CatalogScan(ctx, gossip.PublicKey)
+	cursor, generation, _ := k.store.CatalogScan(ctx, gossip.Address)
 	if cursor == "" {
 		generation++ // this page opens a new scan
 	}
@@ -2226,7 +2263,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 		// A manifest that does not verify is the responder's fault, and the responder is
 		// authenticated: the whole pull fails rather than silently indexing part of a page.
-		if err := k.cfg.Network.VerifyManifestSignature(gossip.PublicKey, m); err != nil {
+		if err := k.cfg.Network.VerifyManifestSignature(gossip.Address, m); err != nil {
 			return "", ErrUnauthorized.Wrap("gossip manifest signature invalid")
 		}
 		// The catalog price a browser sees without resolving: the peer's signed serving markup
@@ -2255,7 +2292,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 		}
 		// Embedding a description costs a model call, so it is reused unless the words moved.
 		if k.llm != nil {
-			if vec, ok := k.store.DiscoveryEmbedding(ctx, gossip.PublicKey, m.ActionID, m.Title+" "+m.Description); ok {
+			if vec, ok := k.store.DiscoveryEmbedding(ctx, gossip.Address, m.ActionID, m.Title+" "+m.Description); ok {
 				d.Embedding = vec
 			} else if vec, eerr := k.llm.Embed(ctx, m.Title+" "+m.Description); eerr == nil {
 				d.Embedding = vec
@@ -2269,9 +2306,9 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 	// kernel failed to store is not skipped: the page is failed, the cursor stays, and the peer
 	// offers it again.
 	for _, b := range gossip.Evidence {
-		if err := k.ingestEvidenceBundle(ctx, gossip.PublicKey, b, now); err != nil {
+		if err := k.ingestEvidenceBundle(ctx, gossip.Address, b, now); err != nil {
 			if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrInvalidInput) {
-				k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.PublicKey, "error", err)
+				k.log.With(ctx).Warn("gossip.evidence.rejected", "issuer", gossip.Address, "error", err)
 				continue
 			}
 			return "", err
@@ -2280,7 +2317,7 @@ func (k *Kernel) AccumulateGossip(ctx context.Context, gossip *GossipResponse, i
 
 	// One transition: the page's documents, what a completed scan leaves behind, and where the
 	// scan now stands, in one commit. Partway through is not a state the catalogue has.
-	if err := k.store.ApplyCatalogPage(ctx, gossip.PublicKey, docs, gossip.NextCatalogCursor, generation); err != nil {
+	if err := k.store.ApplyCatalogPage(ctx, gossip.Address, docs, gossip.NextCatalogCursor, generation); err != nil {
 		return "", err
 	}
 	return gossip.NextCursor, nil
@@ -2318,7 +2355,7 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 	if er == nil {
 		return ErrInvalidInput.Wrap("evidence bundle missing receipt")
 	}
-	pub, err := decodeRemotePublicKey(issuerKey)
+	pub, err := ParseKernelAddress(issuerKey)
 	if err != nil {
 		return err
 	}
@@ -2328,15 +2365,15 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 		return ErrUnauthorized.Wrap("evidence receipt signature invalid")
 	}
 	row := &EvidenceRow{
-		IssuerPublicKey:             issuerKey,
-		ReceiptHash:                 er.ReceiptHash,
-		SubjectKernelPublicKey:      er.SubjectKernelPublicKey,
-		SubjectActionID:             er.SubjectActionID,
-		CounterpartyKernelPublicKey: er.CounterpartyKernelPublicKey,
-		RemoteReceiptHash:           er.RemoteReceiptHash,
-		ReceiptCreatedAt:            er.CreatedAt,
-		EffectiveAt:                 er.CreatedAt,
-		ObservedAt:                  now,
+		IssuerKernel:       issuerKey,
+		ReceiptHash:        er.ReceiptHash,
+		SubjectKernel:      er.SubjectKernel,
+		SubjectActionID:    er.SubjectActionID,
+		CounterpartyKernel: er.CounterpartyKernel,
+		RemoteReceiptHash:  er.RemoteReceiptHash,
+		ReceiptCreatedAt:   er.CreatedAt,
+		EffectiveAt:        er.CreatedAt,
+		ObservedAt:         now,
 	}
 	erJSON, _ := json.Marshal(er)
 	row.EvidenceReceiptJSON = string(erJSON)
@@ -2359,22 +2396,6 @@ func (k *Kernel) ingestEvidenceBundle(ctx context.Context, issuerKey string, b E
 		row.EffectiveAt = b.Rating.CreatedAt
 	}
 	return k.store.UpsertEvidence(ctx, row)
-}
-
-// decodeRemotePublicKey reads a kernel's key as every payload names it, and holds it to being a
-// point on the curve: a key that is none could verify nothing and name no address.
-func decodeRemotePublicKey(publicKey string) ([]byte, error) {
-	key, err := base64.RawURLEncoding.DecodeString(publicKey)
-	if err != nil {
-		return nil, ErrInvalidInput.Wrap("public_key must be base64url")
-	}
-	if len(key) != 33 {
-		return nil, ErrInvalidInput.Wrap("public_key must be a 33-byte compressed secp256k1 public key")
-	}
-	if _, err := ethcrypto.DecompressPubkey(key); err != nil {
-		return nil, ErrInvalidInput.Wrap("public_key is not a secp256k1 public key")
-	}
-	return key, nil
 }
 
 // ---- Federation import (uses reconcileImport from kernel.go) ----
@@ -2693,12 +2714,12 @@ func (n Network) SignManifest(key *ecdsa.PrivateKey, m *ActionManifest) (string,
 }
 
 // VerifyManifestSignature checks that m.Signature was produced by the private key
-// corresponding to pubKeyB64 (the kernel's key), and that the monetary fields the
+// of the kernel at address, and that the monetary fields the
 // origin prices from are in range. A signature proves authorship, not sanity: a signed negative
 // price or out-of-range markup would otherwise flow into the proxy price. This is the single
 // funnel for all three trust boundaries — gossip ingest, authoritative import, and resolve.
-func (n Network) VerifyManifestSignature(pubKeyB64 string, m *ActionManifest) error {
-	pub, err := decodeRemotePublicKey(pubKeyB64)
+func (n Network) VerifyManifestSignature(address string, m *ActionManifest) error {
+	pub, err := ParseKernelAddress(address)
 	if err != nil {
 		return err
 	}
@@ -2758,10 +2779,10 @@ type taskCompletePayload struct {
 // verifyPeerSignature verifies a peer's base64url signature over a payload in its own
 // domain. It owns the cryptographic mechanics only; each exported verifier below translates a
 // failure into its own typed, protocol-specific error.
-func (n Network) verifyPeer(pubKeyB64, domain string, payload any, sigB64 string) error {
-	pub, err := decodeRemotePublicKey(pubKeyB64)
+func (n Network) verifyPeer(address, domain string, payload any, sigB64 string) error {
+	pub, err := ParseKernelAddress(address)
 	if err != nil {
-		return ErrUnauthenticated.Wrap("invalid counterparty public key")
+		return ErrUnauthenticated.Wrap("invalid counterparty address")
 	}
 	return n.verify(pub, domain, payload, sigB64)
 }
@@ -2774,8 +2795,8 @@ func fedCallPayloadOf(c OutboundCall, counterparty, recipient, timestamp, argsHa
 }
 
 // VerifyFederationSignature verifies a signature over the canonical federation call payload.
-func (n Network) VerifyFederationSignature(pubKeyB64 string, c OutboundCall, counterparty, recipient, timestamp, argsHash, sigB64 string) error {
-	if err := n.verifyPeer(pubKeyB64, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash), sigB64); err != nil {
+func (n Network) VerifyFederationSignature(address string, c OutboundCall, counterparty, recipient, timestamp, argsHash, sigB64 string) error {
+	if err := n.verifyPeer(address, sigDomainFedCall, fedCallPayloadOf(c, counterparty, recipient, timestamp, argsHash), sigB64); err != nil {
 		return ErrUnauthenticated.Wrap("federation signature is invalid")
 	}
 	return nil
@@ -2818,7 +2839,7 @@ func (n Network) SignTaskPayload(key *ecdsa.PrivateKey, kind, taskID, counterpar
 }
 
 // VerifyTaskSignature verifies a counterparty's signature over a canonical completion or
-// decline. recipient must be the verifying kernel's own public key.
+// decline. recipient must be the verifying kernel's own address.
 func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idempotencyKey, timestamp, inputHash, userID string, superuser bool, sigB64 string) error {
 	p := taskCompletePayload{Counterparty: counterparty, IdempotencyKey: idempotencyKey,
 		InputHash: inputHash, Recipient: recipient, TaskID: taskID, Superuser: superuser, Timestamp: timestamp, UserID: userID}
@@ -2828,9 +2849,9 @@ func (n Network) VerifyTaskSignature(kind, taskID, counterparty, recipient, idem
 	return nil
 }
 
-// ourKeyB64 is this kernel's own public key in the base64url form every payload names it by.
-func (k *Kernel) ourKeyB64() string {
-	return PublicKey(k.cfg.SigningKey)
+// ourAddress is this kernel's own address, by which every payload names it.
+func (k *Kernel) ourAddress() string {
+	return KernelAddress(k.cfg.SigningKey)
 }
 
 // ---- Grants across kernels (D10) ----
@@ -2980,7 +3001,7 @@ func (n Network) SignGrantOp(key *ecdsa.PrivateKey, op GrantOp) (string, error) 
 // by the kernel on the connection, for this kernel, naming a user by id and handle. Anything but a
 // read is placed in that user's sequence, which refuses it if a newer one was applied.
 func (k *Kernel) AdmitGrantOp(ctx context.Context, peerKey string, op GrantOp, signature string) (Principal, error) {
-	pub, err := decodeRemotePublicKey(peerKey)
+	pub, err := ParseKernelAddress(peerKey)
 	if err != nil {
 		return Principal{}, err
 	}

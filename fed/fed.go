@@ -4,11 +4,11 @@
 // single-action resolution, gossip, and tasks (§13). It is a replaceable
 // module behind an interface, exactly like store and llm; the kernel never imports it.
 //
-// Peers are addressed only by public key. The transport resolves a key to a live
+// Peers are addressed only by address. The transport resolves an address to a live
 // libp2p connection — direct when the peer is publicly reachable, hole-punched through NAT
 // when possible, relayed as a last resort — and carries opaque JSON payloads that the
 // caller (cmd/juice) signs and verifies with the §13 rules. The transport knows nothing
-// about receipts, settlement, or money; it moves bytes between kernels by key.
+// about receipts, settlement, or money; it moves bytes between kernels by address.
 package fed
 
 import (
@@ -78,7 +78,7 @@ type ResolveResponse = Response
 // bytes the caller hashed and signed, so the receiver's args_hash matches byte-for-byte.
 type CallRequest struct {
 	Action               string `json:"action"`                   // the action's stable id on the serving kernel
-	Counterparty         string `json:"counterparty"`             // caller's base64url public key
+	Counterparty         string `json:"counterparty"`             // caller's address
 	ExpectedContractHash string `json:"expected_contract_hash"`   // contract hash the caller cached (§8 If-Match)
 	IdempotencyKey       string `json:"idempotency_key"`          //
 	Timestamp            string `json:"timestamp"`                // RFC3339
@@ -106,7 +106,7 @@ type CallResponse = Response
 // input_hash matches byte-for-byte.
 type TaskRequest struct {
 	Kind           string          `json:"kind"`                      // "notice" | "complete" | "cancel"
-	Counterparty   string          `json:"counterparty"`              // caller's base64url public key
+	Counterparty   string          `json:"counterparty"`              // caller's address
 	Timestamp      string          `json:"timestamp"`                 // RFC3339
 	Signature      string          `json:"signature"`                 // over the kind's canonical payload
 	TaskID         string          `json:"task_id,omitempty"`         // complete, cancel
@@ -126,7 +126,7 @@ type TaskResponse = Response
 // the seller already holds; a paying reveal also names the payment and proves the address it comes
 // from, since the seller credits cash by its finalized sender.
 type RevealRequest struct {
-	Counterparty string `json:"counterparty"`      // buyer's base64url public key
+	Counterparty string `json:"counterparty"`      // buyer's address
 	Timestamp    string `json:"timestamp"`         // RFC3339
 	Signature    string `json:"signature"`         // over the scoped canonical payload
 	TicketID     string `json:"ticket_id"`         // the call's idempotency key, naming the obligation
@@ -140,7 +140,7 @@ type RevealResponse = Response
 // TransferRequest is the wire form of a /juice/fed/transfer/1 request (P11): the sender tells the
 // kernel a payment went to whom it is for. Signature covers every field but itself.
 type TransferRequest struct {
-	Counterparty  string `json:"counterparty"`   // sender's base64url public key
+	Counterparty  string `json:"counterparty"`   // sender's address
 	Timestamp     string `json:"timestamp"`      // RFC3339
 	Signature     string `json:"signature"`      // over the scoped canonical payload
 	ID            string `json:"id"`             // the transaction that made the payment
@@ -155,7 +155,7 @@ type TransferResponse = Response
 // GrantRequest is the wire form of a /juice/fed/grant/1 request (D10): one grant operation a kernel
 // forwards for a user of its own. Op is the operation exactly as signed.
 type GrantRequest struct {
-	Counterparty string          `json:"counterparty"` // sender's base64url public key
+	Counterparty string          `json:"counterparty"` // sender's address
 	Signature    string          `json:"signature"`    // over the operation
 	Op           json.RawMessage `json:"op"`
 }
@@ -171,11 +171,11 @@ type ProcessRequest struct {
 }
 
 // Handlers is implemented by cmd/juice to answer inbound protocol streams. Each method
-// receives the peer's verified public key (from the authenticated libp2p connection) plus
+// receives the peer's verified address (from the authenticated libp2p connection) plus
 // the request, and returns opaque JSON. The transport applies no Juice semantics itself.
 type Handlers interface {
 	// OnCall handles an inbound /juice/fed/call/1 request. peerKey is the connection's
-	// authenticated public key; the handler still verifies req.Signature per §13.
+	// authenticated address; the handler still verifies req.Signature per §13.
 	OnCall(ctx context.Context, peerKey string, req CallRequest) CallResponse
 	// OnResolve answers a /juice/fed/resolve/1 request: one action's signed manifest or one
 	// user's stable id+handle (§13). peerKey is informational; the reply is public directory data.
@@ -188,7 +188,7 @@ type Handlers interface {
 	// declining a task addressed to this peer (P8).
 	OnTask(ctx context.Context, peerKey string, req TaskRequest) TaskResponse
 	// OnReveal handles an inbound /juice/fed/settle/1 request (P10): the seller side of one
-	// obligation's draw. peerKey is the connection's authenticated key; the handler still verifies
+	// obligation's draw. peerKey is the connection's authenticated address; the handler still verifies
 	// req.Signature against req.Counterparty per §13.
 	OnReveal(ctx context.Context, peerKey string, req RevealRequest) RevealResponse
 	// OnTransfer handles an inbound /juice/fed/transfer/1 request (P11): whom a payment to this kernel
@@ -204,7 +204,7 @@ type Handlers interface {
 type Config struct {
 	SigningKey     *ecdsa.PrivateKey // the kernel's one key; also the libp2p identity (P1)
 	ListenAddrs    []string          // multiaddrs to listen on; empty = sensible defaults
-	BootstrapPeers []string          // seed multiaddrs (incl. /p2p/<id>); DHT bootstrap + discovery seed (§13)
+	BootstrapPeers []string          // seed lines, 0x…@host:port; DHT bootstrap + discovery seed (§13)
 	Handlers       Handlers          // inbound protocol handlers (from cmd/juice)
 	// AllowPrivateAddrs keeps loopback/private multiaddrs usable so the flow harness can run a
 	// full network on 127.0.0.1. Production leaves this false (public reachability only).

@@ -153,7 +153,7 @@ must know.
 
 - A user registers an address via `user address` (bare shows, an argument registers) or inline
   from an unregistered `user deposit`; either way registration is the same explicit act: an
-  EIP-191 personal-message signature over `(kernel key, user id, address)` proves control of
+  EIP-191 personal-message signature over `(kernel address, user id, address)` proves control of
   the address, not merely a claim. Common wallets sign only for a requesting page, so the CLI
   drives the signature through a local helper page — the same browser dance as login; a pasted
   signature is the fallback.

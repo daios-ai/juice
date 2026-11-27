@@ -4,7 +4,6 @@ package native
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"testing"
 
@@ -33,7 +32,7 @@ func TestResolveTurnsAUsersAddressIntoTheirPrincipal(t *testing.T) {
 	self := k.SelfKey(ctx)
 	alice := seedOwner(t, st, "alice")
 	pub, _, _ := genKey()
-	far := base64.RawURLEncoding.EncodeToString(pub)
+	far := pub
 	resolve := Resolve().Handler(k)
 	run := func(address string) (map[string]any, error) {
 		return resolve(ctx, map[string]any{"address": address}, "", "", "", "", "", kernel.Parties{})

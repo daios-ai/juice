@@ -1464,7 +1464,7 @@ func (s *story) attackSquatting() {
 	pointsAt := ""
 	for _, r := range rows {
 		if r["petname"] == "shop" {
-			pointsAt, _ = r["public_key"].(string)
+			pointsAt, _ = r["blockchain_address"].(string)
 		}
 	}
 	s.n.Check("attack.squatted_name_unmoved", pointsAt == s.k("k2").Key,

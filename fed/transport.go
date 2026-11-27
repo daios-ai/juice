@@ -5,7 +5,6 @@ package fed
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daios-ai/juice/kernel"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
@@ -26,10 +27,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
+	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multistream"
 )
 
 // This file is the libp2p transport implementation behind the fed.go seam: identity derivation,
@@ -38,15 +42,13 @@ import (
 
 // ---- Identity ----
 //
-// The federation network identity is derived deterministically from the kernel's one secp256k1
-// key — there is no second key (P1). A peer's base64url public key is simultaneously its Juice
-// identity (§13) and its address on this transport.
-
-// publicKeySize is a kernel's key as every payload names it: the compressed secp256k1 point.
-const publicKeySize = 33
+// A kernel is named by its address, the Ethereum address of its one secp256k1 key, and by nothing
+// else (P1). libp2p authenticates every connection with that key; this file is the one place an
+// address meets a connection, so nothing above it ever sees a libp2p peer id. The transport keeps
+// one lookup from address to peer, filled alike by seeds, discovery, and inbound peers.
 
 // deriveHostKey converts the kernel's key into a libp2p private key. The mapping is deterministic
-// and 1:1, so the libp2p peer ID is a pure function of the signing key.
+// and 1:1, so the libp2p identity is a pure function of the signing key.
 func deriveHostKey(priv *ecdsa.PrivateKey) (libp2pcrypto.PrivKey, error) {
 	if priv == nil || priv.D == nil {
 		return nil, fmt.Errorf("fed: the kernel's key is not configured")
@@ -54,40 +56,218 @@ func deriveHostKey(priv *ecdsa.PrivateKey) (libp2pcrypto.PrivKey, error) {
 	return libp2pcrypto.UnmarshalSecp256k1PrivateKey(priv.D.FillBytes(make([]byte, 32)))
 }
 
-// PeerIDFromKey maps a kernel's base64url public key (the identity used everywhere in §13) to the
-// libp2p peer ID the transport dials. Deterministic and 1:1.
-func PeerIDFromKey(publicKeyB64 string) (peer.ID, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(publicKeyB64)
-	if err != nil {
-		return "", fmt.Errorf("fed: public key must be base64url: %w", err)
-	}
-	if len(raw) != publicKeySize {
-		return "", fmt.Errorf("fed: public key must be %d bytes, got %d", publicKeySize, len(raw))
-	}
-	pub, err := libp2pcrypto.UnmarshalSecp256k1PublicKey(raw)
-	if err != nil {
-		return "", fmt.Errorf("fed: invalid secp256k1 public key: %w", err)
-	}
-	return peer.IDFromPublicKey(pub)
-}
-
-// KeyFromPeerID recovers a kernel's base64url public key from a libp2p peer ID. A secp256k1 peer
-// ID embeds the public key inline, so this never needs the network. Any other kind of key is not a
-// kernel's and is refused.
-func KeyFromPeerID(id peer.ID) (string, error) {
+// addressOfPeer is the address of the kernel key a peer id carries, or "" for an id that carries
+// none. A secp256k1 peer id embeds the key inline, so this never needs the network.
+func addressOfPeer(id peer.ID) string {
 	pub, err := id.ExtractPublicKey()
-	if err != nil || pub == nil {
-		return "", fmt.Errorf("fed: peer ID does not embed a public key: %w", err)
+	if err != nil || pub == nil || pub.Type() != libp2pcrypto.Secp256k1 {
+		return ""
 	}
 	raw, err := pub.Raw()
 	if err != nil {
-		return "", err
+		return ""
 	}
-	if pub.Type() != libp2pcrypto.Secp256k1 || len(raw) != publicKeySize {
-		return "", fmt.Errorf("fed: peer ID does not embed a kernel's key")
+	key, err := ethcrypto.DecompressPubkey(raw)
+	if err != nil {
+		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
+	return kernel.KernelAddressOf(key)
 }
+
+// learn enters a peer in the lookup and returns its address, "" for a peer that is no kernel.
+func (t *Transport) learn(id peer.ID) string {
+	addr := addressOfPeer(id)
+	if addr != "" {
+		t.knownMu.Lock()
+		t.known[addr] = id
+		t.knownMu.Unlock()
+	}
+	return addr
+}
+
+// named is a library error with the peer id it names replaced by the kernel's address, keeping
+// the reason and what it wraps: libp2p names a peer by its id, which is never a kernel's name (P1).
+func named(err error, id peer.ID, address string) error {
+	if err == nil || id == "" {
+		return err
+	}
+	msg := err.Error()
+	for _, s := range []string{id.String(), id.ShortString()} {
+		msg = strings.ReplaceAll(msg, s, address)
+	}
+	return renamedErr{msg: msg, err: err}
+}
+
+type renamedErr struct {
+	msg string
+	err error
+}
+
+func (e renamedErr) Error() string { return e.msg }
+func (e renamedErr) Unwrap() error { return e.err }
+
+// lookup has its own lock: Close holds mu while handlers drain, and a handler entering a peer here
+// must not wait on it.
+func (t *Transport) lookup(addr string) (peer.ID, bool) {
+	t.knownMu.Lock()
+	defer t.knownMu.Unlock()
+	id, ok := t.known[addr]
+	return id, ok
+}
+
+// ---- Seeds ----
+//
+// A seed line is the seed's address and the TCP endpoint it is met at: 0x…@host:port, the form
+// Cosmos and Ethereum node lists use. A kernel that has never met the seed learns the key behind
+// the address from the seed itself: one plain TCP connection runs libp2p's own secure handshake
+// without naming a peer, and the key the seed proves must hash to the address. The connection is
+// then closed and the normal dialer connects to the peer that key names. A seed must therefore
+// listen on TCP, as a seed always does.
+
+type seed struct{ address, host, port string }
+
+// parseSeeds reads seed lines. A malformed line is a configuration error, not a seed to skip.
+func parseSeeds(lines []string) ([]seed, error) {
+	var out []seed
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		addr, endpoint, ok := strings.Cut(line, "@")
+		host, port, err := net.SplitHostPort(endpoint)
+		if !ok || err != nil || host == "" || port == "" {
+			return nil, fmt.Errorf("fed: seed %q is not a seed line, 0x…@host:port; a world file written for an earlier juice names its seeds otherwise and must be replaced", line)
+		}
+		a, err := kernel.ParseKernelAddress(addr)
+		if err != nil {
+			return nil, fmt.Errorf("fed: seed %q: %w", line, err)
+		}
+		out = append(out, seed{address: a, host: host, port: port})
+	}
+	return out, nil
+}
+
+// tcpMultiaddr is the multiaddr the normal dialer reaches host:port by.
+func tcpMultiaddr(host, port string) (multiaddr.Multiaddr, error) {
+	proto := "dns"
+	if ip := net.ParseIP(host); ip != nil {
+		proto = "ip6"
+		if ip.To4() != nil {
+			proto = "ip4"
+		}
+	}
+	return multiaddr.NewMultiaddr("/" + proto + "/" + host + "/tcp/" + port)
+}
+
+// meetSeed learns which peer a seed is, refusing one whose key is not the seed's address. It sends
+// no request and keeps no connection.
+func meetSeed(ctx context.Context, self libp2pcrypto.PrivKey, s seed) (peer.AddrInfo, error) {
+	endpoint := net.JoinHostPort(s.host, s.port)
+	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", endpoint)
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+	defer c.Close()
+	if d, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(d)
+	}
+	if err := multistream.SelectProtoOrFail(noise.ID, c); err != nil {
+		return peer.AddrInfo{}, fmt.Errorf("fed: seed %s does not speak libp2p: %w", endpoint, err)
+	}
+	tpt, err := noise.New(noise.ID, self, nil)
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+	// The library's own check compares the peer with an id named in advance, which a seed line does
+	// not carry; the check made instead is against the address, below.
+	st, err := tpt.WithSessionOptions(noise.DisablePeerIDCheck())
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+	sc, err := st.SecureOutbound(ctx, c, "")
+	if err != nil {
+		return peer.AddrInfo{}, fmt.Errorf("fed: seed %s: %w", endpoint, err)
+	}
+	id := sc.RemotePeer()
+	_ = sc.Close()
+	if got := addressOfPeer(id); got != s.address {
+		return peer.AddrInfo{}, fmt.Errorf("fed: the kernel at %s is %s, not the seed %s", endpoint, got, s.address)
+	}
+	ma, err := tcpMultiaddr(s.host, s.port)
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+	return peer.AddrInfo{ID: id, Addrs: []multiaddr.Multiaddr{ma}}, nil
+}
+
+// seedSet is the seeds met so far, read by the DHT and the relay finder whenever they look for
+// bootstrap peers or relays.
+type seedSet struct {
+	mu  sync.Mutex
+	all []seed
+	met map[string]peer.AddrInfo
+}
+
+func (ss *seedSet) infos() []peer.AddrInfo {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	out := make([]peer.AddrInfo, 0, len(ss.met))
+	for _, sd := range ss.all {
+		if ai, ok := ss.met[sd.address]; ok {
+			out = append(out, ai)
+		}
+	}
+	return out
+}
+
+// meet meets every seed not yet met, at once, and returns those it met now.
+func (ss *seedSet) meet(ctx context.Context, self libp2pcrypto.PrivKey) []peer.AddrInfo {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var now []peer.AddrInfo
+	for _, sd := range ss.all {
+		ss.mu.Lock()
+		_, done := ss.met[sd.address]
+		ss.mu.Unlock()
+		if done {
+			continue
+		}
+		wg.Add(1)
+		go func(sd seed) {
+			defer wg.Done()
+			mctx, cancel := context.WithTimeout(ctx, seedTimeout)
+			defer cancel()
+			ai, err := meetSeed(mctx, self, sd)
+			if err != nil {
+				return
+			}
+			ss.mu.Lock()
+			ss.met[sd.address] = ai
+			ss.mu.Unlock()
+			mu.Lock()
+			now = append(now, ai)
+			mu.Unlock()
+		}(sd)
+	}
+	wg.Wait()
+	return now
+}
+
+func (ss *seedSet) pending() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return len(ss.met) < len(ss.all)
+}
+
+// seedTimeout bounds one attempt to meet a seed; seedRetry is how long a seed that could not be met
+// waits before it is tried again. A seed down at boot is met when it comes back.
+const (
+	seedTimeout = 10 * time.Second
+	seedRetry   = 30 * time.Second
+)
+
+// Endpoint renders this kernel at one TCP endpoint as a seed line, 0x…@host:port.
+func Endpoint(address, host, port string) string { return address + "@" + net.JoinHostPort(host, port) }
 
 // ---- Host lifecycle ----
 
@@ -141,7 +321,9 @@ type Transport struct {
 	relay     *relayv2.Relay
 	cfg       Config
 	namespace string
-	bootstrap []peer.AddrInfo
+	seeds     *seedSet
+	knownMu   sync.Mutex
+	known     map[string]peer.ID // address → peer, for every kernel met (see learn)
 
 	// ctx is cancelled by Close. Inbound handlers derive from it, so a read a peer abandoned — or
 	// one running at shutdown — is cancelled rather than left to finish against nobody.
@@ -194,10 +376,12 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		return nil, err
 	}
 
-	bootstrap, err := parseAddrInfos(cfg.BootstrapPeers)
+	seeds, err := parseSeeds(cfg.BootstrapPeers)
 	if err != nil {
 		return nil, err
 	}
+	ss := &seedSet{all: seeds, met: map[string]peer.AddrInfo{}}
+	ss.meet(ctx, hostKey)
 
 	baseOpts := []libp2p.Option{
 		libp2p.Identity(hostKey),
@@ -219,8 +403,23 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	if cfg.AgentVersion != "" {
 		baseOpts = append(baseOpts, libp2p.UserAgent(cfg.AgentVersion))
 	}
-	if len(bootstrap) > 0 {
-		baseOpts = append(baseOpts, libp2p.EnableAutoRelayWithStaticRelays(bootstrap))
+	if n := len(seeds); n > 0 {
+		// The seeds are the relays, exactly as static relays are — the same candidate counts — read
+		// from the seeds met so far, so a seed met after boot becomes a relay as well.
+		met := func(_ context.Context, num int) <-chan peer.AddrInfo {
+			infos := ss.infos()
+			if len(infos) > num {
+				infos = infos[:num]
+			}
+			c := make(chan peer.AddrInfo, len(infos))
+			for _, ai := range infos {
+				c <- ai
+			}
+			close(c)
+			return c
+		}
+		baseOpts = append(baseOpts, libp2p.EnableAutoRelayWithPeerSource(met,
+			autorelay.WithMaxCandidates(n), autorelay.WithMinCandidates(n), autorelay.WithNumRelays(n)))
 	}
 
 	build := func(listen []string) (host.Host, error) {
@@ -260,7 +459,7 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 	if bo.dhtModeSet {
 		dhtMode = bo.dhtMode // test-only override to build a real client/server topology (§15)
 	}
-	dhtOpts := []dht.Option{dht.Mode(dhtMode), dht.BootstrapPeers(bootstrap...)}
+	dhtOpts := []dht.Option{dht.Mode(dhtMode), dht.BootstrapPeersFunc(ss.infos)}
 	if cfg.AllowPrivateAddrs {
 		// Loopback flows run the whole network on 127.0.0.1; permit private addresses in the
 		// routing table and query results, which the DHT filters out by default.
@@ -282,7 +481,7 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 
 	tctx, tcancel := context.WithCancel(context.Background())
 	t := &Transport{host: h, dht: kdht, disc: drouting.NewRoutingDiscovery(kdht), cfg: cfg,
-		namespace: cfg.Namespace, bootstrap: bootstrap, ctx: tctx, cancel: tcancel}
+		namespace: cfg.Namespace, seeds: ss, known: map[string]peer.ID{}, ctx: tctx, cancel: tcancel}
 
 	// Every kernel offers the circuit-relay service. On a NAT-bound node it is unreachable and
 	// idle (harmless); on a publicly-reachable node it automatically becomes the relay that lets
@@ -292,30 +491,67 @@ func newTransport(ctx context.Context, cfg Config, opts ...option) (*Transport, 
 		t.relay = r
 	}
 
-	// Connect to bootstrap peers so discovery and relay reservations can proceed.
-	for _, ai := range bootstrap {
-		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = h.Connect(cctx, ai)
-		cancel()
+	// Connect to the seeds met so discovery and relay reservations can proceed; a seed not met yet
+	// is tried again until it is.
+	for _, ai := range ss.infos() {
+		t.connectSeed(ctx, ai)
+	}
+	if ss.pending() {
+		go t.meetLateSeeds(hostKey)
 	}
 
 	t.registerHandlers()
 	return t, nil
 }
 
-// PublicKey returns this host's base64url public key — its §13 identity.
-func (t *Transport) PublicKey() string {
-	k, _ := KeyFromPeerID(t.host.ID())
-	return k
+// connectSeed connects to a seed met, entering it in the lookup.
+func (t *Transport) connectSeed(ctx context.Context, ai peer.AddrInfo) {
+	t.learn(ai.ID)
+	cctx, cancel := context.WithTimeout(ctx, seedTimeout)
+	_ = t.host.Connect(cctx, ai)
+	cancel()
 }
 
-// ListenAddrs returns the multiaddrs (including /p2p/<id>) the host is reachable on. Used for
-// logging at server.ready and for the flow harness to scrape a seed's address.
-func (t *Transport) ListenAddrs() []string {
+// meetLateSeeds keeps trying the seeds not met at boot until every one is, or the transport closes.
+func (t *Transport) meetLateSeeds(self libp2pcrypto.PrivKey) {
+	tick := time.NewTicker(seedRetry)
+	defer tick.Stop()
+	for t.seeds.pending() {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-tick.C:
+		}
+		for _, ai := range t.seeds.meet(t.ctx, self) {
+			t.connectSeed(t.ctx, ai)
+			t.dht.RefreshRoutingTable()
+		}
+	}
+}
+
+// Address is this kernel's address, its one identifier (P1).
+func (t *Transport) Address() string { return addressOfPeer(t.host.ID()) }
+
+// Endpoints are the TCP endpoints this host listens on, each written as a seed line. A line has the
+// form of a seed, but whether another machine can reach it depends on where that machine is: a
+// kernel behind a router is met through the network by its address instead.
+func (t *Transport) Endpoints() []string {
 	var out []string
-	pid := t.host.ID()
+	self := t.Address()
 	for _, a := range t.host.Addrs() {
-		out = append(out, fmt.Sprintf("%s/p2p/%s", a, pid))
+		// Only a plain TCP listener, host and port and nothing over them, is one a seed can be met
+		// at: meeting a seed is a TCP handshake (meetSeed), which a WebSocket or relayed listener on
+		// the same port does not answer.
+		port, err := a.ValueForProtocol(multiaddr.P_TCP)
+		if err != nil || len(a.Protocols()) != 2 {
+			continue
+		}
+		for _, p := range []int{multiaddr.P_IP4, multiaddr.P_IP6, multiaddr.P_DNS, multiaddr.P_DNS4, multiaddr.P_DNS6} {
+			if host, err := a.ValueForProtocol(p); err == nil {
+				out = append(out, Endpoint(self, host, port))
+				break
+			}
+		}
 	}
 	return out
 }
@@ -339,47 +575,83 @@ func (t *Transport) Close() error {
 	return t.host.Close()
 }
 
-// resolve maps a base64url public key to a connected peer, using the peerstore first and the DHT
-// otherwise, then ensures a connection (direct, hole-punched, or relayed) is open.
-func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error) {
-	pid, err := PeerIDFromKey(peerKey)
+// resolve maps an address to a connected peer — the lookup first, the network otherwise — then
+// ensures a connection (direct, hole-punched, or relayed) is open.
+func (t *Transport) resolve(ctx context.Context, address string) (peer.ID, error) {
+	address, err := kernel.ParseKernelAddress(address)
 	if err != nil {
 		return "", err
 	}
-	if t.host.Network().Connectedness(pid) == network.Connected {
-		return pid, nil
-	}
-	// Known addresses?
-	if addrs := t.host.Peerstore().Addrs(pid); len(addrs) > 0 {
-		if err := t.host.Connect(ctx, peer.AddrInfo{ID: pid, Addrs: addrs}); err == nil {
+	pid, known := t.lookup(address)
+	if known {
+		if t.host.Network().Connectedness(pid) == network.Connected {
 			return pid, nil
 		}
+		if addrs := t.host.Peerstore().Addrs(pid); len(addrs) > 0 {
+			if err := t.host.Connect(ctx, peer.AddrInfo{ID: pid, Addrs: addrs}); err == nil {
+				return pid, nil
+			}
+		}
 	}
-	// Resolve via the DHT. On a freshly-formed network the routing table may not yet carry the
+	// Resolve via the DHT: a kernel never met by the address it announces itself under, one met
+	// before by its peer. On a freshly-formed network the routing table may not yet carry the
 	// target, so retry a few times while the DHT settles (bounded by the caller's context).
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
-		ai, err := t.dht.FindPeer(ctx, pid)
+		var ai peer.AddrInfo
+		if known {
+			ai, err = t.dht.FindPeer(ctx, pid)
+		} else {
+			ai, err = t.findByAddress(ctx, address)
+		}
+		if err == nil && len(ai.Addrs) == 0 && ai.ID != "" {
+			ai, err = t.dht.FindPeer(ctx, ai.ID)
+		}
 		if err == nil && len(ai.Addrs) > 0 {
+			pid, known = ai.ID, true
 			t.host.Peerstore().AddAddrs(ai.ID, ai.Addrs, peerstore.TempAddrTTL)
 			if cerr := t.host.Connect(ctx, ai); cerr == nil {
 				return pid, nil
 			} else {
-				lastErr = cerr
+				lastErr = named(cerr, pid, address)
 			}
 		} else if err != nil {
-			lastErr = err
+			lastErr = named(err, pid, address)
 		}
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("fed: cannot resolve peer %s: %w", pid, ctx.Err())
+			return "", fmt.Errorf("fed: cannot resolve kernel %s: %w", address, ctx.Err())
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("not found")
 	}
-	return "", fmt.Errorf("fed: cannot resolve peer %s: %w", pid, lastErr)
+	return "", fmt.Errorf("fed: cannot resolve kernel %s: %w", address, lastErr)
+}
+
+// addressNamespace is what a kernel announces itself under so it is found by its address alone.
+func (t *Transport) addressNamespace(address string) string {
+	return t.namespace + "/kernel/" + address
+}
+
+// findByAddress asks the network which peers announce themselves under address and keeps the one
+// whose key is that address. Anyone may announce under any address; no one else's key hashes to it,
+// so a false announcer can delay a lookup but never redirect it.
+func (t *Transport) findByAddress(ctx context.Context, address string) (peer.AddrInfo, error) {
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch, err := t.disc.FindPeers(fctx, t.addressNamespace(address), discovery.Limit(0))
+	if err != nil {
+		return peer.AddrInfo{}, err
+	}
+	for ai := range ch {
+		if addressOfPeer(ai.ID) == address {
+			t.learn(ai.ID)
+			return ai, nil
+		}
+	}
+	return peer.AddrInfo{}, fmt.Errorf("no kernel announces itself as %s", address)
 }
 
 // ---- Discovery (§13) ----
@@ -396,18 +668,21 @@ func (t *Transport) resolve(ctx context.Context, peerKey string) (peer.ID, error
 // unboundedly expensive by a large (or flooded) namespace.
 const discoveryLimit = 100
 
-// Advertise announces this kernel as a provider of the discovery namespace, publishing its current
-// transport addresses to the DHT, and returns the TTL after which the record should be refreshed.
-// Called once per discovery pass (§13). Provide needs only query capability, so a DHT-client kernel
-// behind NAT advertises successfully and becomes findable through the public servers.
+// Advertise announces this kernel as a provider of the discovery namespace and of its own address,
+// publishing its current transport addresses to the DHT. Called once per discovery pass (§13).
+// Provide needs only query capability, so a DHT-client kernel behind NAT advertises successfully
+// and becomes findable through the public servers, by the network and by its address.
 func (t *Transport) Advertise(ctx context.Context) error {
-	_, err := t.disc.Advertise(ctx, t.namespace)
+	if _, err := t.disc.Advertise(ctx, t.namespace); err != nil {
+		return err
+	}
+	_, err := t.disc.Advertise(ctx, t.addressNamespace(t.Address()))
 	return err
 }
 
 // DiscoverProviders enumerates the discovery namespace's providers, refreshes each provider's
 // addresses into the peerstore as ephemeral reachability data (never Juice identity), and returns
-// their base64url public keys — this kernel's own key excluded. It is the routing-discovery
+// their addresses — this kernel's own excluded. It is the routing-discovery
 // membership feed the discovery loop pulls gossip from; a returned key grants nothing until a
 // verified first-party gossip pull (§13).
 func (t *Transport) DiscoverProviders(ctx context.Context) ([]string, error) {
@@ -424,44 +699,21 @@ func (t *Transport) DiscoverProviders(ctx context.Context) ([]string, error) {
 		if len(ai.Addrs) > 0 {
 			t.host.Peerstore().AddAddrs(ai.ID, ai.Addrs, peerstore.TempAddrTTL)
 		}
-		if k, err := KeyFromPeerID(ai.ID); err == nil {
-			out = append(out, k)
+		if a := t.learn(ai.ID); a != "" {
+			out = append(out, a)
 		}
 	}
 	return out, nil
 }
 
-// BootstrapKeys returns the base64url keys of the configured bootstrap peers — the same
-// key format inspect/gossip take. The libp2p peer ID inlines the key (KeyFromPeerID), so
-// this is the whole peer-ID→key bridge: the discovery loop seeds from, and an operator can inspect,
-// a bootstrap node addressed only by its multiaddr.
-func (t *Transport) BootstrapKeys() []string {
+// SeedAddresses are the addresses of the configured seeds, which the discovery loop seeds from and
+// an operator can inspect. A seed line names its address, so this needs no network.
+func (t *Transport) SeedAddresses() []string {
 	var out []string
-	for _, ai := range t.bootstrap {
-		if k, err := KeyFromPeerID(ai.ID); err == nil {
-			out = append(out, k)
-		}
+	for _, sd := range t.seeds.all {
+		out = append(out, sd.address)
 	}
 	return out
-}
-
-func parseAddrInfos(addrs []string) ([]peer.AddrInfo, error) {
-	var out []peer.AddrInfo
-	for _, s := range addrs {
-		if s == "" {
-			continue
-		}
-		ma, err := multiaddr.NewMultiaddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("fed: invalid bootstrap multiaddr %q: %w", s, err)
-		}
-		ai, err := peer.AddrInfoFromP2pAddr(ma)
-		if err != nil {
-			return nil, fmt.Errorf("fed: bootstrap multiaddr %q missing /p2p/<id>: %w", s, err)
-		}
-		out = append(out, *ai)
-	}
-	return out, nil
 }
 
 // ---- Protocol streams ----
@@ -510,12 +762,9 @@ func readFrame(s io.Reader, v any) error {
 	return json.Unmarshal(buf, v)
 }
 
-// peerKeyOf returns the base64url public key of the stream's remote peer. The connection is
-// Noise-authenticated by libp2p, so this key is proven, not claimed.
-func peerKeyOf(s network.Stream) string {
-	k, _ := KeyFromPeerID(s.Conn().RemotePeer())
-	return k
-}
+// peerOf returns the address of the stream's remote peer and enters it in the lookup. The
+// connection is Noise-authenticated by libp2p, so the address is proven, not claimed.
+func (t *Transport) peerOf(s network.Stream) string { return t.learn(s.Conn().RemotePeer()) }
 
 func (t *Transport) registerHandlers() {
 	t.host.SetStreamHandler(protocol.ID(ProtocolCall), t.handleCall)
@@ -596,7 +845,7 @@ func serveReq[Req any](t *Transport, s network.Stream, handle func(context.Conte
 	}
 	// A handler with nothing to say says nothing: the stream closes with no frame, which the
 	// caller reads as a failed read rather than as an answer.
-	if reply := handle(hctx, peerKeyOf(s), req); reply != nil {
+	if reply := handle(hctx, t.peerOf(s), req); reply != nil {
 		ok = writeFrame(s, reply) == nil
 	}
 }
@@ -674,7 +923,7 @@ func (t *Transport) openStream(ctx context.Context, peerKey, proto string) (netw
 	sctx := network.WithAllowLimitedConn(ctx, "juice-fed")
 	s, err := t.host.NewStream(sctx, pid, protocol.ID(proto))
 	if err != nil {
-		return nil, fmt.Errorf("fed: open %s to %s: %w", proto, pid, err)
+		return nil, fmt.Errorf("fed: open %s to %s: %w", proto, peerKey, named(err, pid, peerKey))
 	}
 	// The caller's own deadline wins when it is the shorter one: a pass that budgets ten seconds
 	// per peer must not wait a minute because the stream's default says it may.
@@ -784,7 +1033,7 @@ type Reachability struct {
 	Error     string   `json:"error,omitempty"`
 }
 
-// Probe resolves and connects to a peer by key, classifies the connection, and measures one round
+// Probe resolves and connects to a peer by address, classifies the connection, and measures one round
 // trip with libp2p's ping. It does not send a federation call. Connecting is not the round trip: on
 // a connection already held it costs nothing, so the time reported is the ping's alone.
 func (t *Transport) Probe(ctx context.Context, peerKey string) Reachability {
@@ -798,7 +1047,7 @@ func (t *Transport) Probe(ctx context.Context, peerKey string) Reachability {
 	rtt, err := firstPing(ping.Ping(pctx, t.host, pid))
 	stop()
 	if err != nil {
-		return Reachability{Path: "unreachable", Error: "ping: " + err.Error()}
+		return Reachability{Path: "unreachable", Error: "ping: " + named(err, pid, peerKey).Error()}
 	}
 	r := Reachability{RTTmillis: rtt.Milliseconds()}
 	// Classify the live connection: a limited (relayed) connection routes through a relay.
@@ -832,6 +1081,3 @@ func firstPing(ch <-chan ping.Result) (time.Duration, error) {
 	}
 	return res.RTT, res.Error
 }
-
-// isRelayAddr reports whether a multiaddr string denotes a circuit-relay path.
-func isRelayAddr(s string) bool { return strings.Contains(s, "/p2p-circuit") }

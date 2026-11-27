@@ -76,7 +76,7 @@ func executeLookup(ctx context.Context, args map[string]any, subjectID string, k
 		// A discovered hit (§13) renders its STABLE identity — the remote action id and a
 		// kernel-qualified reference — so selecting it resolves from the home kernel; a local hit
 		// renders its own row. The kernel qualifier goes through the one naming rule (§13): a bound
-		// petname when this kernel has met the peer, its key otherwise, both of which resolve.
+		// petname when this kernel has met the peer, its address otherwise, both of which resolve.
 		// observed_at dates what this kernel last verified against the authority: the gossip
 		// observation for a discovered action, the last reconcile for a resolved proxy. A local
 		// action has none — this kernel IS its authority, so its row is never an observation.

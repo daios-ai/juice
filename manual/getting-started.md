@@ -69,7 +69,7 @@ Press Enter once you have written it down:
 Superuser "sys" created.
 …
 INF client.self_registered kernel=acme outcome=added
-INF server.ready handle=acme network=play addr=[::]:4040 public_key=L3ciw7zj…
+INF server.ready handle=acme network=play addr=[::]:4040 blockchain_address=0xcaf2a882…
 ```
 
 {: .warning }
@@ -249,7 +249,7 @@ sys@acme/lookup costs 0.00 fUSD. Run it? [y/N] y
       {
         "action": {
           "address": "bob@acme/echo",
-          "principal": "<user-id>@<kernel-key>/echo"
+          "principal": "<user-id>@<kernel-address>/echo"
         },
         "action_id": "6a9e04ce-…",
         "title": "Echo a message",
@@ -359,7 +359,7 @@ you. You can then create an account and log in without running a server:
 
 ```console
 $ juice kernel add https://kernel.example.org
-work  network play  https://kernel.example.org  hqDr8oMX…  (added)
+work  network play  https://kernel.example.org  0x6fbc8401…  (added)
 $ juice user create alice@work
 $ juice auth login alice@work
 ```

@@ -24,17 +24,16 @@ On a chain world, `rpc` is the URL of the node the kernel uses to read payments
 and submit transactions. Edit it to use another provider or your own node on
 the same chain.
 
-`seeds` is a list of federation addresses for kernels already serving the world.
-Obtain an address from that kernel's `juice admin kernel show`, or from the
-`fed_addrs` field of its public `GET /health` response. Choose an address
-reachable from the joining machine and copy it in full, including its peer id:
+`seeds` lists the TCP endpoints of kernels already serving the world. Each seed
+has the form `0x…@host:port`. Choose an endpoint reachable from the joining machine and
+copy it from the seed kernel's `juice admin kernel show` output or from the
+`fed_addrs` field of its public `GET /health` response:
 
 ```json
-"seeds": ["/ip4/203.0.113.10/tcp/31313/p2p/16Uiu2HAm…"]
+"seeds": ["0xcaf2a882af8730c6ad92d76361b1952c71c0453f@203.0.113.10:31313"]
 ```
 
-The address above is illustrative. Replace it with the seed's actual address
-and complete peer id. A seed must serve the same world. With an empty list,
+The address above is illustrative. A seed must serve the same world. With an empty list,
 the kernel does not discover new peers through the network, though it can
 continue synchronizing with known counterparties.
 
@@ -73,9 +72,10 @@ nickname and superuser password, as in [Running a kernel](running-a-kernel.html)
 If another kernel is already running on the machine, give this one distinct
 HTTP and federation listening addresses.
 
-To connect more kernels, add the first kernel's reachable federation address
-to `seeds` and give the file to the other operators. Each saves it under the
-same filename in their installation and runs `juice kernel serve workshop`.
+To connect more kernels, add a seed line for the first kernel, `0x…@host:port`,
+to `seeds`. Choose an endpoint the other kernels can reach. Give the file to
+the other operators. Each saves it under the same filename in their
+installation and runs `juice kernel serve workshop`.
 Keep the display precision consistent so everyone reads amounts the same way.
 Anyone with the world definition can join; a separate world has no membership
 approval mechanism.

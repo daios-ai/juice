@@ -81,7 +81,7 @@ type Kernel struct {
 	Name   string // k1..k8, the directory name
 	Handle string // the name it advertises to the network
 	URL    string
-	Key    string // its public key, the only global name it has
+	Key    string // its address, the only global name it has
 	Dir    string
 	cmd    *exec.Cmd
 	net    *Net
@@ -474,7 +474,7 @@ func (n *Net) Boot(name string, o bootOpts) (*Kernel, error) {
 	// restarts the story uses to kill and revive a provider, and a kernel whose operator is not
 	// signed in fails every administrative command with a message about logging in.
 	k.Login()
-	k.Key = k.Field("sysop-"+name, "public_key", "admin", "kernel", "show")
+	k.Key = k.Field("sysop-"+name, "blockchain_address", "admin", "kernel", "show")
 	if k.Key == "" {
 		return nil, fmt.Errorf("kernel %s came up but would not report its own key", name)
 	}
@@ -493,8 +493,8 @@ func (k *Kernel) Stop() {
 	time.Sleep(300 * time.Millisecond)
 }
 
-// FedAddr is the multiaddress a peer bootstraps from, read from /health, which is where a kernel
-// says where peers dial it. The transport binds after the HTTP server, so the field is empty for a
+// FedAddr is the seed line a peer bootstraps from, 0x…@host:port, read from /health, which is
+// where a kernel says where peers meet it. The transport binds after the HTTP server, so the field is empty for a
 // moment after the ready line; it is polled rather than read once.
 func (k *Kernel) FedAddr() string {
 	addr := ""
@@ -506,9 +506,8 @@ func (k *Kernel) FedAddr() string {
 			return false
 		}
 		for _, a := range h.FedAddrs {
-			// A TCP address on loopback: the run is one host, and a quic address cannot be dialled
-			// by a peer that has not opened a UDP socket of its own.
-			if strings.HasPrefix(a, "/ip4/127.0.0.1/tcp/") && strings.Contains(a, "/p2p/") {
+			// A TCP endpoint on loopback: the run is one host.
+			if strings.Contains(a, "@127.0.0.1:") {
 				addr = a
 				return true
 			}

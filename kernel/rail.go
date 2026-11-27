@@ -54,10 +54,6 @@ type Rail interface {
 	FinalizedBalances(ctx context.Context) (token int64, gas string, block uint64, ok bool, err error)
 	// DepositsScannedTo is how far payments have been observed; false before any scan has run.
 	DepositsScannedTo() (uint64, bool, error)
-	// AddressOf is the address a kernel's key holds on this rail, in the form the rail reports
-	// senders in; empty where the world has no addresses, or for a key that is none. A kernel is
-	// paid at its key's own address and pays from it, so nothing about it is told or proven (P1).
-	AddressOf(kernelKey string) string
 	// OpeningBalance is what this kernel's address held at the block its payment scan starts
 	// after: money that was there before this ledger existed, which no scan will ever report.
 	// ok is false where the world has no chain to read.
@@ -65,15 +61,6 @@ type Rail interface {
 	// Verify checks a signature by address over msg and returns the address in canonical form —
 	// the only form the kernel stores or compares, so a differently-cased duplicate cannot exist.
 	Verify(msg []byte, address, sig string) (string, error)
-}
-
-// BlockchainAddress is where this kernel is paid: its own key's address on this world's rail, empty
-// where the world has none.
-func (k *Kernel) BlockchainAddress() string {
-	if k.rail == nil {
-		return ""
-	}
-	return k.rail.Address()
 }
 
 // hasAddresses reports whether this kernel's world pays to addresses (D23). Every payment rule that

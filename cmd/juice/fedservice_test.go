@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -31,7 +30,7 @@ func fedPeer(t *testing.T, k *kernel.Kernel, handle string) (string, *ecdsa.Priv
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
+	pubB64 := pub
 	if _, err := k.BindPetname(context.Background(), pubB64, handle); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +66,7 @@ func parkTaskForPeerUser(t *testing.T, k *kernel.Kernel, db *store.DB, peerKey, 
 // selfKey is the kernel's own public key — the `recipient` every task payload binds to (§13).
 func selfKey(t *testing.T, k *kernel.Kernel) string {
 	t.Helper()
-	pub, err := k.GetConfig(context.Background(), configKeySigningPublic)
+	pub, err := k.GetConfig(context.Background(), configKeyAddress)
 	if err != nil || pub == "" {
 		t.Fatalf("signing public key: %v", err)
 	}
@@ -116,7 +115,7 @@ func derivedTaskKey(t *testing.T, k *kernel.Kernel, taskID string, input []byte)
 
 func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, taskID, idempKey string, input []byte) (int, map[string]any, error) {
 	t.Helper()
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cp := kernel.KernelAddress((priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, selfKey(t, k), idempKey, ts, sha256HexBytes(input), "", false)
 	if err != nil {
@@ -130,7 +129,7 @@ func fedTaskComplete(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, tas
 // the wire carries them (P8).
 func fedTaskCompleteAs(t *testing.T, k *kernel.Kernel, priv *ecdsa.PrivateKey, taskID, idempKey string, input []byte, userID string, superuser bool) (int, map[string]any, error) {
 	t.Helper()
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cp := kernel.KernelAddress((priv))
 	self := selfKey(t, k)
 	ts := time.Now().UTC().Format(time.RFC3339)
 	sig, err := testNet.SignTaskPayload(priv, "complete", taskID, cp, self, idempKey, ts, sha256HexBytes(input), userID, superuser)
@@ -506,7 +505,7 @@ func TestFedTask_ReplayOfSettledFailureKeepsErrorStatus(t *testing.T) {
 // The task payloads must not verify as any other signed Juice payload, and vice versa (§12).
 func TestFedTask_SignatureDomainsAreDisjoint(t *testing.T) {
 	_, priv, _ := genKey()
-	cp := base64.RawURLEncoding.EncodeToString(pubBytes(priv))
+	cp := kernel.KernelAddress((priv))
 	ts := time.Now().UTC().Format(time.RFC3339)
 	const hash = "abc123"
 

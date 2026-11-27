@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -125,7 +124,7 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 	suTok := bootSuperuser(t, env)
 
 	pub, _, _ := genKey()
-	keyB64 := base64.RawURLEncoding.EncodeToString(pub)
+	keyB64 := pub
 	if err := env.k.KnowKernel(ctx, keyB64); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +135,7 @@ func TestAdminDepositToAPeerIsRefused(t *testing.T) {
 
 	// A key this kernel has never seen: the refusal must leave no kernel row behind it.
 	stranger, _, _ := genKey()
-	strangerKey := base64.RawURLEncoding.EncodeToString(stranger)
+	strangerKey := stranger
 	if body, status := tcpDo(t, suTok, "POST", "/v1/admin/users/"+strangerKey+"/deposit",
 		map[string]any{"amount": 300, "ref": "test-payment-2"}); status == http.StatusOK {
 		t.Fatalf("a deposit to an unknown kernel was accepted: %s", body)

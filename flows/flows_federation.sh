@@ -380,7 +380,7 @@ flow_fed_gossip_discovery() {
     local tkey; tkey=$(kernel_key "$dbt" "$ht")
     local tevi=no
     for _ in $(seq 1 40); do
-        if python3 -c "import sys,json;e=json.loads(sys.argv[1]).get('evidence',[]);r=next((x for x in e if x.get('issuer_public_key')==sys.argv[2]),None);sys.exit(0 if r and r.get('corroborated_uses',0)>=1 else 1)" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$rkey")" "$tkey" 2>/dev/null; then tevi=yes; break; fi
+        if python3 -c "import sys,json;e=json.loads(sys.argv[1]).get('evidence',[]);r=next((x for x in e if x.get('issuer_kernel')==sys.argv[2]),None);sys.exit(0 if r and r.get('corroborated_uses',0)>=1 else 1)" "$(jj "$FED_DBL" "$FED_HL" admin peer inspect -- "$rkey")" "$tkey" 2>/dev/null; then tevi=yes; break; fi
         sleep 1
     done
     assert_eq "fed_gossip.unrated_call_propagates_as_verified_evidence" yes "$tevi"
@@ -442,7 +442,7 @@ flow_fed_evidence_reaches_buyer() {
 import sys, json
 e = json.loads(sys.argv[1]).get('evidence') or {}
 prov = e.get('provider_reported') or {}
-others = {o.get('issuer_public_key'): o for o in (e.get('observed_by_others') or [])}
+others = {o.get('issuer_kernel'): o for o in (e.get('observed_by_others') or [])}
 m = others.get(sys.argv[2]) or {}
 sys.exit(0 if prov.get('uses', 0) >= 1 and m.get('corroborated_uses', 0) >= 1 else 1)" \
             "$(jj "$FED_DBL" "$FED_HL" action show "$FED_PROXY")" "$mkey" 2>/dev/null; then seen=yes; break; fi
@@ -558,7 +558,7 @@ print(next((x.get('price') for x in res if sys.argv[2] in str(x.get('action','')
     assert_eq "fed_discovery.indicative_price" 1103 "$dprice"
     # L discovered R but never resolved or called it: R appears in the MERGED roster (§14) as a
     # discovery-only kernel — present, but not traded (traded=false).
-    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('public_key')==sys.argv[2]),None);print('missing' if e is None else ('traded' if e.get('traded') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peer list)" "$rkey" 2>/dev/null)
+    local rentry; rentry=$(python3 -c "import sys,json;ps=json.loads(sys.argv[1]);e=next((x for x in ps if x.get('blockchain_address')==sys.argv[2]),None);print('missing' if e is None else ('traded' if e.get('traded') else 'discovery-only'))" "$(jj "$dbl" "$hl" admin peer list)" "$rkey" 2>/dev/null)
     assert_eq "fed_discovery.r_is_discovery_only" discovery-only "$rentry"
 
     # The discovery/proxy quote equality (§4 precondition 7): the hash on a catalog card, computed
@@ -708,7 +708,7 @@ flow_fed_offline() {
     # Retention (90 idle days) is a different question and is untouched — R stays listed either way.
     local peer_row; peer_row=$(jj "$FED_DBL" "$FED_HL" admin peer list | python3 -c \
         'import sys,json;print(json.dumps(next((p for p in json.load(sys.stdin) if p.get("petname")=="kernel-r"), {})))')
-    assert_nonempty "fed_offline.peer_still_listed" "$(strfield "$peer_row" public_key)"
+    assert_nonempty "fed_offline.peer_still_listed" "$(strfield "$peer_row" blockchain_address)"
     assert_nonempty "fed_offline.contact_failure_recorded" "$(strfield "$peer_row" last_contact_failed_at)"
 }
 
@@ -972,7 +972,7 @@ flow_fed_provider_crash_recovery() {
 
     # The provider returns at the address its peer knows it by — a restart keeps the configured
     # listen address, as a deployed kernel's does — and recovers its own interrupted work.
-    local port="${FED_BOOT#*/tcp/}"; port="${port%%/*}"
+    local port="${FED_BOOT##*:}"
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 \
         remote_retry_interval_seconds=1 fed_listen_addrs="/ip4/127.0.0.1/tcp/$port" "${FED_RCFG[@]}" \
         || { fail "fed_crash.restart" "provider did not restart"; return; }
@@ -1494,7 +1494,7 @@ flow_compose_middle_crash() {
     wait "$caller_pid" 2>/dev/null
 
     # R comes back where its peers know it, and both sides re-drive what they had in flight.
-    local port="${FED_BOOT#*/tcp/}"; port="${port%%/*}"
+    local port="${FED_BOOT##*:}"
     start_server "$FED_DBR" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 \
         remote_retry_interval_seconds=1 fed_listen_addrs="/ip4/127.0.0.1/tcp/$port" \
         || { fail "compose_crash.restart" "R did not restart"; return; }
@@ -1757,7 +1757,7 @@ flow_grant_remote_disconnect() {
     assert_fails "grant_disconnect.unreachable_says_run_again" "again" -- j "$L" "$ha" user disconnect sys@kernel-r/vault
     assert_fails "grant_disconnect.unreachable_still_refused_here" "grant" -- j "$L" "$ha" run sys@kernel-r/vault/read '{}'
     # It returns at the address its peer knows it by, as a deployed kernel's restart does.
-    local port="${FED_BOOT#*/tcp/}"; port="${port%%/*}"
+    local port="${FED_BOOT##*:}"
     start_server "$R" "$FED_HR" kernel_handle=kernel-r discovery_interval_seconds=2 remote_retry_interval_seconds=2 \
         fed_listen_addrs="/ip4/127.0.0.1/tcp/$port" || { fail "grant_disconnect.restart" "R did not restart"; return; }
     await_login "$R" "$FED_HR" || { fail "grant_disconnect.provider_up" "not serving after restart"; return; }
@@ -1919,7 +1919,7 @@ flow_petnames_explicit() {
     jj "$L" "$ha" run sys@kernel-r/greet '{}' >/dev/null
     # R has been called by L, and named it nothing.
     assert_eq "petnames.no_petname_after_a_call" "" \
-        "$(jj "$R" "$FED_HR" admin peer list | python3 -c "import sys,json;print(next((p.get('petname','') for p in json.load(sys.stdin) if p.get('public_key')=='$FED_LKEY'),'missing'))")"
+        "$(jj "$R" "$FED_HR" admin peer list | python3 -c "import sys,json;print(next((p.get('petname','') for p in json.load(sys.stdin) if p.get('blockchain_address')=='$FED_LKEY'),'missing'))")"
     # The nickname is learned from L's own gossip, on R's next discovery pass; until then the key alone.
     last_tx() { jj "$R" "$FED_HR" tx list --limit 1 | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)[0]))'; }
     caller_nickname() { dotfield "$(last_tx)" caller.nickname; }

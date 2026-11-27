@@ -78,7 +78,7 @@ func kernelListCmd() *cobra.Command {
 			for _, name := range names {
 				k := cfg.Kernels[name]
 				rows = append(rows, map[string]any{"kernel": name, "endpoint": k.Endpoint,
-					"network": k.Network, "public_key": k.PublicKey, "selected": name == here.Kernel})
+					"network": k.Network, "blockchain_address": k.Address, "selected": name == here.Kernel})
 			}
 			body, err := json.Marshal(rows)
 			if err != nil {
@@ -87,9 +87,9 @@ func kernelListCmd() *cobra.Command {
 			return emit(body, output{id: "kernel", human: list(
 				column{"KERNEL", text("kernel")},
 				column{"NETWORK", text("network")},
-				column{"ADDRESS", text("endpoint")},
+				column{"URL", text("endpoint")},
 				column{"IN USE", selected},
-				column{"KEY", text("public_key")},
+				column{"BLOCKCHAIN ADDRESS", text("blockchain_address")},
 			)})
 		},
 	}
@@ -127,10 +127,10 @@ func kernelHealthCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emit(body, output{id: "public_key", human: func([]byte) error {
+			return emit(body, output{id: "blockchain_address", human: func([]byte) error {
 				// The network comes first after the name: a kernel serves one for life, and it
 				// decides what every balance and every signature here means (D23).
-				fmt.Printf("ok  %s  network %s  %s  %s\n", h.Handle, h.Network, h.PublicKey, h.Version)
+				fmt.Printf("ok  %s  network %s  %s  %s\n", h.Handle, h.Network, h.BlockchainAddress, h.Version)
 				return nil
 			}})
 		},
@@ -207,11 +207,11 @@ func registerKernel(ctx context.Context, url string) (string, *kernelRec, string
 				return false, conflict
 			}
 		}
-		// A key is one kernel, and one kernel is one record: the name is this client's word for it,
+		// An address is one kernel, and one kernel is one record: the name is this client's word for it,
 		// so naming a known kernel something else renames what is already there rather than
 		// keeping two records that drift apart and split its logins between them (D15). Safe now —
 		// the destination is either free or this same kernel.
-		if held, at := recordOfKey(cfg, h.PublicKey); held != nil && at != name {
+		if held, at := recordOfAddress(cfg, h.BlockchainAddress); held != nil && at != name {
 			if conflict := sameKernel(at, held, h); conflict != nil {
 				return false, conflict
 			}
@@ -225,12 +225,12 @@ func registerKernel(ctx context.Context, url string) (string, *kernelRec, string
 			k, outcome = existing, "already known"
 			return false, nil // nothing to do
 		case existing.Endpoint != url && outcome == "added":
-			// The kernel answering is the one recorded — the same key, at whatever address it answers
+			// The kernel answering is the one recorded — the same kernel, at whatever URL it answers
 			// on today — so it keeps its logins: a session belongs to the kernel that issued it, and
 			// this is that kernel.
 			outcome = "moved; existing logins kept"
 		}
-		k = &kernelRec{Endpoint: url, PublicKey: h.PublicKey, WorldFingerprint: h.Fingerprint,
+		k = &kernelRec{Endpoint: url, Address: h.BlockchainAddress, WorldFingerprint: h.Fingerprint,
 			Network: h.Network, Decimals: h.Decimals, Symbol: h.Symbol}
 		cfg.Kernels[name] = k
 		return true, nil
@@ -241,14 +241,14 @@ func registerKernel(ctx context.Context, url string) (string, *kernelRec, string
 	return name, k, outcome, nil
 }
 
-// recordOfKey finds the record this client already holds for a kernel's key, and the name it holds
-// it under. The key is the kernel's identity; the name is only what this client calls it.
-func recordOfKey(cfg *clientConfig, publicKey string) (*kernelRec, string) {
-	if publicKey == "" {
+// recordOfAddress finds the record this client already holds for a kernel's address, and the name
+// it holds it under. The address is the kernel's identity; the name is only what this client calls it.
+func recordOfAddress(cfg *clientConfig, address string) (*kernelRec, string) {
+	if address == "" {
 		return nil, ""
 	}
 	for name, k := range cfg.Kernels {
-		if k != nil && k.PublicKey == publicKey {
+		if k != nil && k.Address == address {
 			return k, name
 		}
 	}
@@ -298,12 +298,12 @@ func forgetLogins(kernelName string) {
 // every other command takes.
 func emitKernel(name string, k *kernelRec, outcome string) error {
 	body, err := json.Marshal(map[string]any{"kernel": name, "endpoint": k.Endpoint,
-		"network": k.Network, "public_key": k.PublicKey, "outcome": outcome})
+		"network": k.Network, "blockchain_address": k.Address, "outcome": outcome})
 	if err != nil {
 		return err
 	}
 	return emit(body, output{id: "kernel", human: func([]byte) error {
-		fmt.Printf("%s  network %s  %s  %s  (%s)\n", name, k.Network, k.Endpoint, k.PublicKey, outcome)
+		fmt.Printf("%s  network %s  %s  %s  (%s)\n", name, k.Network, k.Endpoint, k.Address, outcome)
 		return nil
 	}})
 }

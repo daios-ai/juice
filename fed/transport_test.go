@@ -5,8 +5,8 @@ package fed
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daios-ai/juice/kernel"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -33,13 +34,13 @@ import (
 
 // ---- Identity ----
 
-// The network identity must derive deterministically from the platform signing key (§12).
+// The network identity derives deterministically from the kernel's key, and the peer it gives is
+// the kernel's address: the one identifier, reached two ways (P1).
 func TestDeriveIdentityDeterministic(t *testing.T) {
-	pub, priv, err := genKey()
+	addr, priv, err := genKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	k1, err := deriveHostKey(priv)
 	if err != nil {
 		t.Fatalf("deriveHostKey: %v", err)
@@ -51,75 +52,126 @@ func TestDeriveIdentityDeterministic(t *testing.T) {
 	if !k1.Equals(k2) {
 		t.Fatal("derivation is not deterministic: two derivations differ")
 	}
-
-	// The peer ID derived from the private host key must equal the one derived from the
-	// public key alone — the same identity, two ways.
-	idFromPriv, err := peer.IDFromPrivateKey(k1)
+	id, err := peer.IDFromPrivateKey(k1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.RawURLEncoding.EncodeToString(pub)
-	idFromPub, err := PeerIDFromKey(pubB64)
-	if err != nil {
-		t.Fatalf("PeerIDFromKey: %v", err)
+	if got := addressOfPeer(id); got != addr {
+		t.Fatalf("the peer is %s, the kernel %s", got, addr)
 	}
-	if idFromPriv != idFromPub {
-		t.Fatalf("peer ID mismatch: from-priv %s, from-pub %s", idFromPriv, idFromPub)
-	}
-}
-
-// KeyFromPeerID must round-trip back to the original base64url public key.
-func TestPeerIDKeyRoundTrip(t *testing.T) {
-	pub, _, _ := genKey()
-	want := base64.RawURLEncoding.EncodeToString(pub)
-
-	id, err := PeerIDFromKey(want)
-	if err != nil {
-		t.Fatalf("PeerIDFromKey: %v", err)
-	}
-	got, err := KeyFromPeerID(id)
-	if err != nil {
-		t.Fatalf("KeyFromPeerID: %v", err)
-	}
-	if got != want {
-		t.Fatalf("round-trip: got %q, want %q", got, want)
+	_, ed, _ := libp2pcrypto.GenerateEd25519Key(rand.Reader)
+	if edID, _ := peer.IDFromPublicKey(ed); addressOfPeer(edID) != "" {
+		t.Error("a peer whose key is not a kernel's has an address")
 	}
 }
 
-// BootstrapKeys derives the base64url Ed25519 key of each configured bootstrap peer, so the
-// discovery loop can seed from — and an operator can inspect — a node given only its multiaddr.
-func TestBootstrapKeys(t *testing.T) {
-	var want []string
-	var infos []peer.AddrInfo
-	for i := 0; i < 3; i++ {
-		pub, _, _ := genKey()
-		k := base64.RawURLEncoding.EncodeToString(pub)
-		id, err := PeerIDFromKey(k)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want = append(want, k)
-		infos = append(infos, peer.AddrInfo{ID: id})
+// A seed line is the seed's address and a TCP endpoint. Anything else — the multiaddr form of an
+// earlier juice above all — is refused, saying the world file must be replaced.
+func TestSeedLinesAreParsed(t *testing.T) {
+	a := strangerAddress()
+	upper := "0x" + strings.ToUpper(a[2:])
+	got, err := parseSeeds([]string{a + "@seed.example:31313", upper + "@203.0.113.10:4001", a + "@[::1]:31313", ""})
+	if err != nil {
+		t.Fatal(err)
 	}
-	tr := &Transport{bootstrap: infos}
-	got := tr.BootstrapKeys()
+	want := []seed{{a, "seed.example", "31313"}, {a, "203.0.113.10", "4001"}, {a, "::1", "31313"}}
 	if len(got) != len(want) {
-		t.Fatalf("got %d keys, want %d", len(got), len(want))
+		t.Fatalf("parsed %+v", got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("key %d: got %q want %q", i, got[i], want[i])
+			t.Errorf("line %d: %+v, want %+v", i, got[i], want[i])
 		}
+	}
+	for _, bad := range []string{"/dns4/seed.example/tcp/31313/p2p/16Uiu2HAmUCPo4eadpUGQXbsppAqGvcJPAExarUFcr4aT8g1RYhdW",
+		a + "@seed.example", "seed.example:31313", "0xnothex@seed.example:31313"} {
+		if _, err := parseSeeds([]string{bad}); err == nil {
+			t.Errorf("%q accepted as a seed line", bad)
+		}
+	}
+	if _, err := parseSeeds([]string{"/ip4/203.0.113.10/tcp/31313/p2p/x"}); err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Errorf("an earlier world file's seed must say to replace the file: %v", err)
+	}
+	tr := &Transport{seeds: &seedSet{all: got, met: map[string]peer.AddrInfo{}}}
+	if addrs := tr.SeedAddresses(); len(addrs) != 3 || addrs[0] != a || addrs[1] != a {
+		t.Errorf("seed addresses %v", addrs)
 	}
 }
 
-func TestPeerIDFromKeyRejectsGarbage(t *testing.T) {
-	if _, err := PeerIDFromKey("not-base64url!!"); err == nil {
-		t.Error("expected error for non-base64url key")
+// A kernel that knows only a seed's address and TCP endpoint meets it: the seed proves a key, the
+// key is the address, and the normal dialer then connects. Another kernel answering at the seed's
+// endpoint is refused and left unconnected, however long the new kernel runs.
+func TestAKernelMeetsASeedByItsAddressAlone(t *testing.T) {
+	seed := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
+	lines := seed.Endpoints()
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], seed.Address()+"@127.0.0.1:") {
+		t.Fatalf("the seed's endpoints %v are not seed lines for %s", lines, seed.Address())
 	}
-	if _, err := PeerIDFromKey(base64.RawURLEncoding.EncodeToString([]byte("too short"))); err == nil {
-		t.Error("expected error for wrong-length key")
+	newcomer := newTestTransport(t, &fakeHandlers{}, lines[:1])
+	if newcomer.host.Network().Connectedness(seed.host.ID()) != network.Connected {
+		t.Fatal("the newcomer is not connected to the seed it was given")
 	}
+	if id, ok := newcomer.lookup(seed.Address()); !ok || id != seed.host.ID() {
+		t.Error("the seed is not in the newcomer's lookup by its address")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if resp, err := newcomer.Call(ctx, seed.Address(), CallRequest{Action: "a", Counterparty: newcomer.Address()}); err != nil || resp.Status != 200 {
+		t.Fatalf("a call to the seed by address: %+v %v", resp, err)
+	}
+
+	impostor := strangerAddress() + lines[0][strings.Index(lines[0], "@"):]
+	fooled := newTestTransport(t, &fakeHandlers{}, []string{impostor})
+	if fooled.host.Network().Connectedness(seed.host.ID()) == network.Connected {
+		t.Error("connected to a kernel that is not the seed named")
+	}
+	if !fooled.seeds.pending() {
+		t.Error("a seed whose endpoint answered with another kernel counts as met")
+	}
+}
+
+// A kernel never met is found by its address alone: it announces itself under the address, and
+// the finder keeps only an announcer whose key is that address, so kernels announcing themselves
+// under another's address are ignored.
+func TestANeverMetKernelIsFoundByItsAddress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DHT test in short mode")
+	}
+	r := newTestTransportMode(t, &fakeHandlers{}, nil, dht.ModeServer)
+	boot := r.Endpoints()[:1]
+	target := newTestTransportMode(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, boot, dht.ModeServer)
+	finder := newTestTransportMode(t, &fakeHandlers{}, boot, dht.ModeServer)
+	var liars []*Transport
+	for i := 0; i < 5; i++ {
+		liars = append(liars, newTestTransportMode(t, &fakeHandlers{}, boot, dht.ModeServer))
+	}
+	if _, known := finder.lookup(target.Address()); known {
+		t.Fatal("the finder already knows the target; the test proves nothing")
+	}
+	deadline := time.Now().Add(45 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		for _, l := range liars {
+			_, _ = l.disc.Advertise(actx, l.addressNamespace(target.Address()))
+		}
+		lastErr = target.Advertise(actx)
+		cancel()
+		if lastErr == nil {
+			cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+			resp, err := finder.Call(cctx, target.Address(), CallRequest{Action: "a", Counterparty: finder.Address()})
+			ccancel()
+			if err == nil && resp.Status == 200 {
+				if id, _ := finder.lookup(target.Address()); id != target.host.ID() {
+					t.Fatal("the lookup holds another peer under the target's address")
+				}
+				return
+			}
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("the finder never reached the target by its address: %v", lastErr)
 }
 
 // Signature-domain disjointness (§12): a Juice payload signature (the kernel's signature over JCS bytes)
@@ -190,11 +242,11 @@ func extractEnvelopeSig(t *testing.T, key libp2pcrypto.PrivKey, env *record.Enve
 // A direct loopback connection classifies as "direct".
 func TestProbeDirect(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)
-	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+	b := newTestTransport(t, &fakeHandlers{}, a.Endpoints())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r := b.Probe(ctx, a.PublicKey())
+	r := b.Probe(ctx, a.Address())
 	if r.Path != "direct" {
 		t.Errorf("path: got %q, want direct", r.Path)
 	}
@@ -206,7 +258,7 @@ func TestProbeDirect(t *testing.T) {
 	}
 	// The connection is now held, so a second probe connects for free: what it reports is the
 	// ping's round trip, and a ping that answered reports no error. Loopback may round it to 0 ms.
-	if r2 := b.Probe(ctx, a.PublicKey()); r2.Error != "" || r2.Path != "direct" || r2.RTTmillis < 0 {
+	if r2 := b.Probe(ctx, a.Address()); r2.Error != "" || r2.Path != "direct" || r2.RTTmillis < 0 {
 		t.Errorf("second probe over a held connection: %+v", r2)
 	}
 	if n := b.ConnectedPeers(); n < 1 {
@@ -229,13 +281,13 @@ func TestRequestsAreObservedOnBothSides(t *testing.T) {
 	server := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
 	serverObs, serverSaw := record()
 	server.cfg.Observe = serverObs
-	caller := newTestTransport(t, &fakeHandlers{}, server.ListenAddrs())
+	caller := newTestTransport(t, &fakeHandlers{}, server.Endpoints())
 	callerObs, callerSaw := record()
 	caller.cfg.Observe = callerObs
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := caller.Call(ctx, server.PublicKey(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); err != nil {
+	if _, err := caller.Call(ctx, server.Address(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	want := func(ch chan seen, w seen) {
@@ -252,7 +304,7 @@ func TestRequestsAreObservedOnBothSides(t *testing.T) {
 	want(callerSaw, seen{ProtocolCall, "out", true})
 	want(serverSaw, seen{ProtocolCall, "in", true})
 
-	unknown := caller.PublicKey()[:len(caller.PublicKey())-2] + "ZZ"
+	unknown := strangerAddress()
 	uctx, ucancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ucancel()
 	_, _ = caller.Call(uctx, unknown, CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"})
@@ -270,14 +322,14 @@ func TestProbeReportsTheVersionAJuicePeerSays(t *testing.T) {
 		t.Fatalf("New transport: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
-	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+	b := newTestTransport(t, &fakeHandlers{}, a.Endpoints())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if r := b.Probe(ctx, a.PublicKey()); r.Version != AgentPrefix+"v1.2.3" {
+	if r := b.Probe(ctx, a.Address()); r.Version != AgentPrefix+"v1.2.3" {
 		t.Errorf("version of a: got %q, want %q (%+v)", r.Version, AgentPrefix+"v1.2.3", r)
 	}
-	if r := a.Probe(ctx, b.PublicKey()); r.Version != "" {
+	if r := a.Probe(ctx, b.Address()); r.Version != "" {
 		t.Errorf("version of b, which sends none: got %q, want empty", r.Version)
 	}
 }
@@ -301,7 +353,7 @@ func TestFirstPingWithoutAnAnswerIsAnError(t *testing.T) {
 func TestProbeUnreachable(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)
 	// A syntactically valid but unroutable key.
-	unknown := a.PublicKey()[:len(a.PublicKey())-2] + "ZZ"
+	unknown := strangerAddress()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -319,7 +371,7 @@ func TestProbeUnreachable(t *testing.T) {
 // ErrNotDispatched (§13 never-dispatched); a Call to a reachable peer succeeds without it.
 func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{}, nil)
-	unknown := a.PublicKey()[:len(a.PublicKey())-2] + "ZZ" // valid form, unroutable
+	unknown := strangerAddress() // valid form, unroutable
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -330,8 +382,8 @@ func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 
 	// A reachable peer round-trips without the sentinel.
 	b := newTestTransport(t, &fakeHandlers{callBody: json.RawMessage(`{}`)}, nil)
-	a2 := newTestTransport(t, &fakeHandlers{}, b.ListenAddrs())
-	if _, err := a2.Call(ctx, b.PublicKey(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
+	a2 := newTestTransport(t, &fakeHandlers{}, b.Endpoints())
+	if _, err := a2.Call(ctx, b.Address(), CallRequest{Action: "3f1c9a2e-0b64-4f7a-9c15-2d8e6b0a7f31", IdempotencyKey: "k"}); errors.Is(err, ErrNotDispatched) {
 		t.Errorf("reachable Call must not report ErrNotDispatched: %v", err)
 	}
 }
@@ -342,11 +394,11 @@ func TestCallUnresolvableIsNotDispatched(t *testing.T) {
 // sentinel must NOT appear — the request was dispatched, only the reply was lost.
 func TestGossipReadFailureTagged(t *testing.T) {
 	a := newTestTransport(t, &fakeHandlers{gossipErr: fmt.Errorf("boom")}, nil)
-	b := newTestTransport(t, &fakeHandlers{}, a.ListenAddrs())
+	b := newTestTransport(t, &fakeHandlers{}, a.Endpoints())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := b.Gossip(ctx, a.PublicKey(), GossipRequest{})
+	_, err := b.Gossip(ctx, a.Address(), GossipRequest{})
 	if err == nil {
 		t.Fatal("expected the gossip pull to fail when the handler errors")
 	}
@@ -358,12 +410,92 @@ func TestGossipReadFailureTagged(t *testing.T) {
 	}
 }
 
-func TestIsRelayAddr(t *testing.T) {
-	if !isRelayAddr("/ip4/1.2.3.4/tcp/1/p2p/QmSeed/p2p-circuit/p2p/QmTarget") {
-		t.Error("expected relay addr to be detected")
+// A kernel that cannot be reached is reported by its address with the reason, never by the peer id
+// libp2p names it by inside: the probe and the call an operator reads both say which kernel failed.
+func TestAFailedDialNamesTheKernelByItsAddress(t *testing.T) {
+	gone := newTestTransport(t, &fakeHandlers{}, nil)
+	caller := newTestTransport(t, &fakeHandlers{}, gone.Endpoints()[:1])
+	addr, pid := gone.Address(), gone.host.ID()
+	_ = gone.Close()
+	_ = caller.host.Network().ClosePeer(pid)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r := caller.Probe(ctx, addr)
+	_, err := caller.Call(ctx, addr, CallRequest{Action: "a", Counterparty: caller.Address()})
+	for what, msg := range map[string]string{"probe": r.Error, "call": fmt.Sprint(err)} {
+		if msg == "" || msg == "<nil>" {
+			t.Errorf("%s: the dead kernel answered", what)
+			continue
+		}
+		if strings.Contains(msg, pid.String()) || strings.Contains(msg, "16Uiu2") || strings.Contains(msg, pid.ShortString()) {
+			t.Errorf("%s names the peer id: %s", what, msg)
+		}
+		if !strings.Contains(msg, addr) {
+			t.Errorf("%s does not name the kernel %s: %s", what, addr, msg)
+		}
 	}
-	if isRelayAddr("/ip4/1.2.3.4/tcp/1/p2p/QmDirect") {
-		t.Error("direct addr misclassified as relay")
+	if !errors.Is(err, ErrNotDispatched) {
+		t.Errorf("a dial that never connected must still read as not dispatched: %v", err)
+	}
+}
+
+// A dial libp2p reports names the peer by its id. Rewritten at the boundary, the same failure names
+// the kernel's address and keeps the reason and the error it wraps. The dial here is a real one to
+// a port nobody listens on, so the text is the library's own.
+func TestALibraryDialErrorIsRenamedToTheAddress(t *testing.T) {
+	caller := newTestTransport(t, &fakeHandlers{}, nil)
+	_, priv, _ := genKey()
+	hk, _ := deriveHostKey(priv)
+	id, _ := peer.IDFromPrivateKey(hk)
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	ma, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", port))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw := caller.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: []multiaddr.Multiaddr{ma}})
+	if raw == nil || !strings.Contains(raw.Error(), id.String()) {
+		t.Fatalf("the library's dial error does not name the peer id, so this proves nothing: %v", raw)
+	}
+	addr := addressOfPeer(id)
+	got := named(raw, id, addr)
+	if strings.Contains(got.Error(), id.String()) || strings.Contains(got.Error(), id.ShortString()) || !strings.Contains(got.Error(), addr) {
+		t.Errorf("renamed error %q, want the address %s and no peer id", got, addr)
+	}
+	if !errors.Is(got, raw) {
+		t.Error("the renamed error no longer wraps the library's")
+	}
+}
+
+// Only a plain TCP listener is printed as a seed line: meeting a seed is a TCP handshake, which a
+// WebSocket listener on another port does not answer, so a line for it could never be used.
+func TestOnlyAPlainTCPListenerIsASeedLine(t *testing.T) {
+	_, priv, _ := genKey()
+	tr, err := newTransport(context.Background(), Config{
+		Namespace: testNamespace, SigningKey: priv, Handlers: &fakeHandlers{}, AllowPrivateAddrs: true,
+		ListenAddrs: []string{"/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/tcp/0/ws"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	var ws string
+	for _, a := range tr.host.Addrs() {
+		if strings.Contains(a.String(), "/ws") {
+			p, _ := a.ValueForProtocol(multiaddr.P_TCP)
+			ws = ":" + p
+		}
+	}
+	if ws == "" {
+		t.Fatal("the host has no WebSocket listener; the test proves nothing")
+	}
+	lines := tr.Endpoints()
+	if len(lines) != 1 || strings.HasSuffix(lines[0], ws) {
+		t.Fatalf("seed lines %v, want only the plain TCP listener (WebSocket at %s)", lines, ws)
+	}
+	newcomer := newTestTransport(t, &fakeHandlers{}, lines)
+	if newcomer.host.Network().Connectedness(tr.host.ID()) != network.Connected {
+		t.Error("the seed line printed could not be used to meet the kernel")
 	}
 }
 
@@ -379,8 +511,8 @@ func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 		t.Skip("skipping DHT discovery test in short mode")
 	}
 	r := newTestTransportMode(t, &fakeHandlers{}, nil, dht.ModeServer) // bootstrap/relay server
-	boot := r.ListenAddrs()
-	a := newTestTransportMode(t, &fakeHandlers{gossip: json.RawMessage(`{"public_key":"a"}`)}, boot, dht.ModeClient)
+	boot := r.Endpoints()
+	a := newTestTransportMode(t, &fakeHandlers{gossip: json.RawMessage(`{"blockchain_address":"a"}`)}, boot, dht.ModeClient)
 	b := newTestTransportMode(t, &fakeHandlers{}, boot, dht.ModeClient)
 
 	// Precondition: A and B share no direct connection — only R. This is what makes B's discovery
@@ -403,7 +535,7 @@ func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 		}
 		found := false
 		for _, k := range keys {
-			if k == a.PublicKey() {
+			if k == a.Address() {
 				found = true
 			}
 		}
@@ -420,9 +552,9 @@ func TestDiscoveryByRoutingInClientServerTopology(t *testing.T) {
 			continue
 		}
 		gctx, gcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		g, gerr := b.Gossip(gctx, a.PublicKey(), GossipRequest{})
+		g, gerr := b.Gossip(gctx, a.Address(), GossipRequest{})
 		gcancel()
-		if gerr == nil && string(g) == `{"public_key":"a"}` {
+		if gerr == nil && string(g) == `{"blockchain_address":"a"}` {
 			return // discovered A by routing discovery through the server and gossiped it by key
 		}
 		lastErr = gerr
@@ -455,9 +587,9 @@ func TestTransportOffersRelay(t *testing.T) {
 func TestOversizedFrameIsRefusedBeforeAllocation(t *testing.T) {
 	srv := &fakeHandlers{callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`)}
 	a := newTestTransport(t, srv, nil)
-	b := newTestTransport(t, &fakeHandlers{}, []string{a.ListenAddrs()[0]})
+	b := newTestTransport(t, &fakeHandlers{}, []string{a.Endpoints()[0]})
 
-	pid, err := b.resolve(context.Background(), a.PublicKey())
+	pid, err := b.resolve(context.Background(), a.Address())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -476,7 +608,7 @@ func TestOversizedFrameIsRefusedBeforeAllocation(t *testing.T) {
 	}
 
 	// The honest path still works.
-	resp, err := b.Call(context.Background(), a.PublicKey(), CallRequest{Action: "a", Counterparty: b.PublicKey()})
+	resp, err := b.Call(context.Background(), a.Address(), CallRequest{Action: "a", Counterparty: b.Address()})
 	if err != nil {
 		t.Fatalf("honest call after oversized frames: %v", err)
 	}
@@ -498,10 +630,10 @@ func TestStreamFloodFromOnePeerLeavesAnHonestPeerServed(t *testing.T) {
 	}
 	srv := &fakeHandlers{callBody: json.RawMessage(`{"result":{"ok":true},"receipt":null}`)}
 	victim := newTestTransport(t, srv, nil)
-	flooder := newTestTransport(t, &fakeHandlers{}, []string{victim.ListenAddrs()[0]})
-	honest := newTestTransport(t, &fakeHandlers{}, []string{victim.ListenAddrs()[0]})
+	flooder := newTestTransport(t, &fakeHandlers{}, []string{victim.Endpoints()[0]})
+	honest := newTestTransport(t, &fakeHandlers{}, []string{victim.Endpoints()[0]})
 
-	pid, err := flooder.resolve(context.Background(), victim.PublicKey())
+	pid, err := flooder.resolve(context.Background(), victim.Address())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -534,7 +666,7 @@ func TestStreamFloodFromOnePeerLeavesAnHonestPeerServed(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := honest.Call(ctx, victim.PublicKey(), CallRequest{Action: "a", Counterparty: honest.PublicKey()})
+	resp, err := honest.Call(ctx, victim.Address(), CallRequest{Action: "a", Counterparty: honest.Address()})
 	elapsed := time.Since(start)
 	wg.Wait()
 
@@ -594,8 +726,8 @@ func TestSecondKernelIsRefusedTheStandardPort(t *testing.T) {
 		t.Fatalf("first kernel: %v", err)
 	}
 	t.Cleanup(func() { _ = first.Close() })
-	if !strings.Contains(strings.Join(first.ListenAddrs(), " "), fmt.Sprintf("/tcp/%d/", port)) {
-		t.Fatalf("first kernel did not bind the standard port: %v", first.ListenAddrs())
+	if !strings.Contains(strings.Join(first.Endpoints(), " "), fmt.Sprintf(":%d", port)) {
+		t.Fatalf("first kernel did not bind the standard port: %v", first.Endpoints())
 	}
 
 	second, err := build()
@@ -656,8 +788,8 @@ func TestConfiguredAddressesAreBoundVerbatim(t *testing.T) {
 		t.Fatalf("configured address: %v", err)
 	}
 	t.Cleanup(func() { _ = tr.Close() })
-	if !strings.Contains(strings.Join(tr.ListenAddrs(), " "), fmt.Sprintf("/tcp/%d/", port)) {
-		t.Fatalf("bound something other than the configured address: %v", tr.ListenAddrs())
+	if !strings.Contains(strings.Join(tr.Endpoints(), " "), fmt.Sprintf(":%d", port)) {
+		t.Fatalf("bound something other than the configured address: %v", tr.Endpoints())
 	}
 }
 
@@ -668,7 +800,7 @@ func TestACancelledCallReturnsAtOnce(t *testing.T) {
 	served := make(chan struct{})
 	srv := &slowHandlers{fakeHandlers: &fakeHandlers{}, entered: served, hold: 30 * time.Second}
 	a := newTestTransport(t, srv, nil)
-	b := newTestTransport(t, &fakeHandlers{}, []string{a.ListenAddrs()[0]})
+	b := newTestTransport(t, &fakeHandlers{}, []string{a.Endpoints()[0]})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -677,7 +809,7 @@ func TestACancelledCallReturnsAtOnce(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := b.Call(ctx, a.PublicKey(), CallRequest{Action: "a", Counterparty: b.PublicKey()})
+	_, err := b.Call(ctx, a.Address(), CallRequest{Action: "a", Counterparty: b.Address()})
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("a cancelled call must not report success")
@@ -826,12 +958,18 @@ func TestRelaySlotsAreBoundedAsConfigured(t *testing.T) {
 }
 
 // genKey makes a kernel's key for a test: the public half as payloads carry it, raw, and the key.
-func genKey() ([]byte, *ecdsa.PrivateKey, error) {
+func genKey() (string, *ecdsa.PrivateKey, error) {
 	key, err := ethcrypto.GenerateKey()
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
-	return ethcrypto.CompressPubkey(&key.PublicKey), key, nil
+	return kernel.KernelAddress(key), key, nil
+}
+
+// strangerAddress is a valid kernel address no transport in the test answers for.
+func strangerAddress() string {
+	addr, _, _ := genKey()
+	return addr
 }
 
 // signRaw signs bytes the way a kernel signs a payload (P1), and verifyRaw checks one.

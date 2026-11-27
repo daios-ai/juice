@@ -34,7 +34,7 @@ const (
 )
 
 // Account is a user of this kernel: balance, credentials, and the identity its records name it by
-// (D4). A peer kernel holds none; it is its Kernel row, and records name it by key (D15).
+// (D4). A peer kernel holds none; it is its Kernel row, and records name it by its address (D15).
 // RecoveryPublicKey is a recovery credential (§12), never a federation identity.
 type Account struct {
 	ID           string     `json:"id"`
@@ -285,7 +285,7 @@ func (n TaskNotice) ForPeer(remoteID string) TaskNotice {
 // who may complete it and, on the holder, who funds it.
 type TaskEntry struct {
 	TaskNotice
-	HolderKey      string
+	HolderKernel   string
 	RequiredCaller Principal
 	Requester      Principal // RequesterID on the holder's kernel
 	OwnerUserID    string    // the process owner; empty for a task held by a peer
@@ -417,7 +417,7 @@ type Transaction struct {
 	Reason            string          `json:"reason"`
 	RemoteReceiptHash string          `json:"remote_receipt_hash,omitempty"` // SHA-256 of the remote receipt JSON; empty for local calls
 	RemoteReceiptJSON string          `json:"remote_receipt_json,omitempty"` // full receipt JSON from the remote kernel; empty for local calls
-	RemoteSignerKey   string          `json:"remote_signer_key,omitempty"`   // the key the receipt verified under at settlement, stored with it so verification outlives the peer (G7, U36)
+	RemoteSigner      string          `json:"remote_signer,omitempty"`       // the key the receipt verified under at settlement, stored with it so verification outlives the peer (G7, U36)
 	// EvidenceEligible records, once, whether this call's receipt is public evidence: decided when
 	// the call settles, from what was true then. An action made public later does not publish what
 	// it did in private, and one made private later does not erase what it did in public (P9).
@@ -499,19 +499,18 @@ type LedgerEntry struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-// RemoteKernel is a known remote kernel: one row per public key, the whole of what this kernel keeps
-// about a peer (D4). It owns Stiegler naming state — the self-certifying key, the Nickname the
+// RemoteKernel is a known remote kernel: one row per address, the whole of what this kernel keeps
+// about a peer (D4). It owns Stiegler naming state — the self-certifying address, the Nickname the
 // remote asserts about itself (never resolves a reference), and the Petname assigned locally
 // (resolves). GossipCursor is the persisted evidence high-watermark (§13 peer sync), advanced only
 // after a page is verified and committed, so it is never written by ordinary observation.
 // LastSeen and LastContactFailedAt are the contact display cache: the latest successful and latest
 // failed contact, each only ever moving forward.
 type RemoteKernel struct {
-	PublicKey string `json:"public_key"`
-	Petname   string `json:"petname,omitempty"`
-	Nickname  string `json:"nickname,omitempty"`
-	// BlockchainAddress is where this peer is paid: its key's own address on this world's rail (P1).
-	BlockchainAddress   string     `json:"blockchain_address,omitempty"`
+	// Address is the peer's one identifier, and where it is paid on a world with addresses (P1).
+	Address             string     `json:"blockchain_address"`
+	Petname             string     `json:"petname,omitempty"`
+	Nickname            string     `json:"nickname,omitempty"`
 	About               string     `json:"about,omitempty"`
 	GossipCursor        string     `json:"gossip_cursor,omitempty"`
 	LastSeen            *time.Time `json:"last_seen,omitempty"`
@@ -791,12 +790,12 @@ type TraceOutcome struct {
 
 // ReceiptVerification is the result of VerifyReceipt.
 type ReceiptVerification struct {
-	TransactionID         string        `json:"transaction_id"`
-	Valid                 bool          `json:"valid"`
-	RemoteKernelHandle    AddressView   `json:"remote_kernel_handle,omitzero"`
-	RemoteKernelPublicKey string        `json:"remote_kernel_public_key,omitempty"`
-	Checks                ReceiptChecks `json:"checks"`
-	Receipt               *Receipt      `json:"receipt"`
+	TransactionID      string        `json:"transaction_id"`
+	Valid              bool          `json:"valid"`
+	RemoteKernelHandle AddressView   `json:"remote_kernel_handle,omitzero"`
+	RemoteKernel       string        `json:"remote_kernel,omitempty"`
+	Checks             ReceiptChecks `json:"checks"`
+	Receipt            *Receipt      `json:"receipt"`
 	// Unbound marks a receipt signed before receipts named the request they answer: its binding
 	// cannot be audited, which is a fact about its age, not a failed check (P5, G3).
 	Unbound bool `json:"unbound,omitempty"`
@@ -830,12 +829,12 @@ const (
 // RemoteKernelView is one row of the `admin peers` roster (§14): every known kernel, served by a
 // single kernels LEFT JOIN accounts. Petname resolves a reference and Nickname never does, so the
 // two are surfaced as separate columns. It carries no internal account id — a kernel is addressed
-// by key or petname, never by one.
+// by address or petname, never by one.
 type RemoteKernelView struct {
-	PublicKey string `json:"public_key"`
-	Petname   string `json:"petname,omitempty"`
-	Nickname  string `json:"nickname,omitempty"`
-	About     string `json:"about,omitempty"`
+	Address  string `json:"blockchain_address"`
+	Petname  string `json:"petname,omitempty"`
+	Nickname string `json:"nickname,omitempty"`
+	About    string `json:"about,omitempty"`
 	// Traded is true iff a transaction here names this kernel — it has called us or we have called
 	// it. False for a kernel known only from discovery.
 	Traded bool `json:"traded"`
@@ -860,21 +859,21 @@ type RemoteKernelView struct {
 // the remote-receipt join, so an origin kernel's RemoteReceiptHash equals the serving kernel's
 // ReceiptHash byte-for-byte. Subject{Kernel,Action} is the PrincipalID-style stable identity of the
 // executed action (own key for a first-party action, the peer's key + RemoteActionID for a proxy
-// call). CounterpartyKernelPublicKey is set ONLY when the execution caller was a peer kernel (an
+// call). CounterpartyKernel is set ONLY when the execution caller was a peer kernel (an
 // inbound federated call), never for a local caller and never a user identity: it is the two-kernel
 // trade proof that lets a receiver confirm a remote rating's issuer actually traded here.
 // RemoteReceiptHash links an origin's rating evidence to the serving kernel's execution receipt.
 // Signed under the evidence_receipt domain (§12).
 type EvidenceReceipt struct {
-	ReceiptHash                 string    `json:"receipt_hash"`
-	SubjectKernelPublicKey      string    `json:"subject_kernel_public_key"`
-	SubjectActionID             string    `json:"subject_action_id"`
-	CounterpartyKernelPublicKey string    `json:"counterparty_kernel_public_key,omitempty"`
-	Status                      TxStatus  `json:"status"`
-	StartedAt                   time.Time `json:"started_at"`
-	CreatedAt                   time.Time `json:"created_at"`
-	RemoteReceiptHash           string    `json:"remote_receipt_hash,omitempty"`
-	Signature                   string    `json:"signature"`
+	ReceiptHash        string    `json:"receipt_hash"`
+	SubjectKernel      string    `json:"subject_kernel"`
+	SubjectActionID    string    `json:"subject_action_id"`
+	CounterpartyKernel string    `json:"counterparty_kernel,omitempty"`
+	Status             TxStatus  `json:"status"`
+	StartedAt          time.Time `json:"started_at"`
+	CreatedAt          time.Time `json:"created_at"`
+	RemoteReceiptHash  string    `json:"remote_receipt_hash,omitempty"`
+	Signature          string    `json:"signature"`
 }
 
 // GossipRequest is the (cursored) request payload for /juice/fed/gossip/1. An empty cursor
@@ -908,8 +907,8 @@ type EvidenceBundle struct {
 // ordered by effective time (a rating's created_at when rated, else the receipt's) so a late
 // rating re-surfaces its bundle. NextCursor is the exclusive high-watermark to send on the next pull.
 type GossipResponse struct {
-	PublicKey string `json:"public_key"`
-	Handle    string `json:"handle"`
+	Address string `json:"blockchain_address"`
+	Handle  string `json:"handle"`
 	// Network and NetworkFingerprint name the world this kernel serves. A reply from another network is
 	// not accumulated: its artifacts could never verify here anyway (P9, D23).
 	Network            string            `json:"network,omitempty"`
@@ -930,14 +929,14 @@ type GossipResponse struct {
 // private to the two parties (P9), and reading it to hash what the row already stores would
 // compute one fact twice. Ordered by EffectiveAt, so a late rating re-surfaces its bundle.
 type GossipReceiptRow struct {
-	ReceiptHash                 string
-	Status                      TxStatus
-	StartedAt                   time.Time
-	CreatedAt                   time.Time
-	SubjectKernelPublicKey      string
-	SubjectActionID             string
-	CounterpartyKernelPublicKey string
-	RemoteReceiptJSON           string
+	ReceiptHash        string
+	Status             TxStatus
+	StartedAt          time.Time
+	CreatedAt          time.Time
+	SubjectKernel      string
+	SubjectActionID    string
+	CounterpartyKernel string
+	RemoteReceiptJSON  string
 	// Rating is the wire projection the kernel will sign, unsigned as it comes from the store.
 	Rating      *RatingEvidence
 	EffectiveAt time.Time
@@ -955,20 +954,20 @@ func (r *SubjectEvidenceRow) observe(at time.Time) {
 }
 
 // EvidenceRow is one persisted, verified evidence record in the regenerable evidence cache (§13).
-// It is keyed by (IssuerPublicKey, ReceiptHash) and truncatable with zero semantic effect.
+// It is keyed by (IssuerKernel, ReceiptHash) and truncatable with zero semantic effect.
 type EvidenceRow struct {
-	IssuerPublicKey             string
-	ReceiptHash                 string
-	SubjectKernelPublicKey      string
-	SubjectActionID             string
-	CounterpartyKernelPublicKey string
-	EvidenceReceiptJSON         string
-	RatingJSON                  string
-	RemoteReceiptHash           string
-	ReceiptCreatedAt            time.Time
-	EffectiveAt                 time.Time
-	ObservedAt                  time.Time
-	Equivocated                 bool
+	IssuerKernel        string
+	ReceiptHash         string
+	SubjectKernel       string
+	SubjectActionID     string
+	CounterpartyKernel  string
+	EvidenceReceiptJSON string
+	RatingJSON          string
+	RemoteReceiptHash   string
+	ReceiptCreatedAt    time.Time
+	EffectiveAt         time.Time
+	ObservedAt          time.Time
+	Equivocated         bool
 }
 
 // DiscoveryDoc is one regenerable, searchable discovery record (§13): a remote action summary
@@ -977,15 +976,15 @@ type EvidenceRow struct {
 // from the home kernel). ActionID is the remote action's stable id and the schemas mirror the
 // signed manifest; Handle is the owner's, for rendering owner@kernel/name.
 type DiscoveryDoc struct {
-	KernelPublicKey string         `json:"kernel_public_key"`
-	Handle          string         `json:"handle,omitempty"`
-	OwnerID         string         `json:"owner_id,omitempty"` // the owner's stable id there, from the signed manifest (D15)
-	Title           string         `json:"title,omitempty"`
-	Description     string         `json:"description,omitempty"`
-	ActionID        string         `json:"action_id,omitempty"` // remote action id
-	Name            string         `json:"name,omitempty"`
-	InputSchema     map[string]any `json:"input_schema,omitempty"`
-	OutputSchema    map[string]any `json:"output_schema,omitempty"`
+	Kernel       string         `json:"kernel"`
+	Handle       string         `json:"handle,omitempty"`
+	OwnerID      string         `json:"owner_id,omitempty"` // the owner's stable id there, from the signed manifest (D15)
+	Title        string         `json:"title,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	ActionID     string         `json:"action_id,omitempty"` // remote action id
+	Name         string         `json:"name,omitempty"`
+	InputSchema  map[string]any `json:"input_schema,omitempty"`
+	OutputSchema map[string]any `json:"output_schema,omitempty"`
 	// ServingPrice is the manifest's price plus the peer's signed serving markup,
 	// mp + ceil(mp·remote_bps/10000) (§13). The local all-in price adds import_bps at read time,
 	// so a policy change reprices the catalog with no re-pull. Untagged: admin inspect serializes
@@ -1010,7 +1009,7 @@ type DiscoveryDoc struct {
 // counterparty and the receipt hashes join — so an issuer's claim is shown verified vs unverified,
 // not taken on faith. It is 0 for the self-reported execution summary.
 type SubjectEvidenceRow struct {
-	IssuerPublicKey   string  `json:"issuer_public_key"`
+	IssuerKernel      string  `json:"issuer_kernel"`
 	SubjectActionID   string  `json:"subject_action_id"`
 	Uses              int64   `json:"uses"`
 	Successes         int64   `json:"successes"`

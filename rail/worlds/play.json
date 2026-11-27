@@ -5,6 +5,6 @@
   "symbol": "fUSD",
   "description": "no real money: you credit accounts yourself and keep the records",
   "seeds": [
-    "/dns4/arfante.juiceos.org/tcp/31313/p2p/16Uiu2HAmUCPo4eadpUGQXbsppAqGvcJPAExarUFcr4aT8g1RYhdW"
+    "0x0f09a73d5b07913cf5e87aff1b021a5be160df1d@arfante.juiceos.org:31313"
   ]
 }

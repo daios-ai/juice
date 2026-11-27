@@ -132,13 +132,13 @@ json.dump(d, open(path, "w"), indent=2)
 # root rather than the kernel's home, so a home that moves does not take its own log with it.
 server_log() { echo "$(khome "$1")/$(basename "$(dirname "$1")")-server.log"; }
 
-# kernel_fed_addr db home — print a running kernel's loopback libp2p multiaddr, read from
-# `admin kernel show`, which is where a kernel reports where it listens (the ready line names the
-# kernel, not its addresses). Every kernel serves as a DHT+relay node, so one kernel can be the
-# bootstrap for the others — there is no separate seed process.
+# kernel_fed_addr db home — print a running kernel's loopback seed line, 0x…@127.0.0.1:port, read
+# from `admin kernel show`, which is where a kernel reports its TCP endpoints (the ready line names
+# the kernel, not its endpoints). Every kernel serves as a DHT+relay node, so one kernel can be the
+# seed for the others — there is no separate seed process.
 kernel_fed_addr() {
     jj "$1" "$2" admin kernel show \
-        | grep -o '/ip4/127\.0\.0\.1/tcp/[0-9]*/p2p/[A-Za-z0-9]*' | head -1 | tr -d '\r'
+        | grep -o '0x[0-9a-f]\{40\}@127\.0\.0\.1:[0-9]*' | head -1 | tr -d '\r'
 }
 
 # SYMBOL is what this world calls its money when a person reads it — the one place the flows name
@@ -185,7 +185,7 @@ print(next((t['id'] for t in json.load(sys.stdin) if t.get('parent_trace_id') ==
 
 # kernel_key db home  — print a kernel's own federation public key (via admin kernel show).
 kernel_key() {
-    strfield "$(jj "$1" "$2" admin kernel show)" public_key
+    strfield "$(jj "$1" "$2" admin kernel show)" blockchain_address
 }
 
 # ---------------------------------------------------------------------------

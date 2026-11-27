@@ -170,19 +170,6 @@ func quoteHashOf(t quoteTerms) string {
 	return sha256Hex(string(payload))
 }
 
-// IsPublicKey reports whether s has the syntactic form of a kernel's base64url public key. Exported
-// for the service/CLI layer's shape-based peer resolution (§14 productions).
-func IsPublicKey(s string) bool { return looksLikeKey(s) }
-
-// looksLikeKey reports whether s is a kernel's key (44 chars → the 33-byte compressed point).
-func looksLikeKey(s string) bool {
-	if len(s) != 44 {
-		return false
-	}
-	_, err := decodeRemotePublicKey(s)
-	return err == nil
-}
-
 // looksLikeID reports whether s is a hex UUID (8-4-4-4-12) — a raw object id.
 func looksLikeID(s string) bool {
 	if len(s) != 36 {
@@ -438,7 +425,7 @@ func (k *Kernel) lazyResolveRemote(ctx context.Context, peerKey string, r Addres
 	// First meaningful use (§13): our own verified outbound act makes the kernel known. It names it
 	// nothing — only the operator binds a petname (D15). Best-effort and must never fail the call.
 	if kerr := k.knowKernel(ctx, peerKey); kerr != nil {
-		k.log.With(ctx).Warn("kernel.know_failed", "public_key", peerKey, "error", kerr.Error())
+		k.log.With(ctx).Warn("kernel.know_failed", "kernel", peerKey, "error", kerr.Error())
 	}
 	return k.ImportPeerAction(ctx, peerKey, *m)
 }
@@ -989,7 +976,7 @@ func (k *Kernel) processOwner(ctx context.Context, p *Process) (Principal, error
 }
 
 // Parties is what an executed action is told about who it runs for (D8): its immediate caller and
-// its process owner, each a principal written user_id@kernel_key, or empty for nobody. The kernel
+// its process owner, each a principal written user_id@kernel_address, or empty for nobody. The kernel
 // resolves both once per call and hands the same pair to every executor; the caller supplies neither.
 type Parties struct {
 	Caller string `json:"caller"`

@@ -84,9 +84,9 @@ func (s *server) rosterView(ctx context.Context, acct *kernel.Account, key strin
 	// A kernel target renders one flat record, its row: naming state, contact, suspension. A peer
 	// holds no money here (D14), so none is shown.
 	rk, _ := s.kernel.ReadKernel(ctx, key)
-	out := map[string]any{"public_key": key}
+	out := map[string]any{"blockchain_address": key}
 	if rk != nil {
-		out["petname"], out["nickname"], out["about"], out["blockchain_address"] = rk.Petname, rk.Nickname, rk.About, rk.BlockchainAddress
+		out["petname"], out["nickname"], out["about"] = rk.Petname, rk.Nickname, rk.About
 		out["last_seen"], out["suspended_at"], out["first_seen"] = rk.LastSeen, rk.SuspendedAt, rk.FirstSeen
 	}
 	return out
@@ -212,7 +212,7 @@ func (s *server) ctlListDeposits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
-	// The roster (§14): every known kernel by public key — counterparties this kernel has traded
+	// The roster (§14): every known kernel by address — counterparties this kernel has traded
 	// with and kernels known only from discovery — itself excluded, served by one store query.
 	// Suspended counterparties are included only with ?all=1, like action list hides inactive.
 	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
@@ -233,7 +233,7 @@ func (s *server) ctlListPeers(w http.ResponseWriter, r *http.Request) {
 func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	ident := strings.TrimSpace(chi.URLParam(r, "target"))
-	// A local account with no public key is a plain user, not a federation peer, and an @handle
+	// A local account with no kernel address is a plain user, not a federation peer, and an @handle
 	// naming no account is not a peer either — resolvePeerKey rejects both rather than probing the
 	// handle as if it were a key (inspect is a peer-only window, §13). An unresolvable non-@
 	// identifier is a raw stranger key, which is exactly the inspect-before-peering case.
@@ -266,10 +266,10 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	if gRaw, err := s.fed.Gossip(octx, peerKey, fed.GossipRequest{}); err == nil {
 		var g kernel.GossipResponse
 		if json.Unmarshal(gRaw, &g) == nil {
-			resp["nickname"], resp["public_key"] = g.Handle, g.PublicKey
-			resp["petname"] = s.kernel.KernelName(ctx, g.PublicKey)
-			if resp["petname"] == g.PublicKey {
-				resp["petname"] = "" // unbound: KernelName falls back to the key
+			resp["nickname"], resp["blockchain_address"] = g.Handle, g.Address
+			resp["petname"] = s.kernel.KernelName(ctx, g.Address)
+			if resp["petname"] == g.Address {
+				resp["petname"] = "" // unbound: KernelName falls back to the address
 			}
 			resp["about"] = g.About
 			resp["actions"] = s.kernel.PeerCatalog(ctx, peerKey, g.ActionManifests)
@@ -285,13 +285,13 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	// know locally (either way) is source="local"; a total stranger is "none".
 	known := false
 	if dk, _ := s.kernel.ReadKernel(ctx, peerKey); dk != nil {
-		resp["petname"], resp["nickname"], resp["public_key"], resp["about"] = dk.Petname, dk.Nickname, dk.PublicKey, dk.About
+		resp["petname"], resp["nickname"], resp["blockchain_address"], resp["about"] = dk.Petname, dk.Nickname, dk.Address, dk.About
 		known = true
 	}
 	if known {
 		resp["source"] = "local"
 	} else {
-		resp["petname"], resp["nickname"], resp["public_key"], resp["source"] = "", "", peerKey, "none"
+		resp["petname"], resp["nickname"], resp["blockchain_address"], resp["source"] = "", "", peerKey, "none"
 	}
 	// Same projection as the live branch, so the offline answer differs only in freshness — never in
 	// shape, and never in what the price means.
@@ -301,16 +301,16 @@ func (s *server) ctlInspectPeer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// resolvePeerKey maps a petname or key to a peer's public key, refusing this kernel's own name.
+// resolvePeerKey maps a petname or address to a peer's address, refusing this kernel's own name.
 // Shared by the peer commands. A key nobody knows is a stranger's (inspecting or addressing a peer
 // before it is known locally) — the transport reports it unreachable if it is not real.
 func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, error) {
 	if ident == "" {
-		return "", kernel.ErrInvalidInput.Wrap("a peer name or public key is required")
+		return "", kernel.ErrInvalidInput.Wrap("a peer name or address is required")
 	}
 	kr, err := s.kernel.ResolveKernel(ctx, ident)
 	if err != nil {
-		return "", kernel.ErrNotFound.Wrapf("no peer %q; peers are named by petname or public key", ident)
+		return "", kernel.ErrNotFound.Wrapf("no peer %q; peers are named by petname or address", ident)
 	}
 	if kr.Local {
 		return "", kernel.ErrInvalidInput.Wrapf("%q is this kernel, not a peer", ident)
@@ -318,9 +318,8 @@ func (s *server) resolvePeerKey(ctx context.Context, ident string) (string, erro
 	return kr.Key, nil
 }
 
-// ctlIdentity reports this kernel's federation identity: public key, handle, and libp2p listen
-// addresses. This is how an operator obtains the key to share for friending, now that the
-// .well-known document is gone (§13).
+// ctlIdentity reports this kernel's identity: its address, handle, and the TCP endpoints it listens
+// on, each a seed line. This is how an operator obtains what to share with another (§13).
 func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pub := s.kernel.SelfKey(ctx)
@@ -331,11 +330,11 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 	addrs := []string{}
 	if s.fed != nil {
-		addrs = s.fed.ListenAddrs()
+		addrs = s.fed.Endpoints()
 	}
 	econ := s.kernel.Economy()
 	exposure, _ := s.kernel.Exposure(ctx, callerFrom(r))
-	out := map[string]any{"handle": handle, "public_key": pub, "about": about, "addrs": addrs,
+	out := map[string]any{"handle": handle, "blockchain_address": pub, "about": about, "addrs": addrs,
 		"version": version,
 		"lottery": econ.Lottery, "lottery_max": econ.LotteryMax,
 		"credit_limit": econ.CreditLimit, "exposure": exposure,
@@ -348,7 +347,6 @@ func (s *server) ctlIdentity(w http.ResponseWriter, r *http.Request) {
 	if rep, err := s.kernel.RailInspect(ctx, callerFrom(r)); err == nil {
 		out["network"] = rep.Network.Name
 		out["network_fingerprint"] = rep.Network.Fingerprint
-		out["blockchain_address"] = rep.Address
 		out["finalized"] = rep.Finalized
 		out["sys"] = map[string]any{"earnings": rep.Position.SysAvailable,
 			"pending_payouts": rep.Position.PendingPayouts, "held_deposits": rep.Position.HeldDeposits,

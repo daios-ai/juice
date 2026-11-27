@@ -29,7 +29,7 @@ func TestKernelAddNamesAndPinsWithoutSelecting(t *testing.T) {
 	}
 	cfg := loadClientConfig()
 	k := cfg.Kernels["k"] // healthServer advertises the nickname "k"
-	if k == nil || k.Endpoint != srv.URL || k.PublicKey != "KEY-A" || k.Network != "play" {
+	if k == nil || k.Endpoint != srv.URL || k.Address != "KEY-A" || k.Network != "play" {
 		t.Fatalf("not recorded under its nickname: %+v", cfg.Kernels)
 	}
 	if cfg.Current != "" {
@@ -68,7 +68,7 @@ func TestKernelAddIsIdempotentButNotACoup(t *testing.T) {
 	if _, err := execTestCmd(t, kernelAddCmd(), other.URL, "work"); err == nil {
 		t.Fatal("another kernel took a name already held")
 	}
-	if got := loadClientConfig().Kernels["k"]; got.PublicKey != "KEY-A" {
+	if got := loadClientConfig().Kernels["k"]; got.Address != "KEY-A" {
 		t.Errorf("the refused add changed the record: %+v", got)
 	}
 
@@ -121,8 +121,8 @@ func TestKernelForgetTakesTheLoginsWithIt(t *testing.T) {
 func TestKernelListMarksWhereYouAre(t *testing.T) {
 	clientHomeFor(t)
 	cfg := loadClientConfig()
-	cfg.Kernels["k"] = &kernelRec{Endpoint: "http://work:4040", PublicKey: "KEY-W", Network: "play"}
-	cfg.Kernels["lab"] = &kernelRec{Endpoint: "http://lab:4040", PublicKey: "KEY-L", Network: "test"}
+	cfg.Kernels["k"] = &kernelRec{Endpoint: "http://work:4040", Address: "KEY-W", Network: "play"}
+	cfg.Kernels["lab"] = &kernelRec{Endpoint: "http://lab:4040", Address: "KEY-L", Network: "test"}
 	cfg.Current = "alice@lab"
 	if err := saveClientConfig(cfg); err != nil {
 		t.Fatal(err)
